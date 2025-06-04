@@ -101,14 +101,19 @@ def run_heudiconv(raw_root: Path,
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run HeuDiConv using a heuristic")
+    parser = argparse.ArgumentParser(description="Run HeuDiConv using one or more heuristics")
     parser.add_argument("dicom_root", help="Root directory containing DICOMs")
-    parser.add_argument("heuristic", help="Heuristic .py file")
+    parser.add_argument("heuristic", help="Heuristic file or directory with heuristic_*.py files")
     parser.add_argument("bids_out", help="Output BIDS directory")
     parser.add_argument("--single-run", action="store_true", help="Use one heudiconv call for all subjects")
     args = parser.parse_args()
 
-    run_heudiconv(Path(args.dicom_root), Path(args.heuristic), Path(args.bids_out), per_folder=not args.single_run)
+    heur_path = Path(args.heuristic)
+    heuristics = [heur_path] if heur_path.is_file() else sorted(heur_path.glob("heuristic_*.py"))
+    for heur in heuristics:
+        dataset = heur.stem.replace("heuristic_", "")
+        out_dir = Path(args.bids_out) / dataset
+        run_heudiconv(Path(args.dicom_root), heur, out_dir, per_folder=not args.single_run)
 
 
 if __name__ == "__main__":

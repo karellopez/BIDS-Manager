@@ -117,7 +117,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
 # Driver
 # -----------------------------------------------------------------------------
 
-def generate(tsv: Path, out_py: Path) -> None:
+def generate(tsv: Path, out_dir: Path) -> None:
     df = pd.read_csv(tsv, sep="\t")
 
     # Drop rows with unwanted modalities
@@ -128,22 +128,26 @@ def generate(tsv: Path, out_py: Path) -> None:
 
     df = df[df.include == 1]
 
-    write_heuristic(df, out_py)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    folders = " ".join(sorted({clean(f) for f in df.source_folder.unique()}))
-    print(dedent(f"""
-    heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" -s {folders} -f {out_py.name} -c dcm2niix -o <BIDS_OUT> -b --minmeta --overwrite"""))
+    for study, sub_df in df.groupby("StudyDescription"):
+        fname = safe_stem(study or "unknown")
+        heur = out_dir / f"heuristic_{fname}.py"
+        write_heuristic(sub_df, heur)
+        folders = " ".join(sorted({clean(f) for f in sub_df.source_folder.unique()}))
+        print(dedent(f"""
+        heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" -s {folders} -f {heur.name} -c dcm2niix -o <BIDS_OUT>/{fname} -b --minmeta --overwrite"""))
 
 
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate HeuDiConv heuristic from TSV")
+    parser = argparse.ArgumentParser(description="Generate HeuDiConv heuristic(s) from TSV")
     parser.add_argument("tsv", help="Path to subject_summary.tsv file")
-    parser.add_argument("out_py", help="Output heuristic file path")
+    parser.add_argument("out_dir", help="Directory to write heuristic files")
     args = parser.parse_args()
 
-    generate(Path(args.tsv), Path(args.out_py))
+    generate(Path(args.tsv), Path(args.out_dir))
 
 
 if __name__ == "__main__":
