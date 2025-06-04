@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QSizePolicy, QComboBox)
-from PyQt5.QtCore import Qt, QModelIndex
+from PyQt5.QtCore import Qt, QModelIndex, QTimer
 from PyQt5.QtGui import QPalette, QColor, QFont
 import logging  # debug logging
 
@@ -47,6 +47,7 @@ class BIDSManager(QMainWindow):
         self.tsv_path = ""          # Path to subject_summary.tsv
         self.heuristic_dir = ""     # Directory with heuristics
         self.study_set = set()
+        self.modb_rows = {}
         self.mod_rows = {}
         self.seq_rows = {}
 
@@ -104,17 +105,16 @@ class BIDSManager(QMainWindow):
 
         self.tsv_button = QPushButton("Generate TSV")
         self.tsv_button.clicked.connect(self.runInventory)
-        self.tsv_load_button = QPushButton("Load TSV…")
-        self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.tsv_button)
-        btn_row.addWidget(self.tsv_load_button)
         btn_row.addStretch()
         cfg_layout.addLayout(btn_row, 3, 0, 1, 3)
 
         main_layout.addWidget(cfg_group)
 
-        splitter = QSplitter()
+        vsplitter = QSplitter(Qt.Vertical)
+
+        top_split = QSplitter()
 
         tsv_group = QGroupBox("TSV Viewer")
         tsv_layout = QVBoxLayout(tsv_group)
@@ -128,9 +128,10 @@ class BIDSManager(QMainWindow):
         hdr.setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
         tsv_layout.addWidget(self.mapping_table)
-        splitter.addWidget(tsv_group)
-
-        right_split = QSplitter(Qt.Vertical)
+        self.tsv_load_button = QPushButton("Load TSV…")
+        self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
+        tsv_layout.addWidget(self.tsv_load_button)
+        top_split.addWidget(tsv_group)
 
         modal_group = QGroupBox("Modalities")
         modal_layout = QVBoxLayout(modal_group)
@@ -138,32 +139,34 @@ class BIDSManager(QMainWindow):
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
         self.full_tree = QTreeWidget()
-        self.full_tree.setHeaderLabels(["Modality/NON-BIDS", "Sequences"])
+        self.full_tree.setHeaderLabels(["Modality BIDS", "Non‑BIDS / Sequences"])
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "Full View")
         modal_layout.addWidget(self.modal_tabs)
-        right_split.addWidget(modal_group)
+        top_split.addWidget(modal_group)
+        top_split.setStretchFactor(0, 1)
+        top_split.setStretchFactor(1, 1)
 
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         self.preview_tree = QTreeWidget()
         self.preview_tree.setHeaderLabels(["BIDS Structure"])
         preview_layout.addWidget(self.preview_tree)
-        right_split.addWidget(preview_group)
-
-        splitter.addWidget(right_split)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-
-        main_layout.addWidget(splitter, 1)
-
-        btn_row = QHBoxLayout()
         self.preview_button = QPushButton("Preview")
         self.preview_button.clicked.connect(self.generatePreview)
+        preview_layout.addWidget(self.preview_button)
+
+        vsplitter.addWidget(top_split)
+        vsplitter.addWidget(preview_group)
+        vsplitter.setStretchFactor(0, 1)
+        vsplitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(vsplitter, 1)
+
+        btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.runFullConversion)
         btn_row.addStretch()
-        btn_row.addWidget(self.preview_button)
         btn_row.addWidget(self.run_button)
         main_layout.addLayout(btn_row)
 
@@ -171,6 +174,7 @@ class BIDSManager(QMainWindow):
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
         main_layout.addWidget(log_group)
 
@@ -329,6 +333,7 @@ class BIDSManager(QMainWindow):
         df = pd.read_csv(self.tsv_path, sep="\t")
 
         self.study_set.clear()
+        self.modb_rows.clear()
         self.mod_rows.clear()
         self.seq_rows.clear()
         self.row_info = []
@@ -367,6 +372,7 @@ class BIDSManager(QMainWindow):
             self.mapping_table.setItem(r, 5, modb_item)
 
             self.row_info.append({
+                'modb': row.get('modality_bids', ''),
                 'mod': row.get('modality', ''),
                 'seq': row.get('sequence', ''),
             })
@@ -374,8 +380,9 @@ class BIDSManager(QMainWindow):
 
         # Build modality/sequence lookup for tree interactions
         for idx, info in enumerate(self.row_info):
-            self.mod_rows.setdefault(info['mod'], []).append(idx)
-            self.seq_rows.setdefault((info['mod'], info['seq']), []).append(idx)
+            self.modb_rows.setdefault(info['modb'], []).append(idx)
+            self.mod_rows.setdefault((info['modb'], info['mod']), []).append(idx)
+            self.seq_rows.setdefault((info['modb'], info['mod'], info['seq']), []).append(idx)
 
         self.populateModalitiesTree()
 
@@ -384,36 +391,51 @@ class BIDSManager(QMainWindow):
         """Build modalities tree with checkboxes synced to the table."""
         self.full_tree.blockSignals(True)
         self.full_tree.clear()
-        mod_map = {}
+        # build nested mapping: BIDS modality → non‑BIDS modality → sequences
+        modb_map = {}
         for info in self.row_info:
-            mod_map.setdefault(info['mod'], set()).add(info['seq'])
+            modb_map.setdefault(info['modb'], {}).setdefault(info['mod'], set()).add(info['seq'])
 
-        for mod, seqs in mod_map.items():
-            mod_item = QTreeWidgetItem([mod])
-            mod_item.setFlags(mod_item.flags() | Qt.ItemIsUserCheckable)
-            mod_includes = [self.mapping_table.item(r, 0).checkState() == Qt.Checked
-                            for r in self.mod_rows.get(mod, [])]
-            if all(mod_includes):
-                mod_item.setCheckState(0, Qt.Checked)
-            elif any(mod_includes):
-                mod_item.setCheckState(0, Qt.PartiallyChecked)
+        for modb, mod_map in sorted(modb_map.items()):
+            modb_item = QTreeWidgetItem([modb])
+            modb_item.setFlags(modb_item.flags() | Qt.ItemIsUserCheckable)
+            rows = self.modb_rows.get(modb, [])
+            states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+            if states and all(states):
+                modb_item.setCheckState(0, Qt.Checked)
+            elif states and any(states):
+                modb_item.setCheckState(0, Qt.PartiallyChecked)
             else:
-                mod_item.setCheckState(0, Qt.Unchecked)
-            mod_item.setData(0, Qt.UserRole, ('mod', mod))
-            for seq in sorted(seqs):
-                seq_item = QTreeWidgetItem([seq])
-                seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
-                seq_incl = [self.mapping_table.item(r, 0).checkState() == Qt.Checked
-                            for r in self.seq_rows.get((mod, seq), [])]
-                if all(seq_incl):
-                    seq_item.setCheckState(0, Qt.Checked)
-                elif any(seq_incl):
-                    seq_item.setCheckState(0, Qt.PartiallyChecked)
+                modb_item.setCheckState(0, Qt.Unchecked)
+            modb_item.setData(0, Qt.UserRole, ('modb', modb))
+
+            for mod, seqs in sorted(mod_map.items()):
+                mod_item = QTreeWidgetItem([mod])
+                mod_item.setFlags(mod_item.flags() | Qt.ItemIsUserCheckable)
+                rows = self.mod_rows.get((modb, mod), [])
+                states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+                if states and all(states):
+                    mod_item.setCheckState(0, Qt.Checked)
+                elif states and any(states):
+                    mod_item.setCheckState(0, Qt.PartiallyChecked)
                 else:
-                    seq_item.setCheckState(0, Qt.Unchecked)
-                seq_item.setData(0, Qt.UserRole, ('seq', mod, seq))
-                mod_item.addChild(seq_item)
-            self.full_tree.addTopLevelItem(mod_item)
+                    mod_item.setCheckState(0, Qt.Unchecked)
+                mod_item.setData(0, Qt.UserRole, ('mod', modb, mod))
+                for seq in sorted(seqs):
+                    seq_item = QTreeWidgetItem([seq])
+                    seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
+                    rows = self.seq_rows.get((modb, mod, seq), [])
+                    states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+                    if states and all(states):
+                        seq_item.setCheckState(0, Qt.Checked)
+                    elif states and any(states):
+                        seq_item.setCheckState(0, Qt.PartiallyChecked)
+                    else:
+                        seq_item.setCheckState(0, Qt.Unchecked)
+                    seq_item.setData(0, Qt.UserRole, ('seq', modb, mod, seq))
+                    mod_item.addChild(seq_item)
+                modb_item.addChild(mod_item)
+            self.full_tree.addTopLevelItem(modb_item)
 
         self.full_tree.expandAll()
         self.full_tree.blockSignals(False)
@@ -429,15 +451,19 @@ class BIDSManager(QMainWindow):
         if not role:
             return
         state = item.checkState(0)
-        if role[0] == 'mod':
-            mod = role[1]
-            for r in self.mod_rows.get(mod, []):
+        if role[0] == 'modb':
+            modb = role[1]
+            for r in self.modb_rows.get(modb, []):
+                self.mapping_table.item(r, 0).setCheckState(state)
+        elif role[0] == 'mod':
+            modb, mod = role[1], role[2]
+            for r in self.mod_rows.get((modb, mod), []):
                 self.mapping_table.item(r, 0).setCheckState(state)
         elif role[0] == 'seq':
-            mod, seq = role[1], role[2]
-            for r in self.seq_rows.get((mod, seq), []):
+            modb, mod, seq = role[1], role[2], role[3]
+            for r in self.seq_rows.get((modb, mod, seq), []):
                 self.mapping_table.item(r, 0).setCheckState(state)
-        self.populateModalitiesTree()
+        QTimer.singleShot(0, self.populateModalitiesTree)
 
     def runFullConversion(self):
         logging.info("runFullConversion → Starting full pipeline …")
