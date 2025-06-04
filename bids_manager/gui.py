@@ -112,9 +112,7 @@ class BIDSManager(QMainWindow):
 
         main_layout.addWidget(cfg_group)
 
-        vsplitter = QSplitter(Qt.Vertical)
-
-        top_split = QSplitter()
+        splitter = QSplitter()
 
         tsv_group = QGroupBox("TSV Viewer")
         tsv_layout = QVBoxLayout(tsv_group)
@@ -131,7 +129,7 @@ class BIDSManager(QMainWindow):
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
         tsv_layout.addWidget(self.tsv_load_button)
-        top_split.addWidget(tsv_group)
+        splitter.addWidget(tsv_group)
 
         modal_group = QGroupBox("Modalities")
         modal_layout = QVBoxLayout(modal_group)
@@ -143,9 +141,9 @@ class BIDSManager(QMainWindow):
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "Full View")
         modal_layout.addWidget(self.modal_tabs)
-        top_split.addWidget(modal_group)
-        top_split.setStretchFactor(0, 1)
-        top_split.setStretchFactor(1, 1)
+        splitter.addWidget(modal_group)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
 
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
@@ -156,12 +154,10 @@ class BIDSManager(QMainWindow):
         self.preview_button.clicked.connect(self.generatePreview)
         preview_layout.addWidget(self.preview_button)
 
-        vsplitter.addWidget(top_split)
-        vsplitter.addWidget(preview_group)
-        vsplitter.setStretchFactor(0, 1)
-        vsplitter.setStretchFactor(1, 1)
+        splitter.addWidget(preview_group)
+        splitter.setStretchFactor(2, 1)
 
-        main_layout.addWidget(vsplitter, 1)
+        main_layout.addWidget(splitter, 1)
 
         btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
@@ -174,7 +170,7 @@ class BIDSManager(QMainWindow):
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumBlockCount(1000)
+        self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
         main_layout.addWidget(log_group)
 
