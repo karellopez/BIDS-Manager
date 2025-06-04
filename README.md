@@ -22,4 +22,11 @@ After installation the following commands become available:
 
 All utilities provide `-h/--help` for details.
 
+### Recent updates
+
+- The TSV produced by `dicom-inventory` can now be loaded directly in the GUI and
+  its file name customised before generation.
+- The Batch Rename tool previews changes and allows restricting the scope to
+  specific subjects.
+
 
