@@ -9,8 +9,6 @@ description = "GUI application to manage BIDS datasets"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name="BIDS Manager"}]
-license = {text = "MIT"}
-readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
