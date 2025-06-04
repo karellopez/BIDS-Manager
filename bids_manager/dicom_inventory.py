@@ -20,7 +20,7 @@ subject        – GivenName shown only on the first row of each subject block
 BIDS_name      – auto-assigned `sub-001`, `sub-002`, …
 session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
-source_folder  – first directory under *root_dir* that contained the DICOM
+source_folder  – relative path under *root_dir* where the DICOM series was found
 include        – defaults to 1 but scout/report/physlog rows start at 0
 sequence       – original SeriesDescription
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
@@ -113,7 +113,7 @@ def scan_dicoms_long(root_dir: str,
     print(f"Scanning DICOM headers under: {root_dir}")
 
     # in-memory stores
-    demo    = {}  # subj_id → demographics dictionary
+    demo    = {}
     counts  = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     mods    = defaultdict(lambda: defaultdict(dict))
     sessset = defaultdict(lambda: defaultdict(set))
@@ -133,32 +133,42 @@ def scan_dicoms_long(root_dir: str,
 
             # ---- subject id  (GivenName > PatientID > 'UNKNOWN')
             pn    = getattr(ds, "PatientName", None)
-            given = pn.given_name.strip()  if pn and pn.given_name  else ""
+            given = pn.given_name.strip() if pn and pn.given_name else ""
             pid   = getattr(ds, "PatientID", "").strip()
             subj  = given or pid or "UNKNOWN"
 
+            # ---- study description/name
+            study = (
+                getattr(ds, "StudyDescription", None)
+                or getattr(ds, "StudyName", None)
+                or "n/a"
+            )
+            study = str(study).strip()
+
+            subj_key = f"{subj}||{study}"
+
             # ---- source folder  (first dir under root)
             rel = os.path.relpath(root, root_dir)
-            folder = rel.split(os.sep)[0] if rel != "." else ""
+            folder = rel if rel != "." else ""
 
             series = getattr(ds, "SeriesDescription", "n/a").strip()
-            counts[subj][folder][series] += 1
-            mods[subj][folder][series] = guess_modality(series)
+            counts[subj_key][folder][series] += 1
+            mods[subj_key][folder][series] = guess_modality(series)
 
             # collect session tags
             m = SESSION_RE.search(series.lower())
             if m:
-                sessset[subj][folder].add(f"ses-{m.group(1)}")
+                sessset[subj_key][folder].add(f"ses-{m.group(1)}")
 
             # store demographics once per subject
-            if subj not in demo:
-                demo[subj] = dict(
+            if subj_key not in demo:
+                demo[subj_key] = dict(
                     GivenName        = given,
                     FamilyName       = getattr(pn, "family_name", "").strip(),
                     PatientID        = pid,
                     PatientSex       = getattr(ds, "PatientSex", "n/a").strip(),
                     PatientAge       = getattr(ds, "PatientAge", "n/a").strip(),
-                    StudyDescription = getattr(ds, "StudyDescription", "n/a").strip(),
+                    StudyDescription = study,
                 )
 
     print(f"Subjects found            : {len(demo)}")
@@ -173,22 +183,22 @@ def scan_dicoms_long(root_dir: str,
 
     # PASS 3: build DataFrame rows
     rows = []
-    for subj in sorted(counts):
+    for subj_key in sorted(counts):
         first_row = True
-        for folder in sorted(counts[subj]):
+        for folder in sorted(counts[subj_key]):
 
             # decide session label for this folder
-            ses_labels = sorted(sessset[subj][folder])
+            ses_labels = sorted(sessset[subj_key][folder])
             session = ses_labels[0] if len(ses_labels) == 1 else ""
 
-            for series, n_files in sorted(counts[subj][folder].items()):
-                fine_mod = mods[subj][folder][series]
+            for series, n_files in sorted(counts[subj_key][folder].items()):
+                fine_mod = mods[subj_key][folder][series]
                 include = 1
                 if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
                 rows.append({
-                    "subject"       : demo[subj]["GivenName"] if first_row else "",
-                    "BIDS_name"     : bids_map[subj],
+                    "subject"       : demo[subj_key]["GivenName"] if first_row else "",
+                    "BIDS_name"     : bids_map[subj_key],
                     "session"       : session,
                     "source_folder" : folder,
                     "include"       : include,
@@ -196,7 +206,7 @@ def scan_dicoms_long(root_dir: str,
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
                     "n_files"       : n_files,
-                    **demo[subj],                                # demographics
+                    **demo[subj_key],                                # demographics
                 })
                 first_row = False
 
