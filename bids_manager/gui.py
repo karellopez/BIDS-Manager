@@ -10,7 +10,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView, QMenuBar, QSizePolicy)
+    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
+    QMenuBar, QSizePolicy, QComboBox)
 from PyQt5.QtCore import Qt, QModelIndex
 from PyQt5.QtGui import QPalette, QColor, QFont
 import logging  # debug logging
@@ -96,9 +97,20 @@ class BIDSManager(QMainWindow):
         cfg_layout.addWidget(self.bids_out_edit, 1, 1)
         cfg_layout.addWidget(bids_browse, 1, 2)
 
+        tsvname_label = QLabel("<b>TSV Name:</b>")
+        self.tsv_name_edit = QLineEdit("subject_summary.tsv")
+        cfg_layout.addWidget(tsvname_label, 2, 0)
+        cfg_layout.addWidget(self.tsv_name_edit, 2, 1, 1, 2)
+
         self.tsv_button = QPushButton("Generate TSV")
         self.tsv_button.clicked.connect(self.runInventory)
-        cfg_layout.addWidget(self.tsv_button, 2, 0, 1, 3, alignment=Qt.AlignRight)
+        self.tsv_load_button = QPushButton("Load TSV…")
+        self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.tsv_button)
+        btn_row.addWidget(self.tsv_load_button)
+        btn_row.addStretch()
+        cfg_layout.addLayout(btn_row, 3, 0, 1, 3)
 
         main_layout.addWidget(cfg_group)
 
@@ -271,6 +283,14 @@ class BIDSManager(QMainWindow):
             self.bids_out_dir = directory
             self.bids_out_edit.setText(directory)
 
+    def selectAndLoadTSV(self):
+        """Choose an existing TSV and load it into the table."""
+        path, _ = QFileDialog.getOpenFileName(self, "Select TSV", self.bids_out_dir or "", "TSV Files (*.tsv)")
+        if path:
+            self.tsv_path = path
+            self.tsv_name_edit.setText(os.path.basename(path))
+            self.loadMappingTable()
+
     def runInventory(self):
         logging.info("runInventory → Generating TSV …")
         """
@@ -285,7 +305,8 @@ class BIDSManager(QMainWindow):
 
         os.makedirs(self.bids_out_dir, exist_ok=True)
 
-        self.tsv_path = os.path.join(self.bids_out_dir, "subject_summary.tsv")
+        name = self.tsv_name_edit.text().strip() or "subject_summary.tsv"
+        self.tsv_path = os.path.join(self.bids_out_dir, name)
 
         # Generate TSV via dicom_inventory
         try:
@@ -396,6 +417,10 @@ class BIDSManager(QMainWindow):
 
         self.full_tree.expandAll()
         self.full_tree.blockSignals(False)
+        try:
+            self.full_tree.itemChanged.disconnect(self.onModalityItemChanged)
+        except TypeError:
+            pass
         self.full_tree.itemChanged.connect(self.onModalityItemChanged)
 
 
@@ -562,7 +587,7 @@ class BIDSManager(QMainWindow):
 
     def launchBatchRename(self):
         """Open the Batch Rename dialog from bids_editor_ancpbids."""
-        dlg = RemapDialog(self, getattr(self, 'selected', self.bids_root))
+        dlg = RemapDialog(self, self.bids_root)
         dlg.exec_()
 
 
@@ -588,12 +613,19 @@ class RemapDialog(QDialog):
         btn_add_cond.clicked.connect(self.add_condition)
         layout.addWidget(btn_add_cond)
 
-        # Scope selector (simple text for demo)
+        # Scope selector
         scope_layout = QHBoxLayout()
         scope_layout.addWidget(QLabel("Scope:"))
-        self.scope_combo = QLineEdit()
-        self.scope_combo.setText("Entire dataset")
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItems(["Entire dataset", "Selected subjects"])
+        self.subject_edit = QLineEdit()
+        self.subject_edit.setPlaceholderText("sub-001, sub-002")
+        self.subject_edit.setEnabled(False)
+        self.scope_combo.currentIndexChanged.connect(
+            lambda i: self.subject_edit.setEnabled(i == 1)
+        )
         scope_layout.addWidget(self.scope_combo)
+        scope_layout.addWidget(self.subject_edit)
         layout.addLayout(scope_layout)
 
         # Preview and Apply buttons
@@ -638,9 +670,19 @@ class RemapDialog(QDialog):
         self.tabs.addTab(tab, f"Condition {index}")
 
     def get_scope_paths(self):
-        """Retrieve file paths under the selected scope. TODO: filter by actual scope selection."""
+        """Retrieve file paths under the selected scope."""
         all_files = [p for p in self.bids_root.rglob('*') if p.is_file()]
-        return all_files
+        if self.scope_combo.currentIndex() == 0:
+            return all_files
+        subs = [s.strip() for s in self.subject_edit.text().split(',') if s.strip()]
+        if not subs:
+            return all_files
+        scoped = []
+        for p in all_files:
+            parts = p.relative_to(self.bids_root).parts
+            if parts and parts[0] in subs:
+                scoped.append(p)
+        return scoped
 
     def preview(self):
         """Show potential renaming preview in a tree widget."""

@@ -17,7 +17,7 @@ Why you want this
 Output columns (ordered as they appear)
 ---------------------------------------
 subject        – GivenName shown only on the first row of each subject block
-BIDS_name      – auto-assigned `sub-001`, `sub-002`, …
+BIDS_name      – auto-assigned `sub-001`, `sub-002`, … (same GivenName → same ID)
 session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
 source_folder  – relative path under *root_dir* where the DICOM series was found
@@ -145,7 +145,7 @@ def scan_dicoms_long(root_dir: str,
             )
             study = str(study).strip()
 
-            subj_key = f"{subj}||{study}"
+            subj_key = subj
 
             # ---- source folder  (first dir under root)
             rel = os.path.relpath(root, root_dir)
