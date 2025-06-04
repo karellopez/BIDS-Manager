@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView, QMenuBar)
+    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView, QMenuBar, QSizePolicy)
 from PyQt5.QtCore import Qt, QModelIndex
 from PyQt5.QtGui import QPalette, QColor, QFont
 import logging  # debug logging
@@ -45,6 +45,9 @@ class BIDSManager(QMainWindow):
         self.bids_out_dir = ""      # Output BIDS directory
         self.tsv_path = ""          # Path to subject_summary.tsv
         self.heuristic_dir = ""     # Directory with heuristics
+        self.study_set = set()
+        self.mod_rows = {}
+        self.seq_rows = {}
 
         # Main widget and layout
         main_widget = QWidget()
@@ -126,12 +129,6 @@ class BIDSManager(QMainWindow):
         self.full_tree.setHeaderLabels(["Modality/NON-BIDS", "Sequences"])
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "Full View")
-        unique_tab = QWidget()
-        unique_layout = QVBoxLayout(unique_tab)
-        self.unique_tree = QTreeWidget()
-        self.unique_tree.setHeaderLabels(["Sequence"])
-        unique_layout.addWidget(self.unique_tree)
-        self.modal_tabs.addTab(unique_tab, "Unique")
         modal_layout.addWidget(self.modal_tabs)
         right_split.addWidget(modal_group)
 
@@ -171,19 +168,24 @@ class BIDSManager(QMainWindow):
         logging.info("generatePreview → Building preview tree …")
         """Populate preview tree based on checked sequences."""
         self.preview_tree.clear()
+        multi_study = len(self.study_set) > 1
         for i in range(self.mapping_table.rowCount()):
             include = (self.mapping_table.item(i, 0).checkState() == Qt.Checked)
             if include:
                 subj = self.mapping_table.item(i, 1).text()
+                study = self.mapping_table.item(i, 1).data(Qt.UserRole) or ""
                 ses = self.mapping_table.item(i, 2).text()
                 seq = self.mapping_table.item(i, 3).text()
                 modb = self.mapping_table.item(i, 5).text()
+                base = f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}"
+                if multi_study:
+                    base = f"{study}/" + base
                 if modb == "fmap":
                     for suffix in ["magnitude1", "magnitude2", "phasediff"]:
-                        fname = f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}_{suffix}.nii.gz"
+                        fname = f"{base}_{suffix}.nii.gz"
                         self.preview_tree.addTopLevelItem(QTreeWidgetItem([fname]))
                 else:
-                    item = QTreeWidgetItem([f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}.nii.gz"])
+                    item = QTreeWidgetItem([f"{base}.nii.gz"])
                     self.preview_tree.addTopLevelItem(item)
         self.preview_tree.expandAll()
 
@@ -200,6 +202,8 @@ class BIDSManager(QMainWindow):
 
         # Internal menu bar for Edit features
         menu = QMenuBar()
+        menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        menu.setMaximumHeight(24)
         file_menu = menu.addMenu("File")
         open_act = QAction("Open BIDS…", self)
         open_act.triggered.connect(self.openBIDSForEdit)
@@ -303,6 +307,11 @@ class BIDSManager(QMainWindow):
             return
         df = pd.read_csv(self.tsv_path, sep="\t")
 
+        self.study_set.clear()
+        self.mod_rows.clear()
+        self.seq_rows.clear()
+        self.row_info = []
+
         # Populate table rows
         self.mapping_table.setRowCount(0)
         for _, row in df.iterrows():
@@ -316,6 +325,8 @@ class BIDSManager(QMainWindow):
             # Subject (non-editable)
             subj_item = QTableWidgetItem(str(row.get('BIDS_name', '')))
             subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
+            subj_item.setData(Qt.UserRole, row.get('StudyDescription', ''))
+            self.study_set.add(row.get('StudyDescription', ''))
             self.mapping_table.setItem(r, 1, subj_item)
             # Session (non-editable)
             ses_item = QTableWidgetItem(str(row.get('session', '')))
@@ -333,29 +344,75 @@ class BIDSManager(QMainWindow):
             modb_item = QTableWidgetItem(str(row.get('modality_bids', '')))
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 5, modb_item)
+
+            self.row_info.append({
+                'mod': row.get('modality', ''),
+                'seq': row.get('sequence', ''),
+            })
         self.log_text.append("Loaded TSV into mapping table.")
-        # Populate modalities trees immediately
+
+        # Build modality/sequence lookup for tree interactions
+        for idx, info in enumerate(self.row_info):
+            self.mod_rows.setdefault(info['mod'], []).append(idx)
+            self.seq_rows.setdefault((info['mod'], info['seq']), []).append(idx)
+
+        self.populateModalitiesTree()
+
+
+    def populateModalitiesTree(self):
+        """Build modalities tree with checkboxes synced to the table."""
+        self.full_tree.blockSignals(True)
         self.full_tree.clear()
-        self.unique_tree.clear()
         mod_map = {}
-        for i in range(self.mapping_table.rowCount()):
-            seq = self.mapping_table.item(i, 3).text()
-            mod = self.mapping_table.item(i, 4).text()
-            mod_map.setdefault(mod, set()).add(seq)
+        for info in self.row_info:
+            mod_map.setdefault(info['mod'], set()).add(info['seq'])
+
         for mod, seqs in mod_map.items():
             mod_item = QTreeWidgetItem([mod])
-            for seq in seqs:
-                seq_item = QTreeWidgetItem(["", seq])
+            mod_item.setFlags(mod_item.flags() | Qt.ItemIsUserCheckable)
+            mod_includes = [self.mapping_table.item(r, 0).checkState() == Qt.Checked
+                            for r in self.mod_rows.get(mod, [])]
+            if all(mod_includes):
+                mod_item.setCheckState(0, Qt.Checked)
+            elif any(mod_includes):
+                mod_item.setCheckState(0, Qt.PartiallyChecked)
+            else:
+                mod_item.setCheckState(0, Qt.Unchecked)
+            mod_item.setData(0, Qt.UserRole, ('mod', mod))
+            for seq in sorted(seqs):
+                seq_item = QTreeWidgetItem([seq])
+                seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
+                seq_incl = [self.mapping_table.item(r, 0).checkState() == Qt.Checked
+                            for r in self.seq_rows.get((mod, seq), [])]
+                if all(seq_incl):
+                    seq_item.setCheckState(0, Qt.Checked)
+                elif any(seq_incl):
+                    seq_item.setCheckState(0, Qt.PartiallyChecked)
+                else:
+                    seq_item.setCheckState(0, Qt.Unchecked)
+                seq_item.setData(0, Qt.UserRole, ('seq', mod, seq))
                 mod_item.addChild(seq_item)
             self.full_tree.addTopLevelItem(mod_item)
-        unique_seqs = set()
-        for seqs in mod_map.values():
-            unique_seqs |= seqs
-        for seq in sorted(unique_seqs):
-            self.unique_tree.addTopLevelItem(QTreeWidgetItem([seq]))
-        self.full_tree.expandAll()
-        self.unique_tree.expandAll()
 
+        self.full_tree.expandAll()
+        self.full_tree.blockSignals(False)
+        self.full_tree.itemChanged.connect(self.onModalityItemChanged)
+
+
+    def onModalityItemChanged(self, item, column):
+        role = item.data(0, Qt.UserRole)
+        if not role:
+            return
+        state = item.checkState(0)
+        if role[0] == 'mod':
+            mod = role[1]
+            for r in self.mod_rows.get(mod, []):
+                self.mapping_table.item(r, 0).setCheckState(state)
+        elif role[0] == 'seq':
+            mod, seq = role[1], role[2]
+            for r in self.seq_rows.get((mod, seq), []):
+                self.mapping_table.item(r, 0).setCheckState(state)
+        self.populateModalitiesTree()
 
     def runFullConversion(self):
         logging.info("runFullConversion → Starting full pipeline …")
@@ -551,6 +608,8 @@ class RemapDialog(QDialog):
 
         # Preview tree
         self.preview_tree = QTreeWidget()
+        self.preview_tree.setColumnCount(2)
+        self.preview_tree.setHeaderLabels(["Original", "New Name"])
         hdr = self.preview_tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.Stretch)
