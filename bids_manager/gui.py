@@ -15,8 +15,16 @@ from PyQt5.QtCore import Qt, QModelIndex
 from PyQt5.QtGui import QPalette, QColor, QFont
 import logging  # debug logging
 
-# Import the scan function directly to ensure TSV generation works
-from .dicom_inventory import scan_dicoms_long
+# Import the scan function directly to ensure TSV generation works. When the
+# module is executed as a standalone script (``python gui.py``), ``__package__``
+# will be ``None`` and relative imports fail.  In that case we prepend the
+# package's parent directory to ``sys.path`` and fall back to an absolute
+# import.
+if __package__:
+    from .dicom_inventory import scan_dicoms_long
+else:  # running as a script
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from bids_manager.dicom_inventory import scan_dicoms_long
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
