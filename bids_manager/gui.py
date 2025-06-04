@@ -336,6 +336,10 @@ class BIDSManager(QMainWindow):
 
         # Populate table rows
         self.mapping_table.setRowCount(0)
+        def _clean(val):
+            """Return string representation of val or empty string for NaN."""
+            return "" if pd.isna(val) else str(val)
+
         for _, row in df.iterrows():
             r = self.mapping_table.rowCount()
             self.mapping_table.insertRow(r)
@@ -345,32 +349,32 @@ class BIDSManager(QMainWindow):
             include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
             self.mapping_table.setItem(r, 0, include_item)
             # Subject (non-editable)
-            subj_item = QTableWidgetItem(str(row.get('BIDS_name', '')))
+            subj_item = QTableWidgetItem(_clean(row.get('BIDS_name')))
             subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
-            subj_item.setData(Qt.UserRole, row.get('StudyDescription', ''))
-            self.study_set.add(row.get('StudyDescription', ''))
+            subj_item.setData(Qt.UserRole, _clean(row.get('StudyDescription')))
+            self.study_set.add(_clean(row.get('StudyDescription')))
             self.mapping_table.setItem(r, 1, subj_item)
             # Session (non-editable)
-            ses_item = QTableWidgetItem(str(row.get('session', '')))
+            ses_item = QTableWidgetItem(_clean(row.get('session')))
             ses_item.setFlags(ses_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 2, ses_item)
             # Sequence (editable)
-            seq_item = QTableWidgetItem(str(row.get('sequence', '')))
+            seq_item = QTableWidgetItem(_clean(row.get('sequence')))
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 3, seq_item)
             # Modality (non-editable)
-            mod_item = QTableWidgetItem(str(row.get('modality', '')))
+            mod_item = QTableWidgetItem(_clean(row.get('modality')))
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 4, mod_item)
             # BIDS Modality (editable)
-            modb_item = QTableWidgetItem(str(row.get('modality_bids', '')))
+            modb_item = QTableWidgetItem(_clean(row.get('modality_bids')))
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 5, modb_item)
 
             self.row_info.append({
-                'modb': row.get('modality_bids', ''),
-                'mod': row.get('modality', ''),
-                'seq': row.get('sequence', ''),
+                'modb': _clean(row.get('modality_bids')),
+                'mod': _clean(row.get('modality')),
+                'seq': _clean(row.get('sequence')),
             })
         self.log_text.append("Loaded TSV into mapping table.")
 
