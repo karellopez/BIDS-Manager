@@ -8,9 +8,9 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout,
+    QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView)
+    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView, QMenuBar)
 from PyQt5.QtCore import Qt, QModelIndex
 from PyQt5.QtGui import QPalette, QColor, QFont
 import logging  # debug logging
@@ -44,7 +44,7 @@ class BIDSManager(QMainWindow):
         self.dicom_dir = ""         # Raw DICOM directory
         self.bids_out_dir = ""      # Output BIDS directory
         self.tsv_path = ""          # Path to subject_summary.tsv
-        self.heuristic_path = ""    # Path to auto_heuristic.py
+        self.heuristic_dir = ""     # Directory with heuristics
 
         # Main widget and layout
         main_widget = QWidget()
@@ -66,82 +66,43 @@ class BIDSManager(QMainWindow):
         self.initEditTab()
 
     def initConvertTab(self):
-        """
-        Set up Convert tab with 4-section layout and header.
-        """
+        """Create the Convert tab with a cleaner layout."""
         self.convert_tab = QWidget()
-        # Four sections: header (Input/Output), top-left (TSV table), top-right (modalities menu), bottom-left (preview), bottom-right (placeholder)
         main_layout = QVBoxLayout(self.convert_tab)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(8)
 
-        # Header: Input & Output, stacked vertically
-        header_group = QGroupBox("Configuration")
-        header_layout = QVBoxLayout(header_group)
-        header_layout.setSpacing(6)
+        cfg_group = QGroupBox("Configuration")
+        cfg_layout = QGridLayout(cfg_group)
 
-        # DICOM directory (stacked)
         dicom_label = QLabel("<b>DICOM Dir:</b>")
         self.dicom_dir_edit = QLineEdit()
         self.dicom_dir_edit.setReadOnly(True)
         dicom_browse = QPushButton("Browse…")
-        dicom_browse.setFixedWidth(80)
         dicom_browse.clicked.connect(self.selectDicomDir)
-        dicom_row = QHBoxLayout()
-        dicom_row.addWidget(dicom_label)
-        dicom_row.addWidget(self.dicom_dir_edit)
-        dicom_row.addWidget(dicom_browse)
-        header_layout.addLayout(dicom_row)
+        cfg_layout.addWidget(dicom_label, 0, 0)
+        cfg_layout.addWidget(self.dicom_dir_edit, 0, 1)
+        cfg_layout.addWidget(dicom_browse, 0, 2)
 
-        # BIDS output directory (stacked)
         bids_label = QLabel("<b>BIDS Out Dir:</b>")
         self.bids_out_edit = QLineEdit()
         self.bids_out_edit.setReadOnly(True)
         bids_browse = QPushButton("Browse…")
-        bids_browse.setFixedWidth(80)
         bids_browse.clicked.connect(self.selectBIDSOutDir)
-        bids_row = QHBoxLayout()
-        bids_row.addWidget(bids_label)
-        bids_row.addWidget(self.bids_out_edit)
-        bids_row.addWidget(bids_browse)
-        header_layout.addLayout(bids_row)
+        cfg_layout.addWidget(bids_label, 1, 0)
+        cfg_layout.addWidget(self.bids_out_edit, 1, 1)
+        cfg_layout.addWidget(bids_browse, 1, 2)
 
-        # Output folder name (editable)
-        name_label = QLabel("<b>Output Name:</b>")
-        self.output_name = QLineEdit()
-        self.output_name.setPlaceholderText("Enter folder name")
-        self.output_name.setFixedWidth(200)
-        name_row = QHBoxLayout()
-        name_row.addWidget(name_label)
-        name_row.addWidget(self.output_name)
-        header_layout.addLayout(name_row)
+        self.tsv_button = QPushButton("Generate TSV")
+        self.tsv_button.clicked.connect(self.runInventory)
+        cfg_layout.addWidget(self.tsv_button, 2, 0, 1, 3, alignment=Qt.AlignRight)
 
-        main_layout.addWidget(header_group, stretch=0)
+        main_layout.addWidget(cfg_group)
 
-        # Add a log output area for Convert tab
-        log_group = QGroupBox("Log Output")
-        log_layout = QVBoxLayout(log_group)
-        # Remove log group here; will add at end
-        # self.log_text = QTextEdit()
-        # self.log_text.setReadOnly(True)
-        # log_layout.addWidget(self.log_text)
-        # main_layout.addWidget(log_group, stretch=0)
+        splitter = QSplitter()
 
-        # Create a grid layout for four sections
-        grid_widget = QWidget()
-        grid_layout = QSplitter(Qt.Vertical)
-
-        # Top half splitter (horizontal)
-        top_splitter = QSplitter(Qt.Horizontal)
-        # Top-left: TSV Table
         tsv_group = QGroupBox("TSV Viewer")
         tsv_layout = QVBoxLayout(tsv_group)
-        # Button to generate TSV
-        self.tsv_button = QPushButton("Generate TSV")
-        self.tsv_button.setFixedWidth(100)
-        self.tsv_button.clicked.connect(self.runInventory)
-        tsv_layout.addWidget(self.tsv_button)
-        # TSV table
         self.mapping_table = QTableWidget()
         self.mapping_table.setColumnCount(6)
         self.mapping_table.setHorizontalHeaderLabels([
@@ -152,21 +113,19 @@ class BIDSManager(QMainWindow):
         hdr.setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
         tsv_layout.addWidget(self.mapping_table)
-        top_splitter.addWidget(tsv_group)
+        splitter.addWidget(tsv_group)
 
-        # Top-right: Modalities menu with tabs
+        right_split = QSplitter(Qt.Vertical)
+
         modal_group = QGroupBox("Modalities")
         modal_layout = QVBoxLayout(modal_group)
-        # Tabs: full view vs unique
         self.modal_tabs = QTabWidget()
-        # Full view tab
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
         self.full_tree = QTreeWidget()
-        self.full_tree.setHeaderLabels(["Modality/NON-BIDS","Sequences"])
+        self.full_tree.setHeaderLabels(["Modality/NON-BIDS", "Sequences"])
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "Full View")
-        # Unique tab
         unique_tab = QWidget()
         unique_layout = QVBoxLayout(unique_tab)
         self.unique_tree = QTreeWidget()
@@ -174,49 +133,37 @@ class BIDSManager(QMainWindow):
         unique_layout.addWidget(self.unique_tree)
         self.modal_tabs.addTab(unique_tab, "Unique")
         modal_layout.addWidget(self.modal_tabs)
-        top_splitter.addWidget(modal_group)
+        right_split.addWidget(modal_group)
 
-        grid_layout.addWidget(top_splitter)
-
-        # Bottom half splitter (horizontal)
-        bottom_splitter = QSplitter(Qt.Horizontal)
-        # Bottom-left: Preview tree
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         self.preview_tree = QTreeWidget()
         self.preview_tree.setHeaderLabels(["BIDS Structure"])
         preview_layout.addWidget(self.preview_tree)
-        bottom_splitter.addWidget(preview_group)
+        right_split.addWidget(preview_group)
 
-        # Bottom-right: Placeholder for future controls
-        placeholder_group = QGroupBox("Settings")
-        placeholder_layout = QVBoxLayout(placeholder_group)
-        placeholder_label = QLabel("Additional controls can go here.")
-        placeholder_layout.addWidget(placeholder_label)
-        bottom_splitter.addWidget(placeholder_group)
+        splitter.addWidget(right_split)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
 
-        grid_layout.addWidget(bottom_splitter)
-        main_layout.addWidget(grid_layout, stretch=1)
+        main_layout.addWidget(splitter, 1)
 
-        # Action buttons row
-        actions_layout = QHBoxLayout()
+        btn_row = QHBoxLayout()
         self.preview_button = QPushButton("Preview")
-        self.preview_button.setFixedWidth(100)
         self.preview_button.clicked.connect(self.generatePreview)
         self.run_button = QPushButton("Run")
+        self.run_button.clicked.connect(self.runFullConversion)
+        btn_row.addStretch()
+        btn_row.addWidget(self.preview_button)
+        btn_row.addWidget(self.run_button)
+        main_layout.addLayout(btn_row)
+
         log_group = QGroupBox("Log Output")
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         log_layout.addWidget(self.log_text)
-        main_layout.addWidget(log_group, stretch=0)
-
-        self.run_button.setFixedWidth(100)
-        self.run_button.clicked.connect(self.runFullConversion)
-        actions_layout.addStretch()
-        actions_layout.addWidget(self.preview_button)
-        actions_layout.addWidget(self.run_button)
-        main_layout.addLayout(actions_layout)
+        main_layout.addWidget(log_group)
 
         self.tabs.addTab(self.convert_tab, "Convert")
 
@@ -251,16 +198,17 @@ class BIDSManager(QMainWindow):
         edit_layout.setContentsMargins(10, 10, 10, 10)
         edit_layout.setSpacing(8)
 
-        # Menu bar for Edit features
-        self.menuBar().clear()
-        file_menu = self.menuBar().addMenu("File")
+        # Internal menu bar for Edit features
+        menu = QMenuBar()
+        file_menu = menu.addMenu("File")
         open_act = QAction("Open BIDS…", self)
         open_act.triggered.connect(self.openBIDSForEdit)
         file_menu.addAction(open_act)
-        tools_menu = self.menuBar().addMenu("Tools")
+        tools_menu = menu.addMenu("Tools")
         rename_act = QAction("Batch Rename…", self)
         rename_act.triggered.connect(self.launchBatchRename)
         tools_menu.addAction(rename_act)
+        edit_layout.addWidget(menu)
 
         # Splitter between left (tree & stats) and right (metadata)
         splitter = QSplitter()
@@ -322,8 +270,7 @@ class BIDSManager(QMainWindow):
     def runInventory(self):
         logging.info("runInventory → Generating TSV …")
         """
-        Scan DICOMs and generate subject_summary.tsv in a dedicated output folder.
-        The final output path is <BIDS Out Dir>/<Output Name>/subject_summary.tsv.
+        Scan DICOMs and generate subject_summary.tsv in the selected output directory.
         """
         if not self.dicom_dir or not os.path.isdir(self.dicom_dir):
             QMessageBox.warning(self, "Invalid DICOM Directory", "Please select a valid DICOM input directory.")
@@ -332,12 +279,9 @@ class BIDSManager(QMainWindow):
             QMessageBox.warning(self, "No BIDS Output Directory", "Please select a BIDS output directory.")
             return
 
-        # Resolve final output directory (may include sub‑folder name)
-        out_name = self.output_name.text().strip()
-        self.final_out_dir = os.path.join(self.bids_out_dir, out_name) if out_name else self.bids_out_dir
-        os.makedirs(self.final_out_dir, exist_ok=True)
+        os.makedirs(self.bids_out_dir, exist_ok=True)
 
-        self.tsv_path = os.path.join(self.final_out_dir, "subject_summary.tsv")
+        self.tsv_path = os.path.join(self.bids_out_dir, "subject_summary.tsv")
 
         # Generate TSV via dicom_inventory
         try:
@@ -467,41 +411,44 @@ class BIDSManager(QMainWindow):
         run_script = os.path.join(script_dir, "run_heudiconv_from_heuristic.py")
         rename_script = os.path.join(script_dir, "post_conv_renamer.py")
 
-        # 2) Build heuristic
-        self.heuristic_path = os.path.join(self.bids_out_dir, "auto_heuristic.py")
+        # 2) Build heuristics directory per StudyDescription
+        self.heuristic_dir = os.path.join(self.bids_out_dir, "heuristics")
         try:
             proc = subprocess.run([
                 sys.executable, build_script,
-                self.tsv_path, self.heuristic_path
+                self.tsv_path, self.heuristic_dir
             ], check=True, capture_output=True, text=True)
             self.log_text.append(proc.stdout)
-            self.log_text.append(f"Generated heuristic at {self.heuristic_path}")
+            self.log_text.append(f"Heuristics written to {self.heuristic_dir}")
         except subprocess.CalledProcessError as e:
             QMessageBox.critical(self, "Error", f"build_heuristic failed:\n{e.stderr}")
             return
 
-        # 3) Run HeuDiConv conversion
+        # 3) Run HeuDiConv conversion for each study
         try:
             proc = subprocess.run([
                 sys.executable, run_script,
-                self.dicom_dir, self.heuristic_path, self.bids_out_dir
+                self.dicom_dir, self.heuristic_dir, self.bids_out_dir
             ], check=True, capture_output=True, text=True)
             self.log_text.append(proc.stdout)
-            self.log_text.append(f"HeuDiConv conversion complete.")
+            self.log_text.append("HeuDiConv conversion complete.")
         except subprocess.CalledProcessError as e:
             QMessageBox.critical(self, "Error", f"run_heudiconv failed:\n{e.stderr}")
             return
 
-        # 4) Post-conversion fieldmap renaming
-        try:
-            proc = subprocess.run([
-                sys.executable, rename_script, self.bids_out_dir
-            ], check=True, capture_output=True, text=True)
-            self.log_text.append(proc.stdout)
-            self.log_text.append("Fieldmap renaming applied.")
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"post_conv_renamer failed:\n{e.stderr}")
-            return
+        # 4) Post-conversion fieldmap renaming per dataset
+        for heur in Path(self.heuristic_dir).glob("heuristic_*.py"):
+            study = heur.stem.replace("heuristic_", "")
+            bids_path = os.path.join(self.bids_out_dir, study)
+            try:
+                proc = subprocess.run([
+                    sys.executable, rename_script, bids_path
+                ], check=True, capture_output=True, text=True)
+                self.log_text.append(proc.stdout)
+            except subprocess.CalledProcessError as e:
+                QMessageBox.critical(self, "Error", f"post_conv_renamer failed:\n{e.stderr}")
+                return
+        self.log_text.append("Fieldmap renaming applied.")
 
         self.log_text.append("Conversion pipeline finished successfully.")
 
