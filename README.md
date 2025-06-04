@@ -5,7 +5,7 @@ This repository provides a PyQt-based GUI and helper scripts to convert DICOM fo
 ## Installation
 
 ```bash
-pip install git+https://github.com/your-org/BIDS-Manager.git
+pip install git+https://github.com/karellopez/BIDS-Manager.git
 ```
 
 After installation the following commands become available:
