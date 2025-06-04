@@ -145,7 +145,7 @@ def scan_dicoms_long(root_dir: str,
             )
             study = str(study).strip()
 
-            subj_key = subj
+            subj_key = f"{subj}||{study}"
 
             # ---- source folder  (first dir under root)
             rel = os.path.relpath(root, root_dir)
