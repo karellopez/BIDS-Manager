@@ -848,7 +848,7 @@ class MetadataViewer(QWidget):
             obj[k] = child if child is not None else val
         return obj
 
-if __name__ == '__main__':
+def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     pal = QPalette()
@@ -858,3 +858,8 @@ if __name__ == '__main__':
     win = BIDSManager()
     win.show()
     sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
+
