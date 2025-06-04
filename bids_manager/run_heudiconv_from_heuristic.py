@@ -28,11 +28,15 @@ def clean_name(raw: str) -> str:
 
 
 def physical_by_clean(raw_root: Path) -> Dict[str, str]:
-    """
-    Return mapping folder_name → folder_name  (no cleaning),
-    only first-level dirs under *raw_root*.
-    """
-    return {p.name: p.name for p in raw_root.iterdir() if p.is_dir()}
+    """Return mapping cleaned_name → relative folder path for all subdirs."""
+    mapping: Dict[str, str] = {}
+    for p in raw_root.rglob("*"):
+        if not p.is_dir():
+            continue
+        rel = str(p.relative_to(raw_root))
+        mapping[rel] = rel
+        mapping[clean_name(rel)] = rel
+    return mapping
 
 
 

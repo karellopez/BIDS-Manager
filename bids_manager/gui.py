@@ -154,10 +154,8 @@ class BIDSManager(QMainWindow):
         self.preview_button.clicked.connect(self.generatePreview)
         preview_layout.addWidget(self.preview_button)
 
-        splitter.addWidget(preview_group)
-        splitter.setStretchFactor(2, 1)
-
         main_layout.addWidget(splitter, 1)
+        main_layout.addWidget(preview_group)
 
         btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
