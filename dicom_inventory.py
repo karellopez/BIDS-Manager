@@ -217,10 +217,18 @@ def scan_dicoms_long(root_dir: str,
 # ----------------------------------------------------------------------
 # Command-line test
 # ----------------------------------------------------------------------
-if __name__ == "__main__":
-    ROOT_DIR = "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/Testdata_ConversionApp/raw_data/neuroimaging_unit_new"
-    OUT_TSV  = "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/Testdata_ConversionApp/converted_data/subject_summary.tsv"
+def main() -> None:
+    import argparse
 
-    table = scan_dicoms_long(ROOT_DIR, OUT_TSV)
+    parser = argparse.ArgumentParser(description="Generate TSV inventory for a DICOM folder")
+    parser.add_argument("dicom_dir", help="Path to the directory containing DICOM files")
+    parser.add_argument("output_tsv", help="Destination TSV file")
+    args = parser.parse_args()
+
+    table = scan_dicoms_long(args.dicom_dir, args.output_tsv)
     print("\nPreview (first 10 rows):\n")
     print(table.head(10).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

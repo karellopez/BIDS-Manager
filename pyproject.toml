@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bids-manager"
+version = "0.1.0"
+description = "GUI application to manage BIDS datasets"
+authors = [{name="BIDS Manager"}]
+requires-python = ">=3.8"
+dependencies = [
+    "pydicom",
+    "pandas",
+    "PyQt5",
+]
+
+[project.scripts]
+bids-manager = "bids_manager:main"
+dicom-inventory = "dicom_inventory:main"
+build-heuristic = "build_heuristic_from_tsv:main"
+run-heudiconv = "run_heudiconv_from_heuristic:main"
+post-conv-renamer = "post_conv_renamer:main"
+bids-editor = "bids_editor_ancpbids:main"
+
+
+[tool.setuptools]
+py-modules = [
+  "bids_manager",
+  "dicom_inventory",
+  "build_heuristic_from_tsv",
+  "run_heudiconv_from_heuristic",
+  "post_conv_renamer",
+  "bids_editor_ancpbids",
+]
+
