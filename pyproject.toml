@@ -6,8 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "bids-manager"
 version = "0.1.0"
 description = "GUI application to manage BIDS datasets"
+readme = "README.md"
+license = {text = "MIT"}
 authors = [{name="BIDS Manager"}]
 requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
 dependencies = [
     "pydicom",
     "pandas",
