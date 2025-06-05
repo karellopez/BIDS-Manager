@@ -790,6 +790,7 @@ class MetadataViewer(QWidget):
         vlay.addLayout(self.toolbar)
         self.viewer = None
         self.current_path = None
+        self.data = None  # holds loaded NIfTI data when viewing images
 
     def clear(self):
         """Clear the toolbar and viewer when switching files."""
@@ -819,6 +820,18 @@ class MetadataViewer(QWidget):
             self._setup_nifti_toolbar()
             self.viewer = self._nifti_view(path)
         self.layout().addWidget(self.viewer)
+
+    def resizeEvent(self, event):
+        """Ensure images rescale when the window size decreases."""
+        super().resizeEvent(event)
+        # If a NIfTI image is currently loaded, update the displayed slice
+        if (
+            self.data is not None
+            and self.current_path
+            and _get_ext(self.current_path) in ['.nii', '.nii.gz']
+            and hasattr(self, 'img_label')
+        ):
+            self._update_slice()
 
     def _setup_json_toolbar(self):
         """Add buttons for JSON editing: Add Field, Delete Field, Save."""
