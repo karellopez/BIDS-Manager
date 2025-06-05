@@ -906,7 +906,7 @@ class MetadataViewer(QWidget):
             arr = arr / arr.max()
         arr = (arr * 255).astype(np.uint8)
         h, w = arr.shape
-        img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+        img = QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8)
         pix = QPixmap.fromImage(img)
         self.img_label.setPixmap(pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
