@@ -18,6 +18,19 @@ from PyQt5.QtCore import Qt, QModelIndex, QTimer
 from PyQt5.QtGui import QPalette, QColor, QFont, QImage, QPixmap
 import logging  # debug logging
 
+
+class _AutoUpdateLabel(QLabel):
+    """QLabel that triggers a callback whenever it is resized."""
+
+    def __init__(self, update_fn, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._update_fn = update_fn
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if callable(self._update_fn):
+            self._update_fn()
+
 # Import the scan function directly to ensure TSV generation works. When the
 # module is executed as a standalone script (``python gui.py``), ``__package__``
 # will be ``None`` and relative imports fail.  In that case we prepend the
@@ -917,8 +930,9 @@ class MetadataViewer(QWidget):
         self.data = data
         widget = QWidget()
         vlay = QVBoxLayout(widget)
-        self.img_label = QLabel()
+        self.img_label = _AutoUpdateLabel(self._update_slice)
         self.img_label.setAlignment(Qt.AlignCenter)
+        self.img_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         vlay.addWidget(self.img_label)
 
         # Configure volume slider range
@@ -948,6 +962,7 @@ class MetadataViewer(QWidget):
         if arr.max() > 0:
             arr = arr / arr.max()
         arr = (arr * 255).astype(np.uint8)
+        arr = np.rot90(arr)
         h, w = arr.shape
         img = QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8)
         pix = QPixmap.fromImage(img)
