@@ -32,6 +32,13 @@ else:  # running as a script
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
+def _get_ext(path: Path) -> str:
+    """Return file extension with special handling for .nii.gz."""
+    name = path.name.lower()
+    if name.endswith('.nii.gz'):
+        return '.nii.gz'
+    return path.suffix.lower()
+
 class BIDSManager(QMainWindow):
     """
     Main GUI for BIDS Manager.
@@ -591,7 +598,7 @@ class BIDSManager(QMainWindow):
         """When a file is clicked in the tree, load metadata if JSON/TSV."""
         p = Path(self.model.filePath(idx))
         self.selected = p
-        if p.suffix.lower() in ['.json', '.tsv', '.nii', '.nii.gz']:
+        if _get_ext(p) in ['.json', '.tsv', '.nii', '.nii.gz']:
             self.viewer.load_file(p)
 
     def updateStats(self):
@@ -788,7 +795,7 @@ class MetadataViewer(QWidget):
         self.current_path = path
         self.clear()
         self.welcome.hide()
-        ext = path.suffix.lower()
+        ext = _get_ext(path)
         if ext == '.json':
             self._setup_json_toolbar()
             self.viewer = self._json_view(path)
