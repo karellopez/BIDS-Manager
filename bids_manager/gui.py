@@ -867,6 +867,21 @@ class MetadataViewer(QWidget):
         self.vol_slider.valueChanged.connect(self._update_slice)
         self.toolbar.addWidget(QLabel("Volume:"))
         self.toolbar.addWidget(self.vol_slider)
+        # Brightness slider
+        self.bright_slider = QSlider(Qt.Horizontal)
+        self.bright_slider.setRange(-100, 100)
+        self.bright_slider.setValue(0)
+        self.bright_slider.valueChanged.connect(self._update_slice)
+        self.toolbar.addWidget(QLabel("Brightness:"))
+        self.toolbar.addWidget(self.bright_slider)
+
+        # Contrast slider
+        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider.setRange(0, 200)
+        self.contrast_slider.setValue(100)
+        self.contrast_slider.valueChanged.connect(self._update_slice)
+        self.toolbar.addWidget(QLabel("Contrast:"))
+        self.toolbar.addWidget(self.contrast_slider)
         self.toolbar.addStretch()
 
     def _add_field(self):
@@ -961,6 +976,15 @@ class MetadataViewer(QWidget):
         arr = arr - arr.min()
         if arr.max() > 0:
             arr = arr / arr.max()
+
+        # Apply brightness/contrast adjustments
+        bright = getattr(self, 'bright_slider', None)
+        contrast = getattr(self, 'contrast_slider', None)
+        b_val = bright.value() / 100.0 if bright else 0.0
+        c_factor = (contrast.value() / 100.0) if contrast else 1.0
+        arr = (arr - 0.5) * c_factor + 0.5 + b_val
+        arr = np.clip(arr, 0, 1)
+
         arr = (arr * 255).astype(np.uint8)
         arr = np.rot90(arr)
         h, w = arr.shape
