@@ -18,6 +18,8 @@ dependencies = [
     "pandas",
     "PyQt5",
     "heudiconv",
+    "nibabel",
+    "numpy",
 ]
 
 

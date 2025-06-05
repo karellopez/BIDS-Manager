@@ -4,6 +4,8 @@ import subprocess
 import json
 import re
 import pandas as pd
+import numpy as np
+import nibabel as nib
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
@@ -11,9 +13,9 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
-    QMenuBar, QSizePolicy, QComboBox)
+    QMenuBar, QSizePolicy, QComboBox, QSlider)
 from PyQt5.QtCore import Qt, QModelIndex, QTimer
-from PyQt5.QtGui import QPalette, QColor, QFont
+from PyQt5.QtGui import QPalette, QColor, QFont, QImage, QPixmap
 import logging  # debug logging
 
 # Import the scan function directly to ensure TSV generation works. When the
@@ -137,7 +139,8 @@ class BIDSManager(QMainWindow):
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
         self.full_tree = QTreeWidget()
-        self.full_tree.setHeaderLabels(["Modality BIDS", "Non‑BIDS / Sequences"])
+        # Display only one column with the BIDS modality
+        self.full_tree.setHeaderLabels(["BIDS Modality"])
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "Full View")
         modal_layout.addWidget(self.modal_tabs)
@@ -154,15 +157,20 @@ class BIDSManager(QMainWindow):
         self.preview_button.clicked.connect(self.generatePreview)
         preview_layout.addWidget(self.preview_button)
 
-        main_layout.addWidget(splitter, 1)
-        main_layout.addWidget(preview_group)
-
         btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.runFullConversion)
         btn_row.addStretch()
         btn_row.addWidget(self.run_button)
-        main_layout.addLayout(btn_row)
+
+        # Combine preview panel and run button so the splitter keeps the
+        # original layout but allows resizing versus the log output.
+        preview_container = QWidget()
+        pv_lay = QVBoxLayout(preview_container)
+        pv_lay.setContentsMargins(0, 0, 0, 0)
+        pv_lay.setSpacing(6)
+        pv_lay.addWidget(preview_group)
+        pv_lay.addLayout(btn_row)
 
         log_group = QGroupBox("Log Output")
         log_layout = QVBoxLayout(log_group)
@@ -170,7 +178,16 @@ class BIDSManager(QMainWindow):
         self.log_text.setReadOnly(True)
         self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
-        main_layout.addWidget(log_group)
+
+        main_layout.addWidget(splitter, 1)
+
+        # Splitter to allow resizing between preview and log windows
+        pv_split = QSplitter(Qt.Vertical)
+        pv_split.addWidget(preview_container)
+        pv_split.addWidget(log_group)
+        pv_split.setStretchFactor(0, 1)
+        pv_split.setStretchFactor(1, 1)
+        main_layout.addWidget(pv_split, 1)
 
         self.tabs.addTab(self.convert_tab, "Convert")
 
@@ -574,7 +591,7 @@ class BIDSManager(QMainWindow):
         """When a file is clicked in the tree, load metadata if JSON/TSV."""
         p = Path(self.model.filePath(idx))
         self.selected = p
-        if p.suffix.lower() in ['.json', '.tsv']:
+        if p.suffix.lower() in ['.json', '.tsv', '.nii', '.nii.gz']:
             self.viewer.load_file(p)
 
     def updateStats(self):
@@ -767,7 +784,7 @@ class MetadataViewer(QWidget):
         self.welcome.show()
 
     def load_file(self, path: Path):
-        """Load JSON or TSV file into an editable viewer."""
+        """Load JSON, TSV or NIfTI file into an editable viewer."""
         self.current_path = path
         self.clear()
         self.welcome.hide()
@@ -778,6 +795,9 @@ class MetadataViewer(QWidget):
         elif ext == '.tsv':
             self._setup_tsv_toolbar()
             self.viewer = self._tsv_view(path)
+        elif ext in ['.nii', '.nii.gz']:
+            self._setup_nifti_toolbar()
+            self.viewer = self._nifti_view(path)
         self.layout().addWidget(self.viewer)
 
     def _setup_json_toolbar(self):
@@ -797,6 +817,14 @@ class MetadataViewer(QWidget):
             btn = QPushButton(txt)
             btn.clicked.connect(fn)
             self.toolbar.addWidget(btn)
+        self.toolbar.addStretch()
+
+    def _setup_nifti_toolbar(self):
+        """Toolbar for NIfTI viewer: includes a slider to change volume."""
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.valueChanged.connect(self._update_slice)
+        self.toolbar.addWidget(QLabel("Volume:"))
+        self.toolbar.addWidget(self.vol_slider)
         self.toolbar.addStretch()
 
     def _add_field(self):
@@ -841,6 +869,39 @@ class MetadataViewer(QWidget):
         c = tbl.currentColumn()
         if c >= 0:
             tbl.removeColumn(c)
+
+    def _nifti_view(self, path: Path) -> QWidget:
+        """Create a simple viewer for NIfTI images with volume slider."""
+        self.nifti_img = nib.load(str(path))
+        data = self.nifti_img.get_fdata()
+        self.data = data
+        widget = QWidget()
+        vlay = QVBoxLayout(widget)
+        self.img_label = QLabel()
+        self.img_label.setAlignment(Qt.AlignCenter)
+        vlay.addWidget(self.img_label)
+
+        # Configure slider range based on number of volumes
+        n_vols = data.shape[3] if data.ndim == 4 else 1
+        self.vol_slider.setMaximum(max(n_vols - 1, 0))
+        self.vol_slider.setEnabled(n_vols > 1)
+        self._update_slice()
+        return widget
+
+    def _update_slice(self):
+        """Update displayed slice when slider moves."""
+        vol_idx = getattr(self, 'vol_slider', None).value() if hasattr(self, 'vol_slider') else 0
+        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        slice_img = vol[:, :, vol.shape[2] // 2]
+        arr = slice_img.astype(np.float32)
+        arr = arr - arr.min()
+        if arr.max() > 0:
+            arr = arr / arr.max()
+        arr = (arr * 255).astype(np.uint8)
+        h, w = arr.shape
+        img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+        pix = QPixmap.fromImage(img)
+        self.img_label.setPixmap(pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def _json_view(self, path: Path) -> QTreeWidget:
         """Create a tree widget to show and edit JSON data."""
