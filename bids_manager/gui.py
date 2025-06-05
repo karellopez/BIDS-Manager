@@ -827,7 +827,29 @@ class MetadataViewer(QWidget):
         self.toolbar.addStretch()
 
     def _setup_nifti_toolbar(self):
-        """Toolbar for NIfTI viewer: includes a slider to change volume."""
+        """Toolbar for NIfTI viewer with orientation buttons and sliders."""
+        # Orientation buttons
+        self.orientation = 2  # 0=sagittal, 1=coronal, 2=axial (default)
+        self.ax_btn = QPushButton("Axial")
+        self.co_btn = QPushButton("Coronal")
+        self.sa_btn = QPushButton("Sagittal")
+        for b in (self.ax_btn, self.co_btn, self.sa_btn):
+            b.setCheckable(True)
+        self.ax_btn.setChecked(True)
+        self.ax_btn.clicked.connect(lambda: self._set_orientation(2))
+        self.co_btn.clicked.connect(lambda: self._set_orientation(1))
+        self.sa_btn.clicked.connect(lambda: self._set_orientation(0))
+        self.toolbar.addWidget(self.sa_btn)
+        self.toolbar.addWidget(self.co_btn)
+        self.toolbar.addWidget(self.ax_btn)
+
+        # Slice slider
+        self.slice_slider = QSlider(Qt.Horizontal)
+        self.slice_slider.valueChanged.connect(self._update_slice)
+        self.toolbar.addWidget(QLabel("Slice:"))
+        self.toolbar.addWidget(self.slice_slider)
+
+        # Volume slider
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.valueChanged.connect(self._update_slice)
         self.toolbar.addWidget(QLabel("Volume:"))
@@ -877,8 +899,19 @@ class MetadataViewer(QWidget):
         if c >= 0:
             tbl.removeColumn(c)
 
+    def _set_orientation(self, axis: int) -> None:
+        """Set viewing orientation and update slice slider."""
+        self.orientation = axis
+        vol_idx = getattr(self, 'vol_slider', None).value() if hasattr(self, 'vol_slider') else 0
+        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        axis_len = vol.shape[axis]
+        self.slice_slider.setMaximum(max(axis_len - 1, 0))
+        self.slice_slider.setEnabled(axis_len > 1)
+        self.slice_slider.setValue(axis_len // 2)
+        self._update_slice()
+
     def _nifti_view(self, path: Path) -> QWidget:
-        """Create a simple viewer for NIfTI images with volume slider."""
+        """Create a simple viewer for NIfTI images with slice/volume controls."""
         self.nifti_img = nib.load(str(path))
         data = self.nifti_img.get_fdata()
         self.data = data
@@ -888,10 +921,13 @@ class MetadataViewer(QWidget):
         self.img_label.setAlignment(Qt.AlignCenter)
         vlay.addWidget(self.img_label)
 
-        # Configure slider range based on number of volumes
+        # Configure volume slider range
         n_vols = data.shape[3] if data.ndim == 4 else 1
         self.vol_slider.setMaximum(max(n_vols - 1, 0))
         self.vol_slider.setEnabled(n_vols > 1)
+
+        # Initialize orientation and slice slider
+        self._set_orientation(self.orientation)
         self._update_slice()
         return widget
 
@@ -899,7 +935,14 @@ class MetadataViewer(QWidget):
         """Update displayed slice when slider moves."""
         vol_idx = getattr(self, 'vol_slider', None).value() if hasattr(self, 'vol_slider') else 0
         vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
-        slice_img = vol[:, :, vol.shape[2] // 2]
+        axis = getattr(self, 'orientation', 2)
+        slice_idx = getattr(self, 'slice_slider', None).value() if hasattr(self, 'slice_slider') else vol.shape[axis] // 2
+        if axis == 0:
+            slice_img = vol[slice_idx, :, :]
+        elif axis == 1:
+            slice_img = vol[:, slice_idx, :]
+        else:
+            slice_img = vol[:, :, slice_idx]
         arr = slice_img.astype(np.float32)
         arr = arr - arr.min()
         if arr.max() > 0:
