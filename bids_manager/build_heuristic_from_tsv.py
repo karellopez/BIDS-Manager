@@ -85,7 +85,8 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         base = f"{bids}/{ses}/{container}/{bids}_{ses}".replace("//", "/").rstrip("_") if ses else f"{bids}/{container}/{bids}"
         template = f"{base}_{stem}"
 
-        key_var = "key_" + clean(stem)  # variable name derived from sequence
+        parts = [bids, ses, stem]
+        key_var = "key_" + clean("_".join(p for p in parts if p))
         seq2key[key_id] = key_var
         key_defs.append((key_var, template))
 
