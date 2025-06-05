@@ -20,7 +20,7 @@ subject        – GivenName shown only on the first row of each subject block
 BIDS_name      – auto-assigned `sub-001`, `sub-002`, … (same GivenName → same ID)
 session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
-source_folder  – relative path under *root_dir* where the DICOM series was found
+source_folder  – name of the deepest folder containing the DICOM series
 include        – defaults to 1 but scout/report/physlog rows start at 0
 sequence       – original SeriesDescription
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
@@ -147,9 +147,9 @@ def scan_dicoms_long(root_dir: str,
 
             subj_key = f"{subj}||{study}"
 
-            # ---- source folder  (first dir under root)
+            # ---- source folder  (final folder name only)
             rel = os.path.relpath(root, root_dir)
-            folder = rel if rel != "." else ""
+            folder = "" if rel == "." else os.path.basename(rel)
 
             series = getattr(ds, "SeriesDescription", "n/a").strip()
             counts[subj_key][folder][series] += 1
