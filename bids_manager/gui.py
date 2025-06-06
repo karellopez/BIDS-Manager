@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
-    QMenuBar, QSizePolicy, QComboBox, QSlider)
+    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider)
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
 from PyQt5.QtGui import QPalette, QColor, QFont, QImage, QPixmap
 import logging  # debug logging
@@ -126,6 +126,225 @@ class BIDSManager(QMainWindow):
         # Initialize tabs
         self.initConvertTab()
         self.initEditTab()
+
+        # Theme support
+        self.statusBar()
+        self.themes = self._build_theme_dict()
+        self.theme_btn = QPushButton("\xf0\x9f\x8c\x93")  # half-moon icon
+        self.theme_btn.setFixedWidth(60)
+        self.statusBar().addPermanentWidget(self.theme_btn)
+        theme_menu = QMenu(self)
+        for name in self.themes.keys():
+            act = theme_menu.addAction(name)
+            act.triggered.connect(lambda _=False, n=name: self.apply_theme(n))
+        self.theme_btn.setMenu(theme_menu)
+        self.apply_theme("Ocean")
+
+    def _build_theme_dict(self):
+        """Return dictionary mapping theme names to QPalettes."""
+        themes = {}
+
+        dark = QPalette()
+        dark.setColor(QPalette.Window, QColor(53, 53, 53))
+        dark.setColor(QPalette.WindowText, Qt.white)
+        dark.setColor(QPalette.Base, QColor(35, 35, 35))
+        dark.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+        dark.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
+        dark.setColor(QPalette.ToolTipText, Qt.white)
+        dark.setColor(QPalette.Text, Qt.white)
+        dark.setColor(QPalette.Button, QColor(53, 53, 53))
+        dark.setColor(QPalette.ButtonText, Qt.white)
+        dark.setColor(QPalette.Highlight, QColor(142, 45, 197))
+        dark.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Dark"] = dark
+
+        light = QPalette()
+        light.setColor(QPalette.Window, Qt.white)
+        light.setColor(QPalette.WindowText, Qt.black)
+        light.setColor(QPalette.Base, QColor(245, 245, 245))
+        light.setColor(QPalette.AlternateBase, Qt.white)
+        light.setColor(QPalette.ToolTipBase, Qt.white)
+        light.setColor(QPalette.ToolTipText, Qt.black)
+        light.setColor(QPalette.Text, Qt.black)
+        light.setColor(QPalette.Button, QColor(240, 240, 240))
+        light.setColor(QPalette.ButtonText, Qt.black)
+        light.setColor(QPalette.Highlight, QColor(100, 149, 237))
+        light.setColor(QPalette.HighlightedText, Qt.white)
+        themes["Light"] = light
+
+        beige = QPalette()
+        beige.setColor(QPalette.Window, QColor(243, 232, 210))
+        beige.setColor(QPalette.WindowText, Qt.black)
+        beige.setColor(QPalette.Base, QColor(250, 240, 222))
+        beige.setColor(QPalette.AlternateBase, QColor(246, 236, 218))
+        beige.setColor(QPalette.ToolTipBase, QColor(236, 224, 200))
+        beige.setColor(QPalette.ToolTipText, Qt.black)
+        beige.setColor(QPalette.Text, Qt.black)
+        beige.setColor(QPalette.Button, QColor(242, 231, 208))
+        beige.setColor(QPalette.ButtonText, Qt.black)
+        beige.setColor(QPalette.Highlight, QColor(196, 148, 70))
+        beige.setColor(QPalette.HighlightedText, Qt.white)
+        themes["Beige"] = beige
+
+        ocean = QPalette()
+        ocean.setColor(QPalette.Window, QColor(225, 238, 245))
+        ocean.setColor(QPalette.WindowText, Qt.black)
+        ocean.setColor(QPalette.Base, QColor(240, 248, 252))
+        ocean.setColor(QPalette.AlternateBase, QColor(230, 240, 247))
+        ocean.setColor(QPalette.ToolTipBase, QColor(215, 230, 240))
+        ocean.setColor(QPalette.ToolTipText, Qt.black)
+        ocean.setColor(QPalette.Text, Qt.black)
+        ocean.setColor(QPalette.Button, QColor(213, 234, 242))
+        ocean.setColor(QPalette.ButtonText, Qt.black)
+        ocean.setColor(QPalette.Highlight, QColor(0, 123, 167))
+        ocean.setColor(QPalette.HighlightedText, Qt.white)
+        themes["Ocean"] = ocean
+
+        hc = QPalette()
+        hc.setColor(QPalette.Window, Qt.black)
+        hc.setColor(QPalette.WindowText, Qt.white)
+        hc.setColor(QPalette.Base, Qt.black)
+        hc.setColor(QPalette.AlternateBase, Qt.black)
+        hc.setColor(QPalette.ToolTipBase, Qt.black)
+        hc.setColor(QPalette.ToolTipText, Qt.white)
+        hc.setColor(QPalette.Text, Qt.white)
+        hc.setColor(QPalette.Button, Qt.black)
+        hc.setColor(QPalette.ButtonText, Qt.white)
+        hc.setColor(QPalette.Highlight, QColor(255, 215, 0))
+        hc.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Contrast"] = hc
+
+        solar = QPalette()
+        solar.setColor(QPalette.Window, QColor(253, 246, 227))
+        solar.setColor(QPalette.WindowText, QColor(101, 123, 131))
+        solar.setColor(QPalette.Base, QColor(255, 250, 240))
+        solar.setColor(QPalette.AlternateBase, QColor(253, 246, 227))
+        solar.setColor(QPalette.ToolTipBase, QColor(238, 232, 213))
+        solar.setColor(QPalette.ToolTipText, QColor(88, 110, 117))
+        solar.setColor(QPalette.Text, QColor(88, 110, 117))
+        solar.setColor(QPalette.Button, QColor(238, 232, 213))
+        solar.setColor(QPalette.ButtonText, QColor(88, 110, 117))
+        solar.setColor(QPalette.Highlight, QColor(38, 139, 210))
+        solar.setColor(QPalette.HighlightedText, Qt.white)
+        themes["Solar"] = solar
+
+        cyber = QPalette()
+        cyber.setColor(QPalette.Window, QColor(20, 20, 30))
+        cyber.setColor(QPalette.WindowText, QColor(0, 255, 255))
+        cyber.setColor(QPalette.Base, QColor(30, 30, 45))
+        cyber.setColor(QPalette.AlternateBase, QColor(25, 25, 35))
+        cyber.setColor(QPalette.ToolTipBase, QColor(45, 45, 65))
+        cyber.setColor(QPalette.ToolTipText, QColor(255, 0, 255))
+        cyber.setColor(QPalette.Text, QColor(0, 255, 255))
+        cyber.setColor(QPalette.Button, QColor(40, 40, 55))
+        cyber.setColor(QPalette.ButtonText, QColor(255, 0, 255))
+        cyber.setColor(QPalette.Highlight, QColor(255, 0, 128))
+        cyber.setColor(QPalette.HighlightedText, Qt.white)
+        themes["Cyber"] = cyber
+
+        drac = QPalette()
+        drac.setColor(QPalette.Window, QColor("#282a36"))
+        drac.setColor(QPalette.WindowText, QColor("#f8f8f2"))
+        drac.setColor(QPalette.Base, QColor("#1e1f29"))
+        drac.setColor(QPalette.AlternateBase, QColor("#282a36"))
+        drac.setColor(QPalette.ToolTipBase, QColor("#44475a"))
+        drac.setColor(QPalette.ToolTipText, QColor("#f8f8f2"))
+        drac.setColor(QPalette.Text, QColor("#f8f8f2"))
+        drac.setColor(QPalette.Button, QColor("#44475a"))
+        drac.setColor(QPalette.ButtonText, QColor("#f8f8f2"))
+        drac.setColor(QPalette.Highlight, QColor("#bd93f9"))
+        drac.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Dracula"] = drac
+
+        nord = QPalette()
+        nord.setColor(QPalette.Window, QColor("#2e3440"))
+        nord.setColor(QPalette.WindowText, QColor("#d8dee9"))
+        nord.setColor(QPalette.Base, QColor("#3b4252"))
+        nord.setColor(QPalette.AlternateBase, QColor("#434c5e"))
+        nord.setColor(QPalette.ToolTipBase, QColor("#4c566a"))
+        nord.setColor(QPalette.ToolTipText, QColor("#eceff4"))
+        nord.setColor(QPalette.Text, QColor("#e5e9f0"))
+        nord.setColor(QPalette.Button, QColor("#4c566a"))
+        nord.setColor(QPalette.ButtonText, QColor("#d8dee9"))
+        nord.setColor(QPalette.Highlight, QColor("#88c0d0"))
+        nord.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Nord"] = nord
+
+        gruv = QPalette()
+        gruv.setColor(QPalette.Window, QColor("#282828"))
+        gruv.setColor(QPalette.WindowText, QColor("#ebdbb2"))
+        gruv.setColor(QPalette.Base, QColor("#32302f"))
+        gruv.setColor(QPalette.AlternateBase, QColor("#3c3836"))
+        gruv.setColor(QPalette.ToolTipBase, QColor("#504945"))
+        gruv.setColor(QPalette.ToolTipText, QColor("#fbf1c7"))
+        gruv.setColor(QPalette.Text, QColor("#ebdbb2"))
+        gruv.setColor(QPalette.Button, QColor("#504945"))
+        gruv.setColor(QPalette.ButtonText, QColor("#ebdbb2"))
+        gruv.setColor(QPalette.Highlight, QColor("#d79921"))
+        gruv.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Gruvbox"] = gruv
+
+        mono = QPalette()
+        mono.setColor(QPalette.Window, QColor("#272822"))
+        mono.setColor(QPalette.WindowText, QColor("#f8f8f2"))
+        mono.setColor(QPalette.Base, QColor("#1e1f1c"))
+        mono.setColor(QPalette.AlternateBase, QColor("#272822"))
+        mono.setColor(QPalette.ToolTipBase, QColor("#3e3d32"))
+        mono.setColor(QPalette.ToolTipText, QColor("#f8f8f2"))
+        mono.setColor(QPalette.Text, QColor("#f8f8f2"))
+        mono.setColor(QPalette.Button, QColor("#3e3d32"))
+        mono.setColor(QPalette.ButtonText, QColor("#f8f8f2"))
+        mono.setColor(QPalette.Highlight, QColor("#a6e22e"))
+        mono.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Monokai"] = mono
+
+        tokyo = QPalette()
+        tokyo.setColor(QPalette.Window, QColor("#1a1b26"))
+        tokyo.setColor(QPalette.WindowText, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.Base, QColor("#1f2335"))
+        tokyo.setColor(QPalette.AlternateBase, QColor("#24283b"))
+        tokyo.setColor(QPalette.ToolTipBase, QColor("#414868"))
+        tokyo.setColor(QPalette.ToolTipText, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.Text, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.Button, QColor("#414868"))
+        tokyo.setColor(QPalette.ButtonText, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.Highlight, QColor("#7aa2f7"))
+        tokyo.setColor(QPalette.HighlightedText, Qt.white)
+        themes["Tokyo"] = tokyo
+
+        mocha = QPalette()
+        mocha.setColor(QPalette.Window, QColor("#1e1e2e"))
+        mocha.setColor(QPalette.WindowText, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.Base, QColor("#181825"))
+        mocha.setColor(QPalette.AlternateBase, QColor("#1e1e2e"))
+        mocha.setColor(QPalette.ToolTipBase, QColor("#313244"))
+        mocha.setColor(QPalette.ToolTipText, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.Text, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.Button, QColor("#313244"))
+        mocha.setColor(QPalette.ButtonText, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.Highlight, QColor("#f38ba8"))
+        mocha.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Mocha"] = mocha
+
+        pale = QPalette()
+        pale.setColor(QPalette.Window, QColor("#292d3e"))
+        pale.setColor(QPalette.WindowText, QColor("#a6accd"))
+        pale.setColor(QPalette.Base, QColor("#1b1d2b"))
+        pale.setColor(QPalette.AlternateBase, QColor("#222436"))
+        pale.setColor(QPalette.ToolTipBase, QColor("#444267"))
+        pale.setColor(QPalette.ToolTipText, QColor("#a6accd"))
+        pale.setColor(QPalette.Text, QColor("#a6accd"))
+        pale.setColor(QPalette.Button, QColor("#444267"))
+        pale.setColor(QPalette.ButtonText, QColor("#a6accd"))
+        pale.setColor(QPalette.Highlight, QColor("#82aaff"))
+        pale.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Palenight"] = pale
+
+        return themes
+
+    def apply_theme(self, name: str):
+        """Apply palette chosen from the Theme menu."""
+        QApplication.instance().setPalette(self.themes[name])
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
@@ -1168,10 +1387,6 @@ class MetadataViewer(QWidget):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    pal = QPalette()
-    pal.setColor(QPalette.Window, QColor(240, 240, 240))
-    pal.setColor(QPalette.WindowText, Qt.black)
-    app.setPalette(pal)
     win = BIDSManager()
     win.show()
     sys.exit(app.exec_())
