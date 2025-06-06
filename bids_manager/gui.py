@@ -1,6 +1,5 @@
 import sys
 import os
-import subprocess
 import json
 import re
 import pandas as pd
@@ -14,7 +13,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QSizePolicy, QComboBox, QSlider)
-from PyQt5.QtCore import Qt, QModelIndex, QTimer
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
 from PyQt5.QtGui import QPalette, QColor, QFont, QImage, QPixmap
 import logging  # debug logging
 
@@ -30,17 +29,6 @@ class _AutoUpdateLabel(QLabel):
         super().resizeEvent(event)
         if callable(self._update_fn):
             self._update_fn()
-
-# Import the scan function directly to ensure TSV generation works. When the
-# module is executed as a standalone script (``python gui.py``), ``__package__``
-# will be ``None`` and relative imports fail.  In that case we prepend the
-# package's parent directory to ``sys.path`` and fall back to an absolute
-# import.
-if __package__:
-    from .dicom_inventory import scan_dicoms_long
-else:  # running as a script
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from bids_manager.dicom_inventory import scan_dicoms_long
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -72,6 +60,12 @@ class BIDSManager(QMainWindow):
         self.modb_rows = {}
         self.mod_rows = {}
         self.seq_rows = {}
+
+        # Async process handles
+        self.inventory_process = None
+        self.conv_process = None
+        self.conv_stage = 0
+        self.heurs_to_rename = []
 
         # Main widget and layout
         main_widget = QWidget()
@@ -127,14 +121,19 @@ class BIDSManager(QMainWindow):
 
         self.tsv_button = QPushButton("Generate TSV")
         self.tsv_button.clicked.connect(self.runInventory)
+        self.tsv_stop_button = QPushButton("Stop")
+        self.tsv_stop_button.setEnabled(False)
+        self.tsv_stop_button.clicked.connect(self.stopInventory)
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.tsv_button)
+        btn_row.addWidget(self.tsv_stop_button)
         btn_row.addStretch()
         cfg_layout.addLayout(btn_row, 3, 0, 1, 3)
 
         main_layout.addWidget(cfg_group)
 
-        splitter = QSplitter()
+        left_split = QSplitter(Qt.Vertical)
+        right_split = QSplitter(Qt.Vertical)
 
         tsv_group = QGroupBox("TSV Viewer")
         tsv_layout = QVBoxLayout(tsv_group)
@@ -151,7 +150,7 @@ class BIDSManager(QMainWindow):
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
         tsv_layout.addWidget(self.tsv_load_button)
-        splitter.addWidget(tsv_group)
+        left_split.addWidget(tsv_group)
 
         modal_group = QGroupBox("Modalities")
         modal_layout = QVBoxLayout(modal_group)
@@ -164,9 +163,11 @@ class BIDSManager(QMainWindow):
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "Full View")
         modal_layout.addWidget(self.modal_tabs)
-        splitter.addWidget(modal_group)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        right_split.addWidget(modal_group)
+        left_split.setStretchFactor(0, 1)
+        left_split.setStretchFactor(1, 1)
+        right_split.setStretchFactor(0, 1)
+        right_split.setStretchFactor(1, 1)
 
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
@@ -180,8 +181,12 @@ class BIDSManager(QMainWindow):
         btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.runFullConversion)
+        self.run_stop_button = QPushButton("Stop")
+        self.run_stop_button.setEnabled(False)
+        self.run_stop_button.clicked.connect(self.stopConversion)
         btn_row.addStretch()
         btn_row.addWidget(self.run_button)
+        btn_row.addWidget(self.run_stop_button)
 
         # Combine preview panel and run button so the splitter keeps the
         # original layout but allows resizing versus the log output.
@@ -199,15 +204,16 @@ class BIDSManager(QMainWindow):
         self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
 
-        main_layout.addWidget(splitter, 1)
+        left_split.addWidget(preview_container)
+        right_split.addWidget(log_group)
 
-        # Splitter to allow resizing between preview and log windows
-        pv_split = QSplitter(Qt.Vertical)
-        pv_split.addWidget(preview_container)
-        pv_split.addWidget(log_group)
-        pv_split.setStretchFactor(0, 1)
-        pv_split.setStretchFactor(1, 1)
-        main_layout.addWidget(pv_split, 1)
+        splitter = QSplitter()
+        splitter.addWidget(left_split)
+        splitter.addWidget(right_split)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(splitter, 1)
 
         self.tabs.addTab(self.convert_tab, "Convert")
 
@@ -343,15 +349,36 @@ class BIDSManager(QMainWindow):
         name = self.tsv_name_edit.text().strip() or "subject_summary.tsv"
         self.tsv_path = os.path.join(self.bids_out_dir, name)
 
-        # Generate TSV via dicom_inventory
-        try:
-            scan_dicoms_long(self.dicom_dir, self.tsv_path)
-            self.log_text.append(f"TSV generated at {self.tsv_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"dicom_inventory failed: {e}")
+        # Run dicom_inventory asynchronously
+        if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
-        self.loadMappingTable()
+        self.log_text.append("Starting TSV generation…")
+        self.tsv_button.setEnabled(False)
+        self.tsv_stop_button.setEnabled(True)
+        self.inventory_process = QProcess(self)
+        self.inventory_process.finished.connect(self._inventoryFinished)
+        args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
+        self.inventory_process.start(sys.executable, args)
+
+    def _inventoryFinished(self):
+        ok = self.inventory_process.exitCode() == 0 if self.inventory_process else False
+        self.inventory_process = None
+        self.tsv_button.setEnabled(True)
+        self.tsv_stop_button.setEnabled(False)
+        if ok:
+            self.log_text.append("TSV generation finished.")
+            self.loadMappingTable()
+        else:
+            self.log_text.append("TSV generation failed.")
+
+    def stopInventory(self):
+        if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
+            self.inventory_process.kill()
+            self.inventory_process = None
+            self.tsv_button.setEnabled(True)
+            self.tsv_stop_button.setEnabled(False)
+            self.log_text.append("TSV generation cancelled.")
 
     def loadMappingTable(self):
         logging.info("loadMappingTable → Loading TSV into table …")
@@ -502,13 +529,8 @@ class BIDSManager(QMainWindow):
 
     def runFullConversion(self):
         logging.info("runFullConversion → Starting full pipeline …")
-        """
-        Execute full pipeline:
-        1) Save updated TSV
-        2) build_heuristic_from_tsv.py → auto_heuristic.py
-        3) run_heudiconv_from_heuristic.py to convert DICOMs
-        4) post_conv_renamer.py on BIDS output
-        """
+        if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
+            return
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             QMessageBox.warning(self, "No TSV", "Please generate the TSV first.")
             return
@@ -550,50 +572,72 @@ class BIDSManager(QMainWindow):
 
         # Paths for scripts
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        build_script = os.path.join(script_dir, "build_heuristic_from_tsv.py")
-        run_script = os.path.join(script_dir, "run_heudiconv_from_heuristic.py")
-        rename_script = os.path.join(script_dir, "post_conv_renamer.py")
+        self.build_script = os.path.join(script_dir, "build_heuristic_from_tsv.py")
+        self.run_script = os.path.join(script_dir, "run_heudiconv_from_heuristic.py")
+        self.rename_script = os.path.join(script_dir, "post_conv_renamer.py")
 
-        # 2) Build heuristics directory per StudyDescription
         self.heuristic_dir = os.path.join(self.bids_out_dir, "heuristics")
-        try:
-            proc = subprocess.run([
-                sys.executable, build_script,
-                self.tsv_path, self.heuristic_dir
-            ], check=True, capture_output=True, text=True)
-            self.log_text.append(proc.stdout)
-            self.log_text.append(f"Heuristics written to {self.heuristic_dir}")
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"build_heuristic failed:\n{e.stderr}")
-            return
+        self.heurs_to_rename = []
+        self.conv_stage = 0
 
-        # 3) Run HeuDiConv conversion for each study
-        try:
-            proc = subprocess.run([
-                sys.executable, run_script,
-                self.dicom_dir, self.heuristic_dir, self.bids_out_dir
-            ], check=True, capture_output=True, text=True)
-            self.log_text.append(proc.stdout)
-            self.log_text.append("HeuDiConv conversion complete.")
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"run_heudiconv failed:\n{e.stderr}")
-            return
+        self.log_text.append("Building heuristics…")
+        self.run_button.setEnabled(False)
+        self.run_stop_button.setEnabled(True)
+        self.conv_process = QProcess(self)
+        self.conv_process.finished.connect(self._convStepFinished)
+        args = [self.build_script, self.tsv_path, self.heuristic_dir]
+        self.conv_process.start(sys.executable, args)
 
-        # 4) Post-conversion fieldmap renaming per dataset
-        for heur in Path(self.heuristic_dir).glob("heuristic_*.py"):
-            study = heur.stem.replace("heuristic_", "")
-            bids_path = os.path.join(self.bids_out_dir, study)
-            try:
-                proc = subprocess.run([
-                    sys.executable, rename_script, bids_path
-                ], check=True, capture_output=True, text=True)
-                self.log_text.append(proc.stdout)
-            except subprocess.CalledProcessError as e:
-                QMessageBox.critical(self, "Error", f"post_conv_renamer failed:\n{e.stderr}")
+    def _convStepFinished(self, exitCode, _status):
+        if self.conv_stage == 0:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "build_heuristic failed")
+                self.stopConversion()
                 return
-        self.log_text.append("Fieldmap renaming applied.")
+            self.log_text.append(f"Heuristics written to {self.heuristic_dir}")
+            self.conv_stage = 1
+            self.log_text.append("Running HeuDiConv…")
+            args = [self.run_script, self.dicom_dir, self.heuristic_dir, self.bids_out_dir]
+            self.conv_process.start(sys.executable, args)
+        elif self.conv_stage == 1:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "run_heudiconv failed")
+                self.stopConversion()
+                return
+            self.log_text.append("HeuDiConv conversion complete.")
+            self.conv_stage = 2
+            self.heurs_to_rename = list(Path(self.heuristic_dir).glob("heuristic_*.py"))
+            self._runNextRename()
+        elif self.conv_stage == 2:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "post_conv_renamer failed")
+                self.stopConversion()
+                return
+            if self.heurs_to_rename:
+                self._runNextRename()
+            else:
+                self.log_text.append("Conversion pipeline finished successfully.")
+                self.stopConversion(success=True)
 
-        self.log_text.append("Conversion pipeline finished successfully.")
+    def _runNextRename(self):
+        if not self.heurs_to_rename:
+            self._convStepFinished(0, 0)
+            return
+        heur = self.heurs_to_rename.pop(0)
+        dataset = heur.stem.replace("heuristic_", "")
+        bids_path = os.path.join(self.bids_out_dir, dataset)
+        self.log_text.append(f"Renaming fieldmaps for {dataset}…")
+        args = [self.rename_script, bids_path]
+        self.conv_process.start(sys.executable, args)
+
+    def stopConversion(self, success: bool = False):
+        if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
+            self.conv_process.kill()
+        self.conv_process = None
+        self.run_button.setEnabled(True)
+        self.run_stop_button.setEnabled(False)
+        if not success:
+            self.log_text.append("Conversion cancelled.")
 
     # ----- Edit tab methods (full bids_editor_ancpbids features) -----
     def openBIDSForEdit(self):
