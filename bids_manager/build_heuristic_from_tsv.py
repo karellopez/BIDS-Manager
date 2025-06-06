@@ -62,7 +62,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     )
 
     # 2 ─ SID_MAP ----------------------------------------------------------
-    sid_pairs = {(r.source_folder, r.BIDS_name) for r in df.itertuples()}
+    sid_pairs = {(clean(str(r.source_folder)), r.BIDS_name) for r in df.itertuples()}
     buf.append("\nSID_MAP = {\n")
     for folder, bids in sorted(sid_pairs):
         buf.append(f"    '{folder}': '{bids}',\n")
@@ -74,7 +74,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
 
     for row in df.itertuples():
         ses = str(row.session).strip() if pd.notna(row.session) and str(row.session).strip() else ""
-        folder = str(row.source_folder)
+        folder = Path(str(row.source_folder)).name
         key_id = (row.sequence, row.BIDS_name, ses, folder)
         if key_id in seq2key:
             continue
