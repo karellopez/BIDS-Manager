@@ -34,8 +34,11 @@ def physical_by_clean(raw_root: Path) -> Dict[str, str]:
         if not p.is_dir():
             continue
         rel = str(p.relative_to(raw_root))
-        mapping[rel] = rel
-        mapping[clean_name(rel)] = rel
+        base = p.name
+        mapping.setdefault(rel, rel)
+        mapping.setdefault(clean_name(rel), rel)
+        mapping.setdefault(base, rel)
+        mapping.setdefault(clean_name(base), rel)
     return mapping
 
 
