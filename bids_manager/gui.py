@@ -154,19 +154,47 @@ class BIDSManager(QMainWindow):
         """Return dictionary mapping theme names to QPalettes."""
         themes = {}
 
-        dark = QPalette()
-        dark.setColor(QPalette.Window, QColor(53, 53, 53))
-        dark.setColor(QPalette.WindowText, Qt.white)
-        dark.setColor(QPalette.Base, QColor(35, 35, 35))
-        dark.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        dark.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
-        dark.setColor(QPalette.ToolTipText, Qt.white)
-        dark.setColor(QPalette.Text, Qt.white)
-        dark.setColor(QPalette.Button, QColor(53, 53, 53))
-        dark.setColor(QPalette.ButtonText, Qt.white)
-        dark.setColor(QPalette.Highlight, QColor(142, 45, 197))
-        dark.setColor(QPalette.HighlightedText, Qt.black)
-        themes["Dark"] = dark
+        dark_purple = QPalette()
+        dark_purple.setColor(QPalette.Window, QColor(53, 53, 53))
+        dark_purple.setColor(QPalette.WindowText, Qt.white)
+        dark_purple.setColor(QPalette.Base, QColor(35, 35, 35))
+        dark_purple.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+        dark_purple.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
+        dark_purple.setColor(QPalette.ToolTipText, Qt.white)
+        dark_purple.setColor(QPalette.Text, Qt.white)
+        dark_purple.setColor(QPalette.Button, QColor(53, 53, 53))
+        dark_purple.setColor(QPalette.ButtonText, Qt.white)
+        dark_purple.setColor(QPalette.Highlight, QColor(142, 45, 197))
+        dark_purple.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Dark-purple"] = dark_purple
+
+        dark_blue = QPalette()
+        dark_blue.setColor(QPalette.Window, QColor(53, 53, 53))
+        dark_blue.setColor(QPalette.WindowText, Qt.white)
+        dark_blue.setColor(QPalette.Base, QColor(35, 35, 35))
+        dark_blue.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+        dark_blue.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
+        dark_blue.setColor(QPalette.ToolTipText, Qt.white)
+        dark_blue.setColor(QPalette.Text, Qt.white)
+        dark_blue.setColor(QPalette.Button, QColor(53, 53, 53))
+        dark_blue.setColor(QPalette.ButtonText, Qt.white)
+        dark_blue.setColor(QPalette.Highlight, QColor(65, 105, 225))
+        dark_blue.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Dark-blue"] = dark_blue
+
+        dark_gold = QPalette()
+        dark_gold.setColor(QPalette.Window, QColor(53, 53, 53))
+        dark_gold.setColor(QPalette.WindowText, Qt.white)
+        dark_gold.setColor(QPalette.Base, QColor(35, 35, 35))
+        dark_gold.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+        dark_gold.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
+        dark_gold.setColor(QPalette.ToolTipText, Qt.white)
+        dark_gold.setColor(QPalette.Text, Qt.white)
+        dark_gold.setColor(QPalette.Button, QColor(53, 53, 53))
+        dark_gold.setColor(QPalette.ButtonText, Qt.white)
+        dark_gold.setColor(QPalette.Highlight, QColor(218, 165, 32))
+        dark_gold.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Dark-gold"] = dark_gold
 
         light = QPalette()
         light.setColor(QPalette.Window, Qt.white)
@@ -218,11 +246,27 @@ class BIDSManager(QMainWindow):
         hc.setColor(QPalette.ToolTipBase, Qt.black)
         hc.setColor(QPalette.ToolTipText, Qt.white)
         hc.setColor(QPalette.Text, Qt.white)
+        hc.setColor(QPalette.BrightText, Qt.white)
         hc.setColor(QPalette.Button, Qt.black)
         hc.setColor(QPalette.ButtonText, Qt.white)
         hc.setColor(QPalette.Highlight, QColor(255, 215, 0))
         hc.setColor(QPalette.HighlightedText, Qt.black)
         themes["Contrast"] = hc
+
+        hc_w = QPalette()
+        hc_w.setColor(QPalette.Window, Qt.white)
+        hc_w.setColor(QPalette.WindowText, Qt.black)
+        hc_w.setColor(QPalette.Base, Qt.white)
+        hc_w.setColor(QPalette.AlternateBase, Qt.white)
+        hc_w.setColor(QPalette.ToolTipBase, Qt.white)
+        hc_w.setColor(QPalette.ToolTipText, Qt.black)
+        hc_w.setColor(QPalette.Text, Qt.black)
+        hc_w.setColor(QPalette.BrightText, Qt.black)
+        hc_w.setColor(QPalette.Button, Qt.white)
+        hc_w.setColor(QPalette.ButtonText, Qt.black)
+        hc_w.setColor(QPalette.Highlight, QColor(255, 215, 0))
+        hc_w.setColor(QPalette.HighlightedText, Qt.black)
+        themes["Contrast White"] = hc_w
 
         solar = QPalette()
         solar.setColor(QPalette.Window, QColor(253, 246, 227))
@@ -354,7 +398,15 @@ class BIDSManager(QMainWindow):
 
     def apply_theme(self, name: str):
         """Apply palette chosen from the Theme menu."""
-        QApplication.instance().setPalette(self.themes[name])
+        app = QApplication.instance()
+        app.setPalette(self.themes[name])
+        font = app.font()
+        if name in ("Contrast", "Contrast White"):
+            font.setWeight(QFont.Bold)
+            font.setPointSize(font.pointSize() + 1)
+        else:
+            font.setWeight(QFont.Normal)
+        app.setFont(font)
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
