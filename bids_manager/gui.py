@@ -16,6 +16,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
 from PyQt5.QtGui import QPalette, QColor, QFont, QImage, QPixmap
 import logging  # debug logging
+import signal
+try:
+    import psutil
+    HAS_PSUTIL = True
+except Exception:  # pragma: no cover - optional dependency
+    HAS_PSUTIL = False
 
 
 class _AutoUpdateLabel(QLabel):
@@ -32,6 +38,38 @@ class _AutoUpdateLabel(QLabel):
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+def _terminate_process_tree(pid: int):
+    """Terminate a process and all of its children."""
+    if pid <= 0:
+        return
+    # try killing the whole process group (POSIX)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        return
+    except Exception:
+        pass
+    if HAS_PSUTIL:
+        try:
+            parent = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return
+        children = parent.children(recursive=True)
+        for c in children:
+            try:
+                c.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        psutil.wait_procs(children, timeout=3)
+        try:
+            parent.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
 
 def _get_ext(path: Path) -> str:
     """Return file extension with special handling for .nii.gz."""
@@ -374,7 +412,8 @@ class BIDSManager(QMainWindow):
 
     def stopInventory(self):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
-            self.inventory_process.kill()
+            pid = int(self.inventory_process.processId())
+            _terminate_process_tree(pid)
             self.inventory_process = None
             self.tsv_button.setEnabled(True)
             self.tsv_stop_button.setEnabled(False)
@@ -632,7 +671,8 @@ class BIDSManager(QMainWindow):
 
     def stopConversion(self, success: bool = False):
         if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
-            self.conv_process.kill()
+            pid = int(self.conv_process.processId())
+            _terminate_process_tree(pid)
         self.conv_process = None
         self.run_button.setEnabled(True)
         self.run_stop_button.setEnabled(False)
