@@ -40,13 +40,16 @@ class _AutoUpdateLabel(QLabel):
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 def _terminate_process_tree(pid: int):
-    """Terminate a process and all of its children."""
+    """Terminate a process and all of its children without killing the GUI."""
     if pid <= 0:
         return
-    # try killing the whole process group (POSIX)
+    # Try killing the process group only if it's not the same as the GUI's
+    # to avoid terminating the entire application or IDE.
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-        return
+        pgid = os.getpgid(pid)
+        if pgid != os.getpgid(0):
+            os.killpg(pgid, signal.SIGTERM)
+            return
     except Exception:
         pass
     if HAS_PSUTIL:
@@ -55,9 +58,9 @@ def _terminate_process_tree(pid: int):
         except psutil.NoSuchProcess:
             return
         children = parent.children(recursive=True)
-        for c in children:
+        for child in children:
             try:
-                c.terminate()
+                child.terminate()
             except psutil.NoSuchProcess:
                 pass
         psutil.wait_procs(children, timeout=3)
