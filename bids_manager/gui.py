@@ -130,15 +130,25 @@ class BIDSManager(QMainWindow):
         # Theme support
         self.statusBar()
         self.themes = self._build_theme_dict()
-        self.theme_btn = QPushButton("\xf0\x9f\x8c\x93")  # half-moon icon
-        self.theme_btn.setFixedWidth(60)
-        self.statusBar().addPermanentWidget(self.theme_btn)
+        self.theme_btn = QPushButton("🌓")  # half-moon icon
+        self.theme_btn.setFixedWidth(50)
+        # Create a container widget with layout to adjust position
+        container = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 2, 0, 6)  # left, top, right, bottom
+        layout.setSpacing(0)
+        layout.addWidget(self.theme_btn)
+        container.setLayout(layout)
+        # Add the container to the status bar (left-aligned)
+        self.statusBar().addWidget(container)
+        # Create the theme menu
         theme_menu = QMenu(self)
         for name in self.themes.keys():
             act = theme_menu.addAction(name)
             act.triggered.connect(lambda _=False, n=name: self.apply_theme(n))
         self.theme_btn.setMenu(theme_menu)
-        self.apply_theme("Ocean")
+        # Set default theme
+        self.apply_theme("Light")
 
     def _build_theme_dict(self):
         """Return dictionary mapping theme names to QPalettes."""
