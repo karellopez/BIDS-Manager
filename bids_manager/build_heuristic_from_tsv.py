@@ -36,6 +36,16 @@ def safe_stem(seq: str) -> str:
     return re.sub(r"[^0-9A-Za-z_-]+", "_", seq.strip()).strip("_")
 
 
+def dedup_parts(*parts: str) -> str:
+    """Return underscore-joined *parts* with consecutive repeats removed."""
+    tokens: list[str] = []
+    for part in parts:
+        for t in str(part).split("_"):
+            if t and (not tokens or t != tokens[-1]):
+                tokens.append(t)
+    return "_".join(tokens)
+
+
 # -----------------------------------------------------------------------------
 # Core writer
 # -----------------------------------------------------------------------------
@@ -83,8 +93,9 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         container = row.modality_bids or "misc"
         stem = safe_stem(row.sequence)
 
-        base = f"{bids}/{ses}/{container}/{bids}_{ses}".replace("//", "/").rstrip("_") if ses else f"{bids}/{container}/{bids}"
-        template = f"{base}_{stem}"
+        base = dedup_parts(bids, ses, stem)
+        path = "/".join(p for p in [bids, ses, container] if p)
+        template = f"{path}/{base}"
 
         parts = [bids, ses, stem]
         key_var = "key_" + clean("_".join(p for p in parts if p))

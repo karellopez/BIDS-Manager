@@ -82,6 +82,16 @@ def _get_ext(path: Path) -> str:
         return '.nii.gz'
     return path.suffix.lower()
 
+
+def _dedup_parts(*parts: str) -> str:
+    """Return underscore-joined parts with consecutive repeats removed."""
+    tokens: list[str] = []
+    for part in parts:
+        for t in str(part).split('_'):
+            if t and (not tokens or t != tokens[-1]):
+                tokens.append(t)
+    return "_".join(tokens)
+
 class BIDSManager(QMainWindow):
     """
     Main GUI for BIDS Manager.
@@ -628,7 +638,7 @@ class BIDSManager(QMainWindow):
             if multi_study:
                 path_parts.append(study)
             path_parts.extend([subj, ses, modb])
-            base = f"{subj}_{ses}_{seq}"
+            base = _dedup_parts(subj, ses, seq)
 
             if modb == "fmap":
                 for suffix in ["magnitude1", "magnitude2", "phasediff"]:
