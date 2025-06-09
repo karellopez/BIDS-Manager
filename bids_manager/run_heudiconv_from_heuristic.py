@@ -76,6 +76,38 @@ def heudi_cmd(raw_root: Path,
     ]
 
 
+def _parse_age(value: str) -> str:
+    """Return numeric age from DICOM-style age strings (e.g. '032Y')."""
+    m = re.match(r"(\d+)", str(value))
+    if not m:
+        return str(value)
+    age = m.group(1).lstrip("0")
+    return age or "0"
+
+
+def write_participants(sub_df: pd.DataFrame, bids_root: Path) -> None:
+    """Create or replace participants.tsv in *bids_root* using *sub_df*."""
+    part_df = (
+        sub_df[["BIDS_name", "GivenName", "PatientSex", "PatientAge"]]
+        .drop_duplicates(subset=["BIDS_name"])
+        .copy()
+    )
+    if part_df.empty:
+        return
+
+    part_df["PatientAge"] = part_df["PatientAge"].apply(_parse_age)
+    part_df.rename(
+        columns={
+            "BIDS_name": "participant_id",
+            "GivenName": "given_name",
+            "PatientSex": "sex",
+            "PatientAge": "age",
+        },
+        inplace=True,
+    )
+    part_df.to_csv(bids_root / "participants.tsv", sep="\t", index=False)
+
+
 # ────────────────── main runner ──────────────────
 def run_heudiconv(raw_root: Path,
                   heuristic: Path,
@@ -116,9 +148,11 @@ def run_heudiconv(raw_root: Path,
         sub_df = mapping_df[mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset]
         if not sub_df.empty:
             mdir.mkdir(exist_ok=True)
+            sub_df.to_csv(mdir / "subject_summary.tsv", sep="\t", index=False)
             sub_df[["GivenName", "BIDS_name"]].drop_duplicates().to_csv(
                 mdir / "subject_mapping.tsv", sep="\t", index=False
             )
+            write_participants(sub_df, bids_out)
 
 
 # ────────────────── CLI interface ──────────────────
