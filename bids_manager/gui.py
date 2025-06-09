@@ -524,9 +524,23 @@ class BIDSManager(QMainWindow):
 
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
+        self.preview_tabs = QTabWidget()
+
+        text_tab = QWidget()
+        text_lay = QVBoxLayout(text_tab)
+        self.preview_text = QTreeWidget()
+        self.preview_text.setHeaderLabels(["BIDS Path"])
+        text_lay.addWidget(self.preview_text)
+        self.preview_tabs.addTab(text_tab, "Text")
+
+        tree_tab = QWidget()
+        tree_lay = QVBoxLayout(tree_tab)
         self.preview_tree = QTreeWidget()
         self.preview_tree.setHeaderLabels(["BIDS Structure"])
-        preview_layout.addWidget(self.preview_tree)
+        tree_lay.addWidget(self.preview_tree)
+        self.preview_tabs.addTab(tree_tab, "Tree")
+
+        preview_layout.addWidget(self.preview_tabs)
         self.preview_button = QPushButton("Preview")
         self.preview_button.clicked.connect(self.generatePreview)
         preview_layout.addWidget(self.preview_button)
@@ -570,30 +584,56 @@ class BIDSManager(QMainWindow):
 
         self.tabs.addTab(self.convert_tab, "Convert")
 
+    def _add_preview_path(self, parts):
+        parent = self.preview_tree.invisibleRootItem()
+        for part in parts:
+            match = None
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                if child.text(0) == part:
+                    match = child
+                    break
+            if match is None:
+                match = QTreeWidgetItem([part])
+                parent.addChild(match)
+            parent = match
+
     def generatePreview(self):
         logging.info("generatePreview → Building preview tree …")
-        """Populate preview tree based on checked sequences."""
+        """Populate preview tabs based on checked sequences."""
+        self.preview_text.clear()
         self.preview_tree.clear()
         multi_study = len(self.study_set) > 1
         for i in range(self.mapping_table.rowCount()):
             include = (self.mapping_table.item(i, 0).checkState() == Qt.Checked)
-            if include:
-                info = self.row_info[i]
-                subj = info['bids'] if self.use_bids_names else info['given']
-                study = self.mapping_table.item(i, 1).data(Qt.UserRole) or ""
-                ses = self.mapping_table.item(i, 2).text()
-                seq = self.mapping_table.item(i, 3).text()
-                modb = self.mapping_table.item(i, 5).text()
-                base = f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}"
-                if multi_study:
-                    base = f"{study}/" + base
-                if modb == "fmap":
-                    for suffix in ["magnitude1", "magnitude2", "phasediff"]:
-                        fname = f"{base}_{suffix}.nii.gz"
-                        self.preview_tree.addTopLevelItem(QTreeWidgetItem([fname]))
-                else:
-                    item = QTreeWidgetItem([f"{base}.nii.gz"])
-                    self.preview_tree.addTopLevelItem(item)
+            if not include:
+                continue
+            info = self.row_info[i]
+            subj = info['bids'] if self.use_bids_names else info['given']
+            study = self.mapping_table.item(i, 1).data(Qt.UserRole) or ""
+            ses = self.mapping_table.item(i, 2).text()
+            seq = self.mapping_table.item(i, 3).text()
+            modb = self.mapping_table.item(i, 5).text()
+
+            path_parts = []
+            if multi_study:
+                path_parts.append(study)
+            path_parts.extend([subj, ses, modb])
+            base = f"{subj}_{ses}_{seq}"
+
+            if modb == "fmap":
+                for suffix in ["magnitude1", "magnitude2", "phasediff"]:
+                    fname = f"{base}_{suffix}.nii.gz"
+                    full = path_parts + [fname]
+                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
+                    self._add_preview_path(full)
+            else:
+                fname = f"{base}.nii.gz"
+                full = path_parts + [fname]
+                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
+                self._add_preview_path(full)
+
+        self.preview_text.expandAll()
         self.preview_tree.expandAll()
 
     # (Rest of code remains unchanged)
@@ -830,7 +870,11 @@ class BIDSManager(QMainWindow):
         # Populate naming table
         self.naming_table.blockSignals(True)
         self.naming_table.setRowCount(0)
-        name_df = df[["StudyDescription", "subject", "BIDS_name"]].drop_duplicates()
+        name_df = df[["StudyDescription", "subject", "BIDS_name"]].copy()
+        name_df['subject'] = (name_df.replace({'subject': {"": pd.NA}})
+                              .groupby(["StudyDescription", "BIDS_name"])
+                              ['subject'].transform(lambda x: x.ffill().bfill()))
+        name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
         for _, row in name_df.iterrows():
             nr = self.naming_table.rowCount()
             self.naming_table.insertRow(nr)
@@ -948,9 +992,42 @@ class BIDSManager(QMainWindow):
         self.use_bids_names = self.name_choice.currentIndex() == 0
         QTimer.singleShot(0, self.generatePreview)
 
+    def _save_tree_expansion(self, tree):
+        states = {}
+
+        def recurse(item):
+            path = []
+            it = item
+            while it is not None:
+                path.insert(0, it.text(0))
+                it = it.parent()
+            states[tuple(path)] = item.isExpanded()
+            for i in range(item.childCount()):
+                recurse(item.child(i))
+
+        for i in range(tree.topLevelItemCount()):
+            recurse(tree.topLevelItem(i))
+        return states
+
+    def _restore_tree_expansion(self, tree, states):
+        def recurse(item):
+            path = []
+            it = item
+            while it is not None:
+                path.insert(0, it.text(0))
+                it = it.parent()
+            if states.get(tuple(path)):
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                recurse(item.child(i))
+
+        for i in range(tree.topLevelItemCount()):
+            recurse(tree.topLevelItem(i))
+
 
     def populateSpecificTree(self):
         """Build detailed tree (study→subject→session→modality)."""
+        expanded = self._save_tree_expansion(self.specific_tree)
         self.specific_tree.blockSignals(True)
         self.specific_tree.clear()
 
@@ -1007,7 +1084,9 @@ class BIDSManager(QMainWindow):
                 st_item.addChild(su_item)
             self.specific_tree.addTopLevelItem(st_item)
 
-        self.specific_tree.expandAll()
+        self._restore_tree_expansion(self.specific_tree, expanded)
+        if not expanded:
+            self.specific_tree.expandAll()
         self.specific_tree.blockSignals(False)
         try:
             self.specific_tree.itemChanged.disconnect(self.onSpecificItemChanged)
