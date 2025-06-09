@@ -1557,15 +1557,32 @@ class MetadataViewer(QWidget):
 
     def clear(self):
         """Clear the toolbar and viewer when switching files."""
+        def _clear_layout(lay):
+            while lay.count():
+                item = lay.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+                elif item.layout():
+                    _clear_layout(item.layout())
+            lay.deleteLater()
+
         while self.toolbar.count():
-            w = self.toolbar.takeAt(0).widget()
-            if w:
-                w.deleteLater()
+            item = self.toolbar.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                _clear_layout(item.layout())
         if self.viewer:
             self.layout().removeWidget(self.viewer)
             self.viewer.deleteLater()
             self.viewer = None
         self.welcome.show()
+
+    def _is_dark_theme(self) -> bool:
+        """Detect whether the current palette is dark or light."""
+        color = self.palette().color(QPalette.Window)
+        brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+        return brightness < 128
 
     def load_file(self, path: Path):
         """Load JSON, TSV or NIfTI file into an editable viewer."""
