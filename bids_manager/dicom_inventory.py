@@ -58,7 +58,7 @@ BIDS_PATTERNS = {
     # diffusion
     "dwi"    : ("dti", "dwi", "diff"),
     # field maps
-    "fmap"   : ("gre_field", "fieldmapping", "_fmap", "phase", "magnitude"),
+    "fmap"   : ("gre_field", "fieldmapping", "_fmap", "fmap", "phase", "magnitude"),
     # misc (kept for completeness)
     "physio" : ("physiolog", "physio", "pulse", "resp"),
 }
