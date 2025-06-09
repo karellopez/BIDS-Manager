@@ -973,7 +973,6 @@ class BIDSManager(QMainWindow):
             self.tree.setRootIndex(self.model.index(p))
             self.viewer.clear()
             self.updateStats()
-            self.setWindowTitle(f"BIDS Manager – {p}")
 
     def onTreeClicked(self, idx: QModelIndex):
         """When a file is clicked in the tree, load metadata if JSON/TSV."""
