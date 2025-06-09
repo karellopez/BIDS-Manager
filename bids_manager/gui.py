@@ -1740,11 +1740,29 @@ class MetadataViewer(QWidget):
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(self.img_label)
 
+        # Graph panel with scope selector
+        self.graph_panel = QWidget()
+        g_lay = QVBoxLayout(self.graph_panel)
+        g_lay.setContentsMargins(0, 0, 0, 0)
+        g_lay.setSpacing(2)
+
         self.graph_canvas = FigureCanvas(plt.Figure(figsize=(4, 2)))
         self.graph_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.ax = self.graph_canvas.figure.subplots()
-        self.graph_canvas.setVisible(False)
-        self.splitter.addWidget(self.graph_canvas)
+        g_lay.addWidget(self.graph_canvas)
+
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Scope:"))
+        self.scope_spin = QSpinBox()
+        self.scope_spin.setRange(1, 4)
+        self.scope_spin.setValue(1)
+        self.scope_spin.valueChanged.connect(self._update_graph)
+        scope_row.addWidget(self.scope_spin)
+        scope_row.addStretch()
+        g_lay.addLayout(scope_row)
+
+        self.graph_panel.setVisible(False)
+        self.splitter.addWidget(self.graph_panel)
         # Allow the image and graph to share space evenly when the graph is shown
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 1)
@@ -1806,7 +1824,8 @@ class MetadataViewer(QWidget):
             x_s = int(x_rot * scale_x)
             y_s = int(y_rot * scale_y)
             painter = QPainter(scaled)
-            pen = QPen(Qt.red)
+            theme_color = self.palette().color(QPalette.Highlight)
+            pen = QPen(theme_color)
             pen.setWidth(1)
             painter.setPen(pen)
             painter.drawLine(x_s, 0, x_s, scaled.height())
@@ -1819,7 +1838,7 @@ class MetadataViewer(QWidget):
         self.img_label.setPixmap(scaled)
 
         self._update_value()
-        if self.graph_canvas.isVisible():
+        if self.graph_panel.isVisible():
             self._update_graph_marker()
 
     def _label_pos_to_img_coords(self, pos):
@@ -1876,7 +1895,7 @@ class MetadataViewer(QWidget):
             voxel = self._arr_to_voxel(*coords)
             self.cross_voxel = list(voxel)
             self._update_slice()
-            if self.graph_canvas.isVisible():
+            if self.graph_panel.isVisible():
                 self._update_graph()
 
     def _update_value(self):
@@ -1892,7 +1911,7 @@ class MetadataViewer(QWidget):
 
     def _toggle_graph(self):
         visible = self.graph_btn.isChecked()
-        self.graph_canvas.setVisible(visible)
+        self.graph_panel.setVisible(visible)
         total = self.splitter.size().height()
         if visible:
             self.splitter.setSizes([total // 2, total // 2])
@@ -1903,13 +1922,51 @@ class MetadataViewer(QWidget):
     def _update_graph(self):
         if self.data.ndim != 4 or self.cross_voxel is None:
             return
-        ts = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], :]
-        self.ax.clear()
-        self.ax.plot(ts, "-o", markersize=3)
-        self.marker, = self.ax.plot([self.vol_slider.value()], [ts[self.vol_slider.value()]], "ro")
-        self.ax.set_xlabel("Volume")
-        self.ax.set_ylabel("Value")
-        self.graph_canvas.figure.tight_layout()
+
+        level = self.scope_spin.value()
+        dim = 2 * (level - 1) + 1
+        half = dim // 2
+        i0, j0, k0 = self.cross_voxel
+        orient = self.orientation
+
+        self.graph_canvas.figure.clf()
+        axes = self.graph_canvas.figure.subplots(dim, dim, squeeze=False, sharex=True, sharey=True)
+
+        color = self.palette().color(QPalette.Highlight).name()
+        marker_ax = axes[half][half]
+        ts_center = None
+
+        for r, di in enumerate(range(-half, half + 1)):
+            for c, dj in enumerate(range(-half, half + 1)):
+                ax = axes[r][c]
+                i, j, k = i0, j0, k0
+                if orient == 0:
+                    j = j0 + di
+                    k = k0 + dj
+                elif orient == 1:
+                    i = i0 + di
+                    k = k0 + dj
+                else:
+                    i = i0 + di
+                    j = j0 + dj
+
+                if not (0 <= i < self.data.shape[0] and 0 <= j < self.data.shape[1] and 0 <= k < self.data.shape[2]):
+                    ax.axis("off")
+                    continue
+
+                ts = self.data[i, j, k, :]
+                ax.plot(ts, color=color, linewidth=1)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.tick_params(left=False, bottom=False)
+                if r == half and c == half:
+                    ts_center = ts
+
+        if ts_center is not None:
+            idx = self.vol_slider.value()
+            self.marker, = marker_ax.plot([idx], [ts_center[idx]], "o", color=color, markersize=4)
+
+        self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
 
     def _update_graph_marker(self):
@@ -1919,6 +1976,7 @@ class MetadataViewer(QWidget):
         idx = self.vol_slider.value()
         idx = max(0, min(idx, len(ts) - 1))
         self.marker.set_data([idx], [ts[idx]])
+        self.marker.set_color(self.palette().color(QPalette.Highlight).name())
         self.graph_canvas.draw_idle()
 
     def _json_view(self, path: Path) -> QTreeWidget:
