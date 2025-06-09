@@ -1743,6 +1743,9 @@ class MetadataViewer(QWidget):
         self.ax = self.graph_canvas.figure.subplots()
         self.graph_canvas.setVisible(False)
         self.splitter.addWidget(self.graph_canvas)
+        # Allow the image and graph to share space evenly when the graph is shown
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 1)
 
         vlay.addWidget(self.splitter)
 
