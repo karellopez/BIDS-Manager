@@ -1729,6 +1729,7 @@ class MetadataViewer(QWidget):
         vlay = QVBoxLayout(widget)
 
         self.cross_voxel = [data.shape[0] // 2, data.shape[1] // 2, data.shape[2] // 2]
+        self._img_scale = (1.0, 1.0)
 
         self.img_label = _ImageLabel(self._update_slice, self._on_image_clicked)
         self.img_label.setAlignment(Qt.AlignCenter)
@@ -1738,6 +1739,7 @@ class MetadataViewer(QWidget):
         self.splitter.addWidget(self.img_label)
 
         self.graph_canvas = FigureCanvas(plt.Figure(figsize=(4, 2)))
+        self.graph_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.ax = self.graph_canvas.figure.subplots()
         self.graph_canvas.setVisible(False)
         self.splitter.addWidget(self.graph_canvas)
@@ -1749,6 +1751,7 @@ class MetadataViewer(QWidget):
         self.vol_slider.setMaximum(max(n_vols - 1, 0))
         self.vol_slider.setEnabled(n_vols > 1)
         self.vol_val.setText("0")
+        self.graph_btn.setVisible(n_vols > 1)
 
         # Initialize orientation and slice slider
         self._set_orientation(self.orientation)
@@ -1788,17 +1791,27 @@ class MetadataViewer(QWidget):
         img = QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8)
         pix = QPixmap.fromImage(img)
 
-        # Draw crosshair
+        scaled = pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._img_scale = (scaled.width() / w, scaled.height() / h)
+
+        # Draw crosshair after scaling for consistent width
         if self.cross_voxel is not None:
             x_rot, y_rot = self._voxel_to_arr(self.cross_voxel)
-            painter = QPainter(pix)
+            scale_x, scale_y = self._img_scale
+            x_s = int(x_rot * scale_x)
+            y_s = int(y_rot * scale_y)
+            painter = QPainter(scaled)
             pen = QPen(Qt.red)
+            pen.setWidth(1)
             painter.setPen(pen)
-            painter.drawLine(x_rot, 0, x_rot, h)
-            painter.drawLine(0, y_rot, w, y_rot)
+            painter.drawLine(x_s, 0, x_s, scaled.height())
+            painter.drawLine(0, y_s, scaled.width(), y_s)
+            square = max(2, int(min(scaled.width(), scaled.height()) * 0.02))
+            half = square // 2
+            painter.drawRect(x_s - half, y_s - half, square, square)
             painter.end()
 
-        self.img_label.setPixmap(pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.img_label.setPixmap(scaled)
 
         self._update_value()
         if self.graph_canvas.isVisible():
@@ -1810,13 +1823,12 @@ class MetadataViewer(QWidget):
             return None
         pw, ph = pix.width(), pix.height()
         lw, lh = self.img_label.width(), self.img_label.height()
-        scale = min(lw / pw, lh / ph)
-        disp_w, disp_h = pw * scale, ph * scale
-        off_x, off_y = (lw - disp_w) / 2, (lh - disp_h) / 2
-        x = (pos.x() - off_x) / scale
-        y = (pos.y() - off_y) / scale
+        off_x, off_y = (lw - pw) / 2, (lh - ph) / 2
+        x = pos.x() - off_x
+        y = pos.y() - off_y
         if 0 <= x < pw and 0 <= y < ph:
-            return int(x), int(y)
+            scale_x, scale_y = self._img_scale
+            return int(x / scale_x), int(y / scale_y)
         return None
 
     def _arr_to_voxel(self, x, y):
@@ -1876,11 +1888,12 @@ class MetadataViewer(QWidget):
     def _toggle_graph(self):
         visible = self.graph_btn.isChecked()
         self.graph_canvas.setVisible(visible)
+        total = self.splitter.size().height()
         if visible:
             self._update_graph()
-            self.splitter.setSizes([self.height() // 2, self.height() // 2])
+            self.splitter.setSizes([total // 2, total // 2])
         else:
-            self.splitter.setSizes([self.height(), 0])
+            self.splitter.setSizes([total, 0])
 
     def _update_graph(self):
         if self.data.ndim != 4 or self.cross_voxel is None:
@@ -1891,6 +1904,7 @@ class MetadataViewer(QWidget):
         self.marker, = self.ax.plot([self.vol_slider.value()], [ts[self.vol_slider.value()]], "ro")
         self.ax.set_xlabel("Volume")
         self.ax.set_ylabel("Value")
+        self.graph_canvas.figure.tight_layout()
         self.graph_canvas.draw()
 
     def _update_graph_marker(self):
@@ -1898,6 +1912,7 @@ class MetadataViewer(QWidget):
             return
         ts = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], :]
         idx = self.vol_slider.value()
+        idx = max(0, min(idx, len(ts) - 1))
         self.marker.set_data([idx], [ts[idx]])
         self.graph_canvas.draw_idle()
 
