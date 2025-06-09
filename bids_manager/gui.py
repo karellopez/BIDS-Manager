@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import re
+import shutil
 import pandas as pd
 import numpy as np
 import nibabel as nib
@@ -1031,11 +1032,12 @@ class BIDSManager(QMainWindow):
             self.spec_modb_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb']), []).append(idx)
             self.spec_mod_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod']), []).append(idx)
             self.spec_seq_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
-            self.subject_rows_given.setdefault((info['study'], info['given']), []).append(idx)
-            self.session_rows_given.setdefault((info['study'], info['given'], info['ses']), []).append(idx)
-            self.spec_modb_rows_given.setdefault((info['study'], info['given'], info['ses'], info['modb']), []).append(idx)
-            self.spec_mod_rows_given.setdefault((info['study'], info['given'], info['ses'], info['modb'], info['mod']), []).append(idx)
-            self.spec_seq_rows_given.setdefault((info['study'], info['given'], info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
+            gsub = f"sub-{info['given']}"
+            self.subject_rows_given.setdefault((info['study'], gsub), []).append(idx)
+            self.session_rows_given.setdefault((info['study'], gsub, info['ses']), []).append(idx)
+            self.spec_modb_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb']), []).append(idx)
+            self.spec_mod_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb'], info['mod']), []).append(idx)
+            self.spec_seq_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
 
     def _save_tree_expansion(self, tree):
         states = {}
@@ -1196,37 +1198,36 @@ class BIDSManager(QMainWindow):
 
         # 1) Save updated TSV from table
         try:
-            df_updated = []
+            df_orig = pd.read_csv(self.tsv_path, sep="\t")
+            df_conv = df_orig.copy()
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
-                if self.use_bids_names:
-                    subj = info['bids']
-                else:
-                    subj = f"sub-{info['given']}"
                 ses = self.mapping_table.item(i, 2).text()
                 seq = self.mapping_table.item(i, 3).text()
                 mod = self.mapping_table.item(i, 4).text()
                 modb = self.mapping_table.item(i, 5).text()
-                # Build a minimal row; full dicom_inventory already stored other columns
-                df_updated.append({
-                    'BIDS_name': subj,
-                    'session': ses,
-                    'include': include,
-                    'sequence': seq,
-                    'modality': mod,
-                    'modality_bids': modb
-                })
-            # Write back: read original TSV to preserve other columns
-            df_orig = pd.read_csv(self.tsv_path, sep="\t")
-            # Update only include, sequence, modality_bids columns in df_orig
-            for idx, row in enumerate(df_orig.itertuples()):
-                df_orig.at[idx, 'BIDS_name'] = df_updated[idx]['BIDS_name']
-                df_orig.at[idx, 'include'] = df_updated[idx]['include']
-                df_orig.at[idx, 'sequence'] = df_updated[idx]['sequence']
-                df_orig.at[idx, 'modality_bids'] = df_updated[idx]['modality_bids']
+
+                # Update df_orig with canonical BIDS name
+                df_orig.at[i, 'BIDS_name'] = info['bids']
+                df_orig.at[i, 'include'] = include
+                df_orig.at[i, 'sequence'] = seq
+                df_orig.at[i, 'modality_bids'] = modb
+
+                # For conversion we may use given names
+                conv_name = info['bids'] if self.use_bids_names else f"sub-{info['given']}"
+                df_conv.at[i, 'BIDS_name'] = conv_name
+
             df_orig.to_csv(self.tsv_path, sep="\t", index=False)
             self.log_text.append("Saved updated TSV.")
+
+            # Write temporary TSV for heuristic generation if using given names
+            if self.use_bids_names:
+                self.tsv_for_conv = self.tsv_path
+            else:
+                tmp_tsv = os.path.join(self.bids_out_dir, "tmp_subjects.tsv")
+                df_conv.to_csv(tmp_tsv, sep="\t", index=False)
+                self.tsv_for_conv = tmp_tsv
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {e}")
             return
@@ -1246,7 +1247,7 @@ class BIDSManager(QMainWindow):
         self.run_stop_button.setEnabled(True)
         self.conv_process = QProcess(self)
         self.conv_process.finished.connect(self._convStepFinished)
-        args = [self.build_script, self.tsv_path, self.heuristic_dir]
+        args = [self.build_script, self.tsv_for_conv, self.heuristic_dir]
         self.conv_process.start(sys.executable, args)
 
     def _convStepFinished(self, exitCode, _status):
@@ -1278,6 +1279,12 @@ class BIDSManager(QMainWindow):
                 self._runNextRename()
             else:
                 self.log_text.append("Conversion pipeline finished successfully.")
+                self._store_heuristics()
+                if getattr(self, 'tsv_for_conv', self.tsv_path) != self.tsv_path:
+                    try:
+                        os.remove(self.tsv_for_conv)
+                    except Exception:
+                        pass
                 self.stopConversion(success=True)
 
     def _runNextRename(self):
@@ -1290,6 +1297,19 @@ class BIDSManager(QMainWindow):
         self.log_text.append(f"Renaming fieldmaps for {dataset}…")
         args = [self.rename_script, bids_path]
         self.conv_process.start(sys.executable, args)
+
+    def _store_heuristics(self):
+        """Move heuristics into each dataset's .bids_manager folder."""
+        try:
+            hdir = Path(self.heuristic_dir)
+            for heur in hdir.glob("heuristic_*.py"):
+                dataset = heur.stem.replace("heuristic_", "")
+                dst = Path(self.bids_out_dir) / dataset / ".bids_manager"
+                dst.mkdir(exist_ok=True)
+                shutil.move(str(heur), dst / heur.name)
+            shutil.rmtree(hdir, ignore_errors=True)
+        except Exception as exc:
+            logging.warning(f"Failed to move heuristics: {exc}")
 
     def stopConversion(self, success: bool = False):
         if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
