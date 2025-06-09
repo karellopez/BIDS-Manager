@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
-    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider)
+    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox)
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
 from PyQt5.QtGui import (
     QPalette,
