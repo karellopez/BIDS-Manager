@@ -15,7 +15,17 @@ from PyQt5.QtWidgets import (
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider)
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
-from PyQt5.QtGui import QPalette, QColor, QFont, QImage, QPixmap
+from PyQt5.QtGui import (
+    QPalette,
+    QColor,
+    QFont,
+    QImage,
+    QPixmap,
+    QPainter,
+    QPen,
+)
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib.pyplot as plt
 import logging  # debug logging
 import signal
 try:
@@ -36,6 +46,19 @@ class _AutoUpdateLabel(QLabel):
         super().resizeEvent(event)
         if callable(self._update_fn):
             self._update_fn()
+
+
+class _ImageLabel(_AutoUpdateLabel):
+    """Label that notifies on resize and mouse clicks."""
+
+    def __init__(self, update_fn, click_fn, *args, **kwargs):
+        super().__init__(update_fn, *args, **kwargs)
+        self._click_fn = click_fn
+
+    def mousePressEvent(self, event):
+        if callable(self._click_fn):
+            self._click_fn(event)
+        super().mousePressEvent(event)
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -1607,12 +1630,16 @@ class MetadataViewer(QWidget):
         self.slice_slider.valueChanged.connect(self._update_slice)
         self.toolbar.addWidget(QLabel("Slice:"))
         self.toolbar.addWidget(self.slice_slider)
+        self.slice_val = QLabel("0")
+        self.toolbar.addWidget(self.slice_val)
 
         # Volume slider
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.valueChanged.connect(self._update_slice)
         self.toolbar.addWidget(QLabel("Volume:"))
         self.toolbar.addWidget(self.vol_slider)
+        self.vol_val = QLabel("0")
+        self.toolbar.addWidget(self.vol_val)
         # Brightness slider
         self.bright_slider = QSlider(Qt.Horizontal)
         self.bright_slider.setRange(-100, 100)
@@ -1628,6 +1655,14 @@ class MetadataViewer(QWidget):
         self.contrast_slider.valueChanged.connect(self._update_slice)
         self.toolbar.addWidget(QLabel("Contrast:"))
         self.toolbar.addWidget(self.contrast_slider)
+        self.toolbar.addWidget(QLabel("Value:"))
+        self.voxel_val_label = QLabel("N/A")
+        self.toolbar.addWidget(self.voxel_val_label)
+
+        self.graph_btn = QPushButton("Graph")
+        self.graph_btn.setCheckable(True)
+        self.graph_btn.clicked.connect(self._toggle_graph)
+        self.toolbar.addWidget(self.graph_btn)
         self.toolbar.addStretch()
 
     def _add_field(self):
@@ -1682,6 +1717,7 @@ class MetadataViewer(QWidget):
         self.slice_slider.setMaximum(max(axis_len - 1, 0))
         self.slice_slider.setEnabled(axis_len > 1)
         self.slice_slider.setValue(axis_len // 2)
+        self.slice_val.setText(str(axis_len // 2))
         self._update_slice()
 
     def _nifti_view(self, path: Path) -> QWidget:
@@ -1691,15 +1727,28 @@ class MetadataViewer(QWidget):
         self.data = data
         widget = QWidget()
         vlay = QVBoxLayout(widget)
-        self.img_label = _AutoUpdateLabel(self._update_slice)
+
+        self.cross_voxel = [data.shape[0] // 2, data.shape[1] // 2, data.shape[2] // 2]
+
+        self.img_label = _ImageLabel(self._update_slice, self._on_image_clicked)
         self.img_label.setAlignment(Qt.AlignCenter)
         self.img_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        vlay.addWidget(self.img_label)
+
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.addWidget(self.img_label)
+
+        self.graph_canvas = FigureCanvas(plt.Figure(figsize=(4, 2)))
+        self.ax = self.graph_canvas.figure.subplots()
+        self.graph_canvas.setVisible(False)
+        self.splitter.addWidget(self.graph_canvas)
+
+        vlay.addWidget(self.splitter)
 
         # Configure volume slider range
         n_vols = data.shape[3] if data.ndim == 4 else 1
         self.vol_slider.setMaximum(max(n_vols - 1, 0))
         self.vol_slider.setEnabled(n_vols > 1)
+        self.vol_val.setText("0")
 
         # Initialize orientation and slice slider
         self._set_orientation(self.orientation)
@@ -1712,6 +1761,8 @@ class MetadataViewer(QWidget):
         vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
         axis = getattr(self, 'orientation', 2)
         slice_idx = getattr(self, 'slice_slider', None).value() if hasattr(self, 'slice_slider') else vol.shape[axis] // 2
+        self.slice_val.setText(str(slice_idx))
+        self.vol_val.setText(str(vol_idx))
         if axis == 0:
             slice_img = vol[slice_idx, :, :]
         elif axis == 1:
@@ -1736,7 +1787,119 @@ class MetadataViewer(QWidget):
         h, w = arr.shape
         img = QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8)
         pix = QPixmap.fromImage(img)
+
+        # Draw crosshair
+        if self.cross_voxel is not None:
+            x_rot, y_rot = self._voxel_to_arr(self.cross_voxel)
+            painter = QPainter(pix)
+            pen = QPen(Qt.red)
+            painter.setPen(pen)
+            painter.drawLine(x_rot, 0, x_rot, h)
+            painter.drawLine(0, y_rot, w, y_rot)
+            painter.end()
+
         self.img_label.setPixmap(pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        self._update_value()
+        if self.graph_canvas.isVisible():
+            self._update_graph_marker()
+
+    def _label_pos_to_img_coords(self, pos):
+        pix = self.img_label.pixmap()
+        if pix is None:
+            return None
+        pw, ph = pix.width(), pix.height()
+        lw, lh = self.img_label.width(), self.img_label.height()
+        scale = min(lw / pw, lh / ph)
+        disp_w, disp_h = pw * scale, ph * scale
+        off_x, off_y = (lw - disp_w) / 2, (lh - disp_h) / 2
+        x = (pos.x() - off_x) / scale
+        y = (pos.y() - off_y) / scale
+        if 0 <= x < pw and 0 <= y < ph:
+            return int(x), int(y)
+        return None
+
+    def _arr_to_voxel(self, x, y):
+        vol_idx = self.vol_slider.value()
+        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        axis = self.orientation
+        slice_idx = self.slice_slider.value()
+        if axis == 0:
+            j = x
+            k = vol.shape[2] - 1 - y
+            return slice_idx, j, k
+        elif axis == 1:
+            i = x
+            k = vol.shape[2] - 1 - y
+            return i, slice_idx, k
+        else:
+            i = x
+            j = vol.shape[1] - 1 - y
+            return i, j, slice_idx
+
+    def _voxel_to_arr(self, voxel):
+        i, j, k = voxel
+        vol_idx = self.vol_slider.value()
+        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        axis = self.orientation
+        if axis == 0:
+            x = j
+            y = vol.shape[2] - 1 - k
+        elif axis == 1:
+            x = i
+            y = vol.shape[2] - 1 - k
+        else:
+            x = i
+            y = vol.shape[1] - 1 - j
+        return x, y
+
+    def _on_image_clicked(self, event):
+        coords = self._label_pos_to_img_coords(event.pos())
+        if coords:
+            voxel = self._arr_to_voxel(*coords)
+            self.cross_voxel = list(voxel)
+            self._update_slice()
+            if self.graph_canvas.isVisible():
+                self._update_graph()
+
+    def _update_value(self):
+        if self.cross_voxel is None:
+            self.voxel_val_label.setText("N/A")
+            return
+        vol_idx = self.vol_slider.value()
+        if self.data.ndim == 4:
+            val = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], vol_idx]
+        else:
+            val = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2]]
+        self.voxel_val_label.setText(f"{val:.3g}")
+
+    def _toggle_graph(self):
+        visible = self.graph_btn.isChecked()
+        self.graph_canvas.setVisible(visible)
+        if visible:
+            self._update_graph()
+            self.splitter.setSizes([self.height() // 2, self.height() // 2])
+        else:
+            self.splitter.setSizes([self.height(), 0])
+
+    def _update_graph(self):
+        if self.data.ndim != 4 or self.cross_voxel is None:
+            return
+        ts = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], :]
+        self.ax.clear()
+        self.ax.plot(ts, "-o", markersize=3)
+        self.marker, = self.ax.plot([self.vol_slider.value()], [ts[self.vol_slider.value()]], "ro")
+        self.ax.set_xlabel("Volume")
+        self.ax.set_ylabel("Value")
+        self.graph_canvas.draw()
+
+    def _update_graph_marker(self):
+        if not hasattr(self, "marker") or self.cross_voxel is None:
+            return
+        ts = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], :]
+        idx = self.vol_slider.value()
+        self.marker.set_data([idx], [ts[idx]])
+        self.graph_canvas.draw_idle()
 
     def _json_view(self, path: Path) -> QTreeWidget:
         """Create a tree widget to show and edit JSON data."""
