@@ -1199,13 +1199,10 @@ class BIDSManager(QMainWindow):
         # 1) Save updated TSV from table
         try:
             df_orig = pd.read_csv(self.tsv_path, sep="\t")
-            df_conv = df_orig.copy()
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
-                ses = self.mapping_table.item(i, 2).text()
                 seq = self.mapping_table.item(i, 3).text()
-                mod = self.mapping_table.item(i, 4).text()
                 modb = self.mapping_table.item(i, 5).text()
 
                 # Update df_orig with canonical BIDS name
@@ -1214,20 +1211,9 @@ class BIDSManager(QMainWindow):
                 df_orig.at[i, 'sequence'] = seq
                 df_orig.at[i, 'modality_bids'] = modb
 
-                # For conversion we may use given names
-                conv_name = info['bids'] if self.use_bids_names else f"sub-{info['given']}"
-                df_conv.at[i, 'BIDS_name'] = conv_name
-
             df_orig.to_csv(self.tsv_path, sep="\t", index=False)
             self.log_text.append("Saved updated TSV.")
-
-            # Write temporary TSV for heuristic generation if using given names
-            if self.use_bids_names:
-                self.tsv_for_conv = self.tsv_path
-            else:
-                tmp_tsv = os.path.join(self.bids_out_dir, "tmp_subjects.tsv")
-                df_conv.to_csv(tmp_tsv, sep="\t", index=False)
-                self.tsv_for_conv = tmp_tsv
+            self.tsv_for_conv = self.tsv_path
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {e}")
             return
@@ -1280,11 +1266,6 @@ class BIDSManager(QMainWindow):
             else:
                 self.log_text.append("Conversion pipeline finished successfully.")
                 self._store_heuristics()
-                if getattr(self, 'tsv_for_conv', self.tsv_path) != self.tsv_path:
-                    try:
-                        os.remove(self.tsv_for_conv)
-                    except Exception:
-                        pass
                 self.stopConversion(success=True)
 
     def _runNextRename(self):
