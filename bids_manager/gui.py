@@ -1789,6 +1789,13 @@ class MetadataViewer(QWidget):
         self.scope_spin.setValue(1)
         self.scope_spin.valueChanged.connect(self._update_graph)
         scope_row.addWidget(self.scope_spin)
+        scope_row.addSpacing(10)
+        scope_row.addWidget(QLabel("Dot size:"))
+        self.dot_size_spin = QSpinBox()
+        self.dot_size_spin.setRange(1, 20)
+        self.dot_size_spin.setValue(6)
+        self.dot_size_spin.valueChanged.connect(self._update_graph)
+        scope_row.addWidget(self.dot_size_spin)
         self.mark_neighbors_box = QCheckBox("Mark neighbors")
         self.mark_neighbors_box.setChecked(True)
         self.mark_neighbors_box.stateChanged.connect(self._update_graph)
@@ -1970,6 +1977,7 @@ class MetadataViewer(QWidget):
         line_color = "#000000" if not self._is_dark_theme() else "#ffffff"
         marker_color = self.palette().color(QPalette.Highlight).name()
         bg_color = self.palette().color(QPalette.Base).name()
+        dot_size = self.dot_size_spin.value()
         self.graph_canvas.figure.set_facecolor(bg_color)
         self.markers = []
         self.marker_ts = []
@@ -2001,7 +2009,7 @@ class MetadataViewer(QWidget):
                 if self.mark_neighbors_box.isChecked() or (r == half and c == half):
                     self.marker_ts.append(ts)
                     idx = self.vol_slider.value()
-                    marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=6)
+                    marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=dot_size)
                     self.markers.append(marker)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
@@ -2016,6 +2024,7 @@ class MetadataViewer(QWidget):
             i = max(0, min(idx, len(ts) - 1))
             marker.set_data([i], [ts[i]])
             marker.set_color(marker_color)
+            marker.set_markersize(self.dot_size_spin.value())
         self.graph_canvas.draw_idle()
 
     def _json_view(self, path: Path) -> QTreeWidget:
