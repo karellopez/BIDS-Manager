@@ -1890,8 +1890,8 @@ class MetadataViewer(QWidget):
         self.graph_canvas.setVisible(visible)
         total = self.splitter.size().height()
         if visible:
-            self._update_graph()
             self.splitter.setSizes([total // 2, total // 2])
+            self._update_graph()
         else:
             self.splitter.setSizes([total, 0])
 
