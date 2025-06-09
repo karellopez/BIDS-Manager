@@ -21,6 +21,7 @@ dependencies = [
     "nibabel",
     "numpy",
     "psutil",
+    "matplotlib",
 ]
 
 
