@@ -101,6 +101,13 @@ class BIDSManager(QMainWindow):
         self.modb_rows = {}
         self.mod_rows = {}
         self.seq_rows = {}
+        self.study_rows = {}
+        self.subject_rows = {}
+        self.session_rows = {}
+        self.spec_modb_rows = {}
+        self.spec_mod_rows = {}
+        self.spec_seq_rows = {}
+        self.use_bids_names = True
 
         # Async process handles
         self.inventory_process = None
@@ -483,7 +490,31 @@ class BIDSManager(QMainWindow):
         # Display only one column with the BIDS modality
         self.full_tree.setHeaderLabels(["BIDS Modality"])
         full_layout.addWidget(self.full_tree)
-        self.modal_tabs.addTab(full_tab, "Full View")
+        self.modal_tabs.addTab(full_tab, "General view")
+
+        specific_tab = QWidget()
+        specific_layout = QVBoxLayout(specific_tab)
+        self.specific_tree = QTreeWidget()
+        self.specific_tree.setHeaderLabels(["Study/Subject"])
+        specific_layout.addWidget(self.specific_tree)
+        self.modal_tabs.addTab(specific_tab, "Specific view")
+
+        naming_tab = QWidget()
+        naming_layout = QVBoxLayout(naming_tab)
+        self.naming_table = QTableWidget()
+        self.naming_table.setColumnCount(3)
+        self.naming_table.setHorizontalHeaderLabels(["Study", "Given name", "BIDS name"])
+        n_hdr = self.naming_table.horizontalHeader()
+        n_hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        n_hdr.setStretchLastSection(True)
+        naming_layout.addWidget(self.naming_table)
+        self.naming_table.itemChanged.connect(self._onNamingEdited)
+        self.name_choice = QComboBox()
+        self.name_choice.addItems(["Use BIDS names", "Use given names"])
+        self.name_choice.currentIndexChanged.connect(self._onNameChoiceChanged)
+        naming_layout.addWidget(self.name_choice)
+        self.modal_tabs.addTab(naming_tab, "Edit naming")
+
         modal_layout.addWidget(self.modal_tabs)
         right_split.addWidget(modal_group)
         left_split.setStretchFactor(0, 1)
@@ -547,7 +578,8 @@ class BIDSManager(QMainWindow):
         for i in range(self.mapping_table.rowCount()):
             include = (self.mapping_table.item(i, 0).checkState() == Qt.Checked)
             if include:
-                subj = self.mapping_table.item(i, 1).text()
+                info = self.row_info[i]
+                subj = info['bids'] if self.use_bids_names else info['given']
                 study = self.mapping_table.item(i, 1).data(Qt.UserRole) or ""
                 ses = self.mapping_table.item(i, 2).text()
                 seq = self.mapping_table.item(i, 3).text()
@@ -717,6 +749,12 @@ class BIDSManager(QMainWindow):
         self.modb_rows.clear()
         self.mod_rows.clear()
         self.seq_rows.clear()
+        self.study_rows.clear()
+        self.subject_rows.clear()
+        self.session_rows.clear()
+        self.spec_modb_rows.clear()
+        self.spec_mod_rows.clear()
+        self.spec_seq_rows.clear()
         self.row_info = []
 
         # Populate table rows
@@ -734,13 +772,16 @@ class BIDSManager(QMainWindow):
             include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
             self.mapping_table.setItem(r, 0, include_item)
             # Subject (non-editable)
-            subj_item = QTableWidgetItem(_clean(row.get('BIDS_name')))
+            bids_name = _clean(row.get('BIDS_name'))
+            subj_item = QTableWidgetItem(bids_name)
             subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
-            subj_item.setData(Qt.UserRole, _clean(row.get('StudyDescription')))
-            self.study_set.add(_clean(row.get('StudyDescription')))
+            study = _clean(row.get('StudyDescription'))
+            subj_item.setData(Qt.UserRole, study)
+            self.study_set.add(study)
             self.mapping_table.setItem(r, 1, subj_item)
             # Session (non-editable)
-            ses_item = QTableWidgetItem(_clean(row.get('session')))
+            session = _clean(row.get('session'))
+            ses_item = QTableWidgetItem(session)
             ses_item.setFlags(ses_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 2, ses_item)
             # Sequence (editable)
@@ -752,14 +793,22 @@ class BIDSManager(QMainWindow):
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 4, mod_item)
             # BIDS Modality (editable)
-            modb_item = QTableWidgetItem(_clean(row.get('modality_bids')))
+            modb = _clean(row.get('modality_bids'))
+            modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 5, modb_item)
 
+            mod = _clean(row.get('modality'))
+            seq = _clean(row.get('sequence'))
+            given = _clean(row.get('subject'))
             self.row_info.append({
-                'modb': _clean(row.get('modality_bids')),
-                'mod': _clean(row.get('modality')),
-                'seq': _clean(row.get('sequence')),
+                'study': study,
+                'bids': bids_name,
+                'given': given,
+                'ses': session,
+                'modb': modb,
+                'mod': mod,
+                'seq': seq,
             })
         self.log_text.append("Loaded TSV into mapping table.")
 
@@ -768,8 +817,33 @@ class BIDSManager(QMainWindow):
             self.modb_rows.setdefault(info['modb'], []).append(idx)
             self.mod_rows.setdefault((info['modb'], info['mod']), []).append(idx)
             self.seq_rows.setdefault((info['modb'], info['mod'], info['seq']), []).append(idx)
+            self.study_rows.setdefault(info['study'], []).append(idx)
+            self.subject_rows.setdefault((info['study'], info['bids']), []).append(idx)
+            self.session_rows.setdefault((info['study'], info['bids'], info['ses']), []).append(idx)
+            self.spec_modb_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb']), []).append(idx)
+            self.spec_mod_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod']), []).append(idx)
+            self.spec_seq_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
 
         self.populateModalitiesTree()
+        self.populateSpecificTree()
+
+        # Populate naming table
+        self.naming_table.blockSignals(True)
+        self.naming_table.setRowCount(0)
+        name_df = df[["StudyDescription", "subject", "BIDS_name"]].drop_duplicates()
+        for _, row in name_df.iterrows():
+            nr = self.naming_table.rowCount()
+            self.naming_table.insertRow(nr)
+            sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
+            sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 0, sitem)
+            gitem = QTableWidgetItem(_clean(row["subject"]))
+            gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 1, gitem)
+            bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
+            bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 2, bitem)
+        self.naming_table.blockSignals(False)
 
 
     def populateModalitiesTree(self):
@@ -830,6 +904,117 @@ class BIDSManager(QMainWindow):
             pass
         self.full_tree.itemChanged.connect(self.onModalityItemChanged)
 
+    def onSpecificItemChanged(self, item, column):
+        role = item.data(0, Qt.UserRole)
+        if not role:
+            return
+        state = item.checkState(0)
+        tp = role[0]
+        if tp == 'study':
+            rows = self.study_rows.get(role[1], [])
+        elif tp == 'subject':
+            rows = self.subject_rows.get((role[1], role[2]), [])
+        elif tp == 'session':
+            rows = self.session_rows.get((role[1], role[2], role[3]), [])
+        elif tp == 'modb':
+            rows = self.spec_modb_rows.get((role[1], role[2], role[3], role[4]), [])
+        elif tp == 'mod':
+            rows = self.spec_mod_rows.get((role[1], role[2], role[3], role[4], role[5]), [])
+        elif tp == 'seq':
+            rows = self.spec_seq_rows.get((role[1], role[2], role[3], role[4], role[5], role[6]), [])
+        else:
+            rows = []
+        for r in rows:
+            self.mapping_table.item(r, 0).setCheckState(state)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+
+    def _onNamingEdited(self, item):
+        if item.column() != 2:
+            return
+        study = self.naming_table.item(item.row(), 0).text()
+        given = self.naming_table.item(item.row(), 1).text()
+        new_bids = item.text()
+        for idx, info in enumerate(self.row_info):
+            if info['study'] == study and info['given'] == given:
+                info['bids'] = new_bids
+                self.mapping_table.item(idx, 1).setText(new_bids)
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+
+    def _onNameChoiceChanged(self, _index=None):
+        self.use_bids_names = self.name_choice.currentIndex() == 0
+        QTimer.singleShot(0, self.generatePreview)
+
+
+    def populateSpecificTree(self):
+        """Build detailed tree (study→subject→session→modality)."""
+        self.specific_tree.blockSignals(True)
+        self.specific_tree.clear()
+
+        tree_map = {}
+        for info in self.row_info:
+            tree_map.setdefault(info['study'], {})\
+                    .setdefault(info['bids'], {})\
+                    .setdefault(info['ses'], {})\
+                    .setdefault(info['modb'], {})\
+                    .setdefault(info['mod'], set()).add(info['seq'])
+
+        def _state(rows):
+            states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+            if states and all(states):
+                return Qt.Checked
+            if states and any(states):
+                return Qt.PartiallyChecked
+            return Qt.Unchecked
+
+        for study, sub_map in sorted(tree_map.items()):
+            st_item = QTreeWidgetItem([study])
+            st_item.setFlags(st_item.flags() | Qt.ItemIsUserCheckable)
+            st_item.setCheckState(0, _state(self.study_rows.get(study, [])))
+            st_item.setData(0, Qt.UserRole, ('study', study))
+            for subj, ses_map in sorted(sub_map.items()):
+                su_item = QTreeWidgetItem([subj])
+                su_item.setFlags(su_item.flags() | Qt.ItemIsUserCheckable)
+                su_item.setCheckState(0, _state(self.subject_rows.get((study, subj), [])))
+                su_item.setData(0, Qt.UserRole, ('subject', study, subj))
+                for ses, modb_map in sorted(ses_map.items()):
+                    se_item = QTreeWidgetItem([ses])
+                    se_item.setFlags(se_item.flags() | Qt.ItemIsUserCheckable)
+                    se_item.setCheckState(0, _state(self.session_rows.get((study, subj, ses), [])))
+                    se_item.setData(0, Qt.UserRole, ('session', study, subj, ses))
+                    for modb, mod_map in sorted(modb_map.items()):
+                        mb_item = QTreeWidgetItem([modb])
+                        mb_item.setFlags(mb_item.flags() | Qt.ItemIsUserCheckable)
+                        mb_item.setCheckState(0, _state(self.spec_modb_rows.get((study, subj, ses, modb), [])))
+                        mb_item.setData(0, Qt.UserRole, ('modb', study, subj, ses, modb))
+                        for mod, seqs in sorted(mod_map.items()):
+                            mo_item = QTreeWidgetItem([mod])
+                            mo_item.setFlags(mo_item.flags() | Qt.ItemIsUserCheckable)
+                            mo_item.setCheckState(0, _state(self.spec_mod_rows.get((study, subj, ses, modb, mod), [])))
+                            mo_item.setData(0, Qt.UserRole, ('mod', study, subj, ses, modb, mod))
+                            for seq in sorted(seqs):
+                                sq_item = QTreeWidgetItem([seq])
+                                sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
+                                sq_item.setCheckState(0, _state(self.spec_seq_rows.get((study, subj, ses, modb, mod, seq), [])))
+                                sq_item.setData(0, Qt.UserRole, ('seq', study, subj, ses, modb, mod, seq))
+                                mo_item.addChild(sq_item)
+                            mb_item.addChild(mo_item)
+                        se_item.addChild(mb_item)
+                    su_item.addChild(se_item)
+                st_item.addChild(su_item)
+            self.specific_tree.addTopLevelItem(st_item)
+
+        self.specific_tree.expandAll()
+        self.specific_tree.blockSignals(False)
+        try:
+            self.specific_tree.itemChanged.disconnect(self.onSpecificItemChanged)
+        except TypeError:
+            pass
+        self.specific_tree.itemChanged.connect(self.onSpecificItemChanged)
+
 
     def onModalityItemChanged(self, item, column):
         role = item.data(0, Qt.UserRole)
@@ -866,7 +1051,8 @@ class BIDSManager(QMainWindow):
             df_updated = []
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
-                subj = self.mapping_table.item(i, 1).text()
+                info = self.row_info[i]
+                subj = info['bids'] if self.use_bids_names else info['given']
                 ses = self.mapping_table.item(i, 2).text()
                 seq = self.mapping_table.item(i, 3).text()
                 mod = self.mapping_table.item(i, 4).text()
@@ -884,6 +1070,7 @@ class BIDSManager(QMainWindow):
             df_orig = pd.read_csv(self.tsv_path, sep="\t")
             # Update only include, sequence, modality_bids columns in df_orig
             for idx, row in enumerate(df_orig.itertuples()):
+                df_orig.at[idx, 'BIDS_name'] = df_updated[idx]['BIDS_name']
                 df_orig.at[idx, 'include'] = df_updated[idx]['include']
                 df_orig.at[idx, 'sequence'] = df_updated[idx]['sequence']
                 df_orig.at[idx, 'modality_bids'] = df_updated[idx]['modality_bids']
