@@ -1733,7 +1733,9 @@ class MetadataViewer(QWidget):
 
         self.img_label = _ImageLabel(self._update_slice, self._on_image_clicked)
         self.img_label.setAlignment(Qt.AlignCenter)
-        self.img_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Allow the image to shrink as well as expand when resizing
+        self.img_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.img_label.setMinimumSize(1, 1)
 
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(self.img_label)
