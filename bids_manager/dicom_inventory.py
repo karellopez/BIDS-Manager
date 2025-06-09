@@ -178,9 +178,17 @@ def scan_dicoms_long(root_dir: str,
                        for folder, seq_dict in subj.items())
     print(f"Unique SeriesDescriptions : {total_series}")
 
-    # PASS 2: assign BIDS subject numbers based only on GivenName/PatientID
-    subj_ids = sorted({k.split("||")[0] for k in demo})
-    bids_map = {sid: f"sub-{i+1:03d}" for i, sid in enumerate(subj_ids)}
+    # PASS 2: assign BIDS subject numbers PER STUDY
+    study_subjects = defaultdict(set)
+    for subj_key in demo:
+        subj, stud = subj_key.split("||", 1)
+        study_subjects[stud].add(subj)
+
+    bids_map = {}
+    for study, subj_set in study_subjects.items():
+        for i, sid in enumerate(sorted(subj_set)):
+            bids_map[f"{sid}||{study}"] = f"sub-{i+1:03d}"
+
     print("Assigned BIDS IDs:", bids_map)
 
     # PASS 3: build DataFrame rows
@@ -200,7 +208,7 @@ def scan_dicoms_long(root_dir: str,
                     include = 0
                 rows.append({
                     "subject"       : demo[subj_key]["GivenName"] if first_row else "",
-                    "BIDS_name"     : bids_map[subj_key.split("||")[0]],
+                    "BIDS_name"     : bids_map[subj_key],
                     "session"       : session,
                     "source_folder" : folder,
                     "include"       : include,
@@ -220,6 +228,7 @@ def scan_dicoms_long(root_dir: str,
         "PatientSex", "PatientAge", "StudyDescription",
     ]
     df = pd.DataFrame(rows, columns=columns)
+    df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
 
     # optional TSV export
     if output_tsv:

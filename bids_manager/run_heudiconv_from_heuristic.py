@@ -11,7 +11,9 @@ from pathlib import Path
 import importlib.util
 import subprocess
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
+import pandas as pd
+import re
 
 
 # ────────────────── helpers ──────────────────
@@ -25,6 +27,10 @@ def load_sid_map(heur: Path) -> Dict[str, str]:
 
 def clean_name(raw: str) -> str:
     return "".join(ch for ch in raw if ch.isalnum())
+
+def safe_stem(text: str) -> str:
+    """Return filename-friendly version of *text* (used for study names)."""
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
 
 
 def physical_by_clean(raw_root: Path) -> Dict[str, str]:
@@ -74,7 +80,8 @@ def heudi_cmd(raw_root: Path,
 def run_heudiconv(raw_root: Path,
                   heuristic: Path,
                   bids_out: Path,
-                  per_folder: bool = True) -> None:
+                  per_folder: bool = True,
+                  mapping_df: Optional[pd.DataFrame] = None) -> None:
 
     sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
     clean2phys       = physical_by_clean(raw_root)
@@ -103,6 +110,16 @@ def run_heudiconv(raw_root: Path,
         print(" ".join(cmd))
         subprocess.run(cmd, check=True)
 
+    if mapping_df is not None:
+        dataset = bids_out.name
+        mdir = bids_out / ".bids_manager"
+        sub_df = mapping_df[mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset]
+        if not sub_df.empty:
+            mdir.mkdir(exist_ok=True)
+            sub_df[["GivenName", "BIDS_name"]].drop_duplicates().to_csv(
+                mdir / "subject_mapping.tsv", sep="\t", index=False
+            )
+
 
 # ────────────────── CLI interface ──────────────────
 def main() -> None:
@@ -112,15 +129,20 @@ def main() -> None:
     parser.add_argument("dicom_root", help="Root directory containing DICOMs")
     parser.add_argument("heuristic", help="Heuristic file or directory with heuristic_*.py files")
     parser.add_argument("bids_out", help="Output BIDS directory")
+    parser.add_argument("--subject-tsv", help="Path to subject_summary.tsv", default=None)
     parser.add_argument("--single-run", action="store_true", help="Use one heudiconv call for all subjects")
     args = parser.parse_args()
+
+    mapping_df = None
+    if args.subject_tsv:
+        mapping_df = pd.read_csv(args.subject_tsv, sep="\t")
 
     heur_path = Path(args.heuristic)
     heuristics = [heur_path] if heur_path.is_file() else sorted(heur_path.glob("heuristic_*.py"))
     for heur in heuristics:
         dataset = heur.stem.replace("heuristic_", "")
         out_dir = Path(args.bids_out) / dataset
-        run_heudiconv(Path(args.dicom_root), heur, out_dir, per_folder=not args.single_run)
+        run_heudiconv(Path(args.dicom_root), heur, out_dir, per_folder=not args.single_run, mapping_df=mapping_df)
 
 
 if __name__ == "__main__":

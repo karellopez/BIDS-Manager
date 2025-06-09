@@ -920,7 +920,7 @@ class BIDSManager(QMainWindow):
             self.log_text.append(f"Heuristics written to {self.heuristic_dir}")
             self.conv_stage = 1
             self.log_text.append("Running HeuDiConv…")
-            args = [self.run_script, self.dicom_dir, self.heuristic_dir, self.bids_out_dir]
+            args = [self.run_script, self.dicom_dir, self.heuristic_dir, self.bids_out_dir, '--subject-tsv', self.tsv_path]
             self.conv_process.start(sys.executable, args)
         elif self.conv_stage == 1:
             if exitCode != 0:
