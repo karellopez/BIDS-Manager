@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
-    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox)
+    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox, QCheckBox)
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
 from PyQt5.QtGui import (
     QPalette,
@@ -176,6 +176,7 @@ class BIDSManager(QMainWindow):
         # Theme support
         self.statusBar()
         self.themes = self._build_theme_dict()
+        self.current_theme = None
         self.theme_btn = QPushButton("🌓")  # half-moon icon
         self.theme_btn.setFixedWidth(50)
         # Create a container widget with layout to adjust position
@@ -446,6 +447,7 @@ class BIDSManager(QMainWindow):
         """Apply palette chosen from the Theme menu."""
         app = QApplication.instance()
         app.setPalette(self.themes[name])
+        self.current_theme = name
         font = app.font()
         if name in ("Contrast", "Contrast White"):
             font.setWeight(QFont.Bold)
@@ -453,6 +455,11 @@ class BIDSManager(QMainWindow):
         else:
             font.setWeight(QFont.Normal)
         app.setFont(font)
+
+    def _is_dark_theme(self) -> bool:
+        color = self.palette().color(QPalette.Window)
+        brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+        return brightness < 128
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
@@ -1625,44 +1632,51 @@ class MetadataViewer(QWidget):
         self.toolbar.addWidget(self.co_btn)
         self.toolbar.addWidget(self.ax_btn)
 
+        self.graph_btn = QPushButton("Graph")
+        self.graph_btn.setCheckable(True)
+        self.graph_btn.clicked.connect(self._toggle_graph)
+        self.toolbar.addWidget(self.graph_btn)
+
+        # Helper to add slider+label vertically
+        def add_slider(title, slider, val_label=None):
+            box = QVBoxLayout()
+            lab = QLabel(title)
+            lab.setAlignment(Qt.AlignCenter)
+            box.addWidget(lab)
+            row = QHBoxLayout()
+            row.addWidget(slider)
+            if val_label is not None:
+                row.addWidget(val_label)
+            box.addLayout(row)
+            self.toolbar.addLayout(box)
+
         # Slice slider
         self.slice_slider = QSlider(Qt.Horizontal)
         self.slice_slider.valueChanged.connect(self._update_slice)
-        self.toolbar.addWidget(QLabel("Slice:"))
-        self.toolbar.addWidget(self.slice_slider)
         self.slice_val = QLabel("0")
-        self.toolbar.addWidget(self.slice_val)
+        add_slider("Slice", self.slice_slider, self.slice_val)
 
         # Volume slider
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.valueChanged.connect(self._update_slice)
-        self.toolbar.addWidget(QLabel("Volume:"))
-        self.toolbar.addWidget(self.vol_slider)
         self.vol_val = QLabel("0")
-        self.toolbar.addWidget(self.vol_val)
+        add_slider("Volume", self.vol_slider, self.vol_val)
         # Brightness slider
         self.bright_slider = QSlider(Qt.Horizontal)
         self.bright_slider.setRange(-100, 100)
         self.bright_slider.setValue(0)
         self.bright_slider.valueChanged.connect(self._update_slice)
-        self.toolbar.addWidget(QLabel("Brightness:"))
-        self.toolbar.addWidget(self.bright_slider)
+        add_slider("Brightness", self.bright_slider)
 
         # Contrast slider
         self.contrast_slider = QSlider(Qt.Horizontal)
         self.contrast_slider.setRange(0, 200)
         self.contrast_slider.setValue(100)
         self.contrast_slider.valueChanged.connect(self._update_slice)
-        self.toolbar.addWidget(QLabel("Contrast:"))
-        self.toolbar.addWidget(self.contrast_slider)
+        add_slider("Contrast", self.contrast_slider)
         self.toolbar.addWidget(QLabel("Value:"))
         self.voxel_val_label = QLabel("N/A")
         self.toolbar.addWidget(self.voxel_val_label)
-
-        self.graph_btn = QPushButton("Graph")
-        self.graph_btn.setCheckable(True)
-        self.graph_btn.clicked.connect(self._toggle_graph)
-        self.toolbar.addWidget(self.graph_btn)
         self.toolbar.addStretch()
 
     def _add_field(self):
@@ -1758,6 +1772,10 @@ class MetadataViewer(QWidget):
         self.scope_spin.setValue(1)
         self.scope_spin.valueChanged.connect(self._update_graph)
         scope_row.addWidget(self.scope_spin)
+        self.mark_neighbors_box = QCheckBox("Mark neighbors")
+        self.mark_neighbors_box.setChecked(True)
+        self.mark_neighbors_box.stateChanged.connect(self._update_graph)
+        scope_row.addWidget(self.mark_neighbors_box)
         scope_row.addStretch()
         g_lay.addLayout(scope_row)
 
@@ -1932,9 +1950,12 @@ class MetadataViewer(QWidget):
         self.graph_canvas.figure.clf()
         axes = self.graph_canvas.figure.subplots(dim, dim, squeeze=False, sharex=True, sharey=True)
 
-        color = self.palette().color(QPalette.Highlight).name()
-        marker_ax = axes[half][half]
-        ts_center = None
+        line_color = "#000000" if not self._is_dark_theme() else "#ffffff"
+        marker_color = self.palette().color(QPalette.Highlight).name()
+        bg_color = self.palette().color(QPalette.Base).name()
+        self.graph_canvas.figure.set_facecolor(bg_color)
+        self.markers = []
+        self.marker_ts = []
 
         for r, di in enumerate(range(-half, half + 1)):
             for c, dj in enumerate(range(-half, half + 1)):
@@ -1955,28 +1976,29 @@ class MetadataViewer(QWidget):
                     continue
 
                 ts = self.data[i, j, k, :]
-                ax.plot(ts, color=color, linewidth=1)
+                ax.set_facecolor(bg_color)
+                ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.tick_params(left=False, bottom=False)
-                if r == half and c == half:
-                    ts_center = ts
-
-        if ts_center is not None:
-            idx = self.vol_slider.value()
-            self.marker, = marker_ax.plot([idx], [ts_center[idx]], "o", color=color, markersize=4)
+                if self.mark_neighbors_box.isChecked() or (r == half and c == half):
+                    self.marker_ts.append(ts)
+                    idx = self.vol_slider.value()
+                    marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=6)
+                    self.markers.append(marker)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
 
     def _update_graph_marker(self):
-        if not hasattr(self, "marker") or self.cross_voxel is None:
+        if not getattr(self, "markers", None) or not getattr(self, "marker_ts", None):
             return
-        ts = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], :]
+        marker_color = self.palette().color(QPalette.Highlight).name()
         idx = self.vol_slider.value()
-        idx = max(0, min(idx, len(ts) - 1))
-        self.marker.set_data([idx], [ts[idx]])
-        self.marker.set_color(self.palette().color(QPalette.Highlight).name())
+        for marker, ts in zip(self.markers, self.marker_ts):
+            i = max(0, min(idx, len(ts) - 1))
+            marker.set_data([i], [ts[i]])
+            marker.set_color(marker_color)
         self.graph_canvas.draw_idle()
 
     def _json_view(self, path: Path) -> QTreeWidget:
