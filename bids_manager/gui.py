@@ -2022,10 +2022,10 @@ class MetadataViewer(QWidget):
                     ax.axis("off")
                     continue
 
-                ts = self.data[i, j, k, :]
-                ts = ts * self.scale_spin.value()
-                global_min = min(global_min, ts.min())
-                global_max = max(global_max, ts.max())
+                ts_orig = self.data[i, j, k, :]
+                global_min = min(global_min, ts_orig.min())
+                global_max = max(global_max, ts_orig.max())
+                ts = ts_orig * self.scale_spin.value()
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
