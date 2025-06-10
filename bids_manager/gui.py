@@ -2030,9 +2030,11 @@ class MetadataViewer(QWidget):
                     continue
 
                 ts_orig = self.data[i, j, k, :]
-                global_min = min(global_min, ts_orig.min())
-                global_max = max(global_max, ts_orig.max())
                 ts = ts_orig * self.scale_spin.value()
+                # Track y-axis limits using the scaled data so the graphs
+                # remain centred when the scale factor changes
+                global_min = min(global_min, ts.min())
+                global_max = max(global_max, ts.max())
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
