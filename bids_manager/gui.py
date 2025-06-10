@@ -13,7 +13,8 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
-    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox, QCheckBox)
+    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
+    QDoubleSpinBox, QCheckBox)
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
 from PyQt5.QtGui import (
     QPalette,
@@ -1551,6 +1552,8 @@ class MetadataViewer(QWidget):
         vlay.addWidget(self.welcome)
         self.toolbar = QHBoxLayout()
         vlay.addLayout(self.toolbar)
+        self.value_row = QHBoxLayout()
+        vlay.addLayout(self.value_row)
         self.viewer = None
         self.current_path = None
         self.data = None  # holds loaded NIfTI data when viewing images
@@ -1568,6 +1571,12 @@ class MetadataViewer(QWidget):
 
         while self.toolbar.count():
             item = self.toolbar.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                _clear_layout(item.layout())
+        while self.value_row.count():
+            item = self.value_row.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
             elif item.layout():
@@ -1691,9 +1700,10 @@ class MetadataViewer(QWidget):
         self.contrast_slider.setValue(100)
         self.contrast_slider.valueChanged.connect(self._update_slice)
         add_slider("Contrast", self.contrast_slider)
-        self.toolbar.addWidget(QLabel("Value:"))
         self.voxel_val_label = QLabel("N/A")
-        self.toolbar.addWidget(self.voxel_val_label)
+        self.value_row.addWidget(QLabel("Voxel value:"))
+        self.value_row.addWidget(self.voxel_val_label)
+        self.value_row.addStretch()
         self.toolbar.addStretch()
 
     def _add_field(self):
@@ -1796,6 +1806,15 @@ class MetadataViewer(QWidget):
         self.dot_size_spin.setValue(6)
         self.dot_size_spin.valueChanged.connect(self._update_graph)
         scope_row.addWidget(self.dot_size_spin)
+        scope_row.addSpacing(10)
+        scope_row.addWidget(QLabel("Scale:"))
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.1, 10.0)
+        self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setValue(1.0)
+        self.scale_spin.valueChanged.connect(self._update_graph)
+        scope_row.addWidget(self.scale_spin)
+        scope_row.addSpacing(15)
         self.mark_neighbors_box = QCheckBox("Mark neighbors")
         self.mark_neighbors_box.setChecked(True)
         self.mark_neighbors_box.stateChanged.connect(self._update_graph)
@@ -2001,6 +2020,7 @@ class MetadataViewer(QWidget):
                     continue
 
                 ts = self.data[i, j, k, :]
+                ts = ts * self.scale_spin.value()
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
