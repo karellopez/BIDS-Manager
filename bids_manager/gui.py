@@ -129,7 +129,7 @@ class BIDSManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BIDS Manager")
-        self.resize(1400, 900)
+        self.resize(900, 900)
 
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
@@ -508,7 +508,7 @@ class BIDSManager(QMainWindow):
             img = pix.toImage()
             img.invertPixels()
             pix = QPixmap.fromImage(img)
-        self.logo_label.setPixmap(pix.scaledToHeight(96, Qt.SmoothTransformation))
+        self.logo_label.setPixmap(pix.scaledToHeight(120, Qt.SmoothTransformation))
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
