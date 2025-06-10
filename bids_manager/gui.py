@@ -461,6 +461,7 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         app.setPalette(self.themes[name])
         self.current_theme = name
+        self._update_logo()
         font = app.font()
         if name in ("Contrast", "Contrast White"):
             font.setWeight(QFont.Bold)
@@ -495,6 +496,19 @@ class BIDSManager(QMainWindow):
         color = self.palette().color(QPalette.Window)
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         return brightness < 128
+
+    def _update_logo(self) -> None:
+        """Update logo pixmap based on current theme."""
+        if not hasattr(self, "logo_label"):
+            return
+        if not LOGO_FILE.exists():
+            return
+        pix = QPixmap(str(LOGO_FILE))
+        if self._is_dark_theme():
+            img = pix.toImage()
+            img.invertPixels()
+            pix = QPixmap.fromImage(img)
+        self.logo_label.setPixmap(pix.scaledToHeight(96, Qt.SmoothTransformation))
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
@@ -545,11 +559,14 @@ class BIDSManager(QMainWindow):
         top_row.addWidget(cfg_group)
         top_row.addStretch()
         self.logo_label = QLabel()
-        if LOGO_FILE.exists():
-            pix = QPixmap(str(LOGO_FILE))
-            self.logo_label.setPixmap(pix.scaledToHeight(64, Qt.SmoothTransformation))
-        top_row.addWidget(self.logo_label)
+        self.logo_label.setAlignment(Qt.AlignCenter)
+        logo_container = QWidget()
+        lc_layout = QVBoxLayout(logo_container)
+        lc_layout.setContentsMargins(0, 0, 0, 0)
+        lc_layout.addWidget(self.logo_label)
+        top_row.addWidget(logo_container)
         main_layout.addLayout(top_row)
+        self._update_logo()
 
         left_split = QSplitter(Qt.Vertical)
         right_split = QSplitter(Qt.Vertical)
@@ -2104,10 +2121,16 @@ class MetadataViewer(QWidget):
         # Apply consistent y-axis limits based on the unscaled data so
         # the scale factor modifies the trace amplitude visibly.
         if global_min < global_max:
-            bound = max(abs(global_min), abs(global_max))
+            if global_min >= 0:
+                lower, upper = 0, global_max
+            elif global_max <= 0:
+                lower, upper = global_min, 0
+            else:
+                bound = max(abs(global_min), abs(global_max))
+                lower, upper = -bound, bound
             for ax_row in axes:
                 for ax in ax_row:
-                    ax.set_ylim(-bound, bound)
+                    ax.set_ylim(lower, upper)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
