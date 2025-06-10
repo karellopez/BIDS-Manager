@@ -23,7 +23,6 @@ dependencies = [
     "numpy",
     "psutil",
     "matplotlib",
-    "ancpbids",
 ]
 
 

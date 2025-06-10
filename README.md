@@ -30,7 +30,5 @@ All utilities provide `-h/--help` for details.
   specific subjects.
 - `run-heudiconv` now keeps a copy of `subject_summary.tsv` under `.bids_manager`
   and generates a clean `participants.tsv` using demographics from that file.
-- Dataset statistics in the Edit tab are now computed using `ancpbids` for
-  BIDS Schema compliance.
 
 
