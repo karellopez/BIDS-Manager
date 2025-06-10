@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QDoubleSpinBox, QCheckBox)
+    QCheckBox)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -1886,14 +1886,6 @@ class MetadataViewer(QWidget):
         self.dot_size_spin.setValue(6)
         self.dot_size_spin.valueChanged.connect(self._update_graph)
         scope_row.addWidget(self.dot_size_spin)
-        scope_row.addSpacing(10)
-        scope_row.addWidget(QLabel("Scale:"))
-        self.scale_spin = QDoubleSpinBox()
-        self.scale_spin.setRange(0.1, 10.0)
-        self.scale_spin.setSingleStep(0.1)
-        self.scale_spin.setValue(1.0)
-        self.scale_spin.valueChanged.connect(self._update_graph)
-        scope_row.addWidget(self.scale_spin)
         scope_row.addSpacing(15)
         self.mark_neighbors_box = QCheckBox("Mark neighbors")
         self.mark_neighbors_box.setChecked(True)
@@ -2100,7 +2092,7 @@ class MetadataViewer(QWidget):
                     continue
 
                 ts_orig = self.data[i, j, k, :]
-                ts = ts_orig * self.scale_spin.value()
+                ts = ts_orig
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
