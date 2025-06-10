@@ -1993,6 +1993,9 @@ class MetadataViewer(QWidget):
         self.graph_canvas.figure.clf()
         axes = self.graph_canvas.figure.subplots(dim, dim, squeeze=False, sharex=True, sharey=True)
 
+        global_min = float('inf')
+        global_max = float('-inf')
+
         line_color = "#000000" if not self._is_dark_theme() else "#ffffff"
         marker_color = self.palette().color(QPalette.Highlight).name()
         bg_color = self.palette().color(QPalette.Base).name()
@@ -2021,6 +2024,8 @@ class MetadataViewer(QWidget):
 
                 ts = self.data[i, j, k, :]
                 ts = ts * self.scale_spin.value()
+                global_min = min(global_min, ts.min())
+                global_max = max(global_max, ts.max())
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
@@ -2031,6 +2036,14 @@ class MetadataViewer(QWidget):
                     idx = self.vol_slider.value()
                     marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=dot_size)
                     self.markers.append(marker)
+
+        # Apply consistent y-axis limits across subplots to visualise the effect
+        # of the scale factor. Without this the auto-scaling performed by
+        # Matplotlib cancels out amplitude changes when scaling the data.
+        if global_min < global_max:
+            for ax_row in axes:
+                for ax in ax_row:
+                    ax.set_ylim(global_min, global_max)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
