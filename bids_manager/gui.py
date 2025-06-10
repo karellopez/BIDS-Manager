@@ -1783,7 +1783,7 @@ class MetadataViewer(QWidget):
         img_container = QWidget()
         ic_layout = QVBoxLayout(img_container)
         ic_layout.setContentsMargins(0, 0, 0, 0)
-        ic_layout.addWidget(self.img_label, alignment=Qt.AlignCenter)
+        ic_layout.addWidget(self.img_label)
 
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(img_container)
