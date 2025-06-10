@@ -520,7 +520,7 @@ class BIDSManager(QMainWindow):
         cfg_group = QGroupBox("Configuration")
         cfg_layout = QGridLayout(cfg_group)
 
-        dicom_label = QLabel("<b>DICOM Dir:</b>")
+        dicom_label = QLabel("<b>Raw data Dir:</b>")
         self.dicom_dir_edit = QLineEdit()
         self.dicom_dir_edit.setReadOnly(True)
         dicom_browse = QPushButton("Browse…")
@@ -543,7 +543,7 @@ class BIDSManager(QMainWindow):
         cfg_layout.addWidget(tsvname_label, 2, 0)
         cfg_layout.addWidget(self.tsv_name_edit, 2, 1, 1, 2)
 
-        self.tsv_button = QPushButton("Generate TSV")
+        self.tsv_button = QPushButton("Scan files")
         self.tsv_button.clicked.connect(self.runInventory)
         self.tsv_stop_button = QPushButton("Stop")
         self.tsv_stop_button.setEnabled(False)
@@ -572,7 +572,7 @@ class BIDSManager(QMainWindow):
         left_split = QSplitter(Qt.Vertical)
         right_split = QSplitter(Qt.Vertical)
 
-        tsv_group = QGroupBox("TSV Viewer")
+        tsv_group = QGroupBox("Scanned data viewer")
         tsv_layout = QVBoxLayout(tsv_group)
         self.mapping_table = QTableWidget()
         self.mapping_table.setColumnCount(6)
@@ -589,7 +589,7 @@ class BIDSManager(QMainWindow):
         tsv_layout.addWidget(self.tsv_load_button)
         left_split.addWidget(tsv_group)
 
-        modal_group = QGroupBox("Modalities")
+        modal_group = QGroupBox("Filter")
         modal_layout = QVBoxLayout(modal_group)
         self.modal_tabs = QTabWidget()
         full_tab = QWidget()
@@ -694,7 +694,7 @@ class BIDSManager(QMainWindow):
 
         main_layout.addWidget(splitter, 1)
 
-        self.tabs.addTab(self.convert_tab, "Convert")
+        self.tabs.addTab(self.convert_tab, "Converter")
 
     def _add_preview_path(self, parts):
         parent = self.preview_tree.invisibleRootItem()
@@ -817,7 +817,7 @@ class BIDSManager(QMainWindow):
         splitter.setStretchFactor(1, 2)
 
         edit_layout.addWidget(splitter)
-        self.tabs.addTab(self.edit_tab, "Edit")
+        self.tabs.addTab(self.edit_tab, "Editor")
 
     def selectDicomDir(self):
         """Select the raw DICOM input directory."""
@@ -865,7 +865,7 @@ class BIDSManager(QMainWindow):
         self.log_text.append("Starting TSV generation…")
         self.tsv_button.setEnabled(False)
         self.tsv_stop_button.setEnabled(True)
-        self._start_spinner("Generating TSV")
+        self._start_spinner("Scanning files")
         self.inventory_process = QProcess(self)
         self.inventory_process.finished.connect(self._inventoryFinished)
         args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
@@ -2219,4 +2219,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
