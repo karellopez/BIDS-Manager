@@ -554,17 +554,18 @@ class BIDSManager(QMainWindow):
         btn_row.addStretch()
         cfg_layout.addLayout(btn_row, 3, 0, 1, 3)
 
-        # Place the configuration group and the logo on the same row
+        # Place the configuration group and the logo on the same row with
+        # equal width. The logo stays centered even when the window resizes.
         top_row = QHBoxLayout()
         top_row.addWidget(cfg_group)
-        top_row.addStretch()
         self.logo_label = QLabel()
-        self.logo_label.setAlignment(Qt.AlignCenter)
         logo_container = QWidget()
         lc_layout = QVBoxLayout(logo_container)
         lc_layout.setContentsMargins(0, 0, 0, 0)
-        lc_layout.addWidget(self.logo_label)
+        lc_layout.addWidget(self.logo_label, alignment=Qt.AlignCenter)
         top_row.addWidget(logo_container)
+        top_row.setStretch(0, 1)
+        top_row.setStretch(1, 1)
         main_layout.addLayout(top_row)
         self._update_logo()
 
@@ -2072,9 +2073,6 @@ class MetadataViewer(QWidget):
         self.graph_canvas.figure.clf()
         axes = self.graph_canvas.figure.subplots(dim, dim, squeeze=False, sharex=True, sharey=True)
 
-        global_min = float('inf')
-        global_max = float('-inf')
-
         line_color = "#000000" if not self._is_dark_theme() else "#ffffff"
         marker_color = self.palette().color(QPalette.Highlight).name()
         bg_color = self.palette().color(QPalette.Base).name()
@@ -2103,34 +2101,25 @@ class MetadataViewer(QWidget):
 
                 ts_orig = self.data[i, j, k, :]
                 ts = ts_orig * self.scale_spin.value()
-                # Track y-axis limits using the unscaled data so that
-                # amplitude changes become visible when applying the scale
-                global_min = min(global_min, ts_orig.min())
-                global_max = max(global_max, ts_orig.max())
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.tick_params(left=False, bottom=False)
+                if ts_orig.min() < ts_orig.max():
+                    if ts_orig.min() >= 0:
+                        lower, upper = 0, ts_orig.max()
+                    elif ts_orig.max() <= 0:
+                        lower, upper = ts_orig.min(), 0
+                    else:
+                        bound = max(abs(ts_orig.min()), abs(ts_orig.max()))
+                        lower, upper = -bound, bound
+                    ax.set_ylim(lower, upper)
                 if self.mark_neighbors_box.isChecked() or (r == half and c == half):
                     self.marker_ts.append(ts)
                     idx = self.vol_slider.value()
                     marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=dot_size)
                     self.markers.append(marker)
-
-        # Apply consistent y-axis limits based on the unscaled data so
-        # the scale factor modifies the trace amplitude visibly.
-        if global_min < global_max:
-            if global_min >= 0:
-                lower, upper = 0, global_max
-            elif global_max <= 0:
-                lower, upper = global_min, 0
-            else:
-                bound = max(abs(global_min), abs(global_max))
-                lower, upper = -bound, bound
-            for ax_row in axes:
-                for ax in ax_row:
-                    ax.set_ylim(lower, upper)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
