@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
-    QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
+    QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QDoubleSpinBox, QCheckBox)
@@ -154,6 +154,14 @@ class BIDSManager(QMainWindow):
         self.conv_process = None
         self.conv_stage = 0
         self.heurs_to_rename = []
+
+        # Spinner for long-running tasks
+        self.spinner_label = None
+        self._spinner_timer = QTimer()
+        self._spinner_timer.timeout.connect(self._spin)
+        self._spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self._spinner_index = 0
+        self._spinner_message = ""
 
         # Main widget and layout
         main_widget = QWidget()
@@ -457,6 +465,28 @@ class BIDSManager(QMainWindow):
             font.setWeight(QFont.Normal)
         app.setFont(font)
 
+    def _start_spinner(self, message: str) -> None:
+        """Show animated spinner with *message* in the log group."""
+        self._spinner_message = message
+        self._spinner_index = 0
+        if self.spinner_label is not None:
+            self.spinner_label.setText(f"{message} {self._spinner_frames[0]}")
+            self.spinner_label.show()
+        self._spinner_timer.start(100)
+
+    def _spin(self) -> None:
+        if not self.spinner_label or not self.spinner_label.isVisible():
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(self._spinner_frames)
+        self.spinner_label.setText(
+            f"{self._spinner_message} {self._spinner_frames[self._spinner_index]}"
+        )
+
+    def _stop_spinner(self) -> None:
+        self._spinner_timer.stop()
+        if self.spinner_label is not None:
+            self.spinner_label.hide()
+
     def _is_dark_theme(self) -> bool:
         color = self.palette().color(QPalette.Window)
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
@@ -617,6 +647,10 @@ class BIDSManager(QMainWindow):
         self.log_text.setReadOnly(True)
         self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
+        self.spinner_label = QLabel()
+        self.spinner_label.setAlignment(Qt.AlignLeft)
+        self.spinner_label.hide()
+        log_layout.addWidget(self.spinner_label)
 
         left_split.addWidget(preview_container)
         right_split.addWidget(log_group)
@@ -800,6 +834,7 @@ class BIDSManager(QMainWindow):
         self.log_text.append("Starting TSV generation…")
         self.tsv_button.setEnabled(False)
         self.tsv_stop_button.setEnabled(True)
+        self._start_spinner("Generating TSV")
         self.inventory_process = QProcess(self)
         self.inventory_process.finished.connect(self._inventoryFinished)
         args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
@@ -810,6 +845,7 @@ class BIDSManager(QMainWindow):
         self.inventory_process = None
         self.tsv_button.setEnabled(True)
         self.tsv_stop_button.setEnabled(False)
+        self._stop_spinner()
         if ok:
             self.log_text.append("TSV generation finished.")
             self.loadMappingTable()
@@ -823,6 +859,7 @@ class BIDSManager(QMainWindow):
             self.inventory_process = None
             self.tsv_button.setEnabled(True)
             self.tsv_stop_button.setEnabled(False)
+            self._stop_spinner()
             self.log_text.append("TSV generation cancelled.")
 
     def loadMappingTable(self):
@@ -1282,6 +1319,7 @@ class BIDSManager(QMainWindow):
         self.conv_stage = 0
 
         self.log_text.append("Building heuristics…")
+        self._start_spinner("Converting")
         self.run_button.setEnabled(False)
         self.run_stop_button.setEnabled(True)
         self.conv_process = QProcess(self)
@@ -1355,6 +1393,7 @@ class BIDSManager(QMainWindow):
             pid = int(self.conv_process.processId())
             _terminate_process_tree(pid)
         self.conv_process = None
+        self._stop_spinner()
         self.run_button.setEnabled(True)
         self.run_stop_button.setEnabled(False)
         if not success:
@@ -1375,7 +1414,7 @@ class BIDSManager(QMainWindow):
         """When a file is clicked in the tree, load metadata if JSON/TSV."""
         p = Path(self.model.filePath(idx))
         self.selected = p
-        if _get_ext(p) in ['.json', '.tsv', '.nii', '.nii.gz']:
+        if _get_ext(p) in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm']:
             self.viewer.load_file(p)
 
     def updateStats(self):
@@ -1608,6 +1647,9 @@ class MetadataViewer(QWidget):
         elif ext in ['.nii', '.nii.gz']:
             self._setup_nifti_toolbar()
             self.viewer = self._nifti_view(path)
+        elif ext in ['.html', '.htm']:
+            self.viewer = self._html_view(path)
+            self.toolbar.addStretch()
         self.layout().addWidget(self.viewer)
 
     def resizeEvent(self, event):
@@ -2118,6 +2160,13 @@ class MetadataViewer(QWidget):
             hdr.setSectionResizeMode(j, QHeaderView.Interactive)
         tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         return tbl
+
+    def _html_view(self, path: Path) -> QTextBrowser:
+        """Display HTML file using a read-only QTextBrowser."""
+        browser = QTextBrowser()
+        browser.setHtml(path.read_text(encoding='utf-8'))
+        browser.setOpenExternalLinks(True)
+        return browser
 
     def _save(self):
         """Save edits made to JSON or TSV sidecar back to disk."""
