@@ -17,6 +17,7 @@ dependencies = [
     "pydicom",
     "pandas",
     "PyQt5",
+    "PyQtWebEngine",
     "heudiconv",
     "nibabel",
     "numpy",
@@ -35,4 +36,8 @@ post-conv-renamer = "bids_manager.post_conv_renamer:main"
 
 [tool.setuptools]
 packages = ["bids_manager"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"bids_manager" = ["miscellaneous/images/Logo.png"]
 

@@ -15,7 +15,8 @@ from PyQt5.QtWidgets import (
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QDoubleSpinBox, QCheckBox)
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -34,6 +35,9 @@ try:
     HAS_PSUTIL = True
 except Exception:  # pragma: no cover - optional dependency
     HAS_PSUTIL = False
+
+# Path to the application logo
+LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
 
 
 class _AutoUpdateLabel(QLabel):
@@ -536,7 +540,16 @@ class BIDSManager(QMainWindow):
         btn_row.addStretch()
         cfg_layout.addLayout(btn_row, 3, 0, 1, 3)
 
-        main_layout.addWidget(cfg_group)
+        # Place the configuration group and the logo on the same row
+        top_row = QHBoxLayout()
+        top_row.addWidget(cfg_group)
+        top_row.addStretch()
+        self.logo_label = QLabel()
+        if LOGO_FILE.exists():
+            pix = QPixmap(str(LOGO_FILE))
+            self.logo_label.setPixmap(pix.scaledToHeight(64, Qt.SmoothTransformation))
+        top_row.addWidget(self.logo_label)
+        main_layout.addLayout(top_row)
 
         left_split = QSplitter(Qt.Vertical)
         right_split = QSplitter(Qt.Vertical)
@@ -2073,10 +2086,10 @@ class MetadataViewer(QWidget):
 
                 ts_orig = self.data[i, j, k, :]
                 ts = ts_orig * self.scale_spin.value()
-                # Track y-axis limits using the scaled data so the graphs
-                # remain centred when the scale factor changes
-                global_min = min(global_min, ts.min())
-                global_max = max(global_max, ts.max())
+                # Track y-axis limits using the unscaled data so that
+                # amplitude changes become visible when applying the scale
+                global_min = min(global_min, ts_orig.min())
+                global_max = max(global_max, ts_orig.max())
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
@@ -2088,13 +2101,13 @@ class MetadataViewer(QWidget):
                     marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=dot_size)
                     self.markers.append(marker)
 
-        # Apply consistent y-axis limits across subplots to visualise the effect
-        # of the scale factor. Without this the auto-scaling performed by
-        # Matplotlib cancels out amplitude changes when scaling the data.
+        # Apply consistent y-axis limits based on the unscaled data so
+        # the scale factor modifies the trace amplitude visibly.
         if global_min < global_max:
+            bound = max(abs(global_min), abs(global_max))
             for ax_row in axes:
                 for ax in ax_row:
-                    ax.set_ylim(global_min, global_max)
+                    ax.set_ylim(-bound, bound)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
@@ -2161,12 +2174,11 @@ class MetadataViewer(QWidget):
         tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         return tbl
 
-    def _html_view(self, path: Path) -> QTextBrowser:
-        """Display HTML file using a read-only QTextBrowser."""
-        browser = QTextBrowser()
-        browser.setHtml(path.read_text(encoding='utf-8'))
-        browser.setOpenExternalLinks(True)
-        return browser
+    def _html_view(self, path: Path) -> QWebEngineView:
+        """Display HTML file using a QWebEngineView for full rendering."""
+        view = QWebEngineView()
+        view.setUrl(QUrl.fromLocalFile(str(Path(path).resolve())))
+        return view
 
     def _save(self):
         """Save edits made to JSON or TSV sidecar back to disk."""
