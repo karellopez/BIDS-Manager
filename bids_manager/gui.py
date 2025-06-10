@@ -7,8 +7,6 @@ import pandas as pd
 import numpy as np
 import nibabel as nib
 from pathlib import Path
-from ancpbids import load_dataset, DatasetOptions
-from ancpbids.query import query, query_entities
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
@@ -160,7 +158,6 @@ class BIDSManager(QMainWindow):
         self.conv_process = None
         self.conv_stage = 0
         self.heurs_to_rename = []
-        self.bids_ds = None  # ancpbids dataset object
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -1439,12 +1436,6 @@ class BIDSManager(QMainWindow):
         p = QFileDialog.getExistingDirectory(self, "Select BIDS dataset")
         if p:
             self.bids_root = Path(p)
-            try:
-                opts = DatasetOptions(infer_artifact_datatype=True)
-                self.bids_ds = load_dataset(p, opts)
-            except Exception as exc:
-                logging.warning(f"ancpbids load failed: {exc}")
-                self.bids_ds = None
             self.model.setRootPath(p)
             self.tree.setRootIndex(self.model.index(p))
             self.viewer.clear()
@@ -1458,40 +1449,9 @@ class BIDSManager(QMainWindow):
             self.viewer.load_file(p)
 
     def updateStats(self):
-        """Compute and display BIDS stats using ancpbids if available."""
-        self.stats.clear()
-        if self.bids_ds is not None:
-            ents = query_entities(self.bids_ds)
-            subs = sorted(ents.get('subject', []))
-            self.stats.addTopLevelItem(QTreeWidgetItem(["Total subjects", str(len(subs))]))
-            file_count = len(query(self.bids_ds, return_type='files'))
-            self.stats.addTopLevelItem(QTreeWidgetItem(["Total files", str(file_count)]))
-            for sub in subs:
-                si = QTreeWidgetItem([f"sub-{sub}", ""])
-                ses_dirs = query(self.bids_ds, return_type='dir', subject=sub, target='session')
-                ses_labels = {Path(p).parts[1] for p in ses_dirs}
-                if ses_labels:
-                    for ses in sorted(ses_labels):
-                        s2 = QTreeWidgetItem([ses, ""])
-                        mod_dirs = query(self.bids_ds, return_type='dir', subject=sub, session=ses, extension='nii.gz')
-                        mods = {Path(p).parts[-1] for p in mod_dirs}
-                        s2.addChild(QTreeWidgetItem(["Modalities", str(len(mods))]))
-                        for m in sorted(mods):
-                            s2.addChild(QTreeWidgetItem([m, ""]))
-                        si.addChild(s2)
-                else:
-                    mod_dirs = query(self.bids_ds, return_type='dir', subject=sub, extension='nii.gz')
-                    mods = {Path(p).parts[-1] for p in mod_dirs}
-                    si.addChild(QTreeWidgetItem(["Sessions", "1"]))
-                    si.addChild(QTreeWidgetItem(["Modalities", str(len(mods))]))
-                    for m in sorted(mods):
-                        si.addChild(QTreeWidgetItem([m, ""]))
-                self.stats.addTopLevelItem(si)
-            self.stats.expandAll()
-            return
-
-        # Fallback: simple filesystem walk
+        """Compute and display BIDS stats: total subjects, files, modalities."""
         root = self.bids_root
+        self.stats.clear()
         subs = [d for d in root.iterdir() if d.is_dir() and d.name.startswith('sub-')]
         self.stats.addTopLevelItem(QTreeWidgetItem(["Total subjects", str(len(subs))]))
         files = list(root.rglob('*.*'))
