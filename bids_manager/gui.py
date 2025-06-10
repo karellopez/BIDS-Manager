@@ -2063,7 +2063,9 @@ class MetadataViewer(QWidget):
         orient = self.orientation
 
         self.graph_canvas.figure.clf()
-        axes = self.graph_canvas.figure.subplots(dim, dim, squeeze=False, sharex=True, sharey=True)
+        axes = self.graph_canvas.figure.subplots(
+            dim, dim, squeeze=False, sharex=True, sharey=True
+        )
 
         line_color = "#000000" if not self._is_dark_theme() else "#ffffff"
         marker_color = self.palette().color(QPalette.Highlight).name()
@@ -2072,6 +2074,8 @@ class MetadataViewer(QWidget):
         self.graph_canvas.figure.set_facecolor(bg_color)
         self.markers = []
         self.marker_ts = []
+        global_min = float("inf")
+        global_max = float("-inf")
 
         for r, di in enumerate(range(-half, half + 1)):
             for c, dj in enumerate(range(-half, half + 1)):
@@ -2093,25 +2097,23 @@ class MetadataViewer(QWidget):
 
                 ts_orig = self.data[i, j, k, :]
                 ts = ts_orig
+                global_min = min(global_min, ts_orig.min())
+                global_max = max(global_max, ts_orig.max())
                 ax.set_facecolor(bg_color)
                 ax.plot(ts, color=line_color, linewidth=1)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.tick_params(left=False, bottom=False)
-                if ts_orig.min() < ts_orig.max():
-                    if ts_orig.min() >= 0:
-                        lower, upper = 0, ts_orig.max()
-                    elif ts_orig.max() <= 0:
-                        lower, upper = ts_orig.min(), 0
-                    else:
-                        bound = max(abs(ts_orig.min()), abs(ts_orig.max()))
-                        lower, upper = -bound, bound
-                    ax.set_ylim(lower, upper)
                 if self.mark_neighbors_box.isChecked() or (r == half and c == half):
                     self.marker_ts.append(ts)
                     idx = self.vol_slider.value()
                     marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=dot_size)
                     self.markers.append(marker)
+
+        if global_min < global_max:
+            for ax_row in axes:
+                for ax in ax_row:
+                    ax.set_ylim(global_min, global_max)
 
         self.graph_canvas.figure.tight_layout(pad=0.1)
         self.graph_canvas.draw()
