@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from textwrap import dedent
 from typing import Tuple
+from ancpbids.utils import parse_bids_name
 import pandas as pd
 import re
 
@@ -94,6 +95,8 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         stem = safe_stem(row.sequence)
 
         base = dedup_parts(bids, ses, stem)
+        if parse_bids_name(f"{base}.nii.gz") is None:
+            base = safe_stem(base)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 

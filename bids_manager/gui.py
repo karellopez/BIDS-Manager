@@ -6,9 +6,11 @@ import shutil
 import pandas as pd
 import numpy as np
 import nibabel as nib
+from collections import Counter
 from pathlib import Path
 from ancpbids import load_dataset, DatasetOptions
 from ancpbids.query import query, query_entities
+from ancpbids.utils import parse_bids_name
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
@@ -742,14 +744,16 @@ class BIDSManager(QMainWindow):
             if modb == "fmap":
                 for suffix in ["magnitude1", "magnitude2", "phasediff"]:
                     fname = f"{base}_{suffix}.nii.gz"
+                    if parse_bids_name(fname):
+                        full = path_parts + [fname]
+                        self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
+                        self._add_preview_path(full)
+            else:
+                fname = f"{base}.nii.gz"
+                if parse_bids_name(fname):
                     full = path_parts + [fname]
                     self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
                     self._add_preview_path(full)
-            else:
-                fname = f"{base}.nii.gz"
-                full = path_parts + [fname]
-                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
-                self._add_preview_path(full)
 
         self.preview_text.expandAll()
         self.preview_tree.expandAll()
@@ -1466,6 +1470,12 @@ class BIDSManager(QMainWindow):
             self.stats.addTopLevelItem(QTreeWidgetItem(["Total subjects", str(len(subs))]))
             file_count = len(query(self.bids_ds, return_type='files'))
             self.stats.addTopLevelItem(QTreeWidgetItem(["Total files", str(file_count)]))
+            mod_dirs = query(self.bids_ds, return_type='dir', extension='nii.gz')
+            mod_counts = Counter(Path(p).parts[-1] for p in mod_dirs)
+            mod_item = QTreeWidgetItem(["Modalities", ""])
+            for m, n in sorted(mod_counts.items()):
+                mod_item.addChild(QTreeWidgetItem([m, str(n)]))
+            self.stats.addTopLevelItem(mod_item)
             for sub in subs:
                 si = QTreeWidgetItem([f"sub-{sub}", ""])
                 ses_dirs = query(self.bids_ds, return_type='dir', subject=sub, target='session')
@@ -1496,6 +1506,11 @@ class BIDSManager(QMainWindow):
         self.stats.addTopLevelItem(QTreeWidgetItem(["Total subjects", str(len(subs))]))
         files = list(root.rglob('*.*'))
         self.stats.addTopLevelItem(QTreeWidgetItem(["Total files", str(len(files))]))
+        mod_counts = Counter(p.parent.name for p in root.rglob('*.nii*'))
+        mod_item = QTreeWidgetItem(["Modalities", ""])
+        for m, n in sorted(mod_counts.items()):
+            mod_item.addChild(QTreeWidgetItem([m, str(n)]))
+        self.stats.addTopLevelItem(mod_item)
         for sub in subs:
             si = QTreeWidgetItem([sub.name, ""])
             sessions = [d for d in sub.iterdir() if d.is_dir() and d.name.startswith('ses-')]
