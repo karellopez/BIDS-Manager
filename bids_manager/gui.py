@@ -682,6 +682,8 @@ class BIDSManager(QMainWindow):
         self.spinner_label.setAlignment(Qt.AlignLeft)
         self.spinner_label.hide()
         log_layout.addWidget(self.spinner_label)
+        self.terminal_cb = QCheckBox("Show output in terminal")
+        log_layout.addWidget(self.terminal_cb)
 
         left_split.addWidget(preview_container)
         right_split.addWidget(log_group)
@@ -867,6 +869,8 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(True)
         self._start_spinner("Scanning files")
         self.inventory_process = QProcess(self)
+        if self.terminal_cb.isChecked():
+            self.inventory_process.setProcessChannelMode(QProcess.ForwardedChannels)
         self.inventory_process.finished.connect(self._inventoryFinished)
         args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
         self.inventory_process.start(sys.executable, args)
@@ -1354,6 +1358,8 @@ class BIDSManager(QMainWindow):
         self.run_button.setEnabled(False)
         self.run_stop_button.setEnabled(True)
         self.conv_process = QProcess(self)
+        if self.terminal_cb.isChecked():
+            self.conv_process.setProcessChannelMode(QProcess.ForwardedChannels)
         self.conv_process.finished.connect(self._convStepFinished)
         args = [self.build_script, self.tsv_for_conv, self.heuristic_dir]
         self.conv_process.start(sys.executable, args)
