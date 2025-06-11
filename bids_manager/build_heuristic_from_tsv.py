@@ -123,7 +123,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         buf.append(f"            {var}_list.append(s.series_id)\n")
     buf.append("    return info\n")
 
-    dst.write_text("".join(buf))
+    dst.write_text("".join(buf), encoding="utf-8")
     print("Heuristic written →", dst.resolve())
 
 
