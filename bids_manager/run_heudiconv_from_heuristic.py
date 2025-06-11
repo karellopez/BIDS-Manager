@@ -66,7 +66,13 @@ def heudi_cmd(raw_root: Path,
               bids_out: Path,
               depth: int,
               use_nipype: bool) -> List[str]:
-    """Return argument list for invoking heudiconv."""
+    """Return argument list for invoking heudiconv.
+
+    If the ``heudiconv`` module is available in the current Python
+    environment, it is executed as ``python -m heudiconv`` to ensure
+    consistency across platforms.  Otherwise, it falls back to invoking
+    the ``heudiconv`` command found on ``PATH``.
+    """
 
     wild = "*/" * depth
     template = raw_root.as_posix() + "/{subject}/" + wild + "*.dcm"
@@ -74,11 +80,17 @@ def heudi_cmd(raw_root: Path,
     phys_posix = [Path(p).as_posix() for p in phys_folders]
 
     converter = "dcm2niix" if use_nipype else "none"
+    base_cmd = ["heudiconv"]
+    try:
+        import importlib
+
+        if importlib.util.find_spec("heudiconv") is not None:
+            base_cmd = [sys.executable, "-m", "heudiconv"]
+    except Exception:
+        pass
 
     return [
-        sys.executable,
-        "-m",
-        "heudiconv",
+        *base_cmd,
         "-d",
         template,
         "-s",
