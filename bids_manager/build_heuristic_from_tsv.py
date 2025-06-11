@@ -94,11 +94,11 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         stem = safe_stem(row.sequence)
 
         base = dedup_parts(bids, ses, stem)
-        path = "/".join(p for p in [bids, ses, container] if p)
-        template = f"{path}/{base}"
+        template_parts = [p for p in [bids, ses, container] if p]
+        template = Path(*template_parts, base).as_posix()
 
-        parts = [bids, ses, stem]
-        key_var = "key_" + clean("_".join(p for p in parts if p))
+        key_parts = [bids, ses, stem]
+        key_var = "key_" + clean("_".join(p for p in key_parts if p))
         seq2key[key_id] = key_var
         key_defs.append((key_var, template))
 
@@ -123,7 +123,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         buf.append(f"            {var}_list.append(s.series_id)\n")
     buf.append("    return info\n")
 
-    dst.write_text("".join(buf))
+    dst.write_text("".join(buf), encoding="utf-8")
     print("Heuristic written →", dst.resolve())
 
 
@@ -132,6 +132,9 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
 # -----------------------------------------------------------------------------
 
 def generate(tsv: Path, out_dir: Path) -> None:
+    tsv = Path(tsv).expanduser().resolve()
+    out_dir = Path(out_dir).expanduser().resolve()
+
     df = pd.read_csv(tsv, sep="\t")
 
     # Drop rows with unwanted modalities
@@ -149,8 +152,14 @@ def generate(tsv: Path, out_dir: Path) -> None:
         heur = out_dir / f"heuristic_{fname}.py"
         write_heuristic(sub_df, heur)
         folders = " ".join(sorted({clean(f) for f in sub_df.source_folder.unique()}))
-        print(dedent(f"""
-        heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" -s {folders} -f {heur.name} -c dcm2niix -o <BIDS_OUT>/{fname} -b --minmeta --overwrite"""))
+        cmd = dedent(
+            f"""
+            heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" \
+            -s {folders} \
+            -f {heur.as_posix()} -c dcm2niix \
+            -o <BIDS_OUT>/{fname} -b --minmeta --overwrite"""
+        )
+        print(cmd)
 
 
 def main() -> None:
@@ -161,7 +170,7 @@ def main() -> None:
     parser.add_argument("out_dir", help="Directory to write heuristic files")
     args = parser.parse_args()
 
-    generate(Path(args.tsv), Path(args.out_dir))
+    generate(args.tsv, args.out_dir)
 
 
 if __name__ == "__main__":

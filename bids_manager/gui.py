@@ -653,6 +653,10 @@ class BIDSManager(QMainWindow):
         self.preview_button.clicked.connect(self.generatePreview)
         preview_layout.addWidget(self.preview_button)
 
+        self.skip_nipype_box = QCheckBox("Run dcm2niix separately")
+        self.skip_nipype_box.setToolTip("Use heudiconv with -c none and convert with dcm2niix")
+        preview_layout.addWidget(self.skip_nipype_box)
+
         btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.runFullConversion)
@@ -1368,6 +1372,8 @@ class BIDSManager(QMainWindow):
             self.conv_stage = 1
             self.log_text.append("Running HeuDiConv…")
             args = [self.run_script, self.dicom_dir, self.heuristic_dir, self.bids_out_dir, '--subject-tsv', self.tsv_path]
+            if self.skip_nipype_box.isChecked():
+                args.append('--no-nipype')
             self.conv_process.start(sys.executable, args)
         elif self.conv_stage == 1:
             if exitCode != 0:
