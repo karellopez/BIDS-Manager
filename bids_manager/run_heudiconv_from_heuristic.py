@@ -11,7 +11,6 @@ from pathlib import Path
 import importlib.util
 import subprocess
 import os
-import sys
 from typing import Dict, List, Optional
 import pandas as pd
 import re
@@ -76,22 +75,13 @@ def heudi_cmd(raw_root: Path,
     converter = "dcm2niix" if use_nipype else "none"
 
     return [
-        sys.executable,
-        "-m",
         "heudiconv",
-        "-d",
-        template,
-        "-s",
-        *phys_posix,
-        "-f",
-        heuristic.as_posix(),
-        "-c",
-        converter,
-        "-o",
-        bids_out.as_posix(),
-        "-b",
-        "--minmeta",
-        "--overwrite",
+        "-d", template,
+        "-s", *phys_posix,
+        "-f", heuristic.as_posix(),
+        "-c", converter,
+        "-o", bids_out.as_posix(),
+        "-b", "--minmeta", "--overwrite",
     ]
 
 
