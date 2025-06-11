@@ -23,7 +23,6 @@ dependencies = [
     "numpy",
     "psutil",
     "matplotlib",
-    "dcm2niix",
 ]
 
 

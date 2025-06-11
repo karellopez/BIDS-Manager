@@ -14,7 +14,6 @@ import os
 from typing import Dict, List, Optional
 import pandas as pd
 import re
-import json
 
 
 # ────────────────── helpers ──────────────────
@@ -63,55 +62,18 @@ def heudi_cmd(raw_root: Path,
               phys_folders: List[str],
               heuristic: Path,
               bids_out: Path,
-              depth: int,
-              use_nipype: bool) -> List[str]:
-    """Return argument list for invoking heudiconv."""
-
+              depth: int) -> List[str]:
     wild = "*/" * depth
-    template = raw_root.as_posix() + "/{subject}/" + wild + "*.dcm"
-
-    phys_posix = [Path(p).as_posix() for p in phys_folders]
-
-    converter = "dcm2niix" if use_nipype else "none"
-
+    template = f"{raw_root}/" + "{subject}/" + wild + "*.dcm"
     return [
         "heudiconv",
         "-d", template,
-        "-s", *phys_posix,
-        "-f", heuristic.as_posix(),
-        "-c", converter,
-        "-o", bids_out.as_posix(),
+        "-s", *phys_folders,
+        "-f", str(heuristic),
+        "-c", "dcm2niix",
+        "-o", str(bids_out),
         "-b", "--minmeta", "--overwrite",
     ]
-
-
-def _manual_convert(bids_root: Path, clean_id: str) -> None:
-    """Run dcm2niix on filegroup.json results for *clean_id*."""
-    info_dir = bids_root / ".heudiconv" / clean_id / "info"
-    fg = info_dir / "filegroup.json"
-    if not fg.exists():
-        return
-
-    with fg.open("r", encoding="utf-8") as f:
-        mapping = json.load(f)
-
-    for prefix, dicoms in mapping.items():
-        if not dicoms:
-            continue
-        out_prefix = bids_root / prefix
-        out_dir = out_prefix.parent
-        out_dir.mkdir(parents=True, exist_ok=True)
-        dcm_dir = os.path.dirname(dicoms[0])
-        cmd = [
-            "dcm2niix",
-            "-z", "y",
-            "-b", "y",
-            "-f", out_prefix.name,
-            "-o", str(out_dir),
-            dcm_dir,
-        ]
-        print(" ".join(cmd))
-        subprocess.run(cmd, check=True)
 
 
 def _parse_age(value: str) -> str:
@@ -151,52 +113,34 @@ def run_heudiconv(raw_root: Path,
                   heuristic: Path,
                   bids_out: Path,
                   per_folder: bool = True,
-                  mapping_df: Optional[pd.DataFrame] = None,
-                  use_nipype: bool = True) -> None:
+                  mapping_df: Optional[pd.DataFrame] = None) -> None:
 
-    sid_map     = load_sid_map(heuristic)  # cleaned → sub-XXX
-    clean2phys  = physical_by_clean(raw_root)
-    cleaned_ids = sorted(sid_map.keys())
-
-    missing = [c for c in cleaned_ids if c not in clean2phys]
-    if missing:
-        hint = (
-            "Ensure --dicom-root matches the directory used to generate "
-            "subject_summary.tsv"
-        )
-        raise KeyError(
-            "Folders listed in heuristic not found under "
-            f"{raw_root}: {', '.join(missing)}. {hint}"
-        )
-
-    phys_folders = [clean2phys[c] for c in cleaned_ids]
+    sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
+    clean2phys       = physical_by_clean(raw_root)
+    cleaned_ids      = sorted(sid_map.keys())
+    phys_folders     = [clean2phys[c] for c in cleaned_ids]
 
     depth = detect_depth(raw_root / phys_folders[0])
 
-    print("Raw root    :", raw_root.as_posix())
-    print("Heuristic   :", heuristic.as_posix())
-    print("Output BIDS :", bids_out.as_posix())
-    print("Folders     :", [Path(p).as_posix() for p in phys_folders])
+    print("Raw root    :", raw_root)
+    print("Heuristic   :", heuristic)
+    print("Output BIDS :", bids_out)
+    print("Folders     :", phys_folders)
     print("Depth       :", depth, "\n")
 
     bids_out.mkdir(parents=True, exist_ok=True)
 
     if per_folder:
         for phys in phys_folders:
-            print(f"── {Path(phys).as_posix()} ──")
-            cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth, use_nipype)
+            print(f"── {phys} ──")
+            cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth)
             print(" ".join(cmd))
             subprocess.run(cmd, check=True)
-            if not use_nipype:
-                _manual_convert(bids_out, clean_name(phys))
             print()
     else:
-        cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth, use_nipype)
+        cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth)
         print(" ".join(cmd))
         subprocess.run(cmd, check=True)
-        if not use_nipype:
-            for phys in phys_folders:
-                _manual_convert(bids_out, clean_name(phys))
 
     if mapping_df is not None:
         dataset = bids_out.name
@@ -221,35 +165,18 @@ def main() -> None:
     parser.add_argument("bids_out", help="Output BIDS directory")
     parser.add_argument("--subject-tsv", help="Path to subject_summary.tsv", default=None)
     parser.add_argument("--single-run", action="store_true", help="Use one heudiconv call for all subjects")
-    parser.add_argument("--no-nipype", action="store_true", help="Skip Nipype and run dcm2niix separately")
     args = parser.parse_args()
 
     mapping_df = None
     if args.subject_tsv:
         mapping_df = pd.read_csv(args.subject_tsv, sep="\t")
 
-    raw_root = Path(args.dicom_root).expanduser().resolve()
-    heur_path = Path(args.heuristic).expanduser().resolve()
-    bids_root = Path(args.bids_out).expanduser().resolve()
-
-    heuristics = (
-        [heur_path]
-        if heur_path.is_file()
-        else sorted(heur_path.glob("heuristic_*.py"))
-    )
-
+    heur_path = Path(args.heuristic)
+    heuristics = [heur_path] if heur_path.is_file() else sorted(heur_path.glob("heuristic_*.py"))
     for heur in heuristics:
-        heur = heur.resolve()
         dataset = heur.stem.replace("heuristic_", "")
-        out_dir = bids_root / dataset
-        run_heudiconv(
-            raw_root,
-            heur,
-            out_dir,
-            per_folder=not args.single_run,
-            mapping_df=mapping_df,
-            use_nipype=not args.no_nipype,
-        )
+        out_dir = Path(args.bids_out) / dataset
+        run_heudiconv(Path(args.dicom_root), heur, out_dir, per_folder=not args.single_run, mapping_df=mapping_df)
 
 
 if __name__ == "__main__":
