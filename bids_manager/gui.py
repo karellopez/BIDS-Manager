@@ -872,12 +872,7 @@ class BIDSManager(QMainWindow):
         self._start_spinner("Scanning files")
         self.inventory_process = QProcess(self)
         self.inventory_process.finished.connect(self._inventoryFinished)
-        args = [
-            "-m",
-            "bids_manager.dicom_inventory",
-            self.dicom_dir,
-            self.tsv_path,
-        ]
+        args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
         self.inventory_process.start(sys.executable, args)
 
     def _inventoryFinished(self):
@@ -1348,10 +1343,11 @@ class BIDSManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {e}")
             return
 
-        # Module paths for the helper scripts
-        self.build_script = "bids_manager.build_heuristic_from_tsv"
-        self.run_script = "bids_manager.run_heudiconv_from_heuristic"
-        self.rename_script = "bids_manager.post_conv_renamer"
+        # Paths for scripts
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.build_script = os.path.join(script_dir, "build_heuristic_from_tsv.py")
+        self.run_script = os.path.join(script_dir, "run_heudiconv_from_heuristic.py")
+        self.rename_script = os.path.join(script_dir, "post_conv_renamer.py")
 
         self.heuristic_dir = os.path.join(self.bids_out_dir, "heuristics")
         self.heurs_to_rename = []
@@ -1363,12 +1359,7 @@ class BIDSManager(QMainWindow):
         self.run_stop_button.setEnabled(True)
         self.conv_process = QProcess(self)
         self.conv_process.finished.connect(self._convStepFinished)
-        args = [
-            "-m",
-            self.build_script,
-            self.tsv_for_conv,
-            self.heuristic_dir,
-        ]
+        args = [self.build_script, self.tsv_for_conv, self.heuristic_dir]
         self.conv_process.start(sys.executable, args)
 
     def _convStepFinished(self, exitCode, _status):
@@ -1380,17 +1371,9 @@ class BIDSManager(QMainWindow):
             self.log_text.append(f"Heuristics written to {self.heuristic_dir}")
             self.conv_stage = 1
             self.log_text.append("Running HeuDiConv…")
-            args = [
-                "-m",
-                self.run_script,
-                self.dicom_dir,
-                self.heuristic_dir,
-                self.bids_out_dir,
-                "--subject-tsv",
-                self.tsv_path,
-            ]
+            args = [self.run_script, self.dicom_dir, self.heuristic_dir, self.bids_out_dir, '--subject-tsv', self.tsv_path]
             if self.skip_nipype_box.isChecked():
-                args.append("--no-nipype")
+                args.append('--no-nipype')
             self.conv_process.start(sys.executable, args)
         elif self.conv_stage == 1:
             if exitCode != 0:
@@ -1426,7 +1409,7 @@ class BIDSManager(QMainWindow):
         dataset = heur.stem.replace("heuristic_", "")
         bids_path = os.path.join(self.bids_out_dir, dataset)
         self.log_text.append(f"Renaming fieldmaps for {dataset}…")
-        args = ["-m", self.rename_script, bids_path]
+        args = [self.rename_script, bids_path]
         self.conv_process.start(sys.executable, args)
 
     def _store_heuristics(self):
