@@ -189,6 +189,8 @@ def run_heudiconv(raw_root: Path,
             subprocess.run(cmd, check=True)
             if not use_nipype:
                 _manual_convert(bids_out, clean_name(phys))
+                print("Re-applying heuristic to converted data …")
+                subprocess.run(cmd, check=True)
             print()
     else:
         cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth, use_nipype)
@@ -197,6 +199,8 @@ def run_heudiconv(raw_root: Path,
         if not use_nipype:
             for phys in phys_folders:
                 _manual_convert(bids_out, clean_name(phys))
+            print("Re-applying heuristic to converted data …")
+            subprocess.run(cmd, check=True)
 
     if mapping_df is not None:
         dataset = bids_out.name
