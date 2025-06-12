@@ -32,3 +32,13 @@ All utilities provide `-h/--help` for details.
   and generates a clean `participants.tsv` using demographics from that file.
 
 
+
+### Troubleshooting
+
+If launching `bids-manager` fails with a message like:
+
+```
+ModuleNotFoundError: No module named '_bz2'
+```
+
+Your Python interpreter was built without bzip2 support. Install the system development package for `libbz2` (e.g. `libbz2-dev` on Debian/Ubuntu) and rebuild Python or use a distribution-provided interpreter with bzip2. Dependencies such as `nibabel` rely on the standard `bz2` module.
