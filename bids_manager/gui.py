@@ -5,7 +5,44 @@ import re
 import shutil
 import pandas as pd
 import numpy as np
-import nibabel as nib
+try:
+    import nibabel as nib
+except ModuleNotFoundError as exc:
+    if exc.name == '_bz2':
+        import sys
+        import types
+        import io
+        import subprocess
+
+        class _SubprocessBZ2File(io.BufferedReader):
+            """Minimal BZ2File replacement using the external ``bzip2`` binary."""
+
+            def __init__(self, filename, mode="r", buffering=None, compresslevel=9):
+                if "r" not in mode:
+                    raise NotImplementedError(
+                        "Writing not supported without Python bz2 module"
+                    )
+                proc = subprocess.Popen(
+                    ["bzip2", "-dc", filename], stdout=subprocess.PIPE
+                )
+                if proc.stdout is None:  # pragma: no cover - should not happen
+                    raise RuntimeError("Failed to open bzip2 subprocess")
+                self._proc = proc
+                super().__init__(proc.stdout)
+
+            def close(self):
+                try:
+                    super().close()
+                finally:
+                    self._proc.stdout.close()
+                    self._proc.wait()
+
+        stub = types.ModuleType("bz2")
+        stub.BZ2File = _SubprocessBZ2File
+        sys.modules.setdefault("bz2", stub)
+        import nibabel as nib
+    else:  # pragma: no cover - unrelated import failure
+        raise
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
