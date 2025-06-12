@@ -674,6 +674,8 @@ class BIDSManager(QMainWindow):
 
         log_group = QGroupBox("Log Output")
         log_layout = QVBoxLayout(log_group)
+        self.terminal_cb = QCheckBox("Show output in terminal")
+        log_layout.addWidget(self.terminal_cb)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.document().setMaximumBlockCount(1000)
@@ -682,8 +684,6 @@ class BIDSManager(QMainWindow):
         self.spinner_label.setAlignment(Qt.AlignLeft)
         self.spinner_label.hide()
         log_layout.addWidget(self.spinner_label)
-        self.terminal_cb = QCheckBox("Show output in terminal")
-        log_layout.addWidget(self.terminal_cb)
 
         left_split.addWidget(preview_container)
         right_split.addWidget(log_group)
