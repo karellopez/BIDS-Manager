@@ -41,5 +41,8 @@ packages = ["bids_manager"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"bids_manager" = ["miscellaneous/images/Logo.png"]
+"bids_manager" = [
+    "miscellaneous/images/Logo.png",
+    "miscellaneous/images/Icon.png",
+]
 
