@@ -11,9 +11,6 @@ from pathlib import Path
 import importlib.util
 import subprocess
 import os
-import shutil
-if os.name == "nt":
-    from heudiconv.utils import set_readonly
 from typing import Dict, List, Optional
 import pandas as pd
 import re
@@ -132,23 +129,6 @@ def run_heudiconv(raw_root: Path,
     print("Depth       :", depth, "\n")
 
     bids_out.mkdir(parents=True, exist_ok=True)
-
-    if os.name == "nt":
-        # Windows may keep output files locked from previous runs because
-        # HeuDiConv marks them read-only.  Clear any existing subject
-        # directories after making their contents writeable so that
-        # subsequent conversions succeed with --overwrite.
-        for sid in sid_map.values():
-            sub_dir = bids_out / sid
-            if not sub_dir.exists():
-                continue
-            for root, _dirs, files in os.walk(sub_dir):
-                for f in files:
-                    try:
-                        set_readonly(str(Path(root) / f), False)
-                    except Exception:
-                        pass
-            shutil.rmtree(sub_dir, ignore_errors=True)
 
     if per_folder:
         for phys in phys_folders:
