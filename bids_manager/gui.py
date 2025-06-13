@@ -2257,6 +2257,14 @@ class MetadataViewer(QWidget):
         return obj
 
 def main() -> None:
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                u"bids.manager.1.0"
+            )
+        except Exception:
+            pass
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     if ICON_FILE.exists():
