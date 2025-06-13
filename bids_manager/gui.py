@@ -62,6 +62,7 @@ from PyQt5.QtGui import (
     QPixmap,
     QPainter,
     QPen,
+    QIcon,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
@@ -73,8 +74,9 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     HAS_PSUTIL = False
 
-# Path to the application logo
+# Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
+ICON_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Icon.png"
 
 
 class _AutoUpdateLabel(QLabel):
@@ -166,6 +168,8 @@ class BIDSManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BIDS Manager")
+        if ICON_FILE.exists():
+            self.setWindowIcon(QIcon(str(ICON_FILE)))
         self.resize(900, 900)
 
         # Paths
@@ -2255,6 +2259,8 @@ class MetadataViewer(QWidget):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    if ICON_FILE.exists():
+        app.setWindowIcon(QIcon(str(ICON_FILE)))
     win = BIDSManager()
     win.show()
     sys.exit(app.exec_())
