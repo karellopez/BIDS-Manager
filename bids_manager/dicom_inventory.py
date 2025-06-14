@@ -35,6 +35,7 @@ import os
 import re
 from collections import defaultdict
 from typing import Optional
+from pathlib import Path
 
 import pandas as pd
 import pydicom
@@ -111,6 +112,7 @@ def scan_dicoms_long(root_dir: str,
         Inventory as described in module docstring.
     """
 
+    root_dir = Path(root_dir)
     print(f"Scanning DICOM headers under: {root_dir}")
 
     # in-memory stores
