@@ -51,7 +51,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox)
+    QCheckBox, QStyledItemDelegate)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -158,6 +158,22 @@ def _dedup_parts(*parts: str) -> str:
             if t and (not tokens or t != tokens[-1]):
                 tokens.append(t)
     return "_".join(tokens)
+
+
+class SubjectDelegate(QStyledItemDelegate):
+    """Delegate to edit BIDS subject IDs without altering the 'sub-' prefix."""
+
+    def createEditor(self, parent, option, index):  # noqa: D401 - Qt override
+        return QLineEdit(parent)
+
+    def setEditorData(self, editor, index):  # noqa: D401 - Qt override
+        text = index.model().data(index, Qt.EditRole)
+        suffix = text[4:] if text.startswith("sub-") else text
+        editor.setText(suffix)
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):  # noqa: D401 - Qt override
+        model.setData(index, "sub-" + editor.text(), Qt.EditRole)
 
 class BIDSManager(QMainWindow):
     """
@@ -656,6 +672,7 @@ class BIDSManager(QMainWindow):
         n_hdr = self.naming_table.horizontalHeader()
         n_hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         n_hdr.setStretchLastSection(True)
+        self.naming_table.setItemDelegateForColumn(2, SubjectDelegate(self.naming_table))
         naming_layout.addWidget(self.naming_table)
         self.naming_table.itemChanged.connect(self._onNamingEdited)
         self.name_choice = QComboBox()
@@ -717,6 +734,10 @@ class BIDSManager(QMainWindow):
         log_layout = QVBoxLayout(log_group)
         self.terminal_cb = QCheckBox("Show output in terminal")
         log_layout.addWidget(self.terminal_cb)
+        if sys.platform == "win32":
+            # Always show terminal output on Windows and hide the option
+            self.terminal_cb.setChecked(True)
+            self.terminal_cb.setVisible(False)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.document().setMaximumBlockCount(1000)
@@ -911,7 +932,12 @@ class BIDSManager(QMainWindow):
         self._start_spinner("Scanning files")
         self.inventory_process = QProcess(self)
         if self.terminal_cb.isChecked():
+            # Forward stdout and stderr when the user wants to see terminal output
             self.inventory_process.setProcessChannelMode(QProcess.ForwardedChannels)
+        else:
+            # Discard output to avoid hangs on Windows when not showing the terminal
+            self.inventory_process.setStandardOutputFile(QProcess.nullDevice())
+            self.inventory_process.setStandardErrorFile(QProcess.nullDevice())
         self.inventory_process.finished.connect(self._inventoryFinished)
         args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
         self.inventory_process.start(sys.executable, args)
@@ -1145,7 +1171,25 @@ class BIDSManager(QMainWindow):
             return
         study = self.naming_table.item(item.row(), 0).text()
         given = self.naming_table.item(item.row(), 1).text()
+        # Remember the existing BIDS name so we can restore it if validation fails
+        old_bids = None
+        for info in self.row_info:
+            if info['study'] == study and info['given'] == given:
+                old_bids = info['bids']
+                break
         new_bids = item.text()
+        # Ensure the prefix is kept and that names remain unique
+        if not new_bids.startswith('sub-'):
+            QMessageBox.warning(self, "Invalid name", "BIDS names must start with 'sub-'.")
+            if old_bids is not None:
+                item.setText(old_bids)
+            return
+        other_names = [self.naming_table.item(r, 2).text() for r in range(self.naming_table.rowCount()) if r != item.row()]
+        if new_bids in other_names:
+            QMessageBox.warning(self, "Duplicate name", "This name is already assigned.")
+            if old_bids is not None:
+                item.setText(old_bids)
+            return
         for idx, info in enumerate(self.row_info):
             if info['study'] == study and info['given'] == given:
                 info['bids'] = new_bids
@@ -1400,7 +1444,12 @@ class BIDSManager(QMainWindow):
         self.run_stop_button.setEnabled(True)
         self.conv_process = QProcess(self)
         if self.terminal_cb.isChecked():
+            # Forward output so the user can monitor conversion progress
             self.conv_process.setProcessChannelMode(QProcess.ForwardedChannels)
+        else:
+            # Prevent blocked pipes on Windows when the terminal isn't shown
+            self.conv_process.setStandardOutputFile(QProcess.nullDevice())
+            self.conv_process.setStandardErrorFile(QProcess.nullDevice())
         self.conv_process.finished.connect(self._convStepFinished)
         args = [self.build_script, self.tsv_for_conv, self.heuristic_dir]
         self.conv_process.start(sys.executable, args)
