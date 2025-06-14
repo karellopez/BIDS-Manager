@@ -216,6 +216,9 @@ class BIDSManager(QMainWindow):
         self.conv_stage = 0
         self.heurs_to_rename = []
 
+        # Root of the currently loaded BIDS dataset (None until loaded)
+        self.bids_root = None
+
         # Spinner for long-running tasks
         self.spinner_label = None
         self._spinner_timer = QTimer()
@@ -1547,6 +1550,8 @@ class BIDSManager(QMainWindow):
     def updateStats(self):
         """Compute and display BIDS stats: total subjects, files, modalities."""
         root = self.bids_root
+        if not root:
+            return
         self.stats.clear()
         subs = [d for d in root.iterdir() if d.is_dir() and d.name.startswith('sub-')]
         self.stats.addTopLevelItem(QTreeWidgetItem(["Total subjects", str(len(subs))]))
@@ -1561,7 +1566,7 @@ class BIDSManager(QMainWindow):
                     mods = set(p.parent.name for p in ses.rglob('*.nii*'))
                     s2.addChild(QTreeWidgetItem(["Modalities", str(len(mods))]))
                     for m in mods:
-                        imgs = len(list(ses.rglob(f'{m}/*.*')))
+                        imgs = len(list(ses.rglob(f'{m}/*.nii*')))
                         meta = len(list(ses.rglob(f'{m}/*.json'))) + len(list(ses.rglob(f'{m}/*.tsv')))
                         s2.addChild(QTreeWidgetItem([m, f"imgs:{imgs}, meta:{meta}"]))
                     si.addChild(s2)
@@ -1570,7 +1575,7 @@ class BIDSManager(QMainWindow):
                 si.addChild(QTreeWidgetItem(["Sessions", "1"]))
                 si.addChild(QTreeWidgetItem(["Modalities", str(len(mods))]))
                 for m in mods:
-                    imgs = len(list(sub.rglob(f'{m}/*.*')))
+                    imgs = len(list(sub.rglob(f'{m}/*.nii*')))
                     meta = len(list(sub.rglob(f'{m}/*.json'))) + len(list(sub.rglob(f'{m}/*.tsv')))
                     si.addChild(QTreeWidgetItem([m, f"imgs:{imgs}, meta:{meta}"]))
             self.stats.addTopLevelItem(si)
@@ -1578,6 +1583,13 @@ class BIDSManager(QMainWindow):
 
     def launchBatchRename(self):
         """Open the Batch Rename dialog from bids_editor_ancpbids."""
+        if not self.bids_root:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Dataset not detected. Please load a dataset in File → Open BIDS",
+            )
+            return
         dlg = RemapDialog(self, self.bids_root)
         dlg.exec_()
 
@@ -1598,11 +1610,6 @@ class RemapDialog(QDialog):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
         self.add_condition()  # initial condition
-
-        # Button to add more conditions
-        btn_add_cond = QPushButton("Add Condition")
-        btn_add_cond.clicked.connect(self.add_condition)
-        layout.addWidget(btn_add_cond)
 
         # Scope selector
         scope_layout = QHBoxLayout()
@@ -1652,13 +1659,27 @@ class RemapDialog(QDialog):
         btn_addr.clicked.connect(lambda: rules_tbl.insertRow(rules_tbl.rowCount()))
         btn_delr = QPushButton("Delete Rule")
         btn_delr.clicked.connect(lambda: rules_tbl.removeRow(rules_tbl.currentRow()))
+        btn_addc = QPushButton("Add Condition")
+        btn_addc.clicked.connect(self.add_condition)
+        btn_delc = QPushButton("Delete Condition")
+        btn_delc.clicked.connect(lambda: self.delete_condition(tab))
         rule_btns.addWidget(btn_addr)
         rule_btns.addWidget(btn_delr)
+        rule_btns.addWidget(btn_addc)
+        rule_btns.addWidget(btn_delc)
         rule_btns.addStretch()
         fl.addLayout(rule_btns)
         fl.addWidget(rules_tbl)
         index = self.tabs.count() + 1
         self.tabs.addTab(tab, f"Condition {index}")
+
+    def delete_condition(self, tab):
+        """Remove a condition tab."""
+        idx = self.tabs.indexOf(tab)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        if self.tabs.count() == 0:
+            self.add_condition()
 
     def get_scope_paths(self):
         """Retrieve file paths under the selected scope."""
