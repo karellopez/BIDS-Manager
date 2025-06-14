@@ -39,7 +39,12 @@ def safe_stem(text: str) -> str:
 
 def physical_by_clean(raw_root: Path) -> Dict[str, str]:
     """Return mapping cleaned_name → relative folder path for all subdirs."""
-    mapping: Dict[str, str] = {}
+    mapping: Dict[str, str] = {
+        "": "",
+        ".": "",
+        raw_root.name: "",
+        clean_name(raw_root.name): "",
+    }
     for p in raw_root.rglob("*"):
         if not p.is_dir():
             continue
@@ -70,10 +75,11 @@ def heudi_cmd(raw_root: Path,
     """Build the ``heudiconv`` command for the given parameters."""
     wild = "*/" * depth
     template = f"{raw_root}/" + "{subject}/" + wild + "*.dcm"
+    subjects = [p or "." for p in phys_folders]
     return [
         "heudiconv",
         "-d", template,
-        "-s", *phys_folders,
+        "-s", *subjects,
         "-f", str(heuristic),
         "-c", "dcm2niix",
         "-o", str(bids_out),
