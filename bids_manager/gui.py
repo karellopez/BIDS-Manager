@@ -111,6 +111,7 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 def _terminate_process_tree(pid: int):
     """Terminate a process and all of its children without killing the GUI."""
+    # Protect against invalid PIDs which may occur if a process fails to start
     if pid <= 0:
         return
     # Try killing the process group only if it's not the same as the GUI's
@@ -154,9 +155,13 @@ def _get_ext(path: Path) -> str:
 
 def _dedup_parts(*parts: str) -> str:
     """Return underscore-joined parts with consecutive repeats removed."""
+    # ``parts`` may contain elements that themselves contain underscores.  The
+    # goal is to produce a clean path component without duplicate separators.
     tokens: list[str] = []
     for part in parts:
+        # Split each piece on underscores so ``seq__name`` becomes ["seq", "name"]
         for t in str(part).split('_'):
+            # Only keep tokens that are not a repeat of the previous one
             if t and (not tokens or t != tokens[-1]):
                 tokens.append(t)
     return "_".join(tokens)
@@ -212,17 +217,19 @@ class BIDSManager(QMainWindow):
         self.spec_seq_rows_given = {}
         self.use_bids_names = True
 
-        # Async process handles
-        self.inventory_process = None
-        self.conv_process = None
-        self.conv_stage = 0
-        self.heurs_to_rename = []
+        # Async process handles for inventory and conversion steps
+        self.inventory_process = None  # QProcess for dicom_inventory
+        self.conv_process = None       # QProcess for the conversion pipeline
+        self.conv_stage = 0            # Tracks which step of the pipeline ran
+        self.heurs_to_rename = []      # List of heuristics pending rename
 
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
 
         # Spinner for long-running tasks
         self.spinner_label = None
+        # Timer and unicode characters for the small animated spinner that
+        # appears while long-running subprocesses are running
         self._spinner_timer = QTimer()
         self._spinner_timer.timeout.connect(self._spin)
         self._spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -767,6 +774,9 @@ class BIDSManager(QMainWindow):
 
     def _add_preview_path(self, parts):
         """Insert path components into the preview tree if missing."""
+        # ``parts`` represents a sequence of folders/files in a BIDS path. This
+        # helper walks the preview tree and adds nodes so that the structure is
+        # displayed hierarchically.
         parent = self.preview_tree.invisibleRootItem()
         for part in parts:
             match = None
@@ -800,6 +810,8 @@ class BIDSManager(QMainWindow):
             seq = self.mapping_table.item(i, 3).text()
             modb = self.mapping_table.item(i, 5).text()
 
+            # Build the destination path under BIDS.  If multiple studies are
+            # present, prepend the study name so each dataset is separated.
             path_parts = []
             if multi_study:
                 path_parts.append(study)
@@ -807,6 +819,8 @@ class BIDSManager(QMainWindow):
             base = _dedup_parts(subj, ses, seq)
 
             if modb == "fmap":
+                # Fieldmaps generate several derivative files with specific
+                # suffixes.  Add each expected file name to the preview.
                 for suffix in ["magnitude1", "magnitude2", "phasediff"]:
                     fname = f"{base}_{suffix}.nii.gz"
                     full = path_parts + [fname]
@@ -1212,6 +1226,8 @@ class BIDSManager(QMainWindow):
 
     def _rebuild_lookup_maps(self):
         """Recompute internal lookup tables for tree interactions."""
+        # Maps from tree nodes to row indices in ``self.mapping_table``. These
+        # allow checkbox changes in the tree to update table rows and vice versa.
         self.modb_rows.clear()
         self.mod_rows.clear()
         self.seq_rows.clear()
@@ -1221,12 +1237,16 @@ class BIDSManager(QMainWindow):
         self.spec_modb_rows.clear()
         self.spec_mod_rows.clear()
         self.spec_seq_rows.clear()
+
+        # Same lookups but using the "given" subject names when that mode is
+        # selected instead of the BIDS names
         self.subject_rows_given = {}
         self.session_rows_given = {}
         self.spec_modb_rows_given = {}
         self.spec_mod_rows_given = {}
         self.spec_seq_rows_given = {}
         for idx, info in enumerate(self.row_info):
+            # Populate lookup tables using BIDS subject names
             self.modb_rows.setdefault(info['modb'], []).append(idx)
             self.mod_rows.setdefault((info['modb'], info['mod']), []).append(idx)
             self.seq_rows.setdefault((info['modb'], info['mod'], info['seq']), []).append(idx)
@@ -1237,6 +1257,7 @@ class BIDSManager(QMainWindow):
             self.spec_mod_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod']), []).append(idx)
             self.spec_seq_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
             gsub = f"sub-{info['given']}"
+            # Equivalent lookups built from the given (non-BIDS) subject names
             self.subject_rows_given.setdefault((info['study'], gsub), []).append(idx)
             self.session_rows_given.setdefault((info['study'], gsub, info['ses']), []).append(idx)
             self.spec_modb_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb']), []).append(idx)
@@ -2048,6 +2069,7 @@ class MetadataViewer(QWidget):
             slice_img = vol[:, slice_idx, :]
         else:
             slice_img = vol[:, :, slice_idx]
+        # Normalise the slice to 0..1 before applying display adjustments
         arr = slice_img.astype(np.float32)
         arr = arr - arr.min()
         if arr.max() > 0:
@@ -2076,6 +2098,7 @@ class MetadataViewer(QWidget):
             scale_x, scale_y = self._img_scale
             x_s = int(x_rot * scale_x)
             y_s = int(y_rot * scale_y)
+            # Use the highlight color so the crosshair is visible on any theme
             painter = QPainter(scaled)
             theme_color = self.palette().color(QPalette.Highlight)
             pen = QPen(theme_color)
@@ -2095,6 +2118,7 @@ class MetadataViewer(QWidget):
             self._update_graph_marker()
 
     def _label_pos_to_img_coords(self, pos):
+        # Convert click position on the scaled QLabel back to image coordinates
         pix = self.img_label.pixmap()
         if pix is None:
             return None
@@ -2109,6 +2133,7 @@ class MetadataViewer(QWidget):
         return None
 
     def _arr_to_voxel(self, x, y):
+        # Map 2D display coordinates back to a voxel index within the volume
         vol_idx = self.vol_slider.value()
         vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
         axis = self.orientation
@@ -2127,6 +2152,7 @@ class MetadataViewer(QWidget):
             return i, j, slice_idx
 
     def _voxel_to_arr(self, voxel):
+        """Convert a voxel index back to 2-D array coordinates for drawing."""
         i, j, k = voxel
         vol_idx = self.vol_slider.value()
         vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
@@ -2173,6 +2199,8 @@ class MetadataViewer(QWidget):
             self.splitter.setSizes([total, 0])
 
     def _update_graph(self):
+        # Redraw the time-series graph for all voxels in the selected neighborhood
+        # around ``self.cross_voxel``. Only valid for 4-D data.
         if self.data.ndim != 4 or self.cross_voxel is None:
             return
 
@@ -2239,6 +2267,7 @@ class MetadataViewer(QWidget):
         self.graph_canvas.draw()
 
     def _update_graph_marker(self):
+        # Update the marker showing the current volume index on all axes
         if not getattr(self, "markers", None) or not getattr(self, "marker_ts", None):
             return
         marker_color = self.palette().color(QPalette.Highlight).name()
