@@ -1215,9 +1215,17 @@ class BIDSManager(QMainWindow):
             if old_bids is not None:
                 item.setText(old_bids)
             return
-        other_names = [self.naming_table.item(r, 2).text() for r in range(self.naming_table.rowCount()) if r != item.row()]
+        other_names = [
+            self.naming_table.item(r, 2).text()
+            for r in range(self.naming_table.rowCount())
+            if r != item.row() and self.naming_table.item(r, 0).text() == study
+        ]
         if new_bids in other_names:
-            QMessageBox.warning(self, "Duplicate name", "This name is already assigned.")
+            QMessageBox.warning(
+                self,
+                "Duplicate name",
+                "This name is already assigned in this study.",
+            )
             if old_bids is not None:
                 item.setText(old_bids)
             return
