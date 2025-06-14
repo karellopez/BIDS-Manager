@@ -242,6 +242,8 @@ def scan_dicoms_long(root_dir: str,
 # Command-line test
 # ----------------------------------------------------------------------
 def main() -> None:
+    """Command line interface for :func:`scan_dicoms_long`."""
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate TSV inventory for a DICOM folder")

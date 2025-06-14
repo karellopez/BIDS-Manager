@@ -18,6 +18,8 @@ import re
 
 # ────────────────── helpers ──────────────────
 def load_sid_map(heur: Path) -> Dict[str, str]:
+    """Load the ``SID_MAP`` dictionary from a heuristic file."""
+
     spec = importlib.util.spec_from_file_location("heuristic", heur)
     module = importlib.util.module_from_spec(spec)         # type: ignore
     assert spec.loader
@@ -26,6 +28,8 @@ def load_sid_map(heur: Path) -> Dict[str, str]:
 
 
 def clean_name(raw: str) -> str:
+    """Return alphanumeric-only version of ``raw``."""
+
     return "".join(ch for ch in raw if ch.isalnum())
 
 def safe_stem(text: str) -> str:
@@ -63,6 +67,7 @@ def heudi_cmd(raw_root: Path,
               heuristic: Path,
               bids_out: Path,
               depth: int) -> List[str]:
+    """Build the ``heudiconv`` command for the given parameters."""
     wild = "*/" * depth
     template = f"{raw_root}/" + "{subject}/" + wild + "*.dcm"
     return [
@@ -114,6 +119,7 @@ def run_heudiconv(raw_root: Path,
                   bids_out: Path,
                   per_folder: bool = True,
                   mapping_df: Optional[pd.DataFrame] = None) -> None:
+    """Run HeuDiConv using ``heuristic`` and write output to ``bids_out``."""
 
     sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
     clean2phys       = physical_by_clean(raw_root)
@@ -157,6 +163,8 @@ def run_heudiconv(raw_root: Path,
 
 # ────────────────── CLI interface ──────────────────
 def main() -> None:
+    """Command line interface for ``run-heudiconv``."""
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Run HeuDiConv using one or more heuristics")
