@@ -74,16 +74,44 @@ def heudi_cmd(raw_root: Path,
               depth: int) -> List[str]:
     """Build the ``heudiconv`` command for the given parameters."""
     wild = "*/" * depth
+
+    if len(phys_folders) == 1 and phys_folders[0] == "":
+        files = sorted(str(p) for p in raw_root.glob(wild + "*.dcm"))
+        subj = clean_name(raw_root.name) or "root"
+        return [
+            "heudiconv",
+            "--files",
+            *files,
+            "-s",
+            subj,
+            "-f",
+            str(heuristic),
+            "-c",
+            "dcm2niix",
+            "-o",
+            str(bids_out),
+            "-b",
+            "--minmeta",
+            "--overwrite",
+        ]
+
     template = f"{raw_root}/" + "{subject}/" + wild + "*.dcm"
-    subjects = [p or "." for p in phys_folders]
+    subjects = [p or clean_name(raw_root.name) for p in phys_folders]
     return [
         "heudiconv",
-        "-d", template,
-        "-s", *subjects,
-        "-f", str(heuristic),
-        "-c", "dcm2niix",
-        "-o", str(bids_out),
-        "-b", "--minmeta", "--overwrite",
+        "-d",
+        template,
+        "-s",
+        *subjects,
+        "-f",
+        str(heuristic),
+        "-c",
+        "dcm2niix",
+        "-o",
+        str(bids_out),
+        "-b",
+        "--minmeta",
+        "--overwrite",
     ]
 
 
