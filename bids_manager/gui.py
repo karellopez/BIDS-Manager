@@ -1,3 +1,5 @@
+"""PyQt GUI for converting DICOM data into BIDS and editing metadata."""
+
 import sys
 import os
 import json
@@ -764,6 +766,7 @@ class BIDSManager(QMainWindow):
         self.tabs.addTab(self.convert_tab, "Converter")
 
     def _add_preview_path(self, parts):
+        """Insert path components into the preview tree if missing."""
         parent = self.preview_tree.invisibleRootItem()
         for part in parts:
             match = None

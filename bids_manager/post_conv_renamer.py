@@ -41,6 +41,7 @@ FMAP_SUFFIX_RE = re.compile(r"_fmap(?=(\.nii(?:\.gz)?|\.json)$)", re.I)
 # Process a single fmap directory
 # -----------------------------------------------------------------------------
 def process_fmap_dir(fmap_dir: Path) -> None:
+    """Rename fieldmap files within ``fmap_dir`` according to BIDS rules."""
     for file in sorted(fmap_dir.iterdir()):
         if not file.is_file():
             continue
@@ -67,6 +68,7 @@ def process_fmap_dir(fmap_dir: Path) -> None:
 # Main processing function
 # -----------------------------------------------------------------------------
 def post_fmap_rename(bids_root: Path) -> None:
+    """Walk ``bids_root`` and apply :func:`process_fmap_dir` to each ``fmap`` folder."""
     if not bids_root.is_dir():
         print(f"Error: '{bids_root}' is not a directory", file=sys.stderr)
         return
@@ -81,6 +83,8 @@ def post_fmap_rename(bids_root: Path) -> None:
 # Run immediately when executed
 # -----------------------------------------------------------------------------
 def main() -> None:
+    """CLI wrapper around :func:`post_fmap_rename`."""
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Rename BIDS fieldmap files")
