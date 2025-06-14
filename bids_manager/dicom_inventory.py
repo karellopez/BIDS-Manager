@@ -150,7 +150,7 @@ def scan_dicoms_long(root_dir: str,
 
             # ---- source folder  (relative path under root_dir)
             rel = os.path.relpath(root, root_dir)
-            folder = "" if rel == "." else rel
+            folder = root_dir.name if rel == "." else rel
 
             series = getattr(ds, "SeriesDescription", "n/a").strip()
             counts[subj_key][folder][series] += 1

@@ -82,7 +82,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     )
 
     # 2 ─ SID_MAP ----------------------------------------------------------
-    sid_pairs = {(clean(str(r.source_folder)), r.BIDS_name) for r in df.itertuples()}
+    sid_pairs = {(clean(str(r.source_folder)) or clean(Path(r.source_folder or '.').name), r.BIDS_name) for r in df.itertuples()}
     buf.append("\nSID_MAP = {\n")
     for folder, bids in sorted(sid_pairs):
         buf.append(f"    '{folder}': '{bids}',\n")
@@ -94,7 +94,7 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
 
     for row in df.itertuples():
         ses = str(row.session).strip() if pd.notna(row.session) and str(row.session).strip() else ""
-        folder = Path(str(row.source_folder)).name
+        folder = Path(str(row.source_folder) or '.').name
         key_id = (row.sequence, row.BIDS_name, ses, folder)
         if key_id in seq2key:
             continue
@@ -168,7 +168,7 @@ def generate(tsv: Path, out_dir: Path) -> None:
         fname = safe_stem(study or "unknown")
         heur = out_dir / f"heuristic_{fname}.py"
         write_heuristic(sub_df, heur)
-        folders = " ".join(sorted({clean(f) for f in sub_df.source_folder.unique()}))
+        folders = " ".join(sorted({clean(f) or clean(Path(f or '.').name) for f in sub_df.source_folder.unique()}))
         print(dedent(f"""
         heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" -s {folders} -f {heur.name} -c dcm2niix -o <BIDS_OUT>/{fname} -b --minmeta --overwrite"""))
 
