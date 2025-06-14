@@ -200,16 +200,21 @@ class BIDSManager(QMainWindow):
         self.bids_out_dir = ""      # Output BIDS directory
         self.tsv_path = ""          # Path to subject_summary.tsv
         self.heuristic_dir = ""     # Directory with heuristics
-        self.study_set = set()
-        self.modb_rows = {}
-        self.mod_rows = {}
-        self.seq_rows = {}
+        # Lookup containers used to synchronise the mapping table with the
+        # modality trees.  Keys are different path elements and values are lists
+        # of row indices in ``self.mapping_table``.
+        self.study_set = set()        # All study names encountered
+        self.modb_rows = {}           # BIDS modality → [row, ...]
+        self.mod_rows = {}            # (BIDS modality, modality) → [row, ...]
+        self.seq_rows = {}            # (BIDS modality, modality, sequence) → rows
         self.study_rows = {}
         self.subject_rows = {}
         self.session_rows = {}
         self.spec_modb_rows = {}
         self.spec_mod_rows = {}
         self.spec_seq_rows = {}
+        # Equivalent lookups when displaying the "given" subject names instead
+        # of the BIDS names
         self.subject_rows_given = {}
         self.session_rows_given = {}
         self.spec_modb_rows_given = {}
@@ -581,6 +586,9 @@ class BIDSManager(QMainWindow):
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
+        # This tab guides the user through the DICOM → BIDS workflow.
+        # It contains controls to select directories, review the inventory TSV
+        # and run the conversion pipeline while showing live logs.
         self.convert_tab = QWidget()
         main_layout = QVBoxLayout(self.convert_tab)
         main_layout.setContentsMargins(10, 10, 10, 10)
@@ -841,6 +849,9 @@ class BIDSManager(QMainWindow):
         """
         Set up Edit tab to embed the full functionality of bids_editor_ancpbids.
         """
+        # This tab provides a file browser, statistics viewer and the metadata
+        # editor used to inspect and modify BIDS sidecars.  It mirrors the
+        # standalone "bids-editor" utility but is embedded in this application.
         self.edit_tab = QWidget()
         edit_layout = QVBoxLayout(self.edit_tab)
         edit_layout.setContentsMargins(10, 10, 10, 10)
@@ -1755,6 +1766,8 @@ class MetadataViewer(QWidget):
     """
     def __init__(self):
         super().__init__()
+        # Layout consists of a small toolbar followed by the actual viewer
+        # widget.  A welcome message is shown when no file is loaded.
         vlay = QVBoxLayout(self)
         self.welcome = QLabel(
             "<h3>Metadata BIDSualizer</h3><br>Load data via File → Open or select a file to begin editing."
