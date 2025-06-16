@@ -24,6 +24,8 @@ source_folder  – relative path from the DICOM root to the folder containing th
                  series
 include        – defaults to 1 but scout/report/physlog rows start at 0
 sequence       – original SeriesDescription
+series_uid     – DICOM SeriesInstanceUID identifying a specific run
+run            – 1, 2, … if multiple SeriesInstanceUIDs share the same description
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
 modality_bids  – top-level container (anat, func, dwi, fmap) derived from
                  *modality*
@@ -155,8 +157,10 @@ def scan_dicoms_long(root_dir: str,
             folder = root_dir.name if rel == "." else rel
 
             series = getattr(ds, "SeriesDescription", "n/a").strip()
-            counts[subj_key][folder][series] += 1
-            mods[subj_key][folder][series] = guess_modality(series)
+            uid = getattr(ds, "SeriesInstanceUID", "")
+            key = (series, uid)
+            counts[subj_key][folder][key] += 1
+            mods[subj_key][folder][key] = guess_modality(series)
 
             # collect session tags
             m = SESSION_RE.search(series.lower())
@@ -178,7 +182,7 @@ def scan_dicoms_long(root_dir: str,
     total_series = sum(len(seq_dict)
                        for subj in counts.values()
                        for folder, seq_dict in subj.items())
-    print(f"Unique SeriesDescriptions : {total_series}")
+    print(f"Unique Series instances   : {total_series}")
 
     # PASS 2: assign BIDS subject numbers PER STUDY
     study_subjects = defaultdict(set)
@@ -203,11 +207,13 @@ def scan_dicoms_long(root_dir: str,
             ses_labels = sorted(sessset[subj_key][folder])
             session = ses_labels[0] if len(ses_labels) == 1 else ""
 
-            for series, n_files in sorted(counts[subj_key][folder].items()):
-                fine_mod = mods[subj_key][folder][series]
+            run_counter = defaultdict(int)
+            for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
+                fine_mod = mods[subj_key][folder][(series, uid)]
                 include = 1
                 if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
+                run_counter[series] += 1
                 rows.append({
                     "subject"       : demo[subj_key]["GivenName"] if first_row else "",
                     "BIDS_name"     : bids_map[subj_key],
@@ -215,6 +221,8 @@ def scan_dicoms_long(root_dir: str,
                     "source_folder" : folder,
                     "include"       : include,
                     "sequence"      : series,
+                    "series_uid"    : uid,
+                    "run"           : run_counter[series] if run_counter[series] > 1 else "",
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
                     "n_files"       : n_files,
@@ -225,7 +233,8 @@ def scan_dicoms_long(root_dir: str,
     # Final column order
     columns = [
         "subject", "BIDS_name", "session", "source_folder",
-        "include", "sequence", "modality", "modality_bids", "n_files",
+        "include", "sequence", "series_uid", "run",
+        "modality", "modality_bids", "n_files",
         "GivenName", "FamilyName", "PatientID",
         "PatientSex", "PatientAge", "StudyDescription",
     ]
