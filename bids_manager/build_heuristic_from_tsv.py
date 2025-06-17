@@ -111,14 +111,14 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         stem = safe_stem(row["sequence"])
 
         base_parts = [bids, ses, stem]
-        if rep_counts.iloc[idx] > 1 and rep:
+        if rep_counts.loc[idx] > 1 and rep:
             base_parts.append(f"rep-{rep}")
         base = dedup_parts(*base_parts)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 
         key_parts = [bids, ses, stem]
-        if rep_counts.iloc[idx] > 1 and rep:
+        if rep_counts.loc[idx] > 1 and rep:
             key_parts.append(f"rep-{rep}")
         key_var = "key_" + clean("_".join(p for p in key_parts if p))
         seq2key[key_id] = key_var
