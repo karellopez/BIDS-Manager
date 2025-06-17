@@ -30,7 +30,7 @@ All utilities provide `-h/--help` for details.
   specific subjects.
 - `run-heudiconv` now keeps a copy of `subject_summary.tsv` under `.bids_manager`
   and generates a clean `participants.tsv` using demographics from that file.
-- `dicom-inventory` distinguishes repeated runs by adding `series_uid` and `run`
+- `dicom-inventory` distinguishes repeated sequences by adding `series_uid` and `rep`
   columns and records `acq_time` for each series in `subject_summary.tsv`.
 
 
