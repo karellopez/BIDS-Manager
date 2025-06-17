@@ -672,15 +672,16 @@ class BIDSManager(QMainWindow):
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
         self.full_tree = QTreeWidget()
-        # Display only one column with the BIDS modality
-        self.full_tree.setHeaderLabels(["BIDS Modality"])
+        self.full_tree.setColumnCount(2)
+        self.full_tree.setHeaderLabels(["BIDS Modality", "Files / Time"])
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "General view")
 
         specific_tab = QWidget()
         specific_layout = QVBoxLayout(specific_tab)
         self.specific_tree = QTreeWidget()
-        self.specific_tree.setHeaderLabels(["Study/Subject"])
+        self.specific_tree.setColumnCount(2)
+        self.specific_tree.setHeaderLabels(["Study/Subject", "Files / Time"])
         specific_layout.addWidget(self.specific_tree)
         self.modal_tabs.addTab(specific_tab, "Specific view")
 
@@ -1069,6 +1070,8 @@ class BIDSManager(QMainWindow):
                 'modb': modb,
                 'mod': mod,
                 'seq': seq,
+                'n_files': _clean(row.get('n_files')),
+                'acq_time': _clean(row.get('acq_time')),
             })
         self.log_text.append("Loaded TSV into mapping table.")
 
@@ -1102,10 +1105,11 @@ class BIDSManager(QMainWindow):
         """Build modalities tree with checkboxes synced to the table."""
         self.full_tree.blockSignals(True)
         self.full_tree.clear()
-        # build nested mapping: BIDS modality → non‑BIDS modality → sequences
+        # build nested mapping: BIDS modality → non‑BIDS modality → seq → info
         modb_map = {}
         for info in self.row_info:
-            modb_map.setdefault(info['modb'], {}).setdefault(info['mod'], set()).add(info['seq'])
+            modb_map.setdefault(info['modb'], {})\
+                    .setdefault(info['mod'], {})[info['seq']] = info
 
         for modb, mod_map in sorted(modb_map.items()):
             modb_item = QTreeWidgetItem([modb])
@@ -1121,7 +1125,7 @@ class BIDSManager(QMainWindow):
             modb_item.setData(0, Qt.UserRole, ('modb', modb))
 
             for mod, seqs in sorted(mod_map.items()):
-                mod_item = QTreeWidgetItem([mod])
+                mod_item = QTreeWidgetItem([mod, ""])
                 mod_item.setFlags(mod_item.flags() | Qt.ItemIsUserCheckable)
                 rows = self.mod_rows.get((modb, mod), [])
                 states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
@@ -1132,8 +1136,11 @@ class BIDSManager(QMainWindow):
                 else:
                     mod_item.setCheckState(0, Qt.Unchecked)
                 mod_item.setData(0, Qt.UserRole, ('mod', modb, mod))
-                for seq in sorted(seqs):
-                    seq_item = QTreeWidgetItem([seq])
+                for seq, info in sorted(seqs.items()):
+                    desc = f"{info['n_files']} files"
+                    if info['acq_time']:
+                        desc += f", {info['acq_time']}"
+                    seq_item = QTreeWidgetItem([seq, desc])
                     seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
                     rows = self.seq_rows.get((modb, mod, seq), [])
                     states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
@@ -1332,7 +1339,7 @@ class BIDSManager(QMainWindow):
                     .setdefault(subj_key, {})\
                     .setdefault(info['ses'], {})\
                     .setdefault(info['modb'], {})\
-                    .setdefault(info['mod'], set()).add(info['seq'])
+                    .setdefault(info['mod'], {})[info['seq']] = info
 
         def _state(rows):
             states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
@@ -1366,7 +1373,7 @@ class BIDSManager(QMainWindow):
                     se_item.setCheckState(0, _state(rows))
                     se_item.setData(0, Qt.UserRole, ('session', study, subj, ses))
                     for modb, mod_map in sorted(modb_map.items()):
-                        mb_item = QTreeWidgetItem([modb])
+                        mb_item = QTreeWidgetItem([modb, ""])
                         mb_item.setFlags(mb_item.flags() | Qt.ItemIsUserCheckable)
                         if self.use_bids_names:
                             rows = self.spec_modb_rows.get((study, subj, ses, modb), [])
@@ -1375,7 +1382,7 @@ class BIDSManager(QMainWindow):
                         mb_item.setCheckState(0, _state(rows))
                         mb_item.setData(0, Qt.UserRole, ('modb', study, subj, ses, modb))
                         for mod, seqs in sorted(mod_map.items()):
-                            mo_item = QTreeWidgetItem([mod])
+                            mo_item = QTreeWidgetItem([mod, ""])
                             mo_item.setFlags(mo_item.flags() | Qt.ItemIsUserCheckable)
                             if self.use_bids_names:
                                 rows = self.spec_mod_rows.get((study, subj, ses, modb, mod), [])
@@ -1383,8 +1390,11 @@ class BIDSManager(QMainWindow):
                                 rows = self.spec_mod_rows_given.get((study, subj, ses, modb, mod), [])
                             mo_item.setCheckState(0, _state(rows))
                             mo_item.setData(0, Qt.UserRole, ('mod', study, subj, ses, modb, mod))
-                            for seq in sorted(seqs):
-                                sq_item = QTreeWidgetItem([seq])
+                            for seq, info in sorted(seqs.items()):
+                                desc = f"{info['n_files']} files"
+                                if info['acq_time']:
+                                    desc += f", {info['acq_time']}"
+                                sq_item = QTreeWidgetItem([seq, desc])
                                 sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
                                 if self.use_bids_names:
                                     rows = self.spec_seq_rows.get((study, subj, ses, modb, mod, seq), [])
