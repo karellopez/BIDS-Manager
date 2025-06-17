@@ -838,7 +838,10 @@ class BIDSManager(QMainWindow):
             if multi_study:
                 path_parts.append(study)
             path_parts.extend([subj, ses, modb])
-            base = _dedup_parts(subj, ses, seq)
+            base_parts = [subj, ses, seq]
+            if info['run']:
+                base_parts.append(f"run-{info['run']}")
+            base = _dedup_parts(*base_parts)
 
             if modb == "fmap":
                 # Fieldmaps generate several derivative files with specific
