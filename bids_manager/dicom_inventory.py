@@ -42,6 +42,7 @@ from pathlib import Path
 
 import pandas as pd
 import pydicom
+from pydicom.multival import MultiValue
 
 
 # ----------------------------------------------------------------------
@@ -74,6 +75,34 @@ def guess_modality(series: str) -> str:
         if any(p in s for p in pats):
             return label
     return "unknown"
+
+
+MAGNITUDE_IMGTYPE = ["ORIGINAL", "PRIMARY", "M", "ND", "NORM"]
+PHASE_IMGTYPE = ["ORIGINAL", "PRIMARY", "P", "ND"]
+
+def normalize_image_type(value) -> list:
+    """Return ImageType components as a list of strings."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, MultiValue)):
+        return [str(x).strip() for x in value]
+    text = str(value)
+    if "\\" in text:
+        return [p.strip() for p in text.split("\\")]
+    text = text.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+        return [p.strip().strip("'") for p in text.split(",")]
+    return [text] if text else []
+
+
+def classify_fieldmap_type(img_list: list) -> str:
+    """Return 'M' for magnitude, 'P' for phase, '' otherwise."""
+    if img_list == MAGNITUDE_IMGTYPE:
+        return "M"
+    if img_list == PHASE_IMGTYPE:
+        return "P"
+    return ""
 
 
 # ----------------------------------------------------------------------
@@ -164,17 +193,11 @@ def scan_dicoms_long(root_dir: str,
             key = (series, uid)
             counts[subj_key][folder][key] += 1
             mods[subj_key][folder][key] = guess_modality(series)
-            img_type = getattr(ds, "ImageType", None)
-            # Use the third ImageType element (index 2) to
-            # discriminate magnitude vs phase fieldmaps
-            img3 = ""
-            if isinstance(img_type, (list, tuple)):
-                if len(img_type) >= 3:
-                    img3 = str(img_type[2]).strip()
-            else:
-                parts = str(img_type).split("\\")
-                if len(parts) >= 3:
-                    img3 = parts[2].strip()
+            raw_img_type = getattr(ds, "ImageType", None)
+            img_list = normalize_image_type(raw_img_type)
+            img3 = classify_fieldmap_type(img_list)
+            if not img3:
+                img3 = img_list[2] if len(img_list) >= 3 else ""
             if key not in imgtypes[subj_key][folder]:
                 imgtypes[subj_key][folder][key] = img3
             acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
