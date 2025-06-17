@@ -32,6 +32,8 @@ All utilities provide `-h/--help` for details.
   and generates a clean `participants.tsv` using demographics from that file.
 - `dicom-inventory` distinguishes repeated sequences by adding `series_uid` and `rep`
   columns and records `acq_time` for each series in `subject_summary.tsv`.
+- Fieldmap rows for magnitude and phase images are now merged so each acquisition
+  appears once with the combined file count.
 
 
 
