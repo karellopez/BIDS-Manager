@@ -89,13 +89,16 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     buf.append("}\n\n")
 
     # 3 ─ template keys ----------------------------------------------------
-    seq2key: dict[tuple[str, str, str, str], str] = {}
+    # Include series UID (or run) in the key to handle repeated sequences
+    seq2key: dict[tuple[str, str, str, str, str], str] = {}
     key_defs: list[tuple[str, str]] = []
 
     for row in df.itertuples():
         ses = str(row.session).strip() if pd.notna(row.session) and str(row.session).strip() else ""
         folder = Path(str(row.source_folder) or '.').name
-        key_id = (row.sequence, row.BIDS_name, ses, folder)
+        run = str(row.run).strip() if pd.notna(row.run) and str(row.run).strip() else ""
+        uid = str(row.series_uid)
+        key_id = (row.sequence, row.BIDS_name, ses, folder, uid)
         if key_id in seq2key:
             continue
 
@@ -103,12 +106,17 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         container = row.modality_bids or "misc"
         stem = safe_stem(row.sequence)
 
-        base = dedup_parts(bids, ses, stem)
+        base_parts = [bids, ses, stem]
+        if run:
+            base_parts.append(f"run-{run}")
+        base = dedup_parts(*base_parts)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 
-        parts = [bids, ses, stem]
-        key_var = "key_" + clean("_".join(p for p in parts if p))
+        key_parts = [bids, ses, stem]
+        if run:
+            key_parts.append(f"run-{run}")
+        key_var = "key_" + clean("_".join(p for p in key_parts if p))
         seq2key[key_id] = key_var
         key_defs.append((key_var, template))
 
@@ -126,10 +134,13 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     buf.append("    }\n\n")
 
     buf.append("    for s in seqinfo:\n")
-    for (seq, _b, _s, folder), var in seq2key.items():
+    for (seq, _b, _s, folder, uid), var in seq2key.items():
         seq_esc = seq.replace("'", "\\'")
         fol_esc = folder.replace("'", "\\'")
-        buf.append(f"        if s.series_description == '{seq_esc}' and s.dcm_dir_name == '{fol_esc}':\n")
+        uid_esc = str(uid).replace("'", "\\'")
+        buf.append(
+            f"        if s.series_description == '{seq_esc}' and s.dcm_dir_name == '{fol_esc}' and getattr(s, 'series_uid', '') == '{uid_esc}':\n"
+        )
         buf.append(f"            {var}_list.append(s.series_id)\n")
     buf.append("    return info\n")
 
