@@ -123,6 +123,7 @@ def scan_dicoms_long(root_dir: str,
     counts     = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     mods       = defaultdict(lambda: defaultdict(dict))
     acq_times  = defaultdict(lambda: defaultdict(dict))
+    imgtypes   = defaultdict(lambda: defaultdict(dict))
     sessset = defaultdict(lambda: defaultdict(set))
 
     # PASS 1: Walk filesystem and collect info
@@ -163,6 +164,17 @@ def scan_dicoms_long(root_dir: str,
             key = (series, uid)
             counts[subj_key][folder][key] += 1
             mods[subj_key][folder][key] = guess_modality(series)
+            img_type = getattr(ds, "ImageType", None)
+            img4 = ""
+            if isinstance(img_type, (list, tuple)):
+                if len(img_type) >= 4:
+                    img4 = str(img_type[3]).strip()
+            else:
+                parts = str(img_type).split("\\")
+                if len(parts) >= 4:
+                    img4 = parts[3].strip()
+            if key not in imgtypes[subj_key][folder]:
+                imgtypes[subj_key][folder][key] = img4
             acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
             if key not in acq_times[subj_key][folder] and acq_time:
                 acq_times[subj_key][folder][key] = acq_time
@@ -215,10 +227,12 @@ def scan_dicoms_long(root_dir: str,
             rep_counter = defaultdict(int)
             for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
                 fine_mod = mods[subj_key][folder][(series, uid)]
+                img4 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
                 if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
-                rep_counter[series] += 1
+                rep_key = (series, img4)
+                rep_counter[rep_key] += 1
                 rows.append({
                     "subject"       : demo[subj_key]["GivenName"] if first_row else "",
                     "BIDS_name"     : bids_map[subj_key],
@@ -227,7 +241,8 @@ def scan_dicoms_long(root_dir: str,
                     "include"       : include,
                     "sequence"      : series,
                     "series_uid"    : uid,
-                    "rep"           : rep_counter[series] if rep_counter[series] > 1 else "",
+                    "rep"           : rep_counter[rep_key] if rep_counter[rep_key] > 1 else "",
+                    "image_type"    : img4,
                     "acq_time"      : acq_times[subj_key][folder].get((series, uid), ""),
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
@@ -240,7 +255,7 @@ def scan_dicoms_long(root_dir: str,
     columns = [
         "subject", "BIDS_name", "session", "source_folder",
         "include", "sequence", "series_uid", "rep", "acq_time",
-        "modality", "modality_bids", "n_files",
+        "image_type", "modality", "modality_bids", "n_files",
         "GivenName", "FamilyName", "PatientID",
         "PatientSex", "PatientAge", "StudyDescription",
     ]
