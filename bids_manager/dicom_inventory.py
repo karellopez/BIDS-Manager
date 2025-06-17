@@ -296,8 +296,12 @@ def scan_dicoms_long(root_dir: str,
             "source_folder",
             "sequence",
         ]
-        group_cols = base_cols + ["acq_time"]
+        # Use acquisition time rounded to the minute to merge magnitude and
+        # phase series from the same fieldmap even if their timestamps differ
+        # by a few seconds.
         fmap_df = df[fmap_mask].copy()
+        fmap_df["acq_group"] = fmap_df["acq_time"].apply(lambda t: str(t)[:4])
+        group_cols = base_cols + ["acq_group"]
         fmap_df["uid_list"] = fmap_df["series_uid"]
         fmap_df["img_set"] = fmap_df["image_type"]
         fmap_df = (
@@ -326,7 +330,9 @@ def scan_dicoms_long(root_dir: str,
             )
         )
         fmap_df.rename(columns={"uid_list": "series_uid", "img_set": "image_type"}, inplace=True)
-        fmap_df.sort_values(group_cols, inplace=True)
+        fmap_df.drop(columns=["acq_group"], inplace=True)
+        sort_cols = base_cols + ["acq_time"]
+        fmap_df.sort_values(sort_cols, inplace=True)
         fmap_df["rep"] = fmap_df.groupby(base_cols).cumcount() + 1
         repeat_mask = fmap_df.groupby(base_cols)["rep"].transform("count") > 1
         fmap_df.loc[~repeat_mask, "rep"] = ""
