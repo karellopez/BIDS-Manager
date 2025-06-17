@@ -5,7 +5,7 @@ build_heuristic_from_tsv.py — **v10**
 Simple heuristic that:
 1. **Keeps every sequence**, including SBRef.
 2. **Uses the raw SeriesDescription** (cleaned) as the filename stem – no
-   added `run-*`, task, or echo logic.
+   added `rep-*`, task, or echo logic.
 3. Skips only modalities listed in `SKIP_BY_DEFAULT` (`report`,
    `physio`, `refscan`).
 """
@@ -89,33 +89,37 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     buf.append("}\n\n")
 
     # 3 ─ template keys ----------------------------------------------------
-    # Include series UID (or run) in the key to handle repeated sequences
+    # Include series UID (or rep) in the key to handle repeated sequences
     seq2key: dict[tuple[str, str, str, str, str], str] = {}
     key_defs: list[tuple[str, str]] = []
 
-    for row in df.itertuples():
-        ses = str(row.session).strip() if pd.notna(row.session) and str(row.session).strip() else ""
-        folder = Path(str(row.source_folder) or '.').name
-        run = str(row.run).strip() if pd.notna(row.run) and str(row.run).strip() else ""
-        uid = str(row.series_uid)
-        key_id = (row.sequence, row.BIDS_name, ses, folder, uid)
+    rep_counts = (
+        df.groupby(["BIDS_name", "session", "sequence"])["sequence"].transform("count")
+    )
+
+    for idx, row in df.iterrows():
+        ses = str(row.get("session", "")).strip()
+        folder = Path(str(row.get("source_folder", "."))).name
+        rep = str(row.get("rep", "")).strip()
+        uid = str(row.get("series_uid", ""))
+        key_id = (row["sequence"], row["BIDS_name"], ses, folder, uid)
         if key_id in seq2key:
             continue
 
-        bids = row.BIDS_name
-        container = row.modality_bids or "misc"
-        stem = safe_stem(row.sequence)
+        bids = row["BIDS_name"]
+        container = row.get("modality_bids", "misc") or "misc"
+        stem = safe_stem(row["sequence"])
 
         base_parts = [bids, ses, stem]
-        if run:
-            base_parts.append(f"run-{run}")
+        if rep_counts.iloc[idx] > 1 and rep:
+            base_parts.append(f"rep-{rep}")
         base = dedup_parts(*base_parts)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 
         key_parts = [bids, ses, stem]
-        if run:
-            key_parts.append(f"run-{run}")
+        if rep_counts.iloc[idx] > 1 and rep:
+            key_parts.append(f"rep-{rep}")
         key_var = "key_" + clean("_".join(p for p in key_parts if p))
         seq2key[key_id] = key_var
         key_defs.append((key_var, template))
