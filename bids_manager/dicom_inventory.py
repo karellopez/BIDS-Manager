@@ -165,16 +165,18 @@ def scan_dicoms_long(root_dir: str,
             counts[subj_key][folder][key] += 1
             mods[subj_key][folder][key] = guess_modality(series)
             img_type = getattr(ds, "ImageType", None)
-            img4 = ""
+            # Use the third ImageType element (index 2) to
+            # discriminate magnitude vs phase fieldmaps
+            img3 = ""
             if isinstance(img_type, (list, tuple)):
-                if len(img_type) >= 4:
-                    img4 = str(img_type[3]).strip()
+                if len(img_type) >= 3:
+                    img3 = str(img_type[2]).strip()
             else:
                 parts = str(img_type).split("\\")
-                if len(parts) >= 4:
-                    img4 = parts[3].strip()
+                if len(parts) >= 3:
+                    img3 = parts[2].strip()
             if key not in imgtypes[subj_key][folder]:
-                imgtypes[subj_key][folder][key] = img4
+                imgtypes[subj_key][folder][key] = img3
             acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
             if key not in acq_times[subj_key][folder] and acq_time:
                 acq_times[subj_key][folder][key] = acq_time
@@ -227,11 +229,12 @@ def scan_dicoms_long(root_dir: str,
             rep_counter = defaultdict(int)
             for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
                 fine_mod = mods[subj_key][folder][(series, uid)]
-                img4 = imgtypes[subj_key][folder].get((series, uid), "")
+                img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
                 if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
-                rep_key = (series, img4)
+                # Do not consider image type when counting scout duplicates
+                rep_key = series if fine_mod == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
                 rows.append({
                     "subject"       : demo[subj_key]["GivenName"] if first_row else "",
@@ -242,7 +245,7 @@ def scan_dicoms_long(root_dir: str,
                     "sequence"      : series,
                     "series_uid"    : uid,
                     "rep"           : rep_counter[rep_key] if rep_counter[rep_key] > 1 else "",
-                    "image_type"    : img4,
+                    "image_type"    : img3,
                     "acq_time"      : acq_times[subj_key][folder].get((series, uid), ""),
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
