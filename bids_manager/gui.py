@@ -675,9 +675,10 @@ class BIDSManager(QMainWindow):
         self.full_tree.setColumnCount(3)
         self.full_tree.setHeaderLabels(["BIDS Modality", "Files", "Time"])
         hdr = self.full_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for i in range(self.full_tree.columnCount()):
+            hdr.setSectionResizeMode(i, QHeaderView.Interactive)
+        for i in range(self.full_tree.columnCount()):
+            self.full_tree.resizeColumnToContents(i)
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "General view")
 
@@ -687,9 +688,10 @@ class BIDSManager(QMainWindow):
         self.specific_tree.setColumnCount(3)
         self.specific_tree.setHeaderLabels(["Study/Subject", "Files", "Time"])
         s_hdr = self.specific_tree.header()
-        s_hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        s_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        s_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for i in range(self.specific_tree.columnCount()):
+            s_hdr.setSectionResizeMode(i, QHeaderView.Interactive)
+        for i in range(self.specific_tree.columnCount()):
+            self.specific_tree.resizeColumnToContents(i)
         specific_layout.addWidget(self.specific_tree)
         self.modal_tabs.addTab(specific_tab, "Specific view")
 
@@ -699,8 +701,11 @@ class BIDSManager(QMainWindow):
         self.naming_table.setColumnCount(3)
         self.naming_table.setHorizontalHeaderLabels(["Study", "Given name", "BIDS name"])
         n_hdr = self.naming_table.horizontalHeader()
-        n_hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        for i in range(self.naming_table.columnCount()):
+            n_hdr.setSectionResizeMode(i, QHeaderView.Interactive)
         n_hdr.setStretchLastSection(True)
+        for i in range(self.naming_table.columnCount()):
+            self.naming_table.resizeColumnToContents(i)
         self.naming_table.setItemDelegateForColumn(2, SubjectDelegate(self.naming_table))
         naming_layout.addWidget(self.naming_table)
         self.naming_table.itemChanged.connect(self._onNamingEdited)
@@ -1174,6 +1179,8 @@ class BIDSManager(QMainWindow):
         except TypeError:
             pass
         self.full_tree.itemChanged.connect(self.onModalityItemChanged)
+        for i in range(self.full_tree.columnCount()):
+            self.full_tree.resizeColumnToContents(i)
 
     def onSpecificItemChanged(self, item, column):
         role = item.data(0, Qt.UserRole)
@@ -1432,6 +1439,8 @@ class BIDSManager(QMainWindow):
         except TypeError:
             pass
         self.specific_tree.itemChanged.connect(self.onSpecificItemChanged)
+        for i in range(self.specific_tree.columnCount()):
+            self.specific_tree.resizeColumnToContents(i)
 
 
     def onModalityItemChanged(self, item, column):
