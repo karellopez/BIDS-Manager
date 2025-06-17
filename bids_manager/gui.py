@@ -672,16 +672,24 @@ class BIDSManager(QMainWindow):
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
         self.full_tree = QTreeWidget()
-        self.full_tree.setColumnCount(2)
-        self.full_tree.setHeaderLabels(["BIDS Modality", "Files / Time"])
+        self.full_tree.setColumnCount(3)
+        self.full_tree.setHeaderLabels(["BIDS Modality", "Files", "Time"])
+        hdr = self.full_tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         full_layout.addWidget(self.full_tree)
         self.modal_tabs.addTab(full_tab, "General view")
 
         specific_tab = QWidget()
         specific_layout = QVBoxLayout(specific_tab)
         self.specific_tree = QTreeWidget()
-        self.specific_tree.setColumnCount(2)
-        self.specific_tree.setHeaderLabels(["Study/Subject", "Files / Time"])
+        self.specific_tree.setColumnCount(3)
+        self.specific_tree.setHeaderLabels(["Study/Subject", "Files", "Time"])
+        s_hdr = self.specific_tree.header()
+        s_hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        s_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        s_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         specific_layout.addWidget(self.specific_tree)
         self.modal_tabs.addTab(specific_tab, "Specific view")
 
@@ -1061,6 +1069,7 @@ class BIDSManager(QMainWindow):
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
+            run = _clean(row.get('run'))
             given = _clean(row.get('GivenName'))
             self.row_info.append({
                 'study': study,
@@ -1070,6 +1079,7 @@ class BIDSManager(QMainWindow):
                 'modb': modb,
                 'mod': mod,
                 'seq': seq,
+                'run': run,
                 'n_files': _clean(row.get('n_files')),
                 'acq_time': _clean(row.get('acq_time')),
             })
@@ -1109,7 +1119,7 @@ class BIDSManager(QMainWindow):
         modb_map = {}
         for info in self.row_info:
             modb_map.setdefault(info['modb'], {})\
-                    .setdefault(info['mod'], {})[info['seq']] = info
+                    .setdefault(info['mod'], {})[(info['seq'], info['run'])] = info
 
         for modb, mod_map in sorted(modb_map.items()):
             modb_item = QTreeWidgetItem([modb])
@@ -1125,7 +1135,7 @@ class BIDSManager(QMainWindow):
             modb_item.setData(0, Qt.UserRole, ('modb', modb))
 
             for mod, seqs in sorted(mod_map.items()):
-                mod_item = QTreeWidgetItem([mod, ""])
+                mod_item = QTreeWidgetItem([mod, "", ""])
                 mod_item.setFlags(mod_item.flags() | Qt.ItemIsUserCheckable)
                 rows = self.mod_rows.get((modb, mod), [])
                 states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
@@ -1136,13 +1146,15 @@ class BIDSManager(QMainWindow):
                 else:
                     mod_item.setCheckState(0, Qt.Unchecked)
                 mod_item.setData(0, Qt.UserRole, ('mod', modb, mod))
-                for seq, info in sorted(seqs.items()):
-                    desc = f"{info['n_files']} files"
-                    if info['acq_time']:
-                        desc += f", {info['acq_time']}"
-                    seq_item = QTreeWidgetItem([seq, desc])
+                for (seq, run), info in sorted(seqs.items()):
+                    desc_files = str(info['n_files'])
+                    desc_time = info['acq_time']
+                    label = seq
+                    if run:
+                        label = f"{seq} (run {run})"
+                    seq_item = QTreeWidgetItem([label, desc_files, desc_time])
                     seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
-                    rows = self.seq_rows.get((modb, mod, seq), [])
+                    rows = self.seq_rows.get((modb, mod, seq, run), [])
                     states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
                     if states and all(states):
                         seq_item.setCheckState(0, Qt.Checked)
@@ -1150,7 +1162,7 @@ class BIDSManager(QMainWindow):
                         seq_item.setCheckState(0, Qt.PartiallyChecked)
                     else:
                         seq_item.setCheckState(0, Qt.Unchecked)
-                    seq_item.setData(0, Qt.UserRole, ('seq', modb, mod, seq))
+                    seq_item.setData(0, Qt.UserRole, ('seq', modb, mod, seq, run))
                     mod_item.addChild(seq_item)
                 modb_item.addChild(mod_item)
             self.full_tree.addTopLevelItem(modb_item)
@@ -1193,9 +1205,9 @@ class BIDSManager(QMainWindow):
                 rows = self.spec_mod_rows_given.get((role[1], role[2], role[3], role[4], role[5]), [])
         elif tp == 'seq':
             if self.use_bids_names:
-                rows = self.spec_seq_rows.get((role[1], role[2], role[3], role[4], role[5], role[6]), [])
+                rows = self.spec_seq_rows.get((role[1], role[2], role[3], role[4], role[5], role[6], role[7]), [])
             else:
-                rows = self.spec_seq_rows_given.get((role[1], role[2], role[3], role[4], role[5], role[6]), [])
+                rows = self.spec_seq_rows_given.get((role[1], role[2], role[3], role[4], role[5], role[6], role[7]), [])
         else:
             rows = []
         for r in rows:
@@ -1275,20 +1287,20 @@ class BIDSManager(QMainWindow):
             # Populate lookup tables using BIDS subject names
             self.modb_rows.setdefault(info['modb'], []).append(idx)
             self.mod_rows.setdefault((info['modb'], info['mod']), []).append(idx)
-            self.seq_rows.setdefault((info['modb'], info['mod'], info['seq']), []).append(idx)
+            self.seq_rows.setdefault((info['modb'], info['mod'], info['seq'], info['run']), []).append(idx)
             self.study_rows.setdefault(info['study'], []).append(idx)
             self.subject_rows.setdefault((info['study'], info['bids']), []).append(idx)
             self.session_rows.setdefault((info['study'], info['bids'], info['ses']), []).append(idx)
             self.spec_modb_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb']), []).append(idx)
             self.spec_mod_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod']), []).append(idx)
-            self.spec_seq_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
+            self.spec_seq_rows.setdefault((info['study'], info['bids'], info['ses'], info['modb'], info['mod'], info['seq'], info['run']), []).append(idx)
             gsub = f"sub-{info['given']}"
             # Equivalent lookups built from the given (non-BIDS) subject names
             self.subject_rows_given.setdefault((info['study'], gsub), []).append(idx)
             self.session_rows_given.setdefault((info['study'], gsub, info['ses']), []).append(idx)
             self.spec_modb_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb']), []).append(idx)
             self.spec_mod_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb'], info['mod']), []).append(idx)
-            self.spec_seq_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb'], info['mod'], info['seq']), []).append(idx)
+            self.spec_seq_rows_given.setdefault((info['study'], gsub, info['ses'], info['modb'], info['mod'], info['seq'], info['run']), []).append(idx)
 
     def _save_tree_expansion(self, tree):
         states = {}
@@ -1339,7 +1351,7 @@ class BIDSManager(QMainWindow):
                     .setdefault(subj_key, {})\
                     .setdefault(info['ses'], {})\
                     .setdefault(info['modb'], {})\
-                    .setdefault(info['mod'], {})[info['seq']] = info
+                    .setdefault(info['mod'], {})[(info['seq'], info['run'])] = info
 
         def _state(rows):
             states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
@@ -1373,7 +1385,7 @@ class BIDSManager(QMainWindow):
                     se_item.setCheckState(0, _state(rows))
                     se_item.setData(0, Qt.UserRole, ('session', study, subj, ses))
                     for modb, mod_map in sorted(modb_map.items()):
-                        mb_item = QTreeWidgetItem([modb, ""])
+                        mb_item = QTreeWidgetItem([modb, "", ""])
                         mb_item.setFlags(mb_item.flags() | Qt.ItemIsUserCheckable)
                         if self.use_bids_names:
                             rows = self.spec_modb_rows.get((study, subj, ses, modb), [])
@@ -1382,7 +1394,7 @@ class BIDSManager(QMainWindow):
                         mb_item.setCheckState(0, _state(rows))
                         mb_item.setData(0, Qt.UserRole, ('modb', study, subj, ses, modb))
                         for mod, seqs in sorted(mod_map.items()):
-                            mo_item = QTreeWidgetItem([mod, ""])
+                            mo_item = QTreeWidgetItem([mod, "", ""])
                             mo_item.setFlags(mo_item.flags() | Qt.ItemIsUserCheckable)
                             if self.use_bids_names:
                                 rows = self.spec_mod_rows.get((study, subj, ses, modb, mod), [])
@@ -1390,18 +1402,20 @@ class BIDSManager(QMainWindow):
                                 rows = self.spec_mod_rows_given.get((study, subj, ses, modb, mod), [])
                             mo_item.setCheckState(0, _state(rows))
                             mo_item.setData(0, Qt.UserRole, ('mod', study, subj, ses, modb, mod))
-                            for seq, info in sorted(seqs.items()):
-                                desc = f"{info['n_files']} files"
-                                if info['acq_time']:
-                                    desc += f", {info['acq_time']}"
-                                sq_item = QTreeWidgetItem([seq, desc])
+                            for (seq, run), info in sorted(seqs.items()):
+                                label = seq
+                                if run:
+                                    label = f"{seq} (run {run})"
+                                files = str(info['n_files'])
+                                time = info['acq_time']
+                                sq_item = QTreeWidgetItem([label, files, time])
                                 sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
                                 if self.use_bids_names:
-                                    rows = self.spec_seq_rows.get((study, subj, ses, modb, mod, seq), [])
+                                    rows = self.spec_seq_rows.get((study, subj, ses, modb, mod, seq, run), [])
                                 else:
-                                    rows = self.spec_seq_rows_given.get((study, subj, ses, modb, mod, seq), [])
+                                    rows = self.spec_seq_rows_given.get((study, subj, ses, modb, mod, seq, run), [])
                                 sq_item.setCheckState(0, _state(rows))
-                                sq_item.setData(0, Qt.UserRole, ('seq', study, subj, ses, modb, mod, seq))
+                                sq_item.setData(0, Qt.UserRole, ('seq', study, subj, ses, modb, mod, seq, run))
                                 mo_item.addChild(sq_item)
                             mb_item.addChild(mo_item)
                         se_item.addChild(mb_item)
@@ -1434,8 +1448,8 @@ class BIDSManager(QMainWindow):
             for r in self.mod_rows.get((modb, mod), []):
                 self.mapping_table.item(r, 0).setCheckState(state)
         elif role[0] == 'seq':
-            modb, mod, seq = role[1], role[2], role[3]
-            for r in self.seq_rows.get((modb, mod, seq), []):
+            modb, mod, seq, run = role[1], role[2], role[3], role[4]
+            for r in self.seq_rows.get((modb, mod, seq, run), []):
                 self.mapping_table.item(r, 0).setCheckState(state)
         QTimer.singleShot(0, self.populateModalitiesTree)
 
