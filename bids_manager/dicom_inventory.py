@@ -26,6 +26,7 @@ include        – defaults to 1 but scout/report/physlog rows start at 0
 sequence       – original SeriesDescription
 series_uid     – DICOM SeriesInstanceUID identifying a specific run
 run            – 1, 2, … if multiple SeriesInstanceUIDs share the same description
+acq_time       – AcquisitionTime of the first file in that series
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
 modality_bids  – top-level container (anat, func, dwi, fmap) derived from
                  *modality*
@@ -119,8 +120,9 @@ def scan_dicoms_long(root_dir: str,
 
     # in-memory stores
     demo    = {}
-    counts  = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    mods    = defaultdict(lambda: defaultdict(dict))
+    counts     = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    mods       = defaultdict(lambda: defaultdict(dict))
+    acq_times  = defaultdict(lambda: defaultdict(dict))
     sessset = defaultdict(lambda: defaultdict(set))
 
     # PASS 1: Walk filesystem and collect info
@@ -161,6 +163,9 @@ def scan_dicoms_long(root_dir: str,
             key = (series, uid)
             counts[subj_key][folder][key] += 1
             mods[subj_key][folder][key] = guess_modality(series)
+            acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
+            if key not in acq_times[subj_key][folder] and acq_time:
+                acq_times[subj_key][folder][key] = acq_time
 
             # collect session tags
             m = SESSION_RE.search(series.lower())
@@ -223,6 +228,7 @@ def scan_dicoms_long(root_dir: str,
                     "sequence"      : series,
                     "series_uid"    : uid,
                     "run"           : run_counter[series] if run_counter[series] > 1 else "",
+                    "acq_time"      : acq_times[subj_key][folder].get((series, uid), ""),
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
                     "n_files"       : n_files,
@@ -233,7 +239,7 @@ def scan_dicoms_long(root_dir: str,
     # Final column order
     columns = [
         "subject", "BIDS_name", "session", "source_folder",
-        "include", "sequence", "series_uid", "run",
+        "include", "sequence", "series_uid", "run", "acq_time",
         "modality", "modality_bids", "n_files",
         "GivenName", "FamilyName", "PatientID",
         "PatientSex", "PatientAge", "StudyDescription",
