@@ -286,6 +286,53 @@ def scan_dicoms_long(root_dir: str,
         "PatientSex", "PatientAge", "StudyDescription",
     ]
     df = pd.DataFrame(rows, columns=columns)
+
+    # Collapse magnitude/phase rows for fieldmaps
+    fmap_mask = df.modality == "fmap"
+    if fmap_mask.any():
+        base_cols = [
+            "BIDS_name",
+            "session",
+            "source_folder",
+            "sequence",
+        ]
+        group_cols = base_cols + ["acq_time"]
+        fmap_df = df[fmap_mask].copy()
+        fmap_df["uid_list"] = fmap_df["series_uid"]
+        fmap_df["img_set"] = fmap_df["image_type"]
+        fmap_df = (
+            fmap_df.groupby(group_cols, as_index=False)
+            .agg(
+                {
+                    "subject": "first",
+                    "BIDS_name": "first",
+                    "session": "first",
+                    "source_folder": "first",
+                    "include": "max",
+                    "sequence": "first",
+                    "uid_list": "first",
+                    "img_set": lambda x: "".join(sorted(set(str(v) for v in x))),
+                    "acq_time": "first",
+                    "modality": "first",
+                    "modality_bids": "first",
+                    "n_files": "sum",
+                    "GivenName": "first",
+                    "FamilyName": "first",
+                    "PatientID": "first",
+                    "PatientSex": "first",
+                    "PatientAge": "first",
+                    "StudyDescription": "first",
+                }
+            )
+        )
+        fmap_df.rename(columns={"uid_list": "series_uid", "img_set": "image_type"}, inplace=True)
+        fmap_df.sort_values(group_cols, inplace=True)
+        fmap_df["rep"] = fmap_df.groupby(base_cols).cumcount() + 1
+        repeat_mask = fmap_df.groupby(base_cols)["rep"].transform("count") > 1
+        fmap_df.loc[~repeat_mask, "rep"] = ""
+
+        df = pd.concat([df[~fmap_mask], fmap_df], ignore_index=True, sort=False)
+
     df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
 
     # optional TSV export
