@@ -270,8 +270,8 @@ class BIDSManager(QMainWindow):
         self.current_theme = None
         self.theme_btn = QPushButton("🌓")  # half-moon icon
         self.theme_btn.setFixedWidth(50)
-        self.cpu_btn = QPushButton(f"CPU ({self.num_cpus})")
-        self.cpu_btn.setFixedWidth(50)
+        self.cpu_btn = QPushButton(f"CPU: {self.num_cpus}")
+        self.cpu_btn.setFixedWidth(70)
         self.cpu_btn.clicked.connect(self.show_cpu_dialog)
         # Create a container widget with layout to adjust position
         container = QWidget()
@@ -557,7 +557,7 @@ class BIDSManager(QMainWindow):
         dlg = CpuSettingsDialog(self, self.num_cpus)
         if dlg.exec_() == QDialog.Accepted:
             self.num_cpus = dlg.spin.value()
-            self.cpu_btn.setText(f"CPU ({self.num_cpus})")
+            self.cpu_btn.setText(f"CPU: {self.num_cpus}")
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
