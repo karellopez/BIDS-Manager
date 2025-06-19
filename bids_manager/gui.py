@@ -277,7 +277,7 @@ class BIDSManager(QMainWindow):
         container = QWidget()
         layout = QHBoxLayout()
         layout.setContentsMargins(8, 2, 0, 6)  # left, top, right, bottom
-        layout.setSpacing(0)
+        layout.setSpacing(8)
         layout.addWidget(self.theme_btn)
         layout.addWidget(self.cpu_btn)
         container.setLayout(layout)
@@ -1005,7 +1005,14 @@ class BIDSManager(QMainWindow):
             self.inventory_process.setStandardOutputFile(QProcess.nullDevice())
             self.inventory_process.setStandardErrorFile(QProcess.nullDevice())
         self.inventory_process.finished.connect(self._inventoryFinished)
-        args = ["-m", "bids_manager.dicom_inventory", self.dicom_dir, self.tsv_path]
+        args = [
+            "-m",
+            "bids_manager.dicom_inventory",
+            self.dicom_dir,
+            self.tsv_path,
+            "--jobs",
+            str(self.num_cpus),
+        ]
         self.inventory_process.start(sys.executable, args)
 
     def _inventoryFinished(self):
