@@ -13,7 +13,6 @@ Simple heuristic that:
 from __future__ import annotations
 from pathlib import Path
 from textwrap import dedent
-from typing import Tuple
 import pandas as pd
 import re
 
@@ -100,16 +99,13 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         df.groupby(["BIDS_name", "session", "sequence"], dropna=False).cumcount() + 1
     )
 
+    key_def_set = set()
     for idx, row in df.iterrows():
         ses_raw = row.get("session", "")
         ses = "" if pd.isna(ses_raw) else str(ses_raw).strip()
         folder = Path(str(row.get("source_folder", "."))).name
         rep_num = rep_index.loc[idx]
-        uid = str(row.get("series_uid", ""))
-        key_id = (row["sequence"], row["BIDS_name"], ses, folder, uid)
-        if key_id in seq2key:
-            continue
-
+        uid_field = str(row.get("series_uid", ""))
         bids = row["BIDS_name"]
         container = row.get("modality_bids", "misc") or "misc"
         stem = safe_stem(row["sequence"])
@@ -125,8 +121,16 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         if rep_counts.loc[idx] > 1:
             key_parts.append(f"rep-{rep_num}")
         key_var = "key_" + clean("_".join(p for p in key_parts if p))
-        seq2key[key_id] = key_var
-        key_defs.append((key_var, template))
+        if key_var not in key_def_set:
+            key_defs.append((key_var, template))
+            key_def_set.add(key_var)
+
+        uid_list = [u for u in uid_field.split("|") if u] or [""]
+        for uid in uid_list:
+            key_id = (row["sequence"], row["BIDS_name"], ses, folder, uid)
+            if key_id in seq2key:
+                continue
+            seq2key[key_id] = key_var
 
     for var, tpl in key_defs:
         buf.append(f"{var} = create_key('{tpl}')\n")
