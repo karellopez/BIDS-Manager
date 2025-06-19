@@ -303,6 +303,8 @@ def scan_dicoms_long(root_dir: str,
         fmap_df["acq_group"] = fmap_df["acq_time"].apply(lambda t: str(t)[:4])
         group_cols = base_cols + ["acq_group"]
         fmap_df["uid_list"] = fmap_df["series_uid"]
+        # keep all UIDs within each group so both magnitude and phase series
+        # are converted; they will be joined with '|' below
         fmap_df["img_set"] = fmap_df["image_type"]
         fmap_df = (
             fmap_df.groupby(group_cols, as_index=False)
@@ -314,7 +316,7 @@ def scan_dicoms_long(root_dir: str,
                     "source_folder": "first",
                     "include": "max",
                     "sequence": "first",
-                    "uid_list": "first",
+                    "uid_list": lambda x: "|".join(sorted(set(str(v) for v in x))),
                     "img_set": lambda x: "".join(sorted(set(str(v) for v in x))),
                     "acq_time": "first",
                     "modality": "first",

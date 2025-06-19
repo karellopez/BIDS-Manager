@@ -33,7 +33,8 @@ All utilities provide `-h/--help` for details.
 - `dicom-inventory` distinguishes repeated sequences by adding `series_uid` and `rep`
   columns and records `acq_time` for each series in `subject_summary.tsv`.
 - Fieldmap rows for magnitude and phase images are now merged so each acquisition
-  appears once with the combined file count.
+  appears once with the combined file count, and their `series_uid` values are
+  stored as a pipe-separated list so both sequences are converted.
 
 
 
