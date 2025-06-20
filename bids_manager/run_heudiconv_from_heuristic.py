@@ -207,8 +207,7 @@ def run_heudiconv(
         def _convert_one(phys: str, cid: str) -> None:
             print(f"── {phys} ──")
             files = sorted(str(p) for p in (raw_root / phys).rglob("*.dcm"))
-            subj = sid_map.get(cid, cid)
-            cmd = heudi_cmd_files(files, subj, heuristic, bids_out)
+            cmd = heudi_cmd_files(files, cid, heuristic, bids_out)
             print(" ".join(cmd))
             subprocess.run(cmd, check=True)
             print()
