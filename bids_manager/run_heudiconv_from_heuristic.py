@@ -22,17 +22,16 @@ def load_sid_map(heur: Path) -> Dict[str, str]:
     """Load the ``SID_MAP`` dictionary from a heuristic file."""
 
     spec = importlib.util.spec_from_file_location("heuristic", heur)
-    module = importlib.util.module_from_spec(spec)  # type: ignore
+    module = importlib.util.module_from_spec(spec)         # type: ignore
     assert spec.loader
-    spec.loader.exec_module(module)  # type: ignore
-    return module.SID_MAP  # type: ignore
+    spec.loader.exec_module(module)                        # type: ignore
+    return module.SID_MAP                                  # type: ignore
 
 
 def clean_name(raw: str) -> str:
     """Return alphanumeric-only version of ``raw``."""
 
     return "".join(ch for ch in raw if ch.isalnum())
-
 
 def safe_stem(text: str) -> str:
     """Return filename-friendly version of *text* (used for study names)."""
@@ -59,6 +58,7 @@ def physical_by_clean(raw_root: Path) -> Dict[str, str]:
     return mapping
 
 
+
 def detect_depth(folder: Path) -> int:
     """Minimum depth (#subdirs) from *folder* to any .dcm file."""
     for root, _dirs, files in os.walk(folder):
@@ -68,13 +68,11 @@ def detect_depth(folder: Path) -> int:
     raise RuntimeError(f"No DICOMs under {folder}")
 
 
-def heudi_cmd(
-    raw_root: Path,
-    phys_folders: List[str],
-    heuristic: Path,
-    bids_out: Path,
-    depth: int,
-) -> List[str]:
+def heudi_cmd(raw_root: Path,
+              phys_folders: List[str],
+              heuristic: Path,
+              bids_out: Path,
+              depth: int) -> List[str]:
     """Build the ``heudiconv`` command for the given parameters."""
     wild = "*/" * depth
 
@@ -106,31 +104,6 @@ def heudi_cmd(
         template,
         "-s",
         *subjects,
-        "-f",
-        str(heuristic),
-        "-c",
-        "dcm2niix",
-        "-o",
-        str(bids_out),
-        "-b",
-        "--minmeta",
-        "--overwrite",
-    ]
-
-
-def heudi_cmd_files(
-    files: List[str],
-    subject: str,
-    heuristic: Path,
-    bids_out: Path,
-) -> List[str]:
-    """Return command using explicit list of ``files`` for ``subject``."""
-    return [
-        "heudiconv",
-        "--files",
-        *files,
-        "-s",
-        subject,
         "-f",
         str(heuristic),
         "-c",
@@ -176,20 +149,18 @@ def write_participants(sub_df: pd.DataFrame, bids_root: Path) -> None:
 
 
 # ────────────────── main runner ──────────────────
-def run_heudiconv(
-    raw_root: Path,
-    heuristic: Path,
-    bids_out: Path,
-    per_folder: bool = True,
-    mapping_df: Optional[pd.DataFrame] = None,
-    n_jobs: int = 1,
-) -> None:
+def run_heudiconv(raw_root: Path,
+                  heuristic: Path,
+                  bids_out: Path,
+                  per_folder: bool = True,
+                  mapping_df: Optional[pd.DataFrame] = None,
+                  n_jobs: int = 1) -> None:
     """Run HeuDiConv using ``heuristic`` and write output to ``bids_out``."""
 
-    sid_map = load_sid_map(heuristic)  # cleaned → sub-XXX
-    clean2phys = physical_by_clean(raw_root)
-    cleaned_ids = sorted(sid_map.keys())
-    phys_folders = [clean2phys[c] for c in cleaned_ids]
+    sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
+    clean2phys       = physical_by_clean(raw_root)
+    cleaned_ids      = sorted(sid_map.keys())
+    phys_folders     = [clean2phys[c] for c in cleaned_ids]
 
     depth = detect_depth(raw_root / phys_folders[0])
 
@@ -202,21 +173,18 @@ def run_heudiconv(
     bids_out.mkdir(parents=True, exist_ok=True)
 
     if per_folder:
-        pairs = list(zip(phys_folders, cleaned_ids))
-
-        def _convert_one(phys: str, cid: str) -> None:
+        def _convert_one(phys: str) -> None:
             print(f"── {phys} ──")
-            files = sorted(str(p) for p in (raw_root / phys).rglob("*.dcm"))
-            cmd = heudi_cmd_files(files, cid, heuristic, bids_out)
+            cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth)
             print(" ".join(cmd))
             subprocess.run(cmd, check=True)
             print()
 
         if n_jobs == 1:
-            for phys, cid in pairs:
-                _convert_one(phys, cid)
+            for phys in phys_folders:
+                _convert_one(phys)
         else:
-            Parallel(n_jobs=n_jobs)(delayed(_convert_one)(p, c) for p, c in pairs)
+            Parallel(n_jobs=n_jobs)(delayed(_convert_one)(p) for p in phys_folders)
     else:
         cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth)
         print(" ".join(cmd))
@@ -246,12 +214,8 @@ def main() -> None:
     parser.add_argument("heuristic", help="Heuristic file or directory with heuristic_*.py files")
     parser.add_argument("bids_out", help="Output BIDS directory")
     parser.add_argument("--subject-tsv", help="Path to subject_summary.tsv", default=None)
-    parser.add_argument(
-        "--single-run", action="store_true", help="Use one heudiconv call for all subjects"
-    )
-    parser.add_argument(
-        "--jobs", type=int, default=1, help="Number of parallel workers when converting per subject"
-    )
+    parser.add_argument("--single-run", action="store_true", help="Use one heudiconv call for all subjects")
+    parser.add_argument("--jobs", type=int, default=1, help="Number of parallel workers when converting per subject")
     args = parser.parse_args()
 
     mapping_df = None
@@ -275,3 +239,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
