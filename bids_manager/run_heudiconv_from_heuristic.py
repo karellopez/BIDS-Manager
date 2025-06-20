@@ -12,7 +12,6 @@ import importlib.util
 import subprocess
 import os
 from typing import Dict, List, Optional
-from joblib import Parallel, delayed
 import pandas as pd
 import re
 
@@ -153,8 +152,7 @@ def run_heudiconv(raw_root: Path,
                   heuristic: Path,
                   bids_out: Path,
                   per_folder: bool = True,
-                  mapping_df: Optional[pd.DataFrame] = None,
-                  n_jobs: int = 1) -> None:
+                  mapping_df: Optional[pd.DataFrame] = None) -> None:
     """Run HeuDiConv using ``heuristic`` and write output to ``bids_out``."""
 
     sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
@@ -173,18 +171,12 @@ def run_heudiconv(raw_root: Path,
     bids_out.mkdir(parents=True, exist_ok=True)
 
     if per_folder:
-        def _convert_one(phys: str) -> None:
+        for phys in phys_folders:
             print(f"── {phys} ──")
             cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth)
             print(" ".join(cmd))
             subprocess.run(cmd, check=True)
             print()
-
-        if n_jobs == 1:
-            for phys in phys_folders:
-                _convert_one(phys)
-        else:
-            Parallel(n_jobs=n_jobs)(delayed(_convert_one)(p) for p in phys_folders)
     else:
         cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth)
         print(" ".join(cmd))
@@ -215,7 +207,6 @@ def main() -> None:
     parser.add_argument("bids_out", help="Output BIDS directory")
     parser.add_argument("--subject-tsv", help="Path to subject_summary.tsv", default=None)
     parser.add_argument("--single-run", action="store_true", help="Use one heudiconv call for all subjects")
-    parser.add_argument("--jobs", type=int, default=1, help="Number of parallel workers when converting per subject")
     args = parser.parse_args()
 
     mapping_df = None
@@ -227,14 +218,7 @@ def main() -> None:
     for heur in heuristics:
         dataset = heur.stem.replace("heuristic_", "")
         out_dir = Path(args.bids_out) / dataset
-        run_heudiconv(
-            Path(args.dicom_root),
-            heur,
-            out_dir,
-            per_folder=not args.single_run,
-            mapping_df=mapping_df,
-            n_jobs=args.jobs,
-        )
+        run_heudiconv(Path(args.dicom_root), heur, out_dir, per_folder=not args.single_run, mapping_df=mapping_df)
 
 
 if __name__ == "__main__":
