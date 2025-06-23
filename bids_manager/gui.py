@@ -708,6 +708,9 @@ class BIDSManager(QMainWindow):
         for i in range(self.specific_tree.columnCount()):
             self.specific_tree.resizeColumnToContents(i)
         specific_layout.addWidget(self.specific_tree)
+        self.last_rep_box = QCheckBox("Only last repeats")
+        self.last_rep_box.toggled.connect(self._onLastRepToggled)
+        specific_layout.addWidget(self.last_rep_box)
         self.modal_tabs.addTab(specific_tab, "Specific view")
 
         naming_tab = QWidget()
@@ -1123,6 +1126,8 @@ class BIDSManager(QMainWindow):
 
         self.populateModalitiesTree()
         self.populateSpecificTree()
+        if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
+            self._onLastRepToggled(True)
 
         # Populate naming table
         self.naming_table.blockSignals(True)
@@ -1294,6 +1299,29 @@ class BIDSManager(QMainWindow):
         self.use_bids_names = self.name_choice.currentIndex() == 0
         QTimer.singleShot(0, self.generatePreview)
         QTimer.singleShot(0, self.populateSpecificTree)
+
+    def _onLastRepToggled(self, checked=False):
+        groups = defaultdict(list)
+        for idx, info in enumerate(self.row_info):
+            key = (
+                info['study'], info['bids'], info['ses'],
+                info['modb'], info['mod'], info['seq']
+            )
+            rep_num = int(info['rep']) if str(info['rep']).isdigit() else 1
+            groups.setdefault(key, []).append((rep_num, idx))
+        for items in groups.values():
+            if len(items) < 2:
+                continue
+            if checked:
+                max_idx = max(items, key=lambda x: x[0])[1]
+                for _, i in items:
+                    st = Qt.Checked if i == max_idx else Qt.Unchecked
+                    self.mapping_table.item(i, 0).setCheckState(st)
+            else:
+                for _, i in items:
+                    self.mapping_table.item(i, 0).setCheckState(Qt.Checked)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.populateModalitiesTree)
 
     def _rebuild_lookup_maps(self):
         """Recompute internal lookup tables for tree interactions."""
