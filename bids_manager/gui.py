@@ -907,6 +907,10 @@ class BIDSManager(QMainWindow):
         rename_act = QAction("Batch Rename…", self)
         rename_act.triggered.connect(self.launchBatchRename)
         tools_menu.addAction(rename_act)
+
+        intended_act = QAction("Set Intended For…", self)
+        intended_act.triggered.connect(self.launchIntendedForEditor)
+        tools_menu.addAction(intended_act)
         edit_layout.addWidget(menu)
 
         # Splitter between left (tree & stats) and right (metadata)
@@ -1723,6 +1727,18 @@ class BIDSManager(QMainWindow):
         dlg = RemapDialog(self, self.bids_root)
         dlg.exec_()
 
+    def launchIntendedForEditor(self):
+        """Open the manual IntendedFor editor dialog."""
+        if not self.bids_root:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Dataset not detected. Please load a dataset in File → Open BIDS",
+            )
+            return
+        dlg = IntendedForDialog(self, self.bids_root)
+        dlg.exec_()
+
 
 class RemapDialog(QDialog):
     """
@@ -1887,6 +1903,171 @@ class CpuSettingsDialog(QDialog):
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
+
+
+class IntendedForDialog(QDialog):
+    """Manual editor for fieldmap IntendedFor lists."""
+
+    def __init__(self, parent, bids_root: Path):
+        super().__init__(parent)
+        self.setWindowTitle("Set IntendedFor")
+        self.resize(900, 500)
+        self.bids_root = bids_root
+
+        layout = QHBoxLayout(self)
+
+        self.left_tree = QTreeWidget()
+        self.left_tree.setHeaderHidden(True)
+        self.left_tree.itemSelectionChanged.connect(self.on_left_selected)
+        layout.addWidget(self.left_tree, 2)
+
+        mid_layout = QVBoxLayout()
+        mid_layout.addWidget(QLabel("IntendedFor:"))
+        self.intended_list = QListWidget()
+        mid_layout.addWidget(self.intended_list)
+        rm_save = QHBoxLayout()
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.clicked.connect(self.remove_selected)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.clicked.connect(self.save_changes)
+        rm_save.addWidget(self.remove_btn)
+        rm_save.addWidget(self.save_btn)
+        rm_save.addStretch()
+        mid_layout.addLayout(rm_save)
+        layout.addLayout(mid_layout, 2)
+
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(QLabel("Functional images:"))
+        self.func_list = QListWidget()
+        self.func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        right_layout.addWidget(self.func_list)
+        self.add_btn = QPushButton("Add →")
+        self.add_btn.clicked.connect(self.add_selected)
+        right_layout.addWidget(self.add_btn)
+        right_layout.addStretch()
+        layout.addLayout(right_layout, 2)
+
+        self.data = {}
+        self._collect()
+
+    # ---- helpers ----
+    def _collect(self) -> None:
+        for sub in sorted(self.bids_root.glob('sub-*')):
+            if not sub.is_dir():
+                continue
+            sub_item = QTreeWidgetItem([sub.name])
+            self.left_tree.addTopLevelItem(sub_item)
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            if sessions:
+                for ses in sessions:
+                    ses_item = QTreeWidgetItem([ses.name])
+                    sub_item.addChild(ses_item)
+                    self._add_fmaps(ses, ses_item, sub.name, ses.name)
+            else:
+                self._add_fmaps(sub, sub_item, sub.name, None)
+            sub_item.setExpanded(True)
+
+    def _add_fmaps(self, root: Path, parent_item: QTreeWidgetItem,
+                   sub: str, ses: str | None) -> None:
+        fmap_dir = root / 'fmap'
+        func_dir = root / 'func'
+        func_files = [f.relative_to(self.bids_root).as_posix()
+                      for f in sorted(func_dir.glob('*.nii*')) if f.is_file()]
+        groups: dict[str, list[Path]] = {}
+        if fmap_dir.is_dir():
+            for js in fmap_dir.glob('*.json'):
+                base = re.sub(
+                    r'_(magnitude1|magnitude2|phasediff|phase1|phase2)\.json$',
+                    '', js.name, flags=re.I)
+                groups.setdefault(base, []).append(js)
+        for base, files in groups.items():
+            key = (sub, ses, base)
+            self.data[key] = {
+                'jsons': files,
+                'funcs': func_files,
+                'intended': self._load_intended(files[0])
+            }
+            item = QTreeWidgetItem([base])
+            item.setData(0, Qt.UserRole, key)
+            parent_item.addChild(item)
+
+    def _load_intended(self, path: Path) -> list[str]:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            val = meta.get('IntendedFor', [])
+            if isinstance(val, str):
+                return [val]
+            elif isinstance(val, list):
+                return list(val)
+        except Exception:
+            pass
+        return []
+
+    # ---- slots ----
+    def on_left_selected(self) -> None:
+        it = self.left_tree.currentItem()
+        if not it:
+            return
+        key = it.data(0, Qt.UserRole)
+        if not key:
+            return
+        info = self.data.get(key, {})
+        self.intended_list.clear()
+        for f in info.get('intended', []):
+            self.intended_list.addItem(f)
+        self.func_list.clear()
+        for f in info.get('funcs', []):
+            self.func_list.addItem(f)
+
+    def add_selected(self) -> None:
+        it = self.left_tree.currentItem()
+        if not it:
+            return
+        key = it.data(0, Qt.UserRole)
+        if not key:
+            return
+        info = self.data[key]
+        for sel in self.func_list.selectedItems():
+            path = sel.text()
+            if path not in info['intended']:
+                info['intended'].append(path)
+        self.on_left_selected()
+
+    def remove_selected(self) -> None:
+        it = self.left_tree.currentItem()
+        if not it:
+            return
+        key = it.data(0, Qt.UserRole)
+        if not key:
+            return
+        info = self.data[key]
+        remove = [s.text() for s in self.intended_list.selectedItems()]
+        info['intended'] = [p for p in info['intended'] if p not in remove]
+        self.on_left_selected()
+
+    def save_changes(self) -> None:
+        it = self.left_tree.currentItem()
+        if not it:
+            return
+        key = it.data(0, Qt.UserRole)
+        if not key:
+            return
+        info = self.data[key]
+        val = sorted(info['intended'])
+        for js in info['jsons']:
+            try:
+                with open(js, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                meta['IntendedFor'] = val
+                with open(js, 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, indent=4)
+                    f.write('\n')
+            except Exception as exc:
+                QMessageBox.warning(self, 'Error', f'Failed to save {js}: {exc}')
+                return
+        QMessageBox.information(self, 'Saved', 'IntendedFor updated.')
+
 
 class MetadataViewer(QWidget):
     """

@@ -28,6 +28,8 @@ All utilities provide `-h/--help` for details.
   its file name customised before generation.
 - The Batch Rename tool previews changes and allows restricting the scope to
   specific subjects.
+- A "Set Intended For" dialog lets you manually edit fieldmap IntendedFor lists
+  if the automatic matching needs adjustment.
 - `run-heudiconv` now keeps a copy of `subject_summary.tsv` under `.bids_manager`
   and generates a clean `participants.tsv` using demographics from that file.
 - `dicom-inventory` distinguishes repeated sequences by adding `series_uid` and `rep`
