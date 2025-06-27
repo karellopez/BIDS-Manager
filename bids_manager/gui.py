@@ -1916,14 +1916,18 @@ class IntendedForDialog(QDialog):
 
         layout = QHBoxLayout(self)
 
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(QLabel("Fieldmap images:"))
         self.left_tree = QTreeWidget()
         self.left_tree.setHeaderHidden(True)
         self.left_tree.itemSelectionChanged.connect(self.on_left_selected)
-        layout.addWidget(self.left_tree, 2)
+        left_layout.addWidget(self.left_tree)
+        layout.addLayout(left_layout, 2)
 
         mid_layout = QVBoxLayout()
         mid_layout.addWidget(QLabel("IntendedFor:"))
         self.intended_list = QListWidget()
+        self.intended_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         mid_layout.addWidget(self.intended_list)
         rm_save = QHBoxLayout()
         self.remove_btn = QPushButton("Remove")
@@ -1941,7 +1945,7 @@ class IntendedForDialog(QDialog):
         self.func_list = QListWidget()
         self.func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         right_layout.addWidget(self.func_list)
-        self.add_btn = QPushButton("Add →")
+        self.add_btn = QPushButton("← Add")
         self.add_btn.clicked.connect(self.add_selected)
         right_layout.addWidget(self.add_btn)
         right_layout.addStretch()
