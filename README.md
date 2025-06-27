@@ -35,6 +35,9 @@ All utilities provide `-h/--help` for details.
 - Fieldmap rows for magnitude and phase images are now merged so each acquisition
   appears once with the combined file count, and their `series_uid` values are
   stored as a pipe-separated list so both sequences are converted.
+- `post-conv-renamer` now adds an `IntendedFor` list to each fieldmap JSON so
+  fMRI preprocessing tools can automatically match fieldmaps with the relevant
+  functional runs.
 
 
 

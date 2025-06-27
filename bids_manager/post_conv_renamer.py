@@ -8,7 +8,12 @@ This script renames fieldmap files in a BIDS dataset so that:
   - plain _fmap → _phasediff
 It also **removes** the trailing `_fmap` from the filenames and moves any
 ``_rep-<n>`` suffix to the end (e.g. ``magnitude1_rep-2``).
-Both .nii, .nii.gz, and .json sidecars are handled.
+Both ``.nii``/``.nii.gz`` images and their JSON sidecars are handled.
+
+After renaming, each fieldmap JSON gains an ``IntendedFor`` field listing
+all functional runs in the same subject/session. This allows fMRIPrep and
+other BIDS apps to correctly associate fieldmaps with their target EPI
+images.
 
 Usage in PyCharm:
   1. Open this script in PyCharm.
@@ -18,6 +23,7 @@ Usage in PyCharm:
 No CLI arguments required.
 """
 from pathlib import Path
+import json
 import re
 import sys
 
@@ -88,6 +94,55 @@ def post_fmap_rename(bids_root: Path) -> None:
         return
     for fmap_dir in fmap_dirs:
         process_fmap_dir(fmap_dir)
+
+    # After renaming, populate ``IntendedFor`` in the fieldmap sidecars so
+    # downstream tools know which functional runs they apply to.
+    add_intended_for(bids_root)
+
+
+def _update_intended_for(root: Path, bids_root: Path) -> None:
+    """Add ``IntendedFor`` entries to fieldmap JSONs under ``root``."""
+    # ``root`` points to either ``sub-<id>`` or ``sub-<id>/ses-<id>``
+    # within the BIDS dataset. The function expects ``fmap`` and ``func``
+    # directories side-by-side inside this folder.
+    fmap_dir = root / "fmap"
+    func_dir = root / "func"
+
+    # Skip if either directory does not exist (e.g. no functional runs).
+    if not (fmap_dir.is_dir() and func_dir.is_dir()):
+        return
+
+    # Collect paths of all functional images relative to ``bids_root``.
+    func_files = sorted(func_dir.glob("*.nii*"))
+    if not func_files:
+        return
+
+    rel_paths = [f.relative_to(bids_root).as_posix() for f in func_files]
+
+    # Update each JSON sidecar under ``fmap`` with the collected paths.
+    for js in fmap_dir.glob("*.json"):
+        with open(js, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["IntendedFor"] = rel_paths
+        with open(js, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=4)
+            f.write("\n")
+        print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
+
+
+def add_intended_for(bids_root: Path) -> None:
+    """Populate ``IntendedFor`` in all fieldmap JSONs."""
+    # Walk through all subjects and sessions in the dataset. ``_update_intended_for``
+    # handles the actual JSON editing for each folder.
+    for sub in bids_root.glob("sub-*"):
+        if not sub.is_dir():
+            continue
+        sessions = [s for s in sub.glob("ses-*") if s.is_dir()]
+        if sessions:
+            for ses in sessions:
+                _update_intended_for(ses, bids_root)
+        else:
+            _update_intended_for(sub, bids_root)
 
 # -----------------------------------------------------------------------------
 # Run immediately when executed
