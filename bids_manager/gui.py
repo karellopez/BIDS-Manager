@@ -54,7 +54,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
