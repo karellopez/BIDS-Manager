@@ -33,6 +33,9 @@ All utilities provide `-h/--help` for details.
   if the automatic matching needs adjustment.
 - `run-heudiconv` now keeps a copy of `subject_summary.tsv` under `.bids_manager`
   and generates a clean `participants.tsv` using demographics from that file.
+- Re-running `run-heudiconv` on the same dataset now appends new subjects to
+  the existing `.bids_manager` records and updates `participants.tsv` instead of
+  overwriting them.
 - `dicom-inventory` distinguishes repeated sequences by adding `series_uid` and `rep`
   columns and records `acq_time` for each series in `subject_summary.tsv`.
 - Fieldmap rows for magnitude and phase images are now merged so each acquisition
