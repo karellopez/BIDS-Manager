@@ -2144,31 +2144,53 @@ class IntendedForDialog(QDialog):
 
 
 class BidsIgnoreDialog(QDialog):
-    """Simple dialog to edit ``.bidsignore`` entries."""
+    """Dialog to edit ``.bidsignore`` entries using two selection panels."""
 
     def __init__(self, parent, bids_root: Path):
         super().__init__(parent)
         self.bids_root = bids_root
         self.setWindowTitle("Edit .bidsignore")
-        self.resize(600, 400)
+        self.resize(700, 400)
 
-        layout = QVBoxLayout(self)
+        main = QVBoxLayout(self)
+
+        # --- lists ---
+        lists = QHBoxLayout()
+        main.addLayout(lists)
+
+        # Left panel: existing entries
+        left_box = QVBoxLayout()
+        lists.addLayout(left_box)
+        left_box.addWidget(QLabel("Ignored files:"))
+        self.ignore_list = QListWidget()
+        self.ignore_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        left_box.addWidget(self.ignore_list)
+        rm_btn = QPushButton("Remove")
+        rm_btn.clicked.connect(self._remove_selected)
+        left_box.addWidget(rm_btn)
+
+        # Right panel: available files
+        right_box = QVBoxLayout()
+        lists.addLayout(right_box)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter files…")
-        self.search.textChanged.connect(self._populate)
-        layout.addWidget(self.search)
+        self.search.textChanged.connect(self._populate_lists)
+        right_box.addWidget(self.search)
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        right_box.addWidget(self.file_list)
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._add_selected)
+        right_box.addWidget(add_btn)
 
-        self.list = QListWidget()
-        self.list.setSelectionMode(QAbstractItemView.NoSelection)
-        layout.addWidget(self.list)
-
+        # buttons
         btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.save)
         btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
+        main.addWidget(btn_box)
 
         self.ignore_file = self.bids_root / ".bidsignore"
-        self.entries = set()
+        self.entries: set[str] = set()
         if self.ignore_file.exists():
             self.entries = {
                 line.strip()
@@ -2181,28 +2203,37 @@ class BidsIgnoreDialog(QDialog):
             for p in self.bids_root.rglob('*')
             if p.is_file()
         ]
-        self._populate()
+        self._populate_lists()
 
-    def _populate(self) -> None:
+    # --- helpers ---
+    def _populate_lists(self) -> None:
+        """Refresh both panels based on current entries and filter."""
         pattern = self.search.text().strip()
-        self.list.clear()
+
+        self.ignore_list.clear()
+        for path in sorted(self.entries):
+            self.ignore_list.addItem(path)
+
+        self.file_list.clear()
         for path in sorted(self.all_files):
+            if path in self.entries:
+                continue
             if pattern and pattern not in path:
                 continue
-            item = QListWidgetItem(path)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            if path in self.entries:
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
-            self.list.addItem(item)
+            self.file_list.addItem(path)
 
+    def _add_selected(self) -> None:
+        for item in self.file_list.selectedItems():
+            self.entries.add(item.text())
+        self._populate_lists()
+
+    def _remove_selected(self) -> None:
+        for item in self.ignore_list.selectedItems():
+            self.entries.discard(item.text())
+        self._populate_lists()
+
+    # --- save ---
     def save(self) -> None:
-        self.entries = set()
-        for i in range(self.list.count()):
-            item = self.list.item(i)
-            if item.checkState() == Qt.Checked:
-                self.entries.add(item.text())
         self.ignore_file.write_text("\n".join(sorted(self.entries)) + "\n")
         QMessageBox.information(self, "Saved", f"Updated {self.ignore_file}")
         self.accept()

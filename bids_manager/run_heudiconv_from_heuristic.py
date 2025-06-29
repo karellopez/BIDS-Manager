@@ -124,10 +124,13 @@ def _parse_age(value: str) -> str:
     return age or "0"
 
 
-def write_participants(sub_df: pd.DataFrame, bids_root: Path) -> None:
-    """Create or update participants.tsv in *bids_root* using *sub_df*."""
+def write_participants(summary_path: Path, bids_root: Path) -> None:
+    """Generate ``participants.tsv`` from ``subject_summary.tsv``."""
+    if not summary_path.exists():
+        return
+    df = pd.read_csv(summary_path, sep="\t", keep_default_na=False)
     part_df = (
-        sub_df[["BIDS_name", "GivenName", "PatientSex", "PatientAge"]]
+        df[["BIDS_name", "GivenName", "PatientSex", "PatientAge"]]
         .drop_duplicates(subset=["BIDS_name"])
         .copy()
     )
@@ -146,11 +149,6 @@ def write_participants(sub_df: pd.DataFrame, bids_root: Path) -> None:
     )
 
     part_path = bids_root / "participants.tsv"
-    if part_path.exists():
-        old_part = pd.read_csv(part_path, sep="\t", keep_default_na=False)
-        part_df = pd.concat([old_part, part_df], ignore_index=True)
-        part_df.drop_duplicates(subset=["participant_id"], inplace=True)
-
     part_df.to_csv(part_path, sep="\t", index=False)
 
 
@@ -189,13 +187,13 @@ def run_heudiconv(raw_root: Path,
         print(" ".join(cmd))
         subprocess.run(cmd, check=True)
 
+    summary_path = bids_out / ".bids_manager" / "subject_summary.tsv"
     if mapping_df is not None:
         dataset = bids_out.name
         mdir = bids_out / ".bids_manager"
         sub_df = mapping_df[mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset]
         if not sub_df.empty:
             mdir.mkdir(exist_ok=True)
-            summary_path = mdir / "subject_summary.tsv"
             mapping_path = mdir / "subject_mapping.tsv"
 
             if summary_path.exists():
@@ -213,7 +211,8 @@ def run_heudiconv(raw_root: Path,
                 new_map.drop_duplicates(subset=["GivenName", "BIDS_name"], inplace=True)
             new_map.to_csv(mapping_path, sep="\t", index=False)
 
-            write_participants(sub_df, bids_out)
+    # Always refresh participants.tsv from the accumulated summary
+    write_participants(summary_path, bids_out)
 
 
 # ────────────────── CLI interface ──────────────────
