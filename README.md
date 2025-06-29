@@ -41,6 +41,8 @@ All utilities provide `-h/--help` for details.
 - `post-conv-renamer` now adds an `IntendedFor` list to each fieldmap JSON so
   fMRI preprocessing tools can automatically match fieldmaps with the relevant
   functional runs.
+- The GUI's Tools menu gained actions to refresh `_scans.tsv` files and edit
+  `.bidsignore` entries.
 
 
 
