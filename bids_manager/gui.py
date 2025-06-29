@@ -54,7 +54,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -1757,9 +1757,9 @@ class BIDSManager(QMainWindow):
             )
             return
         try:
-            from .scans_utils import refresh_scans_filenames
+            from .post_conv_renamer import update_scans_tsv
 
-            refresh_scans_filenames(self.bids_root)
+            update_scans_tsv(self.bids_root)
             QMessageBox.information(self, "Refresh", "Updated scans.tsv files")
         except Exception as exc:
             QMessageBox.warning(self, "Error", f"Failed to update: {exc}")
