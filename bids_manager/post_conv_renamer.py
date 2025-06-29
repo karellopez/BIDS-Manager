@@ -176,7 +176,7 @@ def _rename_in_scans(tsv: Path, bids_root: Path) -> None:
                 new_name = _move_rep_suffix(new_name)
 
         if new_name != path.name:
-            candidate = bids_root / path.parent / new_name
+            candidate = tsv.parent / path.parent / new_name
             if candidate.exists():
                 df.at[idx, "filename"] = (path.parent / new_name).as_posix()
                 changed = True
