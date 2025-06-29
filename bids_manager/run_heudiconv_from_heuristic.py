@@ -125,7 +125,7 @@ def _parse_age(value: str) -> str:
 
 
 def write_participants(sub_df: pd.DataFrame, bids_root: Path) -> None:
-    """Create or replace participants.tsv in *bids_root* using *sub_df*."""
+    """Create or update participants.tsv in *bids_root* using *sub_df*."""
     part_df = (
         sub_df[["BIDS_name", "GivenName", "PatientSex", "PatientAge"]]
         .drop_duplicates(subset=["BIDS_name"])
@@ -144,7 +144,14 @@ def write_participants(sub_df: pd.DataFrame, bids_root: Path) -> None:
         },
         inplace=True,
     )
-    part_df.to_csv(bids_root / "participants.tsv", sep="\t", index=False)
+
+    part_path = bids_root / "participants.tsv"
+    if part_path.exists():
+        old_part = pd.read_csv(part_path, sep="\t", keep_default_na=False)
+        part_df = pd.concat([old_part, part_df], ignore_index=True)
+        part_df.drop_duplicates(subset=["participant_id"], inplace=True)
+
+    part_df.to_csv(part_path, sep="\t", index=False)
 
 
 # ────────────────── main runner ──────────────────
@@ -188,10 +195,24 @@ def run_heudiconv(raw_root: Path,
         sub_df = mapping_df[mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset]
         if not sub_df.empty:
             mdir.mkdir(exist_ok=True)
-            sub_df.to_csv(mdir / "subject_summary.tsv", sep="\t", index=False)
-            sub_df[["GivenName", "BIDS_name"]].drop_duplicates().to_csv(
-                mdir / "subject_mapping.tsv", sep="\t", index=False
-            )
+            summary_path = mdir / "subject_summary.tsv"
+            mapping_path = mdir / "subject_mapping.tsv"
+
+            if summary_path.exists():
+                old_summary = pd.read_csv(summary_path, sep="\t", keep_default_na=False)
+                combined = pd.concat([old_summary, sub_df], ignore_index=True)
+                combined.drop_duplicates(inplace=True)
+            else:
+                combined = sub_df
+            combined.to_csv(summary_path, sep="\t", index=False)
+
+            new_map = sub_df[["GivenName", "BIDS_name"]].drop_duplicates()
+            if mapping_path.exists():
+                old_map = pd.read_csv(mapping_path, sep="\t", keep_default_na=False)
+                new_map = pd.concat([old_map, new_map], ignore_index=True)
+                new_map.drop_duplicates(subset=["GivenName", "BIDS_name"], inplace=True)
+            new_map.to_csv(mapping_path, sep="\t", index=False)
+
             write_participants(sub_df, bids_out)
 
 
