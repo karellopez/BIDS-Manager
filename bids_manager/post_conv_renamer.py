@@ -99,6 +99,10 @@ def post_fmap_rename(bids_root: Path) -> None:
     # downstream tools know which functional runs they apply to.
     add_intended_for(bids_root)
 
+    # Finally, refresh filenames recorded in ``*_scans.tsv`` to match the new
+    # fieldmap file names.
+    update_scans_tsv(bids_root)
+
 
 def _update_intended_for(root: Path, bids_root: Path) -> None:
     """Add ``IntendedFor`` entries to fieldmap JSONs under ``root``."""
@@ -112,12 +116,13 @@ def _update_intended_for(root: Path, bids_root: Path) -> None:
     if not (fmap_dir.is_dir() and func_dir.is_dir()):
         return
 
-    # Collect paths of all functional images relative to ``bids_root``.
+    # Collect paths of all functional images relative to the subject/session
+    # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
     func_files = sorted(func_dir.glob("*.nii*"))
     if not func_files:
         return
 
-    rel_paths = [f.relative_to(bids_root).as_posix() for f in func_files]
+    rel_paths = [f.relative_to(root).as_posix() for f in func_files]
 
     # Update each JSON sidecar under ``fmap`` with the collected paths.
     for js in fmap_dir.glob("*.json"):
@@ -143,6 +148,54 @@ def add_intended_for(bids_root: Path) -> None:
                 _update_intended_for(ses, bids_root)
         else:
             _update_intended_for(sub, bids_root)
+
+
+def _rename_in_scans(tsv: Path, bids_root: Path) -> None:
+    """Update file names in a single ``*_scans.tsv`` if needed."""
+    import pandas as pd
+
+    df = pd.read_csv(tsv, sep="\t")
+    if "filename" not in df.columns:
+        return
+
+    changed = False
+    for idx, fname in enumerate(df["filename"]):
+        path = Path(fname)
+        if "fmap" not in path.parts:
+            continue
+        new_name = path.name
+        for pattern, replacement in RENAME_RULES:
+            if pattern.search(new_name) and new_name.lower().endswith((".nii", ".nii.gz", ".json")):
+                interim = pattern.sub(replacement, new_name)
+                new_name = FMAP_SUFFIX_RE.sub("", interim)
+                new_name = _move_rep_suffix(new_name)
+                break
+        else:
+            if new_name.lower().endswith((".nii", ".nii.gz", ".json")) and "_fmap" in new_name and not any(rep in new_name.lower() for rep in ["magnitude1", "magnitude2"]):
+                new_name = new_name.replace("_fmap", "_phasediff")
+                new_name = _move_rep_suffix(new_name)
+
+        if new_name != path.name:
+            candidate = bids_root / path.parent / new_name
+            if candidate.exists():
+                df.at[idx, "filename"] = (path.parent / new_name).as_posix()
+                changed = True
+
+    if changed:
+        df.to_csv(tsv, sep="\t", index=False)
+        print(f"Updated {tsv.relative_to(bids_root)}")
+
+
+def update_scans_tsv(bids_root: Path) -> None:
+    """Refresh filenames inside all ``*_scans.tsv`` files."""
+    for sub in bids_root.glob("sub-*"):
+        if not sub.is_dir():
+            continue
+        sessions = [s for s in sub.glob("ses-*") if s.is_dir()]
+        roots = sessions or [sub]
+        for root in roots:
+            for tsv in root.glob("*_scans.tsv"):
+                _rename_in_scans(tsv, bids_root)
 
 # -----------------------------------------------------------------------------
 # Run immediately when executed

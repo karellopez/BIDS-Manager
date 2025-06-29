@@ -1975,7 +1975,7 @@ class IntendedForDialog(QDialog):
                    sub: str, ses: str | None) -> None:
         fmap_dir = root / 'fmap'
         func_dir = root / 'func'
-        func_files = [f.relative_to(self.bids_root).as_posix()
+        func_files = [f.relative_to(root).as_posix()
                       for f in sorted(func_dir.glob('*.nii*')) if f.is_file()]
         groups: dict[str, list[Path]] = {}
         if fmap_dir.is_dir():
@@ -1989,21 +1989,32 @@ class IntendedForDialog(QDialog):
             self.data[key] = {
                 'jsons': files,
                 'funcs': func_files,
-                'intended': self._load_intended(files[0])
+                'intended': self._load_intended(files[0], root),
+                'root': root,
             }
             item = QTreeWidgetItem([base])
             item.setData(0, Qt.UserRole, key)
             parent_item.addChild(item)
 
-    def _load_intended(self, path: Path) -> list[str]:
+    def _load_intended(self, path: Path, root: Path) -> list[str]:
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
             val = meta.get('IntendedFor', [])
+            prefix = root.relative_to(self.bids_root)
+
+            def _strip(p: str) -> str:
+                parts = Path(p)
+                try:
+                    parts = parts.relative_to(prefix)
+                except ValueError:
+                    pass
+                return parts.as_posix()
+
             if isinstance(val, str):
-                return [val]
+                return [_strip(val)]
             elif isinstance(val, list):
-                return list(val)
+                return [_strip(v) for v in val]
         except Exception:
             pass
         return []
@@ -2059,6 +2070,16 @@ class IntendedForDialog(QDialog):
             return
         info = self.data[key]
         val = sorted(info['intended'])
+        prefix = info['root'].relative_to(self.bids_root)
+        cleaned = []
+        for p in val:
+            path = Path(p)
+            try:
+                path = path.relative_to(prefix)
+            except ValueError:
+                pass
+            cleaned.append(path.as_posix())
+        val = cleaned
         for js in info['jsons']:
             try:
                 with open(js, 'r', encoding='utf-8') as f:
