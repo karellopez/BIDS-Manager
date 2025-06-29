@@ -118,7 +118,11 @@ def _update_intended_for(root: Path, bids_root: Path) -> None:
 
     # Collect paths of all functional images relative to the subject/session
     # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
-    func_files = sorted(func_dir.glob("*.nii*"))
+    # Skip reference volumes (e.g. ``*_sbref``) as they should not appear in the
+    # ``IntendedFor`` lists.
+    func_files = [
+        f for f in sorted(func_dir.glob("*.nii*")) if "ref" not in f.name.lower()
+    ]
     if not func_files:
         return
 
