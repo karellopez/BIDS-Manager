@@ -19,6 +19,7 @@ After installation the following commands become available:
 - `run-heudiconv` – run HeuDiConv using the generated heuristic
 - `post-conv-renamer` – rename fieldmap files after conversion
 - `bids-editor` – standalone metadata editor
+- `fill-bids-ignore` – interactively update `.bidsignore`
 
 All utilities provide `-h/--help` for details.
 

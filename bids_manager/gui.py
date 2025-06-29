@@ -1863,11 +1863,23 @@ class RemapDialog(QDialog):
 
     def apply(self):
         """Apply renaming to files as shown in preview."""
+        rename_map = {}
         for i in range(self.preview_tree.topLevelItemCount()):
             it = self.preview_tree.topLevelItem(i)
-            orig = self.bids_root / it.text(0)
+            orig_rel = Path(it.text(0))
+            orig = self.bids_root / orig_rel
             new = orig.with_name(it.text(1))
             orig.rename(new)
+            rename_map[orig_rel.as_posix()] = (
+                (orig_rel.parent / it.text(1)).as_posix()
+            )
+        if rename_map:
+            try:
+                from .scans_utils import update_scans_with_map
+
+                update_scans_with_map(self.bids_root, rename_map)
+            except Exception:
+                pass
         QMessageBox.information(self, "Batch Remap", "Rename applied.")
         self.accept()
 
