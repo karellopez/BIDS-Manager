@@ -911,6 +911,14 @@ class BIDSManager(QMainWindow):
         intended_act = QAction("Set Intended For…", self)
         intended_act.triggered.connect(self.launchIntendedForEditor)
         tools_menu.addAction(intended_act)
+
+        refresh_act = QAction("Refresh scans.tsv", self)
+        refresh_act.triggered.connect(self.refreshScansTsv)
+        tools_menu.addAction(refresh_act)
+
+        ignore_act = QAction("Edit .bidsignore…", self)
+        ignore_act.triggered.connect(self.launchBidsIgnore)
+        tools_menu.addAction(ignore_act)
         edit_layout.addWidget(menu)
 
         # Splitter between left (tree & stats) and right (metadata)
@@ -1739,6 +1747,35 @@ class BIDSManager(QMainWindow):
         dlg = IntendedForDialog(self, self.bids_root)
         dlg.exec_()
 
+    def refreshScansTsv(self):
+        """Update ``*_scans.tsv`` files to match current filenames."""
+        if not self.bids_root:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Dataset not detected. Please load a dataset in File → Open BIDS",
+            )
+            return
+        try:
+            from .scans_utils import refresh_scans_filenames
+
+            refresh_scans_filenames(self.bids_root)
+            QMessageBox.information(self, "Refresh", "Updated scans.tsv files")
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", f"Failed to update: {exc}")
+
+    def launchBidsIgnore(self):
+        """Open dialog to edit ``.bidsignore``."""
+        if not self.bids_root:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Dataset not detected. Please load a dataset in File → Open BIDS",
+            )
+            return
+        dlg = BidsIgnoreDialog(self, self.bids_root)
+        dlg.exec_()
+
 
 class RemapDialog(QDialog):
     """
@@ -2104,6 +2141,71 @@ class IntendedForDialog(QDialog):
                 QMessageBox.warning(self, 'Error', f'Failed to save {js}: {exc}')
                 return
         QMessageBox.information(self, 'Saved', 'IntendedFor updated.')
+
+
+class BidsIgnoreDialog(QDialog):
+    """Simple dialog to edit ``.bidsignore`` entries."""
+
+    def __init__(self, parent, bids_root: Path):
+        super().__init__(parent)
+        self.bids_root = bids_root
+        self.setWindowTitle("Edit .bidsignore")
+        self.resize(600, 400)
+
+        layout = QVBoxLayout(self)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Filter files…")
+        self.search.textChanged.connect(self._populate)
+        layout.addWidget(self.search)
+
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.NoSelection)
+        layout.addWidget(self.list)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(self.save)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+        self.ignore_file = self.bids_root / ".bidsignore"
+        self.entries = set()
+        if self.ignore_file.exists():
+            self.entries = {
+                line.strip()
+                for line in self.ignore_file.read_text().splitlines()
+                if line.strip()
+            }
+
+        self.all_files = [
+            p.relative_to(self.bids_root).as_posix()
+            for p in self.bids_root.rglob('*')
+            if p.is_file()
+        ]
+        self._populate()
+
+    def _populate(self) -> None:
+        pattern = self.search.text().strip()
+        self.list.clear()
+        for path in sorted(self.all_files):
+            if pattern and pattern not in path:
+                continue
+            item = QListWidgetItem(path)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if path in self.entries:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+            self.list.addItem(item)
+
+    def save(self) -> None:
+        self.entries = set()
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.checkState() == Qt.Checked:
+                self.entries.add(item.text())
+        self.ignore_file.write_text("\n".join(sorted(self.entries)) + "\n")
+        QMessageBox.information(self, "Saved", f"Updated {self.ignore_file}")
+        self.accept()
 
 
 class MetadataViewer(QWidget):
