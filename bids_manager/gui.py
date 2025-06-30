@@ -2412,12 +2412,16 @@ class MetadataViewer(QWidget):
         vlay.addLayout(self.toolbar)
         self.value_row = QHBoxLayout()
         vlay.addLayout(self.value_row)
-        # Label used to show a spinner while a file is being loaded.  It is
-        # hidden by default and only made visible during loading operations.
-        self.loading_label = QLabel()
+        # Label used to show a spinner while a file is being loaded. It is
+        # created as an overlay so it always appears above whatever viewer is
+        # currently shown.  The font is enlarged for better visibility.
+        self.loading_label = QLabel(self)
         self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setStyleSheet(
+            "font-size: 24px; background-color: rgba(0, 0, 0, 128);"
+            "color: white;"
+        )
         self.loading_label.hide()
-        vlay.addWidget(self.loading_label)
 
         # Timer and frame sequence driving the spinner animation.
         self._load_timer = QTimer()
@@ -2471,6 +2475,8 @@ class MetadataViewer(QWidget):
         self._load_message = message
         self._load_index = 0
         self.loading_label.setText(f"{message} {self._load_frames[0]}")
+        self.loading_label.setGeometry(0, 0, self.width(), self.height())
+        self.loading_label.raise_()
         self.loading_label.show()
         self._load_timer.start(100)
 
@@ -2538,6 +2544,7 @@ class MetadataViewer(QWidget):
     def resizeEvent(self, event):
         """Ensure images rescale when the window size decreases."""
         super().resizeEvent(event)
+        self.loading_label.setGeometry(0, 0, self.width(), self.height())
         # If a NIfTI image is currently loaded, update the displayed slice
         if (
             self.data is not None
