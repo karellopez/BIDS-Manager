@@ -46,5 +46,8 @@ include-package-data = true
 "bids_manager" = [
     "miscellaneous/images/Logo.png",
     "miscellaneous/images/Icon.png",
+    "miscellaneous/images/ANCP_lab.png",
+    "miscellaneous/images/Karel.jpeg",
+    "miscellaneous/images/Jochem.jpg",
 ]
 

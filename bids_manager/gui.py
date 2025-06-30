@@ -80,6 +80,9 @@ except Exception:  # pragma: no cover - optional dependency
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
 ICON_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Icon.png"
+ANCP_LAB_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "ANCP_lab.png"
+KAREL_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Karel.jpeg"
+JOCHEM_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Jochem.jpg"
 
 
 class _AutoUpdateLabel(QLabel):
@@ -281,6 +284,9 @@ class BIDSManager(QMainWindow):
         self.cpu_btn = QPushButton(f"CPU: {self.num_cpus}")
         self.cpu_btn.setFixedWidth(70)
         self.cpu_btn.clicked.connect(self.show_cpu_dialog)
+        self.authorship_btn = QPushButton("Authorship")
+        self.authorship_btn.setFixedWidth(90)
+        self.authorship_btn.clicked.connect(self.show_authorship_dialog)
         # Create a container widget with layout to adjust position
         container = QWidget()
         layout = QHBoxLayout()
@@ -288,6 +294,7 @@ class BIDSManager(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(self.theme_btn)
         layout.addWidget(self.cpu_btn)
+        layout.addWidget(self.authorship_btn)
         container.setLayout(layout)
         # Add the container to the status bar (left-aligned)
         self.statusBar().addWidget(container)
@@ -566,6 +573,11 @@ class BIDSManager(QMainWindow):
         if dlg.exec_() == QDialog.Accepted:
             self.num_cpus = dlg.spin.value()
             self.cpu_btn.setText(f"CPU: {self.num_cpus}")
+
+    def show_authorship_dialog(self) -> None:
+        """Display authorship information dialog."""
+        dlg = AuthorshipDialog(self)
+        dlg.exec_()
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
@@ -1998,6 +2010,85 @@ class CpuSettingsDialog(QDialog):
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+
+class AuthorshipDialog(QDialog):
+    """Dialog displaying information about the authors and acknowledgements."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Authorship")
+        self.resize(600, 500)
+        layout = QVBoxLayout(self)
+
+        # Lab logo and description
+        if ANCP_LAB_FILE.exists():
+            logo = QLabel()
+            pix = QPixmap(str(ANCP_LAB_FILE))
+            logo.setPixmap(pix.scaledToWidth(250, Qt.SmoothTransformation))
+            logo.setAlignment(Qt.AlignCenter)
+            layout.addWidget(logo)
+        desc = QLabel(
+            "This software has been developed in the Applied Neurocognitive "
+            "Psychology Lab with the objective of facilitating the conversion "
+            "to BIDS format, easy metadata handling, and quality control."
+        )
+        desc.setWordWrap(True)
+        desc.setAlignment(Qt.AlignCenter)
+        layout.addWidget(desc)
+
+        # Authors
+        layout.addWidget(QLabel("<b>Authors</b>"))
+
+        k_row = QHBoxLayout()
+        if KAREL_IMG_FILE.exists():
+            k_pic = QLabel()
+            k_pic.setPixmap(QPixmap(str(KAREL_IMG_FILE)).scaledToWidth(120, Qt.SmoothTransformation))
+            k_row.addWidget(k_pic)
+        k_desc = QLabel(
+            "Dr. Karel López Vilaret, BIDS Manager App Lead\n"
+            "I hold a PhD in Neuroscience and currently work as a scientific "
+            "software developer. I build BIDS Manager, a tool designed to "
+            "streamline BIDS conversion, metadata handling, and quality "
+            "control—enabling researchers to manage neuroimaging data more "
+            "efficiently."
+        )
+        k_desc.setWordWrap(True)
+        k_row.addWidget(k_desc)
+        layout.addLayout(k_row)
+
+        j_row = QHBoxLayout()
+        if JOCHEM_IMG_FILE.exists():
+            j_pic = QLabel()
+            j_pic.setPixmap(QPixmap(str(JOCHEM_IMG_FILE)).scaledToWidth(120, Qt.SmoothTransformation))
+            j_row.addWidget(j_pic)
+        j_desc = QLabel(
+            "Prof. Dr. rer. nat. Jochem Rieger\n"
+            "Full Professor of Psychology at the University of Oldenburg and "
+            "head of the Applied Neurocognitive Psychology group. His research "
+            "focuses on open science, machine learning, and understanding the "
+            "neural basis of perception, cognition, and action in realistic "
+            "environments."
+        )
+        j_desc.setWordWrap(True)
+        j_row.addWidget(j_desc)
+        layout.addLayout(j_row)
+
+        # Acknowledgements
+        layout.addWidget(QLabel("<b>Acknowledgements</b>"))
+        ack = QLabel(
+            "Dr. Jorge Bosch-Bayard\n"
+            "Msc. Erdal Karaca\n"
+            "Bsc. Pablo Alexis Olguín Baxman\n"
+            "Dr. Dr. Tina Schmitt\n"
+            "Dr.-Ing. Andreas Spiegler"
+        )
+        ack.setWordWrap(True)
+        layout.addWidget(ack)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn_box.accepted.connect(self.accept)
         layout.addWidget(btn_box)
 
 
