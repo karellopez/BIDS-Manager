@@ -2021,14 +2021,16 @@ class AuthorshipDialog(QDialog):
         self.setWindowTitle("Authorship")
         self.resize(600, 500)
         layout = QVBoxLayout(self)
+        layout.setSpacing(15)
 
         # Lab logo and description
         if ANCP_LAB_FILE.exists():
             logo = QLabel()
             pix = QPixmap(str(ANCP_LAB_FILE))
-            logo.setPixmap(pix.scaledToWidth(250, Qt.SmoothTransformation))
+            logo.setPixmap(pix.scaledToWidth(320, Qt.SmoothTransformation))
             logo.setAlignment(Qt.AlignCenter)
             layout.addWidget(logo)
+            layout.addSpacing(10)
         desc = QLabel(
             "This software has been developed in the Applied Neurocognitive "
             "Psychology Lab with the objective of facilitating the conversion "
@@ -2039,15 +2041,19 @@ class AuthorshipDialog(QDialog):
         layout.addWidget(desc)
 
         # Authors
-        layout.addWidget(QLabel("<b>Authors</b>"))
+        auth_label = QLabel("<b>Authors</b>")
+        auth_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(auth_label)
+        layout.addSpacing(10)
 
         k_row = QHBoxLayout()
+        k_row.setSpacing(20)
         if KAREL_IMG_FILE.exists():
             k_pic = QLabel()
             k_pic.setPixmap(QPixmap(str(KAREL_IMG_FILE)).scaledToWidth(120, Qt.SmoothTransformation))
             k_row.addWidget(k_pic)
         k_desc = QLabel(
-            "Dr. Karel López Vilaret, BIDS Manager App Lead\n"
+            "<b>Dr. Karel López Vilaret<br/>BIDS Manager App Lead</b><br/><br/>"
             "I hold a PhD in Neuroscience and currently work as a scientific "
             "software developer. I build BIDS Manager, a tool designed to "
             "streamline BIDS conversion, metadata handling, and quality "
@@ -2057,14 +2063,16 @@ class AuthorshipDialog(QDialog):
         k_desc.setWordWrap(True)
         k_row.addWidget(k_desc)
         layout.addLayout(k_row)
+        layout.addSpacing(15)
 
         j_row = QHBoxLayout()
+        j_row.setSpacing(20)
         if JOCHEM_IMG_FILE.exists():
             j_pic = QLabel()
             j_pic.setPixmap(QPixmap(str(JOCHEM_IMG_FILE)).scaledToWidth(120, Qt.SmoothTransformation))
             j_row.addWidget(j_pic)
         j_desc = QLabel(
-            "Prof. Dr. rer. nat. Jochem Rieger\n"
+            "<b>Prof. Dr. rer. nat. Jochem Rieger<br/>Applied Neurocognitive Psychology</b><br/><br/>"
             "Full Professor of Psychology at the University of Oldenburg and "
             "head of the Applied Neurocognitive Psychology group. His research "
             "focuses on open science, machine learning, and understanding the "
@@ -2074,18 +2082,23 @@ class AuthorshipDialog(QDialog):
         j_desc.setWordWrap(True)
         j_row.addWidget(j_desc)
         layout.addLayout(j_row)
+        layout.addSpacing(15)
 
         # Acknowledgements
-        layout.addWidget(QLabel("<b>Acknowledgements</b>"))
+        ack_label = QLabel("<b>Acknowledgements</b>")
+        ack_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(ack_label)
         ack = QLabel(
             "Dr. Jorge Bosch-Bayard\n"
             "Msc. Erdal Karaca\n"
             "Bsc. Pablo Alexis Olguín Baxman\n"
-            "Dr. Dr. Tina Schmitt\n"
+            "Dr. Tina Schmitt\n"
             "Dr.-Ing. Andreas Spiegler"
         )
         ack.setWordWrap(True)
+        ack.setAlignment(Qt.AlignCenter)
         layout.addWidget(ack)
+        layout.addSpacing(10)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
         btn_box.accepted.connect(self.accept)
