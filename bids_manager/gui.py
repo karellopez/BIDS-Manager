@@ -168,6 +168,11 @@ def _dedup_parts(*parts: str) -> str:
     return "_".join(tokens)
 
 
+def _safe_stem(text: str) -> str:
+    """Return filename-friendly version of ``text``."""
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
+
+
 class SubjectDelegate(QStyledItemDelegate):
     """Delegate to edit BIDS subject IDs without altering the 'sub-' prefix."""
 
@@ -221,6 +226,9 @@ class BIDSManager(QMainWindow):
         self.spec_modb_rows_given = {}
         self.spec_mod_rows_given = {}
         self.spec_seq_rows_given = {}
+        # Existing mappings found in output datasets
+        self.existing_maps = {}
+        self.existing_used = {}
         self.use_bids_names = True
 
         # Async process handles for inventory and conversion steps
@@ -1062,6 +1070,39 @@ class BIDSManager(QMainWindow):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
 
+        # ----- integrate existing mappings for sequential conversion -----
+        self.existing_maps = {}
+        self.existing_used = {}
+        pat = re.compile(r"sub-(\d+)$")
+        studies = df["StudyDescription"].fillna("").unique()
+        for study in studies:
+            safe = _safe_stem(str(study))
+            mpath = Path(self.bids_out_dir) / safe / ".bids_manager" / "subject_mapping.tsv"
+            mapping = {}
+            used = set()
+            if mpath.exists():
+                try:
+                    mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
+                    mapping = dict(zip(mdf["GivenName"].astype(str), mdf["BIDS_name"].astype(str)))
+                    used = set(mapping.values())
+                except Exception:
+                    pass
+            mask = df["StudyDescription"].fillna("") == study
+            nums = [int(m.group(1)) for name in used if (m := pat.match(name))]
+            next_id = max(nums or [0]) + 1
+            for idx in df[mask].index:
+                given = str(df.at[idx, "GivenName"])
+                if given in mapping:
+                    df.at[idx, "BIDS_name"] = mapping[given]
+                else:
+                    new_name = f"sub-{next_id:03d}"
+                    df.at[idx, "BIDS_name"] = new_name
+                    mapping[given] = new_name
+                    used.add(new_name)
+                    next_id += 1
+            self.existing_maps[study] = mapping
+            self.existing_used[study] = used
+
         self.study_set.clear()
         self.modb_rows.clear()
         self.mod_rows.clear()
@@ -1289,7 +1330,10 @@ class BIDSManager(QMainWindow):
             for r in range(self.naming_table.rowCount())
             if r != item.row() and self.naming_table.item(r, 0).text() == study
         ]
-        if new_bids in other_names:
+        # Also consider names already present in the converted dataset
+        used_names = set(other_names)
+        used_names.update(self.existing_used.get(study, set()))
+        if new_bids in used_names and self.existing_maps.get(study, {}).get(given) != new_bids:
             QMessageBox.warning(
                 self,
                 "Duplicate name",
@@ -1302,6 +1346,9 @@ class BIDSManager(QMainWindow):
             if info['study'] == study and info['given'] == given:
                 info['bids'] = new_bids
                 self.mapping_table.item(idx, 1).setText(new_bids)
+        # Keep internal mapping updated
+        self.existing_maps.setdefault(study, {})[given] = new_bids
+        self.existing_used.setdefault(study, set()).add(new_bids)
         self._rebuild_lookup_maps()
         QTimer.singleShot(0, self.populateModalitiesTree)
         QTimer.singleShot(0, self.populateSpecificTree)
