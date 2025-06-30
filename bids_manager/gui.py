@@ -7,6 +7,8 @@ import re
 import shutil
 import pandas as pd
 import numpy as np
+import threading
+import time
 try:
     import nibabel as nib
 except ModuleNotFoundError as exc:
@@ -2410,6 +2412,19 @@ class MetadataViewer(QWidget):
         vlay.addLayout(self.toolbar)
         self.value_row = QHBoxLayout()
         vlay.addLayout(self.value_row)
+        # Label used to show a spinner while a file is being loaded.  It is
+        # hidden by default and only made visible during loading operations.
+        self.loading_label = QLabel()
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.hide()
+        vlay.addWidget(self.loading_label)
+
+        # Timer and frame sequence driving the spinner animation.
+        self._load_timer = QTimer()
+        self._load_timer.timeout.connect(self._spin_loading)
+        self._load_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self._load_index = 0  # Current index into ``_load_frames``
+        self._load_message = ""  # Message displayed next to the spinner
         self.viewer = None
         self.current_path = None
         self.data = None  # holds loaded NIfTI data when viewing images
@@ -2441,6 +2456,8 @@ class MetadataViewer(QWidget):
             self.layout().removeWidget(self.viewer)
             self.viewer.deleteLater()
             self.viewer = None
+        self.loading_label.hide()
+        self._load_timer.stop()
         self.welcome.show()
 
     def _is_dark_theme(self) -> bool:
@@ -2449,21 +2466,70 @@ class MetadataViewer(QWidget):
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         return brightness < 128
 
+    def _start_loading(self, message: str) -> None:
+        """Begin showing the loading spinner with ``message``."""
+        self._load_message = message
+        self._load_index = 0
+        self.loading_label.setText(f"{message} {self._load_frames[0]}")
+        self.loading_label.show()
+        self._load_timer.start(100)
+
+    def _spin_loading(self) -> None:
+        """Advance the spinner animation by one frame."""
+        if not self.loading_label.isVisible():
+            return
+        self._load_index = (self._load_index + 1) % len(self._load_frames)
+        self.loading_label.setText(
+            f"{self._load_message} {self._load_frames[self._load_index]}"
+        )
+
+    def _stop_loading(self) -> None:
+        """Hide the loading spinner and stop the timer."""
+        self._load_timer.stop()
+        self.loading_label.hide()
+
     def load_file(self, path: Path):
-        """Load JSON, TSV or NIfTI file into an editable viewer."""
+        """Load JSON, TSV or NIfTI file into an editable viewer.
+
+        The file is read in a background thread to keep the UI responsive and
+        animate the loading spinner while large datasets are processed.
+        """
         self.current_path = path
         self.clear()
         self.welcome.hide()
         ext = _get_ext(path)
+        self._start_loading("Loading")
+        # ``worker`` reads the file in a separate thread so the UI can keep
+        # updating the spinner while potentially large data is loaded.
+        result = {}
+        def worker():
+            if ext == '.json':
+                result['data'] = json.loads(path.read_text(encoding='utf-8'))
+            elif ext == '.tsv':
+                result['df'] = pd.read_csv(path, sep='\t', keep_default_na=False)
+            elif ext in ['.nii', '.nii.gz']:
+                img = nib.load(str(path))
+                result['img'] = img
+                result['data'] = img.get_fdata()
+
+        if ext in ['.json', '.tsv', '.nii', '.nii.gz']:
+            t = threading.Thread(target=worker)
+            t.start()
+            while t.is_alive():
+                QApplication.processEvents()
+                time.sleep(0.05)
+            t.join()
+        self._stop_loading()
+
         if ext == '.json':
             self._setup_json_toolbar()
-            self.viewer = self._json_view(path)
+            self.viewer = self._json_view(path, result.get('data'))
         elif ext == '.tsv':
             self._setup_tsv_toolbar()
-            self.viewer = self._tsv_view(path)
+            self.viewer = self._tsv_view(path, result.get('df'))
         elif ext in ['.nii', '.nii.gz']:
             self._setup_nifti_toolbar()
-            self.viewer = self._nifti_view(path)
+            self.viewer = self._nifti_view(path, (result.get('img'), result.get('data')))
         elif ext in ['.html', '.htm']:
             self.viewer = self._html_view(path)
             self.toolbar.addStretch()
@@ -2620,10 +2686,13 @@ class MetadataViewer(QWidget):
         self.slice_val.setText(str(axis_len // 2))
         self._update_slice()
 
-    def _nifti_view(self, path: Path) -> QWidget:
+    def _nifti_view(self, path: Path, img_data=None) -> QWidget:
         """Create a simple viewer for NIfTI images with slice/volume controls."""
-        self.nifti_img = nib.load(str(path))
-        data = self.nifti_img.get_fdata()
+        if img_data is None:
+            self.nifti_img = nib.load(str(path))
+            data = self.nifti_img.get_fdata()
+        else:
+            self.nifti_img, data = img_data
         self.data = data
         widget = QWidget()
         vlay = QVBoxLayout(widget)
@@ -2924,7 +2993,7 @@ class MetadataViewer(QWidget):
             marker.set_markersize(self.dot_size_spin.value())
         self.graph_canvas.draw_idle()
 
-    def _json_view(self, path: Path) -> QTreeWidget:
+    def _json_view(self, path: Path, data=None) -> QTreeWidget:
         """Create a tree widget to show and edit JSON data."""
         tree = QTreeWidget()
         tree.setColumnCount(2)
@@ -2933,7 +3002,8 @@ class MetadataViewer(QWidget):
         hdr = tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.Interactive)
         hdr.setSectionResizeMode(1, QHeaderView.Interactive)
-        data = json.loads(path.read_text(encoding='utf-8'))
+        if data is None:
+            data = json.loads(path.read_text(encoding='utf-8'))
         self._populate_json(tree.invisibleRootItem(), data)
         tree.expandAll()
         tree.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -2956,9 +3026,10 @@ class MetadataViewer(QWidget):
                 if isinstance(v, (dict, list)):
                     self._populate_json(it, v)
 
-    def _tsv_view(self, path: Path) -> QTableWidget:
+    def _tsv_view(self, path: Path, df=None) -> QTableWidget:
         """Create a table widget to show and edit TSV data."""
-        df = pd.read_csv(path, sep="\t", keep_default_na=False)
+        if df is None:
+            df = pd.read_csv(path, sep="\t", keep_default_na=False)
         tbl = QTableWidget(df.shape[0], df.shape[1])
         tbl.setAlternatingRowColors(True)
         hdr = tbl.horizontalHeader()
