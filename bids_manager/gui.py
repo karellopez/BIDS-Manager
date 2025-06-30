@@ -2019,7 +2019,7 @@ class AuthorshipDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("Authorship")
-        self.resize(600, 500)
+        self.resize(500, 700)
         layout = QVBoxLayout(self)
         layout.setSpacing(15)
 
@@ -2050,7 +2050,8 @@ class AuthorshipDialog(QDialog):
         k_row.setSpacing(20)
         if KAREL_IMG_FILE.exists():
             k_pic = QLabel()
-            k_pic.setPixmap(QPixmap(str(KAREL_IMG_FILE)).scaledToWidth(120, Qt.SmoothTransformation))
+            k_pic.setPixmap(QPixmap(str(KAREL_IMG_FILE)).scaledToWidth(140, Qt.SmoothTransformation))
+            k_pic.setAlignment(Qt.AlignCenter)
             k_row.addWidget(k_pic)
         k_desc = QLabel(
             "<b>Dr. Karel López Vilaret<br/>BIDS Manager App Lead</b><br/><br/>"
@@ -2069,7 +2070,8 @@ class AuthorshipDialog(QDialog):
         j_row.setSpacing(20)
         if JOCHEM_IMG_FILE.exists():
             j_pic = QLabel()
-            j_pic.setPixmap(QPixmap(str(JOCHEM_IMG_FILE)).scaledToWidth(120, Qt.SmoothTransformation))
+            j_pic.setPixmap(QPixmap(str(JOCHEM_IMG_FILE)).scaledToWidth(140, Qt.SmoothTransformation))
+            j_pic.setAlignment(Qt.AlignCenter)
             j_row.addWidget(j_pic)
         j_desc = QLabel(
             "<b>Prof. Dr. rer. nat. Jochem Rieger<br/>Applied Neurocognitive Psychology</b><br/><br/>"
