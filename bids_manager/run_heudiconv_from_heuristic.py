@@ -76,12 +76,11 @@ def heudi_cmd(raw_root: Path,
     wild = "*/" * depth
 
     if len(phys_folders) == 1 and phys_folders[0] == "":
-        files = sorted(str(p) for p in raw_root.glob(wild + "*.dcm"))
         subj = clean_name(raw_root.name) or "root"
         return [
             "heudiconv",
             "--files",
-            *files,
+            str(raw_root),
             "-s",
             subj,
             "-f",
