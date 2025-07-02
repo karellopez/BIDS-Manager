@@ -23,6 +23,10 @@ After installation the following commands become available:
 
 All utilities provide `-h/--help` for details.
 
+The GUI disables automatic high-DPI scaling by default so it looks the same on
+systems that use display scaling (e.g. 125%). To re-enable Qt's auto scaling set
+the environment variable `QT_AUTO_SCREEN_SCALE_FACTOR=1` before launching.
+
 ### Recent updates
 
 - The TSV produced by `dicom-inventory` can now be loaded directly in the GUI and
