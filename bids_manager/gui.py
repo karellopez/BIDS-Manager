@@ -58,7 +58,7 @@ from PyQt5.QtWidgets import (
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QCoreApplication
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -3090,8 +3090,6 @@ def main() -> None:
             )
         except Exception:
             pass
-    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "0")
-    QCoreApplication.setAttribute(Qt.AA_DisableHighDpiScaling)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     if ICON_FILE.exists():
