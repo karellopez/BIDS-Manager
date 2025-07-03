@@ -631,6 +631,12 @@ class BIDSManager(QMainWindow):
             font.setPointSize(scaled)
         app.setFont(font)
 
+        # Ensure the tab labels also scale with the selected DPI
+        if hasattr(self, "tabs"):
+            tab_font = QFont(font)
+            tab_font.setPointSize(font.pointSize() + 1)
+            self.tabs.setFont(tab_font)
+
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
         if not hasattr(self, "logo_label"):
