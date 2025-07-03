@@ -206,6 +206,10 @@ class BIDSManager(QMainWindow):
             self.setWindowIcon(QIcon(str(ICON_FILE)))
         self.resize(900, 900)
 
+        app = QApplication.instance()
+        self._base_font = app.font()
+        self.dpi_scale = 100
+
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
         self.bids_out_dir = ""      # Output BIDS directory
@@ -289,6 +293,9 @@ class BIDSManager(QMainWindow):
         self.authorship_btn = QPushButton("Authorship")
         self.authorship_btn.setFixedWidth(90)
         self.authorship_btn.clicked.connect(self.show_authorship_dialog)
+        self.dpi_btn = QPushButton(f"DPI: {self.dpi_scale}%")
+        self.dpi_btn.setFixedWidth(80)
+        self.dpi_btn.clicked.connect(self.show_dpi_dialog)
         # Create a container widget with layout to adjust position
         container = QWidget()
         layout = QHBoxLayout()
@@ -297,6 +304,7 @@ class BIDSManager(QMainWindow):
         layout.addWidget(self.theme_btn)
         layout.addWidget(self.cpu_btn)
         layout.addWidget(self.authorship_btn)
+        layout.addWidget(self.dpi_btn)
         container.setLayout(layout)
         # Add the container to the status bar (left-aligned)
         self.statusBar().addWidget(container)
@@ -561,13 +569,7 @@ class BIDSManager(QMainWindow):
         app.setPalette(self.themes[name])
         self.current_theme = name
         self._update_logo()
-        font = app.font()
-        if name in ("Contrast", "Contrast White"):
-            font.setWeight(QFont.Bold)
-            font.setPointSize(font.pointSize() + 1)
-        else:
-            font.setWeight(QFont.Normal)
-        app.setFont(font)
+        self._apply_font_scale()
 
     def show_cpu_dialog(self) -> None:
         """Display dialog to choose number of CPUs."""
@@ -580,6 +582,14 @@ class BIDSManager(QMainWindow):
         """Display authorship information dialog."""
         dlg = AuthorshipDialog(self)
         dlg.exec_()
+
+    def show_dpi_dialog(self) -> None:
+        """Display dialog to adjust UI scale."""
+        dlg = DpiSettingsDialog(self, self.dpi_scale)
+        if dlg.exec_() == QDialog.Accepted:
+            self.dpi_scale = dlg.spin.value()
+            self.dpi_btn.setText(f"DPI: {self.dpi_scale}%")
+            self._apply_font_scale()
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
@@ -607,6 +617,19 @@ class BIDSManager(QMainWindow):
         color = self.palette().color(QPalette.Window)
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         return brightness < 128
+
+    def _apply_font_scale(self) -> None:
+        """Apply current DPI scaling to the application font."""
+        app = QApplication.instance()
+        font = QFont(self._base_font)
+        scaled = max(1, int(self._base_font.pointSize() * self.dpi_scale / 100))
+        if self.current_theme in ("Contrast", "Contrast White"):
+            font.setWeight(QFont.Bold)
+            font.setPointSize(scaled + 1)
+        else:
+            font.setWeight(QFont.Normal)
+            font.setPointSize(scaled)
+        app.setFont(font)
 
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
@@ -2006,6 +2029,28 @@ class CpuSettingsDialog(QDialog):
         self.spin = QSpinBox()
         self.spin.setRange(1, total_cpu)
         self.spin.setValue(min(current, total_cpu))
+        row.addWidget(self.spin)
+        layout.addLayout(row)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+
+class DpiSettingsDialog(QDialog):
+    """Dialog to adjust UI scale (DPI)."""
+
+    def __init__(self, parent, current: int = 100):
+        super().__init__(parent)
+        self.setWindowTitle("UI Scale")
+        layout = QVBoxLayout(self)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Scale (%):"))
+        self.spin = QSpinBox()
+        self.spin.setRange(50, 200)
+        self.spin.setValue(current)
         row.addWidget(self.spin)
         layout.addLayout(row)
 
