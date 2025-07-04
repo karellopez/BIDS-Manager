@@ -384,7 +384,7 @@ def main() -> None:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=1,
+        default=max(1, round((os.cpu_count() or 1) * 0.8)),
         help="Number of parallel workers to use",
     )
     args = parser.parse_args()

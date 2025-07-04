@@ -267,7 +267,8 @@ class BIDSManager(QMainWindow):
         self._spinner_message = ""
 
         # Parallel settings
-        self.num_cpus = 1
+        total_cpu = os.cpu_count() or 1
+        self.num_cpus = max(1, round(total_cpu * 0.8))
 
         # Main widget and layout
         main_widget = QWidget()
@@ -2155,6 +2156,7 @@ class AuthorshipDialog(QDialog):
             "Dr. Jorge Bosch-Bayard\n"
             "Msc. Erdal Karaca\n"
             "Bsc. Pablo Alexis Olguín Baxman\n"
+            "Dr. Amirhussein Abdolalizadeh Saleh\n"
             "Dr. Tina Schmitt\n"
             "Dr.-Ing. Andreas Spiegler"
         )
