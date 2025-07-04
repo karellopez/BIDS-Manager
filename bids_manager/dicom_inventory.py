@@ -384,6 +384,8 @@ def main() -> None:
     parser.add_argument(
         "--jobs",
         type=int,
+        # Use ~80% of available CPUs to provide a sensible default while
+        # leaving some resources free for the rest of the system.
         default=max(1, round((os.cpu_count() or 1) * 0.8)),
         help="Number of parallel workers to use",
     )
