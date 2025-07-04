@@ -208,7 +208,14 @@ class BIDSManager(QMainWindow):
 
         app = QApplication.instance()
         self._base_font = app.font()
-        self.dpi_scale = 100
+        screen = app.primaryScreen()
+        if screen is not None:
+            try:
+                self.dpi_scale = round(screen.logicalDotsPerInch() / 96 * 100)
+            except Exception:
+                self.dpi_scale = 100
+        else:
+            self.dpi_scale = 100
 
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
@@ -303,8 +310,8 @@ class BIDSManager(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(self.theme_btn)
         layout.addWidget(self.cpu_btn)
-        layout.addWidget(self.authorship_btn)
         layout.addWidget(self.dpi_btn)
+        layout.addWidget(self.authorship_btn)
         container.setLayout(layout)
         # Add the container to the status bar (left-aligned)
         self.statusBar().addWidget(container)
@@ -2056,6 +2063,7 @@ class DpiSettingsDialog(QDialog):
         row.addWidget(QLabel("Scale (%):"))
         self.spin = QSpinBox()
         self.spin.setRange(50, 200)
+        self.spin.setSingleStep(25)
         self.spin.setValue(current)
         row.addWidget(self.spin)
         layout.addLayout(row)

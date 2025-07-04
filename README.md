@@ -46,6 +46,9 @@ All utilities provide `-h/--help` for details.
   functional runs.
 - The GUI's Tools menu gained actions to refresh `_scans.tsv` files and edit
   `.bidsignore` entries.
+- The DPI scale dialog now adjusts values in 25% increments and the DPI button
+  appears between the CPU and Authorship buttons.
+- On startup the GUI detects the system DPI and applies the matching scale.
 
 
 
