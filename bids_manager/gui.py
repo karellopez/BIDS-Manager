@@ -209,13 +209,21 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         self._base_font = app.font()
         screen = app.primaryScreen()
+        # Detect the OS DPI scaling.  ``logicalDotsPerInch`` returns the
+        # effective DPI taking the system scaling factor into account.  We store
+        # the percentage relative to the base 96 DPI.
         if screen is not None:
             try:
-                self.dpi_scale = round(screen.logicalDotsPerInch() / 96 * 100)
+                self._os_dpi = round(screen.logicalDotsPerInch() / 96 * 100)
             except Exception:
-                self.dpi_scale = 100
+                self._os_dpi = 100
         else:
-            self.dpi_scale = 100
+            self._os_dpi = 100
+
+        # User requested DPI scale (100% by default).  The actual font scaling
+        # is calculated relative to ``self._os_dpi`` so that the GUI renders at
+        # the expected size even when the system DPI is above 100%.
+        self.dpi_scale = 100
 
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
@@ -267,7 +275,11 @@ class BIDSManager(QMainWindow):
         self._spinner_message = ""
 
         # Parallel settings
+        # Use ~80% of available CPUs by default to avoid saturating the system
+        # when running external tools in parallel.  ``os.cpu_count`` may return
+        # ``None`` so fall back to 1 in that case.
         total_cpu = os.cpu_count() or 1
+        # ``current`` is pre-set to about 80% of this value in the main window.
         self.num_cpus = max(1, round(total_cpu * 0.8))
 
         # Main widget and layout
@@ -630,7 +642,11 @@ class BIDSManager(QMainWindow):
         """Apply current DPI scaling to the application font."""
         app = QApplication.instance()
         font = QFont(self._base_font)
-        scaled = max(1, int(self._base_font.pointSize() * self.dpi_scale / 100))
+        # Calculate font size relative to the system DPI so that ``dpi_scale``
+        # represents the desired scaling independent of the OS setting.
+        scaled = max(
+            1, int(self._base_font.pointSize() * self.dpi_scale / self._os_dpi)
+        )
         if self.current_theme in ("Contrast", "Contrast White"):
             font.setWeight(QFont.Bold)
             font.setPointSize(scaled + 1)
@@ -2028,6 +2044,8 @@ class CpuSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         total_cpu = os.cpu_count() or 1
+        # Show the total number of logical CPUs.  The main window initializes
+        # ``current`` to roughly 80% of this value.
         ram_text = "n/a"
         if HAS_PSUTIL:
             try:
@@ -2059,6 +2077,11 @@ class DpiSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("UI Scale")
         layout = QVBoxLayout(self)
+
+        # ``current`` is expressed as a percentage relative to a base scale of
+        # 100, regardless of the system's DPI setting.  A value of 100 thus
+        # keeps the GUI size unchanged, while values above or below enlarge or
+        # shrink it respectively.
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Scale (%):"))
