@@ -52,9 +52,19 @@ from pydicom.multival import MultiValue
 # ----------------------------------------------------------------------
 BIDS_PATTERNS = {
     # anatomy
-    "T1w"    : ("t1w", "mprage", "tfl3d"),
+    "T1w"    : (
+        "t1w",
+        "t1-weight",
+        "t1_",
+        "t1 ",
+        "mprage",
+        "tfl3d",
+        "fspgr",
+    ),
     "T2w"    : ("t2w", "space", "tse"),
     "FLAIR"  : ("flair",),
+    "MTw"    : ("gre-mt", "gre_mt", "mt"),
+    "PDw"    : ("gre-nm", "gre_nm"),
     "scout"  : ("localizer", "scout"),
     "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
     "refscan": ("type-ref", "reference", "refscan"),
@@ -64,7 +74,17 @@ BIDS_PATTERNS = {
     # diffusion
     "dwi"    : ("dti", "dwi", "diff"),
     # field maps
-    "fmap"   : ("gre_field", "fieldmapping", "_fmap", "fmap", "phase", "magnitude"),
+    "fmap"   : (
+        "gre_field",
+        "fieldmapping",
+        "_fmap",
+        "fmap",
+        "phase",
+        "magnitude",
+        "b0rf",
+        "b0_map",
+        "b0map",
+    ),
     # misc (kept for completeness)
     "physio" : ("physiolog", "physio", "pulse", "resp"),
 }
@@ -111,6 +131,7 @@ def classify_fieldmap_type(img_list: list) -> str:
 # ----------------------------------------------------------------------
 BIDS_CONTAINER = {
     "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
+    "MTw":"anat", "PDw":"anat",
     "scout":"anat", "report":"anat", "refscan":"anat",
     "bold":"func", "SBRef":"func",
     "dwi":"dwi",
