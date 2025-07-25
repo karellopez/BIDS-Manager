@@ -74,10 +74,6 @@ import matplotlib.pyplot as plt
 import logging  # debug logging
 import signal
 try:
-    from BlurWindow.blurWindow import GlobalBlur
-except Exception:  # pragma: no cover - optional dependency
-    GlobalBlur = None
-try:
     import psutil
     HAS_PSUTIL = True
 except Exception:  # pragma: no cover - optional dependency
@@ -585,35 +581,6 @@ class BIDSManager(QMainWindow):
         pale.setColor(QPalette.HighlightedText, Qt.black)
         themes["Palenight"] = pale
 
-        # Elegant transparent themes with blur support
-        light_el = QPalette()
-        light_el.setColor(QPalette.Window, QColor(255, 255, 255, 200))
-        light_el.setColor(QPalette.WindowText, Qt.black)
-        light_el.setColor(QPalette.Base, QColor(245, 245, 245, 180))
-        light_el.setColor(QPalette.AlternateBase, QColor(255, 255, 255, 200))
-        light_el.setColor(QPalette.ToolTipBase, QColor(255, 255, 255, 220))
-        light_el.setColor(QPalette.ToolTipText, Qt.black)
-        light_el.setColor(QPalette.Text, Qt.black)
-        light_el.setColor(QPalette.Button, QColor(255, 255, 255, 150))
-        light_el.setColor(QPalette.ButtonText, Qt.black)
-        light_el.setColor(QPalette.Highlight, QColor(100, 149, 237, 200))
-        light_el.setColor(QPalette.HighlightedText, Qt.white)
-        themes["Light-elegant"] = light_el
-
-        dark_el = QPalette()
-        dark_el.setColor(QPalette.Window, QColor(30, 30, 30, 200))
-        dark_el.setColor(QPalette.WindowText, Qt.white)
-        dark_el.setColor(QPalette.Base, QColor(45, 45, 45, 180))
-        dark_el.setColor(QPalette.AlternateBase, QColor(30, 30, 30, 200))
-        dark_el.setColor(QPalette.ToolTipBase, QColor(65, 65, 65, 220))
-        dark_el.setColor(QPalette.ToolTipText, Qt.white)
-        dark_el.setColor(QPalette.Text, Qt.white)
-        dark_el.setColor(QPalette.Button, QColor(40, 40, 40, 150))
-        dark_el.setColor(QPalette.ButtonText, Qt.white)
-        dark_el.setColor(QPalette.Highlight, QColor(142, 45, 197, 200))
-        dark_el.setColor(QPalette.HighlightedText, Qt.black)
-        themes["Dark-elegant"] = dark_el
-
         return themes
 
     def apply_theme(self, name: str):
@@ -621,15 +588,6 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         app.setPalette(self.themes[name])
         self.current_theme = name
-        if name == "Light-elegant":
-            self._set_blur(True, dark=False)
-            self.setStyleSheet("background-color: rgba(255,255,255,180);")
-        elif name == "Dark-elegant":
-            self._set_blur(True, dark=True)
-            self.setStyleSheet("background-color: rgba(30,30,30,180);")
-        else:
-            self._set_blur(False)
-            self.setStyleSheet("")
         self._update_logo()
         self._apply_font_scale()
 
@@ -702,22 +660,6 @@ class BIDSManager(QMainWindow):
             tab_font = QFont(font)
             tab_font.setPointSize(font.pointSize() + 1)
             self.tabs.setFont(tab_font)
-
-    def _set_blur(self, enable: bool, dark: bool = False) -> None:
-        """Enable or disable background blur on the main window."""
-        if GlobalBlur is None:
-            return
-        if enable:
-            self.setAttribute(Qt.WA_TranslucentBackground, True)
-            try:
-                if dark:
-                    GlobalBlur(self.winId().__int__(), Dark=True, QWidget=self)
-                else:
-                    GlobalBlur(self.winId().__int__(), QWidget=self)
-            except Exception as exc:  # pragma: no cover - OS may not support
-                logging.warning("Failed to apply blur: %s", exc)
-        else:
-            self.setAttribute(Qt.WA_TranslucentBackground, False)
 
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
