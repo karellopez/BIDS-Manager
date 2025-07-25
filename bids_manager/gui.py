@@ -57,9 +57,9 @@ from PyQt5.QtWidgets import (
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem,
-    QGraphicsBlurEffect)
+    QGraphicsBlurEffect, QGraphicsPixmapItem, QGraphicsScene)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QRect, QRectF
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -221,6 +221,10 @@ class BIDSManager(QMainWindow):
         else:
             self._os_dpi = 100
 
+        # Capture a snapshot of the desktop background for blur effects
+        self._desktop_snapshot = screen.grabWindow(0) if screen is not None else None
+        self._blur_enabled = False
+
         # User requested DPI scale (100% by default).  The actual font scaling
         # is calculated relative to ``self._os_dpi`` so that the GUI renders at
         # the expected size even when the system DPI is above 100%.
@@ -287,6 +291,12 @@ class BIDSManager(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
+        # Background label used for blurred desktop snapshot
+        self.blur_background = QLabel(main_widget)
+        self.blur_background.setScaledContents(True)
+        self.blur_background.setGeometry(main_widget.rect())
+        self.blur_background.lower()
+        self.blur_background.hide()
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
@@ -618,14 +628,13 @@ class BIDSManager(QMainWindow):
         app.setPalette(self.themes[name])
         self.current_theme = name
         if name in ("light-elegant", "dark-elegant"):
-            blur = QGraphicsBlurEffect(self)
-            blur.setBlurRadius(15)
-            if self.centralWidget():
-                self.centralWidget().setGraphicsEffect(blur)
+            self._blur_enabled = True
             self.setWindowOpacity(0.9)
+            self.blur_background.show()
+            self._update_blur_background()
         else:
-            if self.centralWidget():
-                self.centralWidget().setGraphicsEffect(None)
+            self._blur_enabled = False
+            self.blur_background.hide()
             self.setWindowOpacity(1.0)
         self._update_logo()
         self._apply_font_scale()
@@ -699,6 +708,36 @@ class BIDSManager(QMainWindow):
             tab_font = QFont(font)
             tab_font.setPointSize(font.pointSize() + 1)
             self.tabs.setFont(tab_font)
+
+    def _blur_pixmap(self, pix: QPixmap, radius: int = 15) -> QPixmap:
+        item = QGraphicsPixmapItem(pix)
+        effect = QGraphicsBlurEffect()
+        effect.setBlurRadius(radius)
+        item.setGraphicsEffect(effect)
+        scene = QGraphicsScene()
+        scene.addItem(item)
+        result = QPixmap(pix.size())
+        result.fill(Qt.transparent)
+        painter = QPainter(result)
+        scene.render(painter, QRectF(result.rect()))
+        painter.end()
+        return result
+
+    def _update_blur_background(self) -> None:
+        if not self._desktop_snapshot:
+            return
+        geo = self.geometry()
+        cropped = self._desktop_snapshot.copy(geo)
+        blurred = self._blur_pixmap(cropped, 20)
+        self.blur_background.setGeometry(self.centralWidget().rect())
+        self.blur_background.setPixmap(blurred)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "blur_background"):
+            self.blur_background.setGeometry(self.centralWidget().rect())
+            if self._blur_enabled:
+                self._update_blur_background()
 
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
