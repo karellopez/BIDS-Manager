@@ -56,7 +56,8 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem,
+    QGraphicsBlurEffect)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -581,6 +582,34 @@ class BIDSManager(QMainWindow):
         pale.setColor(QPalette.HighlightedText, Qt.black)
         themes["Palenight"] = pale
 
+        light_elegant = QPalette()
+        light_elegant.setColor(QPalette.Window, QColor(255, 255, 255, 200))
+        light_elegant.setColor(QPalette.WindowText, Qt.black)
+        light_elegant.setColor(QPalette.Base, QColor(245, 245, 245, 200))
+        light_elegant.setColor(QPalette.AlternateBase, QColor(255, 255, 255, 200))
+        light_elegant.setColor(QPalette.ToolTipBase, QColor(255, 255, 255, 230))
+        light_elegant.setColor(QPalette.ToolTipText, Qt.black)
+        light_elegant.setColor(QPalette.Text, Qt.black)
+        light_elegant.setColor(QPalette.Button, QColor(255, 255, 255, 150))
+        light_elegant.setColor(QPalette.ButtonText, Qt.black)
+        light_elegant.setColor(QPalette.Highlight, QColor(0, 122, 255, 200))
+        light_elegant.setColor(QPalette.HighlightedText, Qt.white)
+        themes["light-elegant"] = light_elegant
+
+        dark_elegant = QPalette()
+        dark_elegant.setColor(QPalette.Window, QColor(30, 30, 30, 180))
+        dark_elegant.setColor(QPalette.WindowText, Qt.white)
+        dark_elegant.setColor(QPalette.Base, QColor(45, 45, 45, 180))
+        dark_elegant.setColor(QPalette.AlternateBase, QColor(30, 30, 30, 180))
+        dark_elegant.setColor(QPalette.ToolTipBase, QColor(60, 60, 60, 230))
+        dark_elegant.setColor(QPalette.ToolTipText, Qt.white)
+        dark_elegant.setColor(QPalette.Text, Qt.white)
+        dark_elegant.setColor(QPalette.Button, QColor(60, 60, 60, 150))
+        dark_elegant.setColor(QPalette.ButtonText, Qt.white)
+        dark_elegant.setColor(QPalette.Highlight, QColor(0, 122, 255, 200))
+        dark_elegant.setColor(QPalette.HighlightedText, Qt.black)
+        themes["dark-elegant"] = dark_elegant
+
         return themes
 
     def apply_theme(self, name: str):
@@ -588,6 +617,16 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         app.setPalette(self.themes[name])
         self.current_theme = name
+        if name in ("light-elegant", "dark-elegant"):
+            blur = QGraphicsBlurEffect(self)
+            blur.setBlurRadius(15)
+            if self.centralWidget():
+                self.centralWidget().setGraphicsEffect(blur)
+            self.setWindowOpacity(0.9)
+        else:
+            if self.centralWidget():
+                self.centralWidget().setGraphicsEffect(None)
+            self.setWindowOpacity(1.0)
         self._update_logo()
         self._apply_font_scale()
 
