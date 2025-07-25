@@ -10,6 +10,8 @@ pip install git+https://github.com/ANCPLabOldenburg/BIDS-Manager.git
 
 The package declares all dependencies including `heudiconv`, so installation
 pulls everything required to run the GUI and helper scripts.
+All core requirements are version pinned in `pyproject.toml` to ensure
+consistent installations.
 
 After installation the following commands become available:
 
