@@ -1392,12 +1392,13 @@ class BIDSManager(QMainWindow):
 
         studies = {self.naming_table.item(r, 0).text().strip() for r in range(self.naming_table.rowCount())}
         existing: dict[tuple[str, str], str] = {}
-        used_names: set[str] = set()
         used_by_study: dict[str, set[str]] = {}
+        has_existing: dict[str, bool] = {}
         for study in studies:
             safe = _safe_stem(str(study))
             s_path = out_dir / safe / ".bids_manager" / "subject_summary.tsv"
-            if s_path.exists():
+            has_existing[study] = s_path.exists()
+            if has_existing[study]:
                 try:
                     df = pd.read_csv(s_path, sep="\t", keep_default_na=False)
                     for _, row in df.iterrows():
@@ -1405,16 +1406,10 @@ class BIDSManager(QMainWindow):
                         bids = str(row.get("BIDS_name", "")).strip()
                         if gname and bids:
                             existing[(study, gname)] = bids
-                            used_names.add(bids)
                             used_by_study.setdefault(study, set()).add(bids)
                 except Exception:
                     pass
 
-        for r in range(self.naming_table.rowCount()):
-            name = self.naming_table.item(r, 2).text().strip()
-            study = self.naming_table.item(r, 0).text().strip()
-            used_names.add(name)
-            used_by_study.setdefault(study, set()).add(name)
 
         self.naming_table.blockSignals(True)
         self.mapping_table.blockSignals(True)
@@ -1425,17 +1420,19 @@ class BIDSManager(QMainWindow):
             item = self.naming_table.item(row, 2)
             current = item.text().strip()
             mapped = existing.get((study, given))
+            used = used_by_study.setdefault(study, set())
             if mapped:
                 new_bids = mapped
+            elif not has_existing.get(study, False):
+                new_bids = current
             else:
-                if current and current not in used_names:
+                if current and current not in used:
                     new_bids = current
                 else:
-                    new_bids = _next_numeric_id(used_by_study.get(study, set()))
+                    new_bids = _next_numeric_id(used)
             if new_bids != current:
                 item.setText(new_bids)
-            used_names.add(new_bids)
-            used_by_study.setdefault(study, set()).add(new_bids)
+            used.add(new_bids)
             for idx, info in enumerate(self.row_info):
                 if info['study'] == study and info['given'] == given:
                     info['bids'] = new_bids
