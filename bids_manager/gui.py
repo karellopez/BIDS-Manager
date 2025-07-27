@@ -178,6 +178,17 @@ def _safe_stem(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
 
 
+def _format_subject_id(num: int) -> str:
+    """Return ID as three letters followed by three digits."""
+    letters_idx = (num - 1) // 1000
+    digits = (num - 1) % 1000 + 1
+    letters = []
+    for _ in range(3):
+        letters.append(chr(ord("A") + letters_idx % 26))
+        letters_idx //= 26
+    return "".join(reversed(letters)) + f"{digits:03d}"
+
+
 class SubjectDelegate(QStyledItemDelegate):
     """Delegate to edit BIDS subject IDs without altering the 'sub-' prefix."""
 
@@ -1209,22 +1220,55 @@ class BIDSManager(QMainWindow):
         self.loadMappingTable()
 
     def generateUniqueIDs(self):
-        """Assign sequential IDs to BIDS subjects lacking an identifier."""
+        """Assign 3-letter/3-digit IDs to subjects without an identifier."""
+        # Load previously assigned IDs from existing datasets
+        existing = {}
+        studies = {
+            self.mapping_table.item(r, 7).text().strip()
+            for r in range(self.mapping_table.rowCount())
+        }
+        for study in studies:
+            if not study:
+                continue
+            s_path = (
+                Path(self.bids_out_dir)
+                / _safe_stem(str(study))
+                / ".bids_manager"
+                / "subject_summary.tsv"
+            )
+            if s_path.exists():
+                try:
+                    sdf = pd.read_csv(s_path, sep="\t", keep_default_na=False)
+                    for _, row in sdf.iterrows():
+                        key = (str(row.get("StudyDescription", "")).strip(), str(row.get("BIDS_name", "")).strip())
+                        sid = str(row.get("subject", "")).strip() or str(row.get("GivenName", "")).strip()
+                        if key[0] and key[1] and sid:
+                            existing.setdefault(key[0], {})[key[1]] = sid
+                except Exception:
+                    pass
+
         id_map = {}
         next_id = 1
         for i in range(self.mapping_table.rowCount()):
             bids = self.mapping_table.item(i, 2).text().strip()
+            study = self.mapping_table.item(i, 7).text().strip()
             if not bids:
                 continue
-            if bids not in id_map:
-                id_map[bids] = f"{next_id:03d}"
-                next_id += 1
+
+            sid = existing.get(study, {}).get(bids)
+            if sid is None:
+                key = (study, bids)
+                if key not in id_map:
+                    id_map[key] = _format_subject_id(next_id)
+                    next_id += 1
+                sid = id_map[key]
+
             subj_item = self.mapping_table.item(i, 3)
             given_item = self.mapping_table.item(i, 4)
             if subj_item.text().strip() == "":
-                subj_item.setText(id_map[bids])
+                subj_item.setText(sid)
             if given_item.text().strip() == "":
-                given_item.setText(id_map[bids])
+                given_item.setText(sid)
             self.row_info[i]['given'] = given_item.text()
 
         self._rebuild_lookup_maps()

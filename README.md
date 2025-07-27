@@ -51,6 +51,9 @@ All utilities provide `-h/--help` for details.
 - The DPI scale dialog now adjusts values in 25% increments and the DPI button
   appears between the CPU and Authorship buttons.
 - On startup the GUI detects the system DPI and applies the matching scale.
+- The scanned data table now provides a "Generate unique IDs" button that
+  assigns 3‑letter/3‑digit identifiers to subjects and reuses IDs from any
+  existing `.bids_manager/subject_summary.tsv` files.
 
 
 
