@@ -770,10 +770,13 @@ class BIDSManager(QMainWindow):
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
         self.tsv_apply_button = QPushButton("Apply changes")
         self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
+        self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
+        self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
         self.tsv_detach_button = QPushButton("Detach")
         self.tsv_detach_button.clicked.connect(self.detachTSVWindow)
         btn_row_tsv.addWidget(self.tsv_load_button)
         btn_row_tsv.addWidget(self.tsv_apply_button)
+        btn_row_tsv.addWidget(self.tsv_generate_ids_button)
         btn_row_tsv.addWidget(self.tsv_detach_button)
         tsv_layout.addLayout(btn_row_tsv)
         self.left_split.addWidget(self.tsv_group)
@@ -1204,6 +1207,30 @@ class BIDSManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {exc}")
             return
         self.loadMappingTable()
+
+    def generateUniqueIDs(self):
+        """Assign sequential IDs to BIDS subjects lacking an identifier."""
+        id_map = {}
+        next_id = 1
+        for i in range(self.mapping_table.rowCount()):
+            bids = self.mapping_table.item(i, 2).text().strip()
+            if not bids:
+                continue
+            if bids not in id_map:
+                id_map[bids] = f"{next_id:03d}"
+                next_id += 1
+            subj_item = self.mapping_table.item(i, 3)
+            given_item = self.mapping_table.item(i, 4)
+            if subj_item.text().strip() == "":
+                subj_item.setText(id_map[bids])
+            if given_item.text().strip() == "":
+                given_item.setText(id_map[bids])
+            self.row_info[i]['given'] = given_item.text()
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
 
     def loadMappingTable(self):
         logging.info("loadMappingTable → Loading TSV into table …")
