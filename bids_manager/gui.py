@@ -201,6 +201,24 @@ def _random_subject_id(existing: set[str]) -> str:
             return sid
 
 
+def _next_numeric_id(used: set[str]) -> str:
+    """Return the next "sub-XXX" style identifier."""
+    nums = []
+    for name in used:
+        m = re.fullmatch(r"sub-(\d+)", name)
+        if m:
+            try:
+                nums.append(int(m.group(1)))
+            except Exception:
+                pass
+    nxt = max(nums, default=0) + 1
+    while True:
+        candidate = f"sub-{nxt:03d}"
+        if candidate not in used:
+            return candidate
+        nxt += 1
+
+
 class SubjectDelegate(QStyledItemDelegate):
     """Delegate to edit BIDS subject IDs without altering the 'sub-' prefix."""
 
@@ -760,7 +778,7 @@ class BIDSManager(QMainWindow):
         self._update_logo()
 
         self.left_split = QSplitter(Qt.Vertical)
-        right_split = QSplitter(Qt.Vertical)
+        self.right_split = QSplitter(Qt.Vertical)
 
         self.tsv_group = QGroupBox("Scanned data viewer")
         tsv_layout = QVBoxLayout(self.tsv_group)
@@ -804,8 +822,8 @@ class BIDSManager(QMainWindow):
         tsv_layout.addLayout(btn_row_tsv)
         self.left_split.addWidget(self.tsv_group)
 
-        modal_group = QGroupBox("Filter")
-        modal_layout = QVBoxLayout(modal_group)
+        self.filter_group = QGroupBox("Filter")
+        modal_layout = QVBoxLayout(self.filter_group)
         self.modal_tabs = QTabWidget()
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
@@ -862,14 +880,21 @@ class BIDSManager(QMainWindow):
         self.modal_tabs.addTab(naming_tab, "Edit naming")
 
         modal_layout.addWidget(self.modal_tabs)
-        right_split.addWidget(modal_group)
+        btn_row_filter = QHBoxLayout()
+        self.filter_detach_button = QPushButton("Detach")
+        self.filter_detach_button.clicked.connect(self.detachFilterWindow)
+        btn_row_filter.addStretch()
+        btn_row_filter.addWidget(self.filter_detach_button)
+        modal_layout.addLayout(btn_row_filter)
+
+        self.right_split.addWidget(self.filter_group)
         self.left_split.setStretchFactor(0, 1)
         self.left_split.setStretchFactor(1, 1)
-        right_split.setStretchFactor(0, 1)
-        right_split.setStretchFactor(1, 1)
+        self.right_split.setStretchFactor(0, 1)
+        self.right_split.setStretchFactor(1, 1)
 
-        preview_group = QGroupBox("Preview")
-        preview_layout = QVBoxLayout(preview_group)
+        self.preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(self.preview_group)
         self.preview_tabs = QTabWidget()
 
         text_tab = QWidget()
@@ -890,6 +915,9 @@ class BIDSManager(QMainWindow):
         self.preview_button = QPushButton("Preview")
         self.preview_button.clicked.connect(self.generatePreview)
         preview_layout.addWidget(self.preview_button)
+        self.preview_detach_button = QPushButton("Detach")
+        self.preview_detach_button.clicked.connect(self.detachPreviewWindow)
+        preview_layout.addWidget(self.preview_detach_button)
 
         btn_row = QHBoxLayout()
         self.run_button = QPushButton("Run")
@@ -903,11 +931,11 @@ class BIDSManager(QMainWindow):
 
         # Combine preview panel and run button so the splitter keeps the
         # original layout but allows resizing versus the log output.
-        preview_container = QWidget()
-        pv_lay = QVBoxLayout(preview_container)
+        self.preview_container = QWidget()
+        pv_lay = QVBoxLayout(self.preview_container)
         pv_lay.setContentsMargins(0, 0, 0, 0)
         pv_lay.setSpacing(6)
-        pv_lay.addWidget(preview_group)
+        pv_lay.addWidget(self.preview_group)
         pv_lay.addLayout(btn_row)
 
         log_group = QGroupBox("Log Output")
@@ -927,12 +955,12 @@ class BIDSManager(QMainWindow):
         self.spinner_label.hide()
         log_layout.addWidget(self.spinner_label)
 
-        self.left_split.addWidget(preview_container)
-        right_split.addWidget(log_group)
+        self.left_split.addWidget(self.preview_container)
+        self.right_split.addWidget(log_group)
 
         splitter = QSplitter()
         splitter.addWidget(self.left_split)
-        splitter.addWidget(right_split)
+        splitter.addWidget(self.right_split)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
 
@@ -1132,6 +1160,46 @@ class BIDSManager(QMainWindow):
         self.left_split.insertWidget(0, self.tsv_group)
         self.tsv_dialog = None
 
+    def detachFilterWindow(self):
+        """Detach the filter panel into a separate window."""
+        if getattr(self, "filter_dialog", None):
+            self.filter_dialog.activateWindow()
+            return
+        self.filter_dialog = QDialog(self, flags=Qt.Window)
+        self.filter_dialog.setWindowTitle("Filter")
+        lay = QVBoxLayout(self.filter_dialog)
+        self.filter_group.setParent(None)
+        lay.addWidget(self.filter_group)
+        self.filter_dialog.finished.connect(self._reattachFilterWindow)
+        self.filter_dialog.showMaximized()
+
+    def _reattachFilterWindow(self, *args):
+        self.filter_group.setParent(None)
+        # Insert after tsv_group but before preview_container
+        self.right_split.insertWidget(0, self.filter_group)
+        self.filter_dialog = None
+
+    def detachPreviewWindow(self):
+        """Detach the preview panel into a separate window."""
+        if getattr(self, "preview_dialog", None):
+            self.preview_dialog.activateWindow()
+            return
+        self.preview_dialog = QDialog(self, flags=Qt.Window)
+        self.preview_dialog.setWindowTitle("Preview")
+        lay = QVBoxLayout(self.preview_dialog)
+        self.preview_container.setParent(None)
+        lay.addWidget(self.preview_container)
+        self.preview_dialog.finished.connect(self._reattachPreviewWindow)
+        self.preview_dialog.showMaximized()
+
+    def _reattachPreviewWindow(self, *args):
+        self.preview_container.setParent(None)
+        if self.left_split.indexOf(self.tsv_group) == -1:
+            self.left_split.addWidget(self.preview_container)
+        else:
+            self.left_split.insertWidget(1, self.preview_container)
+        self.preview_dialog = None
+
     def runInventory(self):
         logging.info("runInventory → Generating TSV …")
         """
@@ -1325,6 +1393,7 @@ class BIDSManager(QMainWindow):
         studies = {self.naming_table.item(r, 0).text().strip() for r in range(self.naming_table.rowCount())}
         existing: dict[tuple[str, str], str] = {}
         used_names: set[str] = set()
+        used_by_study: dict[str, set[str]] = {}
         for study in studies:
             safe = _safe_stem(str(study))
             s_path = out_dir / safe / ".bids_manager" / "subject_summary.tsv"
@@ -1337,13 +1406,15 @@ class BIDSManager(QMainWindow):
                         if gname and bids:
                             existing[(study, gname)] = bids
                             used_names.add(bids)
+                            used_by_study.setdefault(study, set()).add(bids)
                 except Exception:
                     pass
 
         for r in range(self.naming_table.rowCount()):
-            used_names.add(self.naming_table.item(r, 2).text().strip())
-
-        existing_ids = {n[4:] if n.startswith("sub-") else n for n in used_names}
+            name = self.naming_table.item(r, 2).text().strip()
+            study = self.naming_table.item(r, 0).text().strip()
+            used_names.add(name)
+            used_by_study.setdefault(study, set()).add(name)
 
         self.naming_table.blockSignals(True)
         self.mapping_table.blockSignals(True)
@@ -1360,12 +1431,11 @@ class BIDSManager(QMainWindow):
                 if current and current not in used_names:
                     new_bids = current
                 else:
-                    sid = _random_subject_id(existing_ids)
-                    existing_ids.add(sid)
-                    new_bids = f"sub-{sid}"
+                    new_bids = _next_numeric_id(used_by_study.get(study, set()))
             if new_bids != current:
                 item.setText(new_bids)
             used_names.add(new_bids)
+            used_by_study.setdefault(study, set()).add(new_bids)
             for idx, info in enumerate(self.row_info):
                 if info['study'] == study and info['given'] == given:
                     info['bids'] = new_bids
