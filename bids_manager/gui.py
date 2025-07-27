@@ -1191,14 +1191,10 @@ class BIDSManager(QMainWindow):
             df.at[i, "modality"] = self.mapping_table.item(i, 10).text()
             df.at[i, "modality_bids"] = self.mapping_table.item(i, 11).text()
 
-        for name in df["BIDS_name"]:
-            if not str(name).startswith("sub-"):
-                QMessageBox.warning(self, "Invalid name", "BIDS_name must start with 'sub-'.")
-                return
-        for study, grp in df.groupby("StudyDescription"):
-            if grp["BIDS_name"].duplicated().any():
-                QMessageBox.warning(self, "Duplicate name", f"Duplicate BIDS_name in study {study}.")
-                return
+        # When editing the scanned data table we assume the user knows what
+        # they are doing, so we do not enforce BIDS naming rules or uniqueness
+        # here. Validation is still performed when editing via the naming table
+        # and filter fields.
         try:
             df.to_csv(self.tsv_path, sep="\t", index=False)
         except Exception as exc:
