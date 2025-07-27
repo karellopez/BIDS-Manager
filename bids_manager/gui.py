@@ -736,25 +736,45 @@ class BIDSManager(QMainWindow):
         main_layout.addLayout(top_row)
         self._update_logo()
 
-        left_split = QSplitter(Qt.Vertical)
+        self.left_split = QSplitter(Qt.Vertical)
         right_split = QSplitter(Qt.Vertical)
 
-        tsv_group = QGroupBox("Scanned data viewer")
-        tsv_layout = QVBoxLayout(tsv_group)
+        self.tsv_group = QGroupBox("Scanned data viewer")
+        tsv_layout = QVBoxLayout(self.tsv_group)
         self.mapping_table = QTableWidget()
-        self.mapping_table.setColumnCount(6)
+        self.mapping_table.setColumnCount(12)
         self.mapping_table.setHorizontalHeaderLabels([
-            "Include", "Subject", "Session", "Sequence", "Modality", "BIDS Modality"
+            "include",
+            "source_folder",
+            "BIDS_name",
+            "GivenName",
+            "session",
+            "sequence",
+            "StudyDescription",
+            "series_uid",
+            "acq_time",
+            "rep",
+            "modality",
+            "modality_bids",
         ])
         hdr = self.mapping_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
+        self.mapping_table.setItemDelegateForColumn(2, SubjectDelegate(self.mapping_table))
         tsv_layout.addWidget(self.mapping_table)
+        btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
-        tsv_layout.addWidget(self.tsv_load_button)
-        left_split.addWidget(tsv_group)
+        self.tsv_apply_button = QPushButton("Apply changes")
+        self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
+        self.tsv_detach_button = QPushButton("Detach")
+        self.tsv_detach_button.clicked.connect(self.detachTSVWindow)
+        btn_row_tsv.addWidget(self.tsv_load_button)
+        btn_row_tsv.addWidget(self.tsv_apply_button)
+        btn_row_tsv.addWidget(self.tsv_detach_button)
+        tsv_layout.addLayout(btn_row_tsv)
+        self.left_split.addWidget(self.tsv_group)
 
         modal_group = QGroupBox("Filter")
         modal_layout = QVBoxLayout(modal_group)
@@ -810,8 +830,8 @@ class BIDSManager(QMainWindow):
 
         modal_layout.addWidget(self.modal_tabs)
         right_split.addWidget(modal_group)
-        left_split.setStretchFactor(0, 1)
-        left_split.setStretchFactor(1, 1)
+        self.left_split.setStretchFactor(0, 1)
+        self.left_split.setStretchFactor(1, 1)
         right_split.setStretchFactor(0, 1)
         right_split.setStretchFactor(1, 1)
 
@@ -874,11 +894,11 @@ class BIDSManager(QMainWindow):
         self.spinner_label.hide()
         log_layout.addWidget(self.spinner_label)
 
-        left_split.addWidget(preview_container)
+        self.left_split.addWidget(preview_container)
         right_split.addWidget(log_group)
 
         splitter = QSplitter()
-        splitter.addWidget(left_split)
+        splitter.addWidget(self.left_split)
         splitter.addWidget(right_split)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
@@ -1061,6 +1081,24 @@ class BIDSManager(QMainWindow):
             self.tsv_name_edit.setText(os.path.basename(path))
             self.loadMappingTable()
 
+    def detachTSVWindow(self):
+        """Detach the scanned data viewer into a separate window."""
+        if getattr(self, "tsv_dialog", None):
+            self.tsv_dialog.activateWindow()
+            return
+        self.tsv_dialog = QDialog(self, flags=Qt.Window)
+        self.tsv_dialog.setWindowTitle("Scanned data viewer")
+        lay = QVBoxLayout(self.tsv_dialog)
+        self.tsv_group.setParent(None)
+        lay.addWidget(self.tsv_group)
+        self.tsv_dialog.finished.connect(self._reattachTSVWindow)
+        self.tsv_dialog.showMaximized()
+
+    def _reattachTSVWindow(self, *args):
+        self.tsv_group.setParent(None)
+        self.left_split.insertWidget(0, self.tsv_group)
+        self.tsv_dialog = None
+
     def runInventory(self):
         logging.info("runInventory → Generating TSV …")
         """
@@ -1127,11 +1165,53 @@ class BIDSManager(QMainWindow):
             self._stop_spinner()
             self.log_text.append("TSV generation cancelled.")
 
+    def applyMappingChanges(self):
+        """Save edits in the scanned data table back to the TSV and refresh."""
+        if not self.tsv_path or not os.path.isfile(self.tsv_path):
+            return
+        try:
+            df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", f"Failed to load TSV: {exc}")
+            return
+        if df.shape[0] != self.mapping_table.rowCount():
+            QMessageBox.warning(self, "Error", "Row count mismatch")
+            return
+        for i in range(self.mapping_table.rowCount()):
+            df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
+            df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
+            df.at[i, "BIDS_name"] = self.mapping_table.item(i, 2).text()
+            df.at[i, "GivenName"] = self.mapping_table.item(i, 3).text()
+            df.at[i, "session"] = self.mapping_table.item(i, 4).text()
+            df.at[i, "sequence"] = self.mapping_table.item(i, 5).text()
+            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 6).text()
+            df.at[i, "series_uid"] = self.mapping_table.item(i, 7).text()
+            df.at[i, "acq_time"] = self.mapping_table.item(i, 8).text()
+            df.at[i, "rep"] = self.mapping_table.item(i, 9).text()
+            df.at[i, "modality"] = self.mapping_table.item(i, 10).text()
+            df.at[i, "modality_bids"] = self.mapping_table.item(i, 11).text()
+
+        for name in df["BIDS_name"]:
+            if not str(name).startswith("sub-"):
+                QMessageBox.warning(self, "Invalid name", "BIDS_name must start with 'sub-'.")
+                return
+        for study, grp in df.groupby("StudyDescription"):
+            if grp["BIDS_name"].duplicated().any():
+                QMessageBox.warning(self, "Duplicate name", f"Duplicate BIDS_name in study {study}.")
+                return
+        try:
+            df.to_csv(self.tsv_path, sep="\t", index=False)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to save TSV: {exc}")
+            return
+        self.loadMappingTable()
+
     def loadMappingTable(self):
         logging.info("loadMappingTable → Loading TSV into table …")
         """
         Load the generated TSV into the mapping_table for user editing.
-        Columns: include, subject, session, sequence, modality, modality_bids
+        Columns: include, source_folder, BIDS_name, GivenName, session, sequence,
+        StudyDescription, series_uid, acq_time, rep, modality, modality_bids
         """
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
@@ -1191,37 +1271,60 @@ class BIDSManager(QMainWindow):
         for _, row in df.iterrows():
             r = self.mapping_table.rowCount()
             self.mapping_table.insertRow(r)
-            # Include: checkbox
             include_item = QTableWidgetItem()
             include_item.setFlags(include_item.flags() | Qt.ItemIsUserCheckable)
             include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
             self.mapping_table.setItem(r, 0, include_item)
-            # Subject (non-editable)
+
+            src_item = QTableWidgetItem(_clean(row.get('source_folder')))
+            src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 1, src_item)
+
             bids_name = _clean(row.get('BIDS_name'))
-            subj_item = QTableWidgetItem(bids_name)
-            subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
+            bids_item = QTableWidgetItem(bids_name)
+            bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
             study = _clean(row.get('StudyDescription'))
-            subj_item.setData(Qt.UserRole, study)
+            bids_item.setData(Qt.UserRole, study)
             self.study_set.add(study)
-            self.mapping_table.setItem(r, 1, subj_item)
-            # Session (non-editable)
+            self.mapping_table.setItem(r, 2, bids_item)
+
+            given_item = QTableWidgetItem(_clean(row.get('GivenName')))
+            given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 3, given_item)
+
             session = _clean(row.get('session'))
             ses_item = QTableWidgetItem(session)
-            ses_item.setFlags(ses_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 2, ses_item)
-            # Sequence (editable)
+            ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 4, ses_item)
+
             seq_item = QTableWidgetItem(_clean(row.get('sequence')))
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 3, seq_item)
-            # Modality (non-editable)
+            self.mapping_table.setItem(r, 5, seq_item)
+
+            study_item = QTableWidgetItem(study)
+            study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 6, study_item)
+
+            uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
+            uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 7, uid_item)
+
+            acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
+            acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 8, acq_item)
+
+            rep_item = QTableWidgetItem(_clean(row.get('rep')))
+            rep_item.setFlags(rep_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 9, rep_item)
+
             mod_item = QTableWidgetItem(_clean(row.get('modality')))
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 4, mod_item)
-            # BIDS Modality (editable)
+            self.mapping_table.setItem(r, 10, mod_item)
+
             modb = _clean(row.get('modality_bids'))
             modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 5, modb_item)
+            self.mapping_table.setItem(r, 11, modb_item)
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
@@ -1412,7 +1515,7 @@ class BIDSManager(QMainWindow):
         for idx, info in enumerate(self.row_info):
             if info['study'] == study and info['given'] == given:
                 info['bids'] = new_bids
-                self.mapping_table.item(idx, 1).setText(new_bids)
+                self.mapping_table.item(idx, 2).setText(new_bids)
         # Keep internal mapping updated
         self.existing_maps.setdefault(study, {})[given] = new_bids
         self.existing_used.setdefault(study, set()).add(new_bids)
@@ -1660,8 +1763,8 @@ class BIDSManager(QMainWindow):
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
-                seq = self.mapping_table.item(i, 3).text()
-                modb = self.mapping_table.item(i, 5).text()
+                seq = self.mapping_table.item(i, 5).text()
+                modb = self.mapping_table.item(i, 11).text()
 
                 # Update df_orig with canonical BIDS name
                 df_orig.at[i, 'BIDS_name'] = info['bids']
