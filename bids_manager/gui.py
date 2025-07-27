@@ -742,11 +742,13 @@ class BIDSManager(QMainWindow):
         self.tsv_group = QGroupBox("Scanned data viewer")
         tsv_layout = QVBoxLayout(self.tsv_group)
         self.mapping_table = QTableWidget()
-        self.mapping_table.setColumnCount(12)
+        # +1 column for the original subject label shown in the inventory TSV
+        self.mapping_table.setColumnCount(13)
         self.mapping_table.setHorizontalHeaderLabels([
             "include",
             "source_folder",
             "BIDS_name",
+            "subject",
             "GivenName",
             "session",
             "sequence",
@@ -1181,15 +1183,16 @@ class BIDSManager(QMainWindow):
             df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
             df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
             df.at[i, "BIDS_name"] = self.mapping_table.item(i, 2).text()
-            df.at[i, "GivenName"] = self.mapping_table.item(i, 3).text()
-            df.at[i, "session"] = self.mapping_table.item(i, 4).text()
-            df.at[i, "sequence"] = self.mapping_table.item(i, 5).text()
-            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 6).text()
-            df.at[i, "series_uid"] = self.mapping_table.item(i, 7).text()
-            df.at[i, "acq_time"] = self.mapping_table.item(i, 8).text()
-            df.at[i, "rep"] = self.mapping_table.item(i, 9).text()
-            df.at[i, "modality"] = self.mapping_table.item(i, 10).text()
-            df.at[i, "modality_bids"] = self.mapping_table.item(i, 11).text()
+            df.at[i, "subject"] = self.mapping_table.item(i, 3).text()
+            df.at[i, "GivenName"] = self.mapping_table.item(i, 4).text()
+            df.at[i, "session"] = self.mapping_table.item(i, 5).text()
+            df.at[i, "sequence"] = self.mapping_table.item(i, 6).text()
+            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 7).text()
+            df.at[i, "series_uid"] = self.mapping_table.item(i, 8).text()
+            df.at[i, "acq_time"] = self.mapping_table.item(i, 9).text()
+            df.at[i, "rep"] = self.mapping_table.item(i, 10).text()
+            df.at[i, "modality"] = self.mapping_table.item(i, 11).text()
+            df.at[i, "modality_bids"] = self.mapping_table.item(i, 12).text()
 
         # When editing the scanned data table we assume the user knows what
         # they are doing, so we do not enforce BIDS naming rules or uniqueness
@@ -1206,17 +1209,17 @@ class BIDSManager(QMainWindow):
         logging.info("loadMappingTable → Loading TSV into table …")
         """
         Load the generated TSV into the mapping_table for user editing.
-        Columns: include, source_folder, BIDS_name, GivenName, session, sequence,
-        StudyDescription, series_uid, acq_time, rep, modality, modality_bids
+        Columns: include, source_folder, BIDS_name, subject, GivenName, session,
+        sequence, StudyDescription, series_uid, acq_time, rep, modality,
+        modality_bids
         """
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
 
-        # ----- integrate existing mappings for sequential conversion -----
+        # ----- load existing mappings without altering the TSV -----
         self.existing_maps = {}
         self.existing_used = {}
-        pat = re.compile(r"sub-(\d+)$")
         studies = df["StudyDescription"].fillna("").unique()
         for study in studies:
             safe = _safe_stem(str(study))
@@ -1230,19 +1233,7 @@ class BIDSManager(QMainWindow):
                     used = set(mapping.values())
                 except Exception:
                     pass
-            mask = df["StudyDescription"].fillna("") == study
-            nums = [int(m.group(1)) for name in used if (m := pat.match(name))]
-            next_id = max(nums or [0]) + 1
-            for idx in df[mask].index:
-                given = str(df.at[idx, "GivenName"])
-                if given in mapping:
-                    df.at[idx, "BIDS_name"] = mapping[given]
-                else:
-                    new_name = f"sub-{next_id:03d}"
-                    df.at[idx, "BIDS_name"] = new_name
-                    mapping[given] = new_name
-                    used.add(new_name)
-                    next_id += 1
+            # Store mapping info so we can validate name edits later on
             self.existing_maps[study] = mapping
             self.existing_used[study] = used
 
@@ -1284,43 +1275,48 @@ class BIDSManager(QMainWindow):
             self.study_set.add(study)
             self.mapping_table.setItem(r, 2, bids_item)
 
+            subj_item = QTableWidgetItem(_clean(row.get('subject')))
+            subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 3, subj_item)
+
             given_item = QTableWidgetItem(_clean(row.get('GivenName')))
             given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 3, given_item)
+            self.mapping_table.setItem(r, 4, given_item)
 
             session = _clean(row.get('session'))
             ses_item = QTableWidgetItem(session)
             ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 4, ses_item)
+            self.mapping_table.setItem(r, 5, ses_item)
 
             seq_item = QTableWidgetItem(_clean(row.get('sequence')))
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 5, seq_item)
+            self.mapping_table.setItem(r, 6, seq_item)
 
             study_item = QTableWidgetItem(study)
             study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 6, study_item)
+            self.mapping_table.setItem(r, 7, study_item)
 
             uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
             uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 7, uid_item)
+            self.mapping_table.setItem(r, 8, uid_item)
 
             acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
             acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 8, acq_item)
+            self.mapping_table.setItem(r, 9, acq_item)
 
             rep_item = QTableWidgetItem(_clean(row.get('rep')))
-            rep_item.setFlags(rep_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 9, rep_item)
+            # Allow editing the repeat number directly in the table
+            rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 10, rep_item)
 
             mod_item = QTableWidgetItem(_clean(row.get('modality')))
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 10, mod_item)
+            self.mapping_table.setItem(r, 11, mod_item)
 
             modb = _clean(row.get('modality_bids'))
             modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 11, modb_item)
+            self.mapping_table.setItem(r, 12, modb_item)
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
@@ -1759,8 +1755,8 @@ class BIDSManager(QMainWindow):
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
-                seq = self.mapping_table.item(i, 5).text()
-                modb = self.mapping_table.item(i, 11).text()
+                seq = self.mapping_table.item(i, 6).text()
+                modb = self.mapping_table.item(i, 12).text()
 
                 # Update df_orig with canonical BIDS name
                 df_orig.at[i, 'BIDS_name'] = info['bids']
