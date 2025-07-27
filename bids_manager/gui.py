@@ -73,6 +73,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 import logging  # debug logging
 import signal
+import random
+import string
 try:
     import psutil
     HAS_PSUTIL = True
@@ -187,6 +189,16 @@ def _format_subject_id(num: int) -> str:
         letters.append(chr(ord("A") + letters_idx % 26))
         letters_idx //= 26
     return "".join(reversed(letters)) + f"{digits:03d}"
+
+
+def _random_subject_id(existing: set[str]) -> str:
+    """Return a unique random 3-letter/3-digit identifier."""
+    while True:
+        letters = ''.join(random.choices(string.ascii_uppercase, k=3))
+        digits = ''.join(random.choices(string.digits, k=3))
+        sid = letters + digits
+        if sid not in existing:
+            return sid
 
 
 class SubjectDelegate(QStyledItemDelegate):
@@ -1220,56 +1232,64 @@ class BIDSManager(QMainWindow):
         self.loadMappingTable()
 
     def generateUniqueIDs(self):
-        """Assign 3-letter/3-digit IDs to subjects without an identifier."""
-        # Load previously assigned IDs from existing datasets
-        existing = {}
-        studies = {
-            self.mapping_table.item(r, 7).text().strip()
-            for r in range(self.mapping_table.rowCount())
-        }
-        for study in studies:
-            if not study:
-                continue
-            s_path = (
-                Path(self.bids_out_dir)
-                / _safe_stem(str(study))
-                / ".bids_manager"
-                / "subject_summary.tsv"
-            )
-            if s_path.exists():
-                try:
-                    sdf = pd.read_csv(s_path, sep="\t", keep_default_na=False)
-                    for _, row in sdf.iterrows():
-                        key = (str(row.get("StudyDescription", "")).strip(), str(row.get("BIDS_name", "")).strip())
-                        sid = str(row.get("subject", "")).strip() or str(row.get("GivenName", "")).strip()
-                        if key[0] and key[1] and sid:
-                            existing.setdefault(key[0], {})[key[1]] = sid
-                except Exception:
-                    pass
+        """Assign random 3-letter/3-digit IDs to subjects without an identifier."""
+        # Load previously assigned IDs from all studies in the output directory
+        existing: dict[str, dict[str, str]] = {}
+        existing_ids: set[str] = set()
+        out_dir = Path(self.bids_out_dir)
+        if out_dir.is_dir():
+            for study_dir in out_dir.iterdir():
+                if not study_dir.is_dir():
+                    continue
+                s_path = study_dir / ".bids_manager" / "subject_summary.tsv"
+                if s_path.exists():
+                    try:
+                        sdf = pd.read_csv(s_path, sep="\t", keep_default_na=False)
+                        for _, row in sdf.iterrows():
+                            study_desc = str(row.get("StudyDescription", "")).strip()
+                            bids_name = str(row.get("BIDS_name", "")).strip()
+                            sid = str(row.get("subject", "")).strip() or str(row.get("GivenName", "")).strip()
+                            if study_desc and bids_name and sid:
+                                existing.setdefault(study_desc, {})[bids_name] = sid
+                                existing_ids.add(sid)
+                    except Exception:
+                        pass
 
-        id_map = {}
-        next_id = 1
+        id_map: dict[tuple[str, str], str] = {}
         for i in range(self.mapping_table.rowCount()):
             bids = self.mapping_table.item(i, 2).text().strip()
             study = self.mapping_table.item(i, 7).text().strip()
             if not bids:
                 continue
 
-            sid = existing.get(study, {}).get(bids)
+            subj_item = self.mapping_table.item(i, 3)
+            given_item = self.mapping_table.item(i, 4)
+
+            sid = None
+            prior = existing.get(study, {}).get(bids)
+            if prior and subj_item.text().strip() == "" and given_item.text().strip() == "":
+                resp = QMessageBox.question(
+                    self,
+                    "Subject exists",
+                    "This subject already exist in the study. Would you like to use the same unique ID?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if resp == QMessageBox.Yes:
+                    sid = prior
+
             if sid is None:
                 key = (study, bids)
                 if key not in id_map:
-                    id_map[key] = _format_subject_id(next_id)
-                    next_id += 1
+                    id_map[key] = _random_subject_id(existing_ids | set(id_map.values()))
                 sid = id_map[key]
 
-            subj_item = self.mapping_table.item(i, 3)
-            given_item = self.mapping_table.item(i, 4)
             if subj_item.text().strip() == "":
                 subj_item.setText(sid)
             if given_item.text().strip() == "":
                 given_item.setText(sid)
             self.row_info[i]['given'] = given_item.text()
+            existing_ids.add(sid)
 
         self._rebuild_lookup_maps()
         QTimer.singleShot(0, self.populateModalitiesTree)

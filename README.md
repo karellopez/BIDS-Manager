@@ -52,8 +52,9 @@ All utilities provide `-h/--help` for details.
   appears between the CPU and Authorship buttons.
 - On startup the GUI detects the system DPI and applies the matching scale.
 - The scanned data table now provides a "Generate unique IDs" button that
-  assigns 3‑letter/3‑digit identifiers to subjects and reuses IDs from any
-  existing `.bids_manager/subject_summary.tsv` files.
+  assigns random 3‑letter/3‑digit identifiers to subjects. If an entry already
+  exists for the same study in an existing `.bids_manager/subject_summary.tsv`,
+  you are prompted to reuse its identifier.
 
 
 
