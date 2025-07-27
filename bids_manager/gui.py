@@ -850,10 +850,15 @@ class BIDSManager(QMainWindow):
         self.naming_table.setItemDelegateForColumn(2, SubjectDelegate(self.naming_table))
         naming_layout.addWidget(self.naming_table)
         self.naming_table.itemChanged.connect(self._onNamingEdited)
+        self.naming_table.itemChanged.connect(self._updateScanExistingEnabled)
         self.name_choice = QComboBox()
         self.name_choice.addItems(["Use BIDS names", "Use given names"])
         self.name_choice.currentIndexChanged.connect(self._onNameChoiceChanged)
         naming_layout.addWidget(self.name_choice)
+        self.scan_existing_button = QPushButton("Scan existing studies")
+        self.scan_existing_button.setEnabled(False)
+        self.scan_existing_button.clicked.connect(self.scanExistingStudies)
+        naming_layout.addWidget(self.scan_existing_button)
         self.modal_tabs.addTab(naming_tab, "Edit naming")
 
         modal_layout.addWidget(self.modal_tabs)
@@ -1295,6 +1300,88 @@ class BIDSManager(QMainWindow):
         QTimer.singleShot(0, self.populateModalitiesTree)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateScanExistingEnabled)
+
+    def _updateScanExistingEnabled(self, _item=None):
+        """Enable scan button when all given names are filled."""
+        if not hasattr(self, "scan_existing_button"):
+            return
+        enabled = self.naming_table.rowCount() > 0
+        if enabled:
+            for r in range(self.naming_table.rowCount()):
+                item = self.naming_table.item(r, 1)
+                if item is None or not item.text().strip():
+                    enabled = False
+                    break
+        self.scan_existing_button.setEnabled(enabled)
+
+    def scanExistingStudies(self):
+        """Update BIDS names based on existing datasets."""
+        out_dir = Path(self.bids_out_dir)
+        if not out_dir.is_dir():
+            QMessageBox.warning(self, "No BIDS Output Directory", "Please select a BIDS output directory.")
+            return
+
+        studies = {self.naming_table.item(r, 0).text().strip() for r in range(self.naming_table.rowCount())}
+        existing: dict[tuple[str, str], str] = {}
+        used_names: set[str] = set()
+        for study in studies:
+            safe = _safe_stem(str(study))
+            s_path = out_dir / safe / ".bids_manager" / "subject_summary.tsv"
+            if s_path.exists():
+                try:
+                    df = pd.read_csv(s_path, sep="\t", keep_default_na=False)
+                    for _, row in df.iterrows():
+                        gname = str(row.get("GivenName", "")).strip()
+                        bids = str(row.get("BIDS_name", "")).strip()
+                        if gname and bids:
+                            existing[(study, gname)] = bids
+                            used_names.add(bids)
+                except Exception:
+                    pass
+
+        for r in range(self.naming_table.rowCount()):
+            used_names.add(self.naming_table.item(r, 2).text().strip())
+
+        existing_ids = {n[4:] if n.startswith("sub-") else n for n in used_names}
+
+        self.naming_table.blockSignals(True)
+        self.mapping_table.blockSignals(True)
+
+        for row in range(self.naming_table.rowCount()):
+            study = self.naming_table.item(row, 0).text().strip()
+            given = self.naming_table.item(row, 1).text().strip()
+            item = self.naming_table.item(row, 2)
+            current = item.text().strip()
+            mapped = existing.get((study, given))
+            if mapped:
+                new_bids = mapped
+            else:
+                if current and current not in used_names:
+                    new_bids = current
+                else:
+                    sid = _random_subject_id(existing_ids)
+                    existing_ids.add(sid)
+                    new_bids = f"sub-{sid}"
+            if new_bids != current:
+                item.setText(new_bids)
+            used_names.add(new_bids)
+            for idx, info in enumerate(self.row_info):
+                if info['study'] == study and info['given'] == given:
+                    info['bids'] = new_bids
+                    self.mapping_table.item(idx, 2).setText(new_bids)
+            self.existing_maps.setdefault(study, {})[given] = new_bids
+            self.existing_used.setdefault(study, set()).add(new_bids)
+
+        self.naming_table.blockSignals(False)
+        self.mapping_table.blockSignals(False)
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateScanExistingEnabled)
+
 
     def loadMappingTable(self):
         logging.info("loadMappingTable → Loading TSV into table …")
@@ -1453,6 +1540,7 @@ class BIDSManager(QMainWindow):
             bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
             self.naming_table.setItem(nr, 2, bitem)
         self.naming_table.blockSignals(False)
+        self._updateScanExistingEnabled()
 
 
     def populateModalitiesTree(self):
