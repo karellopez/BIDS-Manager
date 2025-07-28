@@ -2761,79 +2761,137 @@ class IntendedForDialog(QDialog):
         self.resize(900, 500)
         self.bids_root = bids_root
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        (
+            self.bold_tab,
+            self.bold_tree,
+            self.bold_intended,
+            self.bold_func_list,
+            self.bold_remove,
+            self.bold_add,
+            self.bold_save,
+        ) = self._build_tab("bold")
+        self.tabs.addTab(self.bold_tab, "BOLD")
+
+        (
+            self.dwi_tab,
+            self.dwi_tree,
+            self.dwi_intended,
+            self.dwi_func_list,
+            self.dwi_remove,
+            self.dwi_add,
+            self.dwi_save,
+        ) = self._build_tab("dwi")
+
+        self.b0_box = QCheckBox("Treat DWI b0 maps as fieldmaps")
+        self.b0_box.toggled.connect(self._on_b0_toggle)
+        layout.addWidget(self.b0_box)
+
+        self.data = {}
+        self._init_b0_state()
+        self._collect()
+
+    # ---- helpers ----
+    def _build_tab(self, mode: str):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Fieldmap images:"))
-        self.left_tree = QTreeWidget()
-        self.left_tree.setHeaderHidden(True)
-        self.left_tree.itemSelectionChanged.connect(self.on_left_selected)
-        left_layout.addWidget(self.left_tree)
-        self.b0_box = QCheckBox("Treat DWI b0 maps as fieldmaps")
-        self.b0_box.toggled.connect(self._collect)
-        left_layout.addWidget(self.b0_box)
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        if mode == "bold":
+            tree.itemSelectionChanged.connect(lambda: self._on_left_selected("bold"))
+        else:
+            tree.itemSelectionChanged.connect(lambda: self._on_left_selected("dwi"))
+        left_layout.addWidget(tree)
         layout.addLayout(left_layout, 2)
 
         mid_layout = QVBoxLayout()
         mid_layout.addWidget(QLabel("IntendedFor:"))
-        self.intended_tabs = QTabWidget()
-        self.bold_intended = QListWidget()
-        self.bold_intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.intended_tabs.addTab(self.bold_intended, "Intended for BOLD")
-        self.dwi_intended = QListWidget()
-        self.dwi_intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.intended_tabs.addTab(self.dwi_intended, "Intended for DWI")
-        mid_layout.addWidget(self.intended_tabs)
+        intended = QListWidget()
+        intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        mid_layout.addWidget(intended)
         rm_save = QHBoxLayout()
-        self.remove_btn = QPushButton("Remove")
-        self.remove_btn.clicked.connect(self.remove_selected)
-        self.save_btn = QPushButton("Save")
-        self.save_btn.clicked.connect(self.save_changes)
-        rm_save.addWidget(self.remove_btn)
-        rm_save.addWidget(self.save_btn)
+        remove = QPushButton("Remove")
+        remove.clicked.connect(lambda: self._remove_selected(mode))
+        save = QPushButton("Save")
+        save.clicked.connect(lambda: self._save_changes(mode))
+        rm_save.addWidget(remove)
+        rm_save.addWidget(save)
         rm_save.addStretch()
         mid_layout.addLayout(rm_save)
         layout.addLayout(mid_layout, 2)
 
         right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("Functional images:"))
-        self.func_tabs = QTabWidget()
-        self.bold_func_list = QListWidget()
-        self.bold_func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.func_tabs.addTab(self.bold_func_list, "BOLD images")
-        self.dwi_func_list = QListWidget()
-        self.dwi_func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.func_tabs.addTab(self.dwi_func_list, "DWI images")
-        right_layout.addWidget(self.func_tabs)
-        self.add_btn = QPushButton("← Add")
-        self.add_btn.clicked.connect(self.add_selected)
-        right_layout.addWidget(self.add_btn)
+        label = "Functional images:" if mode == "bold" else "Diffusion images:"
+        right_layout.addWidget(QLabel(label))
+        func_list = QListWidget()
+        func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        right_layout.addWidget(func_list)
+        add_btn = QPushButton("← Add")
+        add_btn.clicked.connect(lambda: self._add_selected(mode))
+        right_layout.addWidget(add_btn)
         right_layout.addStretch()
         layout.addLayout(right_layout, 2)
 
-        self.data = {}
+        return widget, tree, intended, func_list, remove, add_btn, save
+
+    def _init_b0_state(self) -> None:
+        has_b0 = self._has_any_b0()
+        fmap_b0 = self._fmap_has_b0()
+        self.b0_box.setEnabled(has_b0)
+        self.b0_box.setChecked(fmap_b0)
+        if fmap_b0 and self.tabs.indexOf(self.dwi_tab) == -1:
+            self.tabs.addTab(self.dwi_tab, "DWI")
+
+    def _on_b0_toggle(self) -> None:
+        if self.b0_box.isChecked():
+            if self.tabs.indexOf(self.dwi_tab) == -1:
+                self.tabs.addTab(self.dwi_tab, "DWI")
+        else:
+            idx = self.tabs.indexOf(self.dwi_tab)
+            if idx != -1:
+                self.tabs.removeTab(idx)
         self._collect()
 
-    # ---- helpers ----
     def _collect(self) -> None:
-        self.left_tree.clear()
+        self.bold_tree.clear()
+        if self.tabs.indexOf(self.dwi_tab) != -1:
+            self.dwi_tree.clear()
         self.data.clear()
         if self.b0_box.isChecked():
             self._move_b0_maps()
+        else:
+            self._restore_b0_maps()
         for sub in sorted(self.bids_root.glob('sub-*')):
             if not sub.is_dir():
                 continue
-            sub_item = QTreeWidgetItem([sub.name])
-            self.left_tree.addTopLevelItem(sub_item)
+            sub_item_bold = QTreeWidgetItem([sub.name])
+            self.bold_tree.addTopLevelItem(sub_item_bold)
+            sub_item_dwi = None
+            if self.tabs.indexOf(self.dwi_tab) != -1:
+                sub_item_dwi = QTreeWidgetItem([sub.name])
+                self.dwi_tree.addTopLevelItem(sub_item_dwi)
             sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
             if sessions:
                 for ses in sessions:
-                    ses_item = QTreeWidgetItem([ses.name])
-                    sub_item.addChild(ses_item)
-                    self._add_fmaps(ses, ses_item, sub.name, ses.name)
+                    ses_item_bold = QTreeWidgetItem([ses.name])
+                    sub_item_bold.addChild(ses_item_bold)
+                    ses_item_dwi = None
+                    if sub_item_dwi is not None:
+                        ses_item_dwi = QTreeWidgetItem([ses.name])
+                        sub_item_dwi.addChild(ses_item_dwi)
+                    self._add_fmaps(ses, ses_item_bold, ses_item_dwi, sub.name, ses.name)
             else:
-                self._add_fmaps(sub, sub_item, sub.name, None)
-            sub_item.setExpanded(True)
+                self._add_fmaps(sub, sub_item_bold, sub_item_dwi, sub.name, None)
+            sub_item_bold.setExpanded(True)
+            if sub_item_dwi is not None:
+                sub_item_dwi.setExpanded(True)
 
     def _move_b0_maps(self) -> None:
         """Move DWI b0/epi images into the ``fmap`` folder."""
@@ -2875,7 +2933,82 @@ class IntendedForDialog(QDialog):
             except Exception:
                 pass
 
-    def _add_fmaps(self, root: Path, parent_item: QTreeWidgetItem,
+    def _restore_b0_maps(self) -> None:
+        """Move previously relocated b0/epi images back to ``dwi``."""
+        rename_map: dict[str, str] = {}
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                fmap_dir = root / 'fmap'
+                dwi_dir = root / 'dwi'
+                if not fmap_dir.is_dir() or not dwi_dir.is_dir():
+                    continue
+                for nii in fmap_dir.glob('*.nii*'):
+                    name = nii.name.lower()
+                    if 'b0' not in name and '_epi' not in name:
+                        continue
+                    dst = dwi_dir / nii.name
+                    if not dst.exists():
+                        nii.rename(dst)
+                        rename_map[(nii.relative_to(self.bids_root)).as_posix()] = (
+                            dst.relative_to(self.bids_root).as_posix()
+                        )
+                    js = nii.with_suffix('.json')
+                    if js.exists():
+                        dst_js = dwi_dir / js.name
+                        if not dst_js.exists():
+                            js.rename(dst_js)
+                            rename_map[(js.relative_to(self.bids_root)).as_posix()] = (
+                                dst_js.relative_to(self.bids_root).as_posix()
+                            )
+        if rename_map:
+            try:
+                from .scans_utils import update_scans_with_map
+
+                update_scans_with_map(self.bids_root, rename_map)
+            except Exception:
+                pass
+
+    def _has_any_b0(self) -> bool:
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                for folder in [root / 'dwi', root / 'fmap']:
+                    if not folder.is_dir():
+                        continue
+                    for nii in folder.glob('*.nii*'):
+                        if self._is_b0(nii.name):
+                            return True
+        return False
+
+    def _fmap_has_b0(self) -> bool:
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                fmap_dir = root / 'fmap'
+                if not fmap_dir.is_dir():
+                    continue
+                for nii in fmap_dir.glob('*.nii*'):
+                    if self._is_b0(nii.name):
+                        return True
+        return False
+
+    @staticmethod
+    def _is_b0(name: str) -> bool:
+        lower = name.lower()
+        return 'b0' in lower or '_epi' in lower
+
+    def _add_fmaps(self, root: Path, bold_parent: QTreeWidgetItem,
+                   dwi_parent: QTreeWidgetItem | None,
                    sub: str, ses: str | None) -> None:
         fmap_dir = root / 'fmap'
         func_dir = root / 'func'
@@ -2902,9 +3035,13 @@ class IntendedForDialog(QDialog):
                 'intended_dwi': dwi_int,
                 'root': root,
             }
-            item = QTreeWidgetItem([base])
-            item.setData(0, Qt.UserRole, key)
-            parent_item.addChild(item)
+            item_bold = QTreeWidgetItem([base])
+            item_bold.setData(0, Qt.UserRole, key)
+            bold_parent.addChild(item_bold)
+            if dwi_parent is not None and self._is_b0(base):
+                item_dwi = QTreeWidgetItem([base])
+                item_dwi.setData(0, Qt.UserRole, key)
+                dwi_parent.addChild(item_dwi)
 
     def _load_intended(self, path: Path, root: Path) -> tuple[list[str], list[str]]:
         try:
@@ -2934,66 +3071,57 @@ class IntendedForDialog(QDialog):
             pass
         return [], []
 
-    # ---- slots ----
-    def on_left_selected(self) -> None:
-        it = self.left_tree.currentItem()
+    def _on_left_selected(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        intended = self.bold_intended if mode == "bold" else self.dwi_intended
+        funcs = self.bold_func_list if mode == "bold" else self.dwi_func_list
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data.get(key, {})
-        self.bold_intended.clear()
-        for f in info.get('intended_bold', []):
-            self.bold_intended.addItem(f)
-        self.dwi_intended.clear()
-        for f in info.get('intended_dwi', []):
-            self.dwi_intended.addItem(f)
-        self.bold_func_list.clear()
-        for f in info.get('funcs_bold', []):
-            self.bold_func_list.addItem(f)
-        self.dwi_func_list.clear()
-        for f in info.get('funcs_dwi', []):
-            self.dwi_func_list.addItem(f)
+        intended.clear()
+        for f in info.get(f'intended_{mode}', []):
+            intended.addItem(f)
+        funcs.clear()
+        for f in info.get(f'funcs_{mode}', []):
+            funcs.addItem(f)
 
-    def add_selected(self) -> None:
-        it = self.left_tree.currentItem()
+    def _add_selected(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        func_list = self.bold_func_list if mode == "bold" else self.dwi_func_list
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data[key]
-        if self.func_tabs.currentIndex() == 0:
-            for sel in self.bold_func_list.selectedItems():
-                path = sel.text()
-                if path not in info['intended_bold']:
-                    info['intended_bold'].append(path)
-        else:
-            for sel in self.dwi_func_list.selectedItems():
-                path = sel.text()
-                if path not in info['intended_dwi']:
-                    info['intended_dwi'].append(path)
-        self.on_left_selected()
+        for sel in func_list.selectedItems():
+            path = sel.text()
+            if path not in info[f'intended_{mode}']:
+                info[f'intended_{mode}'].append(path)
+        self._on_left_selected(mode)
 
-    def remove_selected(self) -> None:
-        it = self.left_tree.currentItem()
+    def _remove_selected(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        intended = self.bold_intended if mode == "bold" else self.dwi_intended
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data[key]
-        if self.intended_tabs.currentIndex() == 0:
-            remove = [s.text() for s in self.bold_intended.selectedItems()]
-            info['intended_bold'] = [p for p in info['intended_bold'] if p not in remove]
-        else:
-            remove = [s.text() for s in self.dwi_intended.selectedItems()]
-            info['intended_dwi'] = [p for p in info['intended_dwi'] if p not in remove]
-        self.on_left_selected()
+        remove = [s.text() for s in intended.selectedItems()]
+        info[f'intended_{mode}'] = [p for p in info[f'intended_{mode}'] if p not in remove]
+        self._on_left_selected(mode)
 
-    def save_changes(self) -> None:
-        it = self.left_tree.currentItem()
+    def _save_changes(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
