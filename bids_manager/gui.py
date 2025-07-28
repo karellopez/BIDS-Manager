@@ -88,6 +88,9 @@ ANCP_LAB_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "
 KAREL_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Karel.jpeg"
 JOCHEM_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Jochem.jpg"
 
+# Directory used to store persistent user preferences
+PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
+
 
 class _AutoUpdateLabel(QLabel):
     """QLabel that triggers a callback whenever it is resized."""
@@ -305,6 +308,15 @@ class BIDSManager(QMainWindow):
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
 
+        # Path to persistent user preferences
+        self.pref_dir = PREF_DIR
+        try:
+            self.pref_dir.mkdir(exist_ok=True, parents=True)
+        except Exception:
+            pass
+        self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
+        self.theme_file = self.pref_dir / "theme.txt"
+
         # Spinner for long-running tasks
         self.spinner_label = None
         # Timer and unicode characters for the small animated spinner that
@@ -375,8 +387,15 @@ class BIDSManager(QMainWindow):
             act = theme_menu.addAction(name)
             act.triggered.connect(lambda _=False, n=name: self.apply_theme(n))
         self.theme_btn.setMenu(theme_menu)
-        # Set default theme
-        self.apply_theme("Light")
+
+        # Load previously saved theme preference
+        default_theme = "Light"
+        if self.theme_file.exists():
+            try:
+                default_theme = self.theme_file.read_text().strip() or default_theme
+            except Exception:
+                pass
+        self.apply_theme(default_theme)
 
     def _build_theme_dict(self):
         """Return dictionary mapping theme names to QPalettes."""
@@ -629,6 +648,10 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         app.setPalette(self.themes[name])
         self.current_theme = name
+        try:
+            self.theme_file.write_text(name)
+        except Exception:
+            pass
         self._update_logo()
         self._apply_font_scale()
 
@@ -884,6 +907,33 @@ class BIDSManager(QMainWindow):
         self.scan_existing_button.clicked.connect(self.scanExistingStudies)
         naming_layout.addWidget(self.scan_existing_button)
         self.modal_tabs.addTab(naming_tab, "Edit naming")
+
+        # Always Exclude tab
+        exclude_tab = QWidget()
+        exclude_layout = QVBoxLayout(exclude_tab)
+        self.exclude_table = QTableWidget()
+        self.exclude_table.setColumnCount(2)
+        self.exclude_table.setHorizontalHeaderLabels(["Active", "Pattern"])
+        ex_hdr = self.exclude_table.horizontalHeader()
+        ex_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        ex_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        exclude_layout.addWidget(self.exclude_table)
+
+        ex_add_row = QHBoxLayout()
+        self.exclude_edit = QLineEdit()
+        ex_add_row.addWidget(self.exclude_edit)
+        ex_add_btn = QPushButton("Add")
+        ex_add_btn.clicked.connect(self._exclude_add)
+        ex_add_row.addWidget(ex_add_btn)
+        exclude_layout.addLayout(ex_add_row)
+
+        ex_save_btn = QPushButton("Save")
+        ex_save_btn.clicked.connect(self.saveExcludePatterns)
+        exclude_layout.addWidget(ex_save_btn, alignment=Qt.AlignRight)
+        self.modal_tabs.addTab(exclude_tab, "Always exclude")
+
+        # Load saved exclude patterns now that the table exists
+        self.loadExcludePatterns()
 
         header_row_filter = QHBoxLayout()
         self.filter_detach_button = QPushButton("»")
@@ -1148,6 +1198,7 @@ class BIDSManager(QMainWindow):
         if directory:
             self.bids_out_dir = directory
             self.bids_out_edit.setText(directory)
+            self.loadExcludePatterns()
 
     def selectAndLoadTSV(self):
         """Choose an existing TSV and load it into the table."""
@@ -1596,6 +1647,9 @@ class BIDSManager(QMainWindow):
             })
         self.log_text.append("Loaded TSV into mapping table.")
 
+        # Apply always-exclude patterns before building lookup tables
+        self.applyExcludePatterns()
+
         # Build modality/sequence lookup for tree interactions
         self._rebuild_lookup_maps()
 
@@ -1804,6 +1858,80 @@ class BIDSManager(QMainWindow):
                     self.mapping_table.item(i, 0).setCheckState(Qt.Checked)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
+
+    # ----- always exclude helpers -----
+    def _exclude_add(self) -> None:
+        pattern = self.exclude_edit.text().strip()
+        if not pattern:
+            return
+        r = self.exclude_table.rowCount()
+        self.exclude_table.insertRow(r)
+        chk = QTableWidgetItem()
+        chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
+        chk.setCheckState(Qt.Checked)
+        self.exclude_table.setItem(r, 0, chk)
+        self.exclude_table.setItem(r, 1, QTableWidgetItem(pattern))
+        self.exclude_edit.clear()
+
+    def loadExcludePatterns(self) -> None:
+        if not hasattr(self, "exclude_table"):
+            return
+        self.exclude_table.setRowCount(0)
+        patterns = []
+        if self.exclude_patterns_file.exists():
+            try:
+                df = pd.read_csv(self.exclude_patterns_file, sep="\t", keep_default_na=False)
+                for _, row in df.iterrows():
+                    pat = str(row.get("pattern", ""))
+                    active = bool(int(row.get("active", 1)))
+                    patterns.append((pat, active))
+            except Exception:
+                pass
+        if not patterns:
+            patterns = [
+                ("localizer", True),
+                ("scout", True),
+                ("phoenixzipreport", True),
+                ("phoenix document", True),
+                (".pdf", True),
+                ("report", True),
+                ("physlog", True),
+            ]
+        for pat, active in patterns:
+            r = self.exclude_table.rowCount()
+            self.exclude_table.insertRow(r)
+            chk = QTableWidgetItem()
+            chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
+            chk.setCheckState(Qt.Checked if active else Qt.Unchecked)
+            self.exclude_table.setItem(r, 0, chk)
+            self.exclude_table.setItem(r, 1, QTableWidgetItem(pat))
+        self.applyExcludePatterns()
+
+    def saveExcludePatterns(self) -> None:
+        self.exclude_patterns_file.parent.mkdir(exist_ok=True, parents=True)
+        rows = []
+        for r in range(self.exclude_table.rowCount()):
+            pat = self.exclude_table.item(r, 1).text().strip()
+            if not pat:
+                continue
+            active = self.exclude_table.item(r, 0).checkState() == Qt.Checked
+            rows.append({"active": int(active), "pattern": pat})
+        pd.DataFrame(rows).to_csv(self.exclude_patterns_file, sep="\t", index=False)
+        QMessageBox.information(self, "Saved", f"Updated {self.exclude_patterns_file}")
+        self.applyExcludePatterns()
+
+    def applyExcludePatterns(self) -> None:
+        if not hasattr(self, "exclude_table"):
+            return
+        patterns = [
+            self.exclude_table.item(r, 1).text().strip().lower()
+            for r in range(self.exclude_table.rowCount())
+            if self.exclude_table.item(r, 0).checkState() == Qt.Checked
+        ]
+        for r in range(self.mapping_table.rowCount()):
+            seq = self.mapping_table.item(r, 6).text().lower()
+            if any(p in seq for p in patterns):
+                self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
 
     def _rebuild_lookup_maps(self):
         """Recompute internal lookup tables for tree interactions."""
@@ -2151,6 +2279,7 @@ class BIDSManager(QMainWindow):
             self.tree.setRootIndex(self.model.index(p))
             self.viewer.clear()
             self.updateStats()
+            self.loadExcludePatterns()
 
     def onTreeClicked(self, idx: QModelIndex):
         """When a file is clicked in the tree, load metadata if JSON/TSV."""
