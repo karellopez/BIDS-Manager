@@ -2769,13 +2769,21 @@ class IntendedForDialog(QDialog):
         self.left_tree.setHeaderHidden(True)
         self.left_tree.itemSelectionChanged.connect(self.on_left_selected)
         left_layout.addWidget(self.left_tree)
+        self.b0_box = QCheckBox("Treat DWI b0 maps as fieldmaps")
+        self.b0_box.toggled.connect(self._collect)
+        left_layout.addWidget(self.b0_box)
         layout.addLayout(left_layout, 2)
 
         mid_layout = QVBoxLayout()
         mid_layout.addWidget(QLabel("IntendedFor:"))
-        self.intended_list = QListWidget()
-        self.intended_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        mid_layout.addWidget(self.intended_list)
+        self.intended_tabs = QTabWidget()
+        self.bold_intended = QListWidget()
+        self.bold_intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.intended_tabs.addTab(self.bold_intended, "Intended for BOLD")
+        self.dwi_intended = QListWidget()
+        self.dwi_intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.intended_tabs.addTab(self.dwi_intended, "Intended for DWI")
+        mid_layout.addWidget(self.intended_tabs)
         rm_save = QHBoxLayout()
         self.remove_btn = QPushButton("Remove")
         self.remove_btn.clicked.connect(self.remove_selected)
@@ -2789,9 +2797,14 @@ class IntendedForDialog(QDialog):
 
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("Functional images:"))
-        self.func_list = QListWidget()
-        self.func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        right_layout.addWidget(self.func_list)
+        self.func_tabs = QTabWidget()
+        self.bold_func_list = QListWidget()
+        self.bold_func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.func_tabs.addTab(self.bold_func_list, "BOLD images")
+        self.dwi_func_list = QListWidget()
+        self.dwi_func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.func_tabs.addTab(self.dwi_func_list, "DWI images")
+        right_layout.addWidget(self.func_tabs)
         self.add_btn = QPushButton("← Add")
         self.add_btn.clicked.connect(self.add_selected)
         right_layout.addWidget(self.add_btn)
@@ -2803,6 +2816,10 @@ class IntendedForDialog(QDialog):
 
     # ---- helpers ----
     def _collect(self) -> None:
+        self.left_tree.clear()
+        self.data.clear()
+        if self.b0_box.isChecked():
+            self._move_b0_maps()
         for sub in sorted(self.bids_root.glob('sub-*')):
             if not sub.is_dir():
                 continue
@@ -2818,12 +2835,55 @@ class IntendedForDialog(QDialog):
                 self._add_fmaps(sub, sub_item, sub.name, None)
             sub_item.setExpanded(True)
 
+    def _move_b0_maps(self) -> None:
+        """Move DWI b0/epi images into the ``fmap`` folder."""
+        rename_map: dict[str, str] = {}
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                dwi_dir = root / 'dwi'
+                if not dwi_dir.is_dir():
+                    continue
+                fmap_dir = root / 'fmap'
+                fmap_dir.mkdir(exist_ok=True)
+                for nii in dwi_dir.glob('*.nii*'):
+                    name = nii.name.lower()
+                    if 'b0' not in name and '_epi' not in name:
+                        continue
+                    dst = fmap_dir / nii.name
+                    if not dst.exists():
+                        nii.rename(dst)
+                        rename_map[(nii.relative_to(self.bids_root)).as_posix()] = (
+                            dst.relative_to(self.bids_root).as_posix()
+                        )
+                    js = nii.with_suffix('.json')
+                    if js.exists():
+                        dst_js = fmap_dir / js.name
+                        if not dst_js.exists():
+                            js.rename(dst_js)
+                            rename_map[(js.relative_to(self.bids_root)).as_posix()] = (
+                                dst_js.relative_to(self.bids_root).as_posix()
+                            )
+        if rename_map:
+            try:
+                from .scans_utils import update_scans_with_map
+
+                update_scans_with_map(self.bids_root, rename_map)
+            except Exception:
+                pass
+
     def _add_fmaps(self, root: Path, parent_item: QTreeWidgetItem,
                    sub: str, ses: str | None) -> None:
         fmap_dir = root / 'fmap'
         func_dir = root / 'func'
+        dwi_dir = root / 'dwi'
         func_files = [f.relative_to(root).as_posix()
                       for f in sorted(func_dir.glob('*.nii*')) if f.is_file()]
+        dwi_files = [f.relative_to(root).as_posix()
+                     for f in sorted(dwi_dir.glob('*.nii*')) if f.is_file()]
         groups: dict[str, list[Path]] = {}
         if fmap_dir.is_dir():
             for js in fmap_dir.glob('*.json'):
@@ -2833,17 +2893,20 @@ class IntendedForDialog(QDialog):
                 groups.setdefault(base, []).append(js)
         for base, files in groups.items():
             key = (sub, ses, base)
+            bold_int, dwi_int = self._load_intended(files[0], root)
             self.data[key] = {
                 'jsons': files,
-                'funcs': func_files,
-                'intended': self._load_intended(files[0], root),
+                'funcs_bold': func_files,
+                'funcs_dwi': dwi_files,
+                'intended_bold': bold_int,
+                'intended_dwi': dwi_int,
                 'root': root,
             }
             item = QTreeWidgetItem([base])
             item.setData(0, Qt.UserRole, key)
             parent_item.addChild(item)
 
-    def _load_intended(self, path: Path, root: Path) -> list[str]:
+    def _load_intended(self, path: Path, root: Path) -> tuple[list[str], list[str]]:
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
@@ -2859,12 +2922,17 @@ class IntendedForDialog(QDialog):
                 return parts.as_posix()
 
             if isinstance(val, str):
-                return [_strip(val)]
+                vals = [_strip(val)]
             elif isinstance(val, list):
-                return [_strip(v) for v in val]
+                vals = [_strip(v) for v in val]
+            else:
+                vals = []
+            bold = [v for v in vals if '/func/' in v]
+            dwi = [v for v in vals if '/dwi/' in v]
+            return bold, dwi
         except Exception:
             pass
-        return []
+        return [], []
 
     # ---- slots ----
     def on_left_selected(self) -> None:
@@ -2875,12 +2943,18 @@ class IntendedForDialog(QDialog):
         if not key:
             return
         info = self.data.get(key, {})
-        self.intended_list.clear()
-        for f in info.get('intended', []):
-            self.intended_list.addItem(f)
-        self.func_list.clear()
-        for f in info.get('funcs', []):
-            self.func_list.addItem(f)
+        self.bold_intended.clear()
+        for f in info.get('intended_bold', []):
+            self.bold_intended.addItem(f)
+        self.dwi_intended.clear()
+        for f in info.get('intended_dwi', []):
+            self.dwi_intended.addItem(f)
+        self.bold_func_list.clear()
+        for f in info.get('funcs_bold', []):
+            self.bold_func_list.addItem(f)
+        self.dwi_func_list.clear()
+        for f in info.get('funcs_dwi', []):
+            self.dwi_func_list.addItem(f)
 
     def add_selected(self) -> None:
         it = self.left_tree.currentItem()
@@ -2890,10 +2964,16 @@ class IntendedForDialog(QDialog):
         if not key:
             return
         info = self.data[key]
-        for sel in self.func_list.selectedItems():
-            path = sel.text()
-            if path not in info['intended']:
-                info['intended'].append(path)
+        if self.func_tabs.currentIndex() == 0:
+            for sel in self.bold_func_list.selectedItems():
+                path = sel.text()
+                if path not in info['intended_bold']:
+                    info['intended_bold'].append(path)
+        else:
+            for sel in self.dwi_func_list.selectedItems():
+                path = sel.text()
+                if path not in info['intended_dwi']:
+                    info['intended_dwi'].append(path)
         self.on_left_selected()
 
     def remove_selected(self) -> None:
@@ -2904,8 +2984,12 @@ class IntendedForDialog(QDialog):
         if not key:
             return
         info = self.data[key]
-        remove = [s.text() for s in self.intended_list.selectedItems()]
-        info['intended'] = [p for p in info['intended'] if p not in remove]
+        if self.intended_tabs.currentIndex() == 0:
+            remove = [s.text() for s in self.bold_intended.selectedItems()]
+            info['intended_bold'] = [p for p in info['intended_bold'] if p not in remove]
+        else:
+            remove = [s.text() for s in self.dwi_intended.selectedItems()]
+            info['intended_dwi'] = [p for p in info['intended_dwi'] if p not in remove]
         self.on_left_selected()
 
     def save_changes(self) -> None:
@@ -2916,7 +3000,7 @@ class IntendedForDialog(QDialog):
         if not key:
             return
         info = self.data[key]
-        val = sorted(info['intended'])
+        val = sorted(info['intended_bold'] + info['intended_dwi'])
         prefix = info['root'].relative_to(self.bids_root)
         cleaned = []
         for p in val:
