@@ -30,7 +30,7 @@ acq_time       – AcquisitionTime of the first file in that series
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
 modality_bids  – top-level container (anat, func, dwi, fmap) derived from
                  *modality*
-n_files        – number of *.dcm files* with that SeriesDescription
+n_files        – number of DICOM files (.dcm or .ima) with that SeriesDescription
 GivenName … StudyDescription – demographics copied from the first header seen
 """
 
@@ -44,6 +44,9 @@ from joblib import Parallel, delayed
 import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
+
+# Acceptable DICOM file extensions (lower case)
+DICOM_EXTS = (".dcm", ".ima")
 
 
 # ----------------------------------------------------------------------
@@ -186,7 +189,7 @@ def scan_dicoms_long(
     file_list = []
     for root, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if fname.lower().endswith(".dcm"):
+            if fname.lower().endswith(DICOM_EXTS):
                 file_list.append(os.path.join(root, fname))
 
     def _read_one(fpath: str):
