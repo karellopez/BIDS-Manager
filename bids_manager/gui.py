@@ -828,6 +828,7 @@ class BIDSManager(QMainWindow):
         hdr.setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
         self.mapping_table.setItemDelegateForColumn(2, SubjectDelegate(self.mapping_table))
+        self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
         btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
@@ -835,6 +836,8 @@ class BIDSManager(QMainWindow):
         self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
         self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
         self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
+        self.tsv_detect_rep_button = QPushButton("Detect repeats")
+        self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
         self.tsv_detach_button = QPushButton("»")
         self.tsv_detach_button.setFixedWidth(20)
         self.tsv_detach_button.setFixedHeight(20)
@@ -848,6 +851,7 @@ class BIDSManager(QMainWindow):
         btn_row_tsv.addWidget(self.tsv_load_button)
         btn_row_tsv.addWidget(self.tsv_apply_button)
         btn_row_tsv.addWidget(self.tsv_generate_ids_button)
+        btn_row_tsv.addWidget(self.tsv_detect_rep_button)
         tsv_layout.addLayout(btn_row_tsv)
         self.left_split.addWidget(self.tsv_group)
 
@@ -1435,6 +1439,7 @@ class BIDSManager(QMainWindow):
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
         QTimer.singleShot(0, self._updateScanExistingEnabled)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
 
     def _updateScanExistingEnabled(self, _item=None):
         """Enable scan button when all given names are filled."""
@@ -1448,6 +1453,56 @@ class BIDSManager(QMainWindow):
                     enabled = False
                     break
         self.scan_existing_button.setEnabled(enabled)
+
+    def _updateDetectRepeatEnabled(self, _item=None):
+        """Enable repeat detection when BIDS and Given names are filled."""
+        if not hasattr(self, "tsv_detect_rep_button"):
+            return
+        enabled = self.mapping_table.rowCount() > 0
+        if enabled:
+            for r in range(self.mapping_table.rowCount()):
+                bids = self.mapping_table.item(r, 2)
+                given = self.mapping_table.item(r, 4)
+                if bids is None or given is None or not bids.text().strip() or not given.text().strip():
+                    enabled = False
+                    break
+        self.tsv_detect_rep_button.setEnabled(enabled)
+
+    def detectRepeatedSequences(self):
+        """Detect repeated sequences within each subject and assign numbers."""
+        if self.mapping_table.rowCount() == 0:
+            return
+
+        rows = []
+        for i in range(self.mapping_table.rowCount()):
+            rows.append({
+                'StudyDescription': self.mapping_table.item(i, 7).text().strip(),
+                'BIDS_name': self.mapping_table.item(i, 2).text().strip(),
+                'session': self.mapping_table.item(i, 5).text().strip(),
+                'modality_bids': self.mapping_table.item(i, 12).text().strip(),
+                'modality': self.mapping_table.item(i, 11).text().strip(),
+                'sequence': self.mapping_table.item(i, 6).text().strip(),
+                'acq_time': self.mapping_table.item(i, 9).text().strip(),
+            })
+
+        df = pd.DataFrame(rows)
+        df['acq_sort'] = pd.to_numeric(df['acq_time'].str.replace(':', ''), errors='coerce')
+        key_cols = ['StudyDescription', 'BIDS_name', 'session', 'modality_bids', 'modality', 'sequence']
+        df.sort_values(['acq_sort'], inplace=True)
+        df['rep'] = df.groupby(key_cols).cumcount() + 1
+        counts = df.groupby(key_cols)['rep'].transform('count')
+        df.loc[counts == 1, 'rep'] = ''
+        df.loc[(counts > 1) & (df['rep'] == 1), 'rep'] = ''
+
+        for i in range(self.mapping_table.rowCount()):
+            val = df.at[i, 'rep']
+            self.mapping_table.item(i, 10).setText(str(val) if str(val) else '')
+            self.row_info[i]['rep'] = str(val) if str(val) else ''
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
 
     def scanExistingStudies(self):
         """Update BIDS names based on existing datasets."""
@@ -1514,6 +1569,7 @@ class BIDSManager(QMainWindow):
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
         QTimer.singleShot(0, self._updateScanExistingEnabled)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
 
 
     def loadMappingTable(self):
