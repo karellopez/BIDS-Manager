@@ -353,6 +353,7 @@ class BIDSManager(QMainWindow):
         # Initialize tabs
         self.initConvertTab()
         self.initEditTab()
+        self._updateMappingControlsEnabled()
 
         # Theme support
         self.statusBar()
@@ -835,6 +836,7 @@ class BIDSManager(QMainWindow):
         self.tsv_apply_button = QPushButton("Apply changes")
         self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
         self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
+        self.tsv_generate_ids_button.setEnabled(False)
         self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
         self.tsv_detect_rep_button = QPushButton("Detect repeats")
         self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
@@ -883,6 +885,7 @@ class BIDSManager(QMainWindow):
             self.specific_tree.resizeColumnToContents(i)
         specific_layout.addWidget(self.specific_tree)
         self.last_rep_box = QCheckBox("Only last repeats")
+        self.last_rep_box.setEnabled(False)
         self.last_rep_box.toggled.connect(self._onLastRepToggled)
         specific_layout.addWidget(self.last_rep_box)
         self.modal_tabs.addTab(specific_tab, "Specific view")
@@ -904,6 +907,7 @@ class BIDSManager(QMainWindow):
         self.naming_table.itemChanged.connect(self._updateScanExistingEnabled)
         self.name_choice = QComboBox()
         self.name_choice.addItems(["Use BIDS names", "Use given names"])
+        self.name_choice.setEnabled(False)
         self.name_choice.currentIndexChanged.connect(self._onNameChoiceChanged)
         naming_layout.addWidget(self.name_choice)
         self.scan_existing_button = QPushButton("Scan existing studies")
@@ -1440,6 +1444,7 @@ class BIDSManager(QMainWindow):
         QTimer.singleShot(0, self.generatePreview)
         QTimer.singleShot(0, self._updateScanExistingEnabled)
         QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
 
     def _updateScanExistingEnabled(self, _item=None):
         """Enable scan button when all given names are filled."""
@@ -1467,6 +1472,17 @@ class BIDSManager(QMainWindow):
                     enabled = False
                     break
         self.tsv_detect_rep_button.setEnabled(enabled)
+
+    def _updateMappingControlsEnabled(self):
+        """Enable controls that require scanned data."""
+        if not hasattr(self, "tsv_generate_ids_button"):
+            return
+        has_data = self.mapping_table.rowCount() > 0
+        self.tsv_generate_ids_button.setEnabled(has_data)
+        self.last_rep_box.setEnabled(has_data)
+        self.name_choice.setEnabled(has_data)
+        if not has_data:
+            self.last_rep_box.setChecked(False)
 
     def detectRepeatedSequences(self):
         """Detect repeated sequences within each subject and assign numbers."""
@@ -1570,6 +1586,7 @@ class BIDSManager(QMainWindow):
         QTimer.singleShot(0, self.generatePreview)
         QTimer.singleShot(0, self._updateScanExistingEnabled)
         QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
 
 
     def loadMappingTable(self):
@@ -1733,6 +1750,7 @@ class BIDSManager(QMainWindow):
             self.naming_table.setItem(nr, 2, bitem)
         self.naming_table.blockSignals(False)
         self._updateScanExistingEnabled()
+        self._updateMappingControlsEnabled()
 
 
     def populateModalitiesTree(self):
