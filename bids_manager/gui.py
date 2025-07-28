@@ -2917,14 +2917,16 @@ class IntendedForDialog(QDialog):
                         rename_map[(nii.relative_to(self.bids_root)).as_posix()] = (
                             dst.relative_to(self.bids_root).as_posix()
                         )
-                    js = nii.with_suffix('.json')
-                    if js.exists():
-                        dst_js = fmap_dir / js.name
-                        if not dst_js.exists():
-                            js.rename(dst_js)
-                            rename_map[(js.relative_to(self.bids_root)).as_posix()] = (
-                                dst_js.relative_to(self.bids_root).as_posix()
-                            )
+                    base = re.sub(r'\.nii(\.gz)?$', '', nii.name, flags=re.I)
+                    for ext in ['.json', '.bval', '.bvec']:
+                        src = dwi_dir / (base + ext)
+                        if src.exists():
+                            dst_file = fmap_dir / src.name
+                            if not dst_file.exists():
+                                src.rename(dst_file)
+                                rename_map[(src.relative_to(self.bids_root)).as_posix()] = (
+                                    dst_file.relative_to(self.bids_root).as_posix()
+                                )
         if rename_map:
             try:
                 from .scans_utils import update_scans_with_map
@@ -2956,14 +2958,16 @@ class IntendedForDialog(QDialog):
                         rename_map[(nii.relative_to(self.bids_root)).as_posix()] = (
                             dst.relative_to(self.bids_root).as_posix()
                         )
-                    js = nii.with_suffix('.json')
-                    if js.exists():
-                        dst_js = dwi_dir / js.name
-                        if not dst_js.exists():
-                            js.rename(dst_js)
-                            rename_map[(js.relative_to(self.bids_root)).as_posix()] = (
-                                dst_js.relative_to(self.bids_root).as_posix()
-                            )
+                    base = re.sub(r'\.nii(\.gz)?$', '', nii.name, flags=re.I)
+                    for ext in ['.json', '.bval', '.bvec']:
+                        src = fmap_dir / (base + ext)
+                        if src.exists():
+                            dst_file = dwi_dir / src.name
+                            if not dst_file.exists():
+                                src.rename(dst_file)
+                                rename_map[(src.relative_to(self.bids_root)).as_posix()] = (
+                                    dst_file.relative_to(self.bids_root).as_posix()
+                                )
         if rename_map:
             try:
                 from .scans_utils import update_scans_with_map
@@ -3035,9 +3039,10 @@ class IntendedForDialog(QDialog):
                 'intended_dwi': dwi_int,
                 'root': root,
             }
-            item_bold = QTreeWidgetItem([base])
-            item_bold.setData(0, Qt.UserRole, key)
-            bold_parent.addChild(item_bold)
+            if not (self.b0_box.isChecked() and self._is_b0(base)):
+                item_bold = QTreeWidgetItem([base])
+                item_bold.setData(0, Qt.UserRole, key)
+                bold_parent.addChild(item_bold)
             if dwi_parent is not None and self._is_b0(base):
                 item_dwi = QTreeWidgetItem([base])
                 item_dwi.setData(0, Qt.UserRole, key)
