@@ -15,6 +15,9 @@ from typing import Dict, List, Optional
 import pandas as pd
 import re
 
+# Acceptable DICOM file extensions (lower case)
+DICOM_EXTS = (".dcm", ".ima")
+
 
 # ────────────────── helpers ──────────────────
 def load_sid_map(heur: Path) -> Dict[str, str]:
@@ -59,9 +62,9 @@ def physical_by_clean(raw_root: Path) -> Dict[str, str]:
 
 
 def detect_depth(folder: Path) -> int:
-    """Minimum depth (#subdirs) from *folder* to any .dcm file."""
+    """Minimum depth (#subdirs) from *folder* to any DICOM file."""
     for root, _dirs, files in os.walk(folder):
-        if any(f.lower().endswith(".dcm") for f in files):
+        if any(f.lower().endswith(DICOM_EXTS) for f in files):
             rel = Path(root).relative_to(folder)
             return len(rel.parts)
     raise RuntimeError(f"No DICOMs under {folder}")
@@ -94,7 +97,7 @@ def heudi_cmd(raw_root: Path,
             "--overwrite",
         ]
 
-    template = f"{raw_root}/" + "{subject}/" + wild + "*.dcm"
+    template = f"{raw_root}/" + "{subject}/" + wild + "*.*"
     subjects = [p or clean_name(raw_root.name) for p in phys_folders]
     return [
         "heudiconv",

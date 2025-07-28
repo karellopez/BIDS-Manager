@@ -193,7 +193,7 @@ def generate(tsv: Path, out_dir: Path) -> None:
         write_heuristic(sub_df, heur)
         folders = " ".join(sorted({clean(f) or clean(Path(f or '.').name) for f in sub_df.source_folder.unique()}))
         print(dedent(f"""
-        heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" -s {folders} -f {heur.name} -c dcm2niix -o <BIDS_OUT>/{fname} -b --minmeta --overwrite"""))
+        heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.*" -s {folders} -f {heur.name} -c dcm2niix -o <BIDS_OUT>/{fname} -b --minmeta --overwrite"""))
 
 
 def main() -> None:
