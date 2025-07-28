@@ -141,8 +141,8 @@ def modality_to_container(mod: str) -> str:
     """Translate T1w → anat, bold → func, etc.; unknown → ''."""
     return BIDS_CONTAINER.get(mod, "")
 
-# session detector (e.g. ses-pre, ses-01)
-SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)")
+# session detector (e.g. ses-pre, ses-01) -- case-insensitive
+SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
 
 
 # ----------------------------------------------------------------------
@@ -218,7 +218,7 @@ def scan_dicoms_long(
         if not img3:
             img3 = img_list[2] if len(img_list) >= 3 else ""
         acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
-        m = SESSION_RE.search(series.lower())
+        m = SESSION_RE.search(series)
         sess_tag = f"ses-{m.group(1)}" if m else None
         demo_dict = dict(
             GivenName=given,
