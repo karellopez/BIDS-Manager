@@ -55,6 +55,8 @@ All utilities provide `-h/--help` for details.
   assigns random 3‑letter/3‑digit identifiers to subjects. If an entry already
   exists for the same study in an existing `.bids_manager/subject_summary.tsv`,
   you are prompted to reuse its identifier.
+- A "Detect repeats" button can recompute repetition numbers based on
+  acquisition time when all BIDS and given names are filled.
 
 
 
