@@ -873,6 +873,9 @@ class BIDSManager(QMainWindow):
         dict_layout = QVBoxLayout(dict_tab)
         self.seq_tabs_widget = QTabWidget()
         dict_layout.addWidget(self.seq_tabs_widget)
+        restore_btn = QPushButton("Restore defaults")
+        restore_btn.clicked.connect(self.restoreSequenceDefaults)
+        dict_layout.addWidget(restore_btn, alignment=Qt.AlignRight)
 
         self.tsv_tabs.addTab(dict_tab, "Sequence dictionary")
         self.loadSequenceDictionary()
@@ -2042,6 +2045,14 @@ class BIDSManager(QMainWindow):
         table.setItem(r, 0, QTableWidgetItem(pat))
         self.seq_inputs[mod].clear()
 
+    def _seq_remove(self, mod: str) -> None:
+        if mod not in self.seq_lists:
+            return
+        table = self.seq_lists[mod]
+        rows = sorted({item.row() for item in table.selectedItems()}, reverse=True)
+        for r in rows:
+            table.removeRow(r)
+
     def loadSequenceDictionary(self) -> None:
         if not hasattr(self, "seq_tabs_widget"):
             return
@@ -2087,6 +2098,9 @@ class BIDSManager(QMainWindow):
             add_btn = QPushButton("Add")
             add_btn.clicked.connect(lambda _=False, m=mod: self._seq_add(m))
             row.addWidget(add_btn)
+            rm_btn = QPushButton("Remove")
+            rm_btn.clicked.connect(lambda _=False, m=mod: self._seq_remove(m))
+            row.addWidget(rm_btn)
             lay.addLayout(row)
 
             save_btn = QPushButton("Save")
@@ -2110,6 +2124,14 @@ class BIDSManager(QMainWindow):
         pd.DataFrame(rows).to_csv(self.seq_dict_file, sep="\t", index=False)
         QMessageBox.information(self, "Saved", f"Updated {self.seq_dict_file}")
         self.applySequenceDictionary()
+
+    def restoreSequenceDefaults(self) -> None:
+        """Restore the built-in sequence dictionary."""
+        from . import dicom_inventory
+
+        dicom_inventory.restore_sequence_dictionary()
+        self.loadSequenceDictionary()
+        QMessageBox.information(self, "Restored", "Default sequence dictionary restored")
 
     def applySequenceDictionary(self) -> None:
         if not hasattr(self, "seq_lists"):
