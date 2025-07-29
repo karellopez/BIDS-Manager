@@ -96,6 +96,9 @@ BIDS_PATTERNS = {
     "physio" : ("physiolog", "physio", "pulse", "resp"),
 }
 
+# Keep a pristine copy of the default patterns so the GUI can restore them
+DEFAULT_BIDS_PATTERNS = {m: tuple(pats) for m, pats in BIDS_PATTERNS.items()}
+
 
 def load_sequence_dictionary() -> None:
     """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
@@ -114,6 +117,16 @@ def load_sequence_dictionary() -> None:
             patterns[mod].append(pat)
     if patterns:
         BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+
+
+def restore_sequence_dictionary() -> None:
+    """Revert :data:`BIDS_PATTERNS` to the bundled defaults."""
+    global BIDS_PATTERNS
+    BIDS_PATTERNS = {m: tuple(pats) for m, pats in DEFAULT_BIDS_PATTERNS.items()}
+    try:
+        SEQ_DICT_FILE.unlink()
+    except Exception:
+        pass
 
 
 load_sequence_dictionary()
