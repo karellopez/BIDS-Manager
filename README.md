@@ -10,6 +10,8 @@ pip install git+https://github.com/ANCPLabOldenburg/BIDS-Manager.git
 
 The package declares all dependencies including `heudiconv`, so installation
 pulls everything required to run the GUI and helper scripts.
+All core requirements are version pinned in `pyproject.toml` to ensure
+consistent installations.
 
 After installation the following commands become available:
 
@@ -49,6 +51,12 @@ All utilities provide `-h/--help` for details.
 - The DPI scale dialog now adjusts values in 25% increments and the DPI button
   appears between the CPU and Authorship buttons.
 - On startup the GUI detects the system DPI and applies the matching scale.
+- The scanned data table now provides a "Generate unique IDs" button that
+  assigns random 3‑letter/3‑digit identifiers to subjects. If an entry already
+  exists for the same study in an existing `.bids_manager/subject_summary.tsv`,
+  you are prompted to reuse its identifier.
+- A "Detect repeats" button can recompute repetition numbers based on
+  acquisition time when all BIDS and given names are filled.
 
 
 

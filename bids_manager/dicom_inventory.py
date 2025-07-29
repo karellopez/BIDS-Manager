@@ -30,7 +30,7 @@ acq_time       – AcquisitionTime of the first file in that series
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
 modality_bids  – top-level container (anat, func, dwi, fmap) derived from
                  *modality*
-n_files        – number of *.dcm files* with that SeriesDescription
+n_files        – number of DICOM files (.dcm or .ima) with that SeriesDescription
 GivenName … StudyDescription – demographics copied from the first header seen
 """
 
@@ -44,6 +44,13 @@ from joblib import Parallel, delayed
 import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
+
+# Directory used to store persistent user preferences
+PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
+SEQ_DICT_FILE = PREF_DIR / "sequence_dictionary.tsv"
+
+# Acceptable DICOM file extensions (lower case)
+DICOM_EXTS = (".dcm", ".ima")
 
 
 # ----------------------------------------------------------------------
@@ -88,6 +95,41 @@ BIDS_PATTERNS = {
     # misc (kept for completeness)
     "physio" : ("physiolog", "physio", "pulse", "resp"),
 }
+
+# Keep a pristine copy of the default patterns so the GUI can restore them
+DEFAULT_BIDS_PATTERNS = {m: tuple(pats) for m, pats in BIDS_PATTERNS.items()}
+
+
+def load_sequence_dictionary() -> None:
+    """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
+    global BIDS_PATTERNS
+    if not SEQ_DICT_FILE.exists():
+        return
+    try:
+        df = pd.read_csv(SEQ_DICT_FILE, sep="\t", keep_default_na=False)
+    except Exception:
+        return
+    patterns: defaultdict[str, list[str]] = defaultdict(list)
+    for _, row in df.iterrows():
+        mod = str(row.get("modality", "")).strip()
+        pat = str(row.get("pattern", "")).strip().lower()
+        if mod and pat:
+            patterns[mod].append(pat)
+    if patterns:
+        BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+
+
+def restore_sequence_dictionary() -> None:
+    """Revert :data:`BIDS_PATTERNS` to the bundled defaults."""
+    global BIDS_PATTERNS
+    BIDS_PATTERNS = {m: tuple(pats) for m, pats in DEFAULT_BIDS_PATTERNS.items()}
+    try:
+        SEQ_DICT_FILE.unlink()
+    except Exception:
+        pass
+
+
+load_sequence_dictionary()
 
 def guess_modality(series: str) -> str:
     """Return first matching fine label; otherwise 'unknown'."""
@@ -141,8 +183,8 @@ def modality_to_container(mod: str) -> str:
     """Translate T1w → anat, bold → func, etc.; unknown → ''."""
     return BIDS_CONTAINER.get(mod, "")
 
-# session detector (e.g. ses-pre, ses-01)
-SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)")
+# session detector (e.g. ses-pre, ses-01) -- case-insensitive
+SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
 
 
 # ----------------------------------------------------------------------
@@ -186,7 +228,7 @@ def scan_dicoms_long(
     file_list = []
     for root, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if fname.lower().endswith(".dcm"):
+            if fname.lower().endswith(DICOM_EXTS):
                 file_list.append(os.path.join(root, fname))
 
     def _read_one(fpath: str):
@@ -218,7 +260,7 @@ def scan_dicoms_long(
         if not img3:
             img3 = img_list[2] if len(img_list) >= 3 else ""
         acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
-        m = SESSION_RE.search(series.lower())
+        m = SESSION_RE.search(series)
         sess_tag = f"ses-{m.group(1)}" if m else None
         demo_dict = dict(
             GivenName=given,

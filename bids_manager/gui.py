@@ -52,11 +52,11 @@ from collections import defaultdict
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
-    QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
+    QTableWidget, QTableWidgetItem, QGroupBox, QGridLayout,
+    QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -73,6 +73,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 import logging  # debug logging
 import signal
+import random
+import string
 try:
     import psutil
     HAS_PSUTIL = True
@@ -85,6 +87,9 @@ ICON_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Icon
 ANCP_LAB_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "ANCP_lab.png"
 KAREL_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Karel.jpeg"
 JOCHEM_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Jochem.jpg"
+
+# Directory used to store persistent user preferences
+PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
 
 
 class _AutoUpdateLabel(QLabel):
@@ -178,6 +183,45 @@ def _safe_stem(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
 
 
+def _format_subject_id(num: int) -> str:
+    """Return ID as three letters followed by three digits."""
+    letters_idx = (num - 1) // 1000
+    digits = (num - 1) % 1000 + 1
+    letters = []
+    for _ in range(3):
+        letters.append(chr(ord("A") + letters_idx % 26))
+        letters_idx //= 26
+    return "".join(reversed(letters)) + f"{digits:03d}"
+
+
+def _random_subject_id(existing: set[str]) -> str:
+    """Return a unique random 3-letter/3-digit identifier."""
+    while True:
+        letters = ''.join(random.choices(string.ascii_uppercase, k=3))
+        digits = ''.join(random.choices(string.digits, k=3))
+        sid = letters + digits
+        if sid not in existing:
+            return sid
+
+
+def _next_numeric_id(used: set[str]) -> str:
+    """Return the next "sub-XXX" style identifier."""
+    nums = []
+    for name in used:
+        m = re.fullmatch(r"sub-(\d+)", name)
+        if m:
+            try:
+                nums.append(int(m.group(1)))
+            except Exception:
+                pass
+    nxt = max(nums, default=0) + 1
+    while True:
+        candidate = f"sub-{nxt:03d}"
+        if candidate not in used:
+            return candidate
+        nxt += 1
+
+
 class SubjectDelegate(QStyledItemDelegate):
     """Delegate to edit BIDS subject IDs without altering the 'sub-' prefix."""
 
@@ -264,6 +308,16 @@ class BIDSManager(QMainWindow):
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
 
+        # Path to persistent user preferences
+        self.pref_dir = PREF_DIR
+        try:
+            self.pref_dir.mkdir(exist_ok=True, parents=True)
+        except Exception:
+            pass
+        self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
+        self.theme_file = self.pref_dir / "theme.txt"
+        self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
+
         # Spinner for long-running tasks
         self.spinner_label = None
         # Timer and unicode characters for the small animated spinner that
@@ -300,6 +354,7 @@ class BIDSManager(QMainWindow):
         # Initialize tabs
         self.initConvertTab()
         self.initEditTab()
+        self._updateMappingControlsEnabled()
 
         # Theme support
         self.statusBar()
@@ -334,8 +389,15 @@ class BIDSManager(QMainWindow):
             act = theme_menu.addAction(name)
             act.triggered.connect(lambda _=False, n=name: self.apply_theme(n))
         self.theme_btn.setMenu(theme_menu)
-        # Set default theme
-        self.apply_theme("Light")
+
+        # Load previously saved theme preference
+        default_theme = "Light"
+        if self.theme_file.exists():
+            try:
+                default_theme = self.theme_file.read_text().strip() or default_theme
+            except Exception:
+                pass
+        self.apply_theme(default_theme)
 
     def _build_theme_dict(self):
         """Return dictionary mapping theme names to QPalettes."""
@@ -588,6 +650,10 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         app.setPalette(self.themes[name])
         self.current_theme = name
+        try:
+            self.theme_file.write_text(name)
+        except Exception:
+            pass
         self._update_logo()
         self._apply_font_scale()
 
@@ -716,6 +782,7 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(False)
         self.tsv_stop_button.clicked.connect(self.stopInventory)
         btn_row = QHBoxLayout()
+        btn_row.addStretch()
         btn_row.addWidget(self.tsv_button)
         btn_row.addWidget(self.tsv_stop_button)
         btn_row.addStretch()
@@ -736,28 +803,86 @@ class BIDSManager(QMainWindow):
         main_layout.addLayout(top_row)
         self._update_logo()
 
-        left_split = QSplitter(Qt.Vertical)
-        right_split = QSplitter(Qt.Vertical)
+        self.left_split = QSplitter(Qt.Vertical)
+        self.right_split = QSplitter(Qt.Vertical)
 
-        tsv_group = QGroupBox("Scanned data viewer")
-        tsv_layout = QVBoxLayout(tsv_group)
+        self.tsv_group = QGroupBox("Scanned data viewer")
+        tsv_layout = QVBoxLayout(self.tsv_group)
+        self.tsv_detach_button = QPushButton("»")
+        self.tsv_detach_button.setFixedWidth(20)
+        self.tsv_detach_button.setFixedHeight(20)
+        self.tsv_detach_button.clicked.connect(self.detachTSVWindow)
+        self.tsv_detach_button.setFocusPolicy(Qt.NoFocus)
+        header_row_tsv = QHBoxLayout()
+        header_row_tsv.addStretch()
+        header_row_tsv.addWidget(self.tsv_detach_button)
+        tsv_layout.addLayout(header_row_tsv)
+        self.tsv_tabs = QTabWidget()
+        tsv_layout.addWidget(self.tsv_tabs)
+
+        # --- Scanned metadata tab ---
+        metadata_tab = QWidget()
+        metadata_layout = QVBoxLayout(metadata_tab)
         self.mapping_table = QTableWidget()
-        self.mapping_table.setColumnCount(6)
+        # +1 column for the original subject label shown in the inventory TSV
+        self.mapping_table.setColumnCount(13)
         self.mapping_table.setHorizontalHeaderLabels([
-            "Include", "Subject", "Session", "Sequence", "Modality", "BIDS Modality"
+            "include",
+            "source_folder",
+            "BIDS_name",
+            "subject",
+            "GivenName",
+            "session",
+            "sequence",
+            "StudyDescription",
+            "series_uid",
+            "acq_time",
+            "rep",
+            "modality",
+            "modality_bids",
         ])
         hdr = self.mapping_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
-        tsv_layout.addWidget(self.mapping_table)
+        self.mapping_table.setItemDelegateForColumn(2, SubjectDelegate(self.mapping_table))
+        self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
+        btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
-        tsv_layout.addWidget(self.tsv_load_button)
-        left_split.addWidget(tsv_group)
+        self.tsv_apply_button = QPushButton("Apply changes")
+        self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
+        self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
+        self.tsv_generate_ids_button.setEnabled(False)
+        self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
+        self.tsv_detect_rep_button = QPushButton("Detect repeats")
+        self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
+        metadata_layout.addWidget(self.mapping_table)
+        btn_row_tsv.addStretch()
+        btn_row_tsv.addWidget(self.tsv_load_button)
+        btn_row_tsv.addWidget(self.tsv_apply_button)
+        btn_row_tsv.addWidget(self.tsv_generate_ids_button)
+        btn_row_tsv.addWidget(self.tsv_detect_rep_button)
+        btn_row_tsv.addStretch()
+        metadata_layout.addLayout(btn_row_tsv)
 
-        modal_group = QGroupBox("Filter")
-        modal_layout = QVBoxLayout(modal_group)
+        self.tsv_tabs.addTab(metadata_tab, "Scanned metadata")
+
+        # --- Sequence dictionary tab ---
+        dict_tab = QWidget()
+        dict_layout = QVBoxLayout(dict_tab)
+        self.seq_tabs_widget = QTabWidget()
+        dict_layout.addWidget(self.seq_tabs_widget)
+        restore_btn = QPushButton("Restore defaults")
+        restore_btn.clicked.connect(self.restoreSequenceDefaults)
+        dict_layout.addWidget(restore_btn, alignment=Qt.AlignRight)
+
+        self.tsv_tabs.addTab(dict_tab, "Sequence dictionary")
+        self.loadSequenceDictionary()
+        self.left_split.addWidget(self.tsv_group)
+
+        self.filter_group = QGroupBox("Filter")
+        modal_layout = QVBoxLayout(self.filter_group)
         self.modal_tabs = QTabWidget()
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
@@ -784,6 +909,7 @@ class BIDSManager(QMainWindow):
             self.specific_tree.resizeColumnToContents(i)
         specific_layout.addWidget(self.specific_tree)
         self.last_rep_box = QCheckBox("Only last repeats")
+        self.last_rep_box.setEnabled(False)
         self.last_rep_box.toggled.connect(self._onLastRepToggled)
         specific_layout.addWidget(self.last_rep_box)
         self.modal_tabs.addTab(specific_tab, "Specific view")
@@ -802,21 +928,64 @@ class BIDSManager(QMainWindow):
         self.naming_table.setItemDelegateForColumn(2, SubjectDelegate(self.naming_table))
         naming_layout.addWidget(self.naming_table)
         self.naming_table.itemChanged.connect(self._onNamingEdited)
+        self.naming_table.itemChanged.connect(self._updateScanExistingEnabled)
         self.name_choice = QComboBox()
         self.name_choice.addItems(["Use BIDS names", "Use given names"])
+        self.name_choice.setEnabled(False)
         self.name_choice.currentIndexChanged.connect(self._onNameChoiceChanged)
         naming_layout.addWidget(self.name_choice)
+        self.scan_existing_button = QPushButton("Scan existing studies")
+        self.scan_existing_button.setEnabled(False)
+        self.scan_existing_button.clicked.connect(self.scanExistingStudies)
+        naming_layout.addWidget(self.scan_existing_button)
         self.modal_tabs.addTab(naming_tab, "Edit naming")
 
-        modal_layout.addWidget(self.modal_tabs)
-        right_split.addWidget(modal_group)
-        left_split.setStretchFactor(0, 1)
-        left_split.setStretchFactor(1, 1)
-        right_split.setStretchFactor(0, 1)
-        right_split.setStretchFactor(1, 1)
+        # Always Exclude tab
+        exclude_tab = QWidget()
+        exclude_layout = QVBoxLayout(exclude_tab)
+        self.exclude_table = QTableWidget()
+        self.exclude_table.setColumnCount(2)
+        self.exclude_table.setHorizontalHeaderLabels(["Active", "Pattern"])
+        ex_hdr = self.exclude_table.horizontalHeader()
+        ex_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        ex_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        exclude_layout.addWidget(self.exclude_table)
 
-        preview_group = QGroupBox("Preview")
-        preview_layout = QVBoxLayout(preview_group)
+        ex_add_row = QHBoxLayout()
+        self.exclude_edit = QLineEdit()
+        ex_add_row.addWidget(self.exclude_edit)
+        ex_add_btn = QPushButton("Add")
+        ex_add_btn.clicked.connect(self._exclude_add)
+        ex_add_row.addWidget(ex_add_btn)
+        exclude_layout.addLayout(ex_add_row)
+
+        ex_save_btn = QPushButton("Save")
+        ex_save_btn.clicked.connect(self.saveExcludePatterns)
+        exclude_layout.addWidget(ex_save_btn, alignment=Qt.AlignRight)
+        self.modal_tabs.addTab(exclude_tab, "Always exclude")
+
+        # Load saved exclude patterns now that the table exists
+        self.loadExcludePatterns()
+
+        header_row_filter = QHBoxLayout()
+        self.filter_detach_button = QPushButton("»")
+        self.filter_detach_button.setFixedWidth(20)
+        self.filter_detach_button.setFixedHeight(20)
+        self.filter_detach_button.clicked.connect(self.detachFilterWindow)
+        self.filter_detach_button.setFocusPolicy(Qt.NoFocus)
+        header_row_filter.addStretch()
+        header_row_filter.addWidget(self.filter_detach_button)
+        modal_layout.addLayout(header_row_filter)
+        modal_layout.addWidget(self.modal_tabs)
+
+        self.right_split.addWidget(self.filter_group)
+        self.left_split.setStretchFactor(0, 1)
+        self.left_split.setStretchFactor(1, 1)
+        self.right_split.setStretchFactor(0, 1)
+        self.right_split.setStretchFactor(1, 1)
+
+        self.preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(self.preview_group)
         self.preview_tabs = QTabWidget()
 
         text_tab = QWidget()
@@ -833,6 +1002,15 @@ class BIDSManager(QMainWindow):
         tree_lay.addWidget(self.preview_tree)
         self.preview_tabs.addTab(tree_tab, "Tree")
 
+        header_row_preview = QHBoxLayout()
+        self.preview_detach_button = QPushButton("»")
+        self.preview_detach_button.setFixedWidth(20)
+        self.preview_detach_button.setFixedHeight(20)
+        self.preview_detach_button.clicked.connect(self.detachPreviewWindow)
+        self.preview_detach_button.setFocusPolicy(Qt.NoFocus)
+        header_row_preview.addStretch()
+        header_row_preview.addWidget(self.preview_detach_button)
+        preview_layout.addLayout(header_row_preview)
         preview_layout.addWidget(self.preview_tabs)
         self.preview_button = QPushButton("Preview")
         self.preview_button.clicked.connect(self.generatePreview)
@@ -847,14 +1025,15 @@ class BIDSManager(QMainWindow):
         btn_row.addStretch()
         btn_row.addWidget(self.run_button)
         btn_row.addWidget(self.run_stop_button)
+        btn_row.addStretch()
 
         # Combine preview panel and run button so the splitter keeps the
         # original layout but allows resizing versus the log output.
-        preview_container = QWidget()
-        pv_lay = QVBoxLayout(preview_container)
+        self.preview_container = QWidget()
+        pv_lay = QVBoxLayout(self.preview_container)
         pv_lay.setContentsMargins(0, 0, 0, 0)
         pv_lay.setSpacing(6)
-        pv_lay.addWidget(preview_group)
+        pv_lay.addWidget(self.preview_group)
         pv_lay.addLayout(btn_row)
 
         log_group = QGroupBox("Log Output")
@@ -874,12 +1053,12 @@ class BIDSManager(QMainWindow):
         self.spinner_label.hide()
         log_layout.addWidget(self.spinner_label)
 
-        left_split.addWidget(preview_container)
-        right_split.addWidget(log_group)
+        self.left_split.addWidget(self.preview_container)
+        self.right_split.addWidget(log_group)
 
         splitter = QSplitter()
-        splitter.addWidget(left_split)
-        splitter.addWidget(right_split)
+        splitter.addWidget(self.left_split)
+        splitter.addWidget(self.right_split)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
 
@@ -1052,6 +1231,7 @@ class BIDSManager(QMainWindow):
         if directory:
             self.bids_out_dir = directory
             self.bids_out_edit.setText(directory)
+            self.loadExcludePatterns()
 
     def selectAndLoadTSV(self):
         """Choose an existing TSV and load it into the table."""
@@ -1060,6 +1240,64 @@ class BIDSManager(QMainWindow):
             self.tsv_path = path
             self.tsv_name_edit.setText(os.path.basename(path))
             self.loadMappingTable()
+
+    def detachTSVWindow(self):
+        """Detach the scanned data viewer into a separate window."""
+        if getattr(self, "tsv_dialog", None):
+            self.tsv_dialog.activateWindow()
+            return
+        self.tsv_dialog = QDialog(self, flags=Qt.Window)
+        self.tsv_dialog.setWindowTitle("Scanned data viewer")
+        lay = QVBoxLayout(self.tsv_dialog)
+        self.tsv_group.setParent(None)
+        lay.addWidget(self.tsv_group)
+        self.tsv_dialog.finished.connect(self._reattachTSVWindow)
+        self.tsv_dialog.showMaximized()
+
+    def _reattachTSVWindow(self, *args):
+        self.tsv_group.setParent(None)
+        self.left_split.insertWidget(0, self.tsv_group)
+        self.tsv_dialog = None
+
+    def detachFilterWindow(self):
+        """Detach the filter panel into a separate window."""
+        if getattr(self, "filter_dialog", None):
+            self.filter_dialog.activateWindow()
+            return
+        self.filter_dialog = QDialog(self, flags=Qt.Window)
+        self.filter_dialog.setWindowTitle("Filter")
+        lay = QVBoxLayout(self.filter_dialog)
+        self.filter_group.setParent(None)
+        lay.addWidget(self.filter_group)
+        self.filter_dialog.finished.connect(self._reattachFilterWindow)
+        self.filter_dialog.showMaximized()
+
+    def _reattachFilterWindow(self, *args):
+        self.filter_group.setParent(None)
+        # Insert after tsv_group but before preview_container
+        self.right_split.insertWidget(0, self.filter_group)
+        self.filter_dialog = None
+
+    def detachPreviewWindow(self):
+        """Detach the preview panel into a separate window."""
+        if getattr(self, "preview_dialog", None):
+            self.preview_dialog.activateWindow()
+            return
+        self.preview_dialog = QDialog(self, flags=Qt.Window)
+        self.preview_dialog.setWindowTitle("Preview")
+        lay = QVBoxLayout(self.preview_dialog)
+        self.preview_container.setParent(None)
+        lay.addWidget(self.preview_container)
+        self.preview_dialog.finished.connect(self._reattachPreviewWindow)
+        self.preview_dialog.showMaximized()
+
+    def _reattachPreviewWindow(self, *args):
+        self.preview_container.setParent(None)
+        if self.left_split.indexOf(self.tsv_group) == -1:
+            self.left_split.addWidget(self.preview_container)
+        else:
+            self.left_split.insertWidget(1, self.preview_container)
+        self.preview_dialog = None
 
     def runInventory(self):
         logging.info("runInventory → Generating TSV …")
@@ -1127,20 +1365,270 @@ class BIDSManager(QMainWindow):
             self._stop_spinner()
             self.log_text.append("TSV generation cancelled.")
 
+    def applyMappingChanges(self):
+        """Save edits in the scanned data table back to the TSV and refresh."""
+        if not self.tsv_path or not os.path.isfile(self.tsv_path):
+            return
+        try:
+            df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", f"Failed to load TSV: {exc}")
+            return
+        if df.shape[0] != self.mapping_table.rowCount():
+            QMessageBox.warning(self, "Error", "Row count mismatch")
+            return
+        for i in range(self.mapping_table.rowCount()):
+            df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
+            df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
+            df.at[i, "BIDS_name"] = self.mapping_table.item(i, 2).text()
+            df.at[i, "subject"] = self.mapping_table.item(i, 3).text()
+            df.at[i, "GivenName"] = self.mapping_table.item(i, 4).text()
+            df.at[i, "session"] = self.mapping_table.item(i, 5).text()
+            df.at[i, "sequence"] = self.mapping_table.item(i, 6).text()
+            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 7).text()
+            df.at[i, "series_uid"] = self.mapping_table.item(i, 8).text()
+            df.at[i, "acq_time"] = self.mapping_table.item(i, 9).text()
+            df.at[i, "rep"] = self.mapping_table.item(i, 10).text()
+            df.at[i, "modality"] = self.mapping_table.item(i, 11).text()
+            df.at[i, "modality_bids"] = self.mapping_table.item(i, 12).text()
+
+        # When editing the scanned data table we assume the user knows what
+        # they are doing, so we do not enforce BIDS naming rules or uniqueness
+        # here. Validation is still performed when editing via the naming table
+        # and filter fields.
+        try:
+            df.to_csv(self.tsv_path, sep="\t", index=False)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to save TSV: {exc}")
+            return
+        self.loadMappingTable()
+
+    def generateUniqueIDs(self):
+        """Assign random 3-letter/3-digit IDs to subjects without an identifier."""
+        # Load previously assigned IDs from all studies in the output directory
+        existing: dict[str, dict[str, str]] = {}
+        existing_ids: set[str] = set()
+        out_dir = Path(self.bids_out_dir)
+        if out_dir.is_dir():
+            for study_dir in out_dir.iterdir():
+                if not study_dir.is_dir():
+                    continue
+                s_path = study_dir / ".bids_manager" / "subject_summary.tsv"
+                if s_path.exists():
+                    try:
+                        sdf = pd.read_csv(s_path, sep="\t", keep_default_na=False)
+                        for _, row in sdf.iterrows():
+                            study_desc = str(row.get("StudyDescription", "")).strip()
+                            bids_name = str(row.get("BIDS_name", "")).strip()
+                            sid = str(row.get("subject", "")).strip() or str(row.get("GivenName", "")).strip()
+                            if study_desc and bids_name and sid:
+                                existing.setdefault(study_desc, {})[bids_name] = sid
+                                existing_ids.add(sid)
+                    except Exception:
+                        pass
+
+        id_map: dict[tuple[str, str], str] = {}
+        for i in range(self.mapping_table.rowCount()):
+            bids = self.mapping_table.item(i, 2).text().strip()
+            study = self.mapping_table.item(i, 7).text().strip()
+            if not bids:
+                continue
+
+            subj_item = self.mapping_table.item(i, 3)
+            given_item = self.mapping_table.item(i, 4)
+
+            sid = None
+            prior = existing.get(study, {}).get(bids)
+            if prior and subj_item.text().strip() == "" and given_item.text().strip() == "":
+                resp = QMessageBox.question(
+                    self,
+                    "Subject exists",
+                    "This subject already exist in the study. Would you like to use the same unique ID?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if resp == QMessageBox.Yes:
+                    sid = prior
+
+            if sid is None:
+                key = (study, bids)
+                if key not in id_map:
+                    id_map[key] = _random_subject_id(existing_ids | set(id_map.values()))
+                sid = id_map[key]
+
+            if subj_item.text().strip() == "":
+                subj_item.setText(sid)
+            if given_item.text().strip() == "":
+                given_item.setText(sid)
+            self.row_info[i]['given'] = given_item.text()
+            existing_ids.add(sid)
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateScanExistingEnabled)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
+
+    def _updateScanExistingEnabled(self, _item=None):
+        """Enable scan button when all given names are filled."""
+        if not hasattr(self, "scan_existing_button"):
+            return
+        enabled = self.naming_table.rowCount() > 0
+        if enabled:
+            for r in range(self.naming_table.rowCount()):
+                item = self.naming_table.item(r, 1)
+                if item is None or not item.text().strip():
+                    enabled = False
+                    break
+        self.scan_existing_button.setEnabled(enabled)
+
+    def _updateDetectRepeatEnabled(self, _item=None):
+        """Enable repeat detection when BIDS and Given names are filled."""
+        if not hasattr(self, "tsv_detect_rep_button"):
+            return
+        enabled = self.mapping_table.rowCount() > 0
+        if enabled:
+            for r in range(self.mapping_table.rowCount()):
+                bids = self.mapping_table.item(r, 2)
+                given = self.mapping_table.item(r, 4)
+                if bids is None or given is None or not bids.text().strip() or not given.text().strip():
+                    enabled = False
+                    break
+        self.tsv_detect_rep_button.setEnabled(enabled)
+
+    def _updateMappingControlsEnabled(self):
+        """Enable controls that require scanned data."""
+        if not hasattr(self, "tsv_generate_ids_button"):
+            return
+        has_data = self.mapping_table.rowCount() > 0
+        self.tsv_generate_ids_button.setEnabled(has_data)
+        self.last_rep_box.setEnabled(has_data)
+        self.name_choice.setEnabled(has_data)
+        if not has_data:
+            self.last_rep_box.setChecked(False)
+
+    def detectRepeatedSequences(self):
+        """Detect repeated sequences within each subject and assign numbers."""
+        if self.mapping_table.rowCount() == 0:
+            return
+
+        rows = []
+        for i in range(self.mapping_table.rowCount()):
+            rows.append({
+                'StudyDescription': self.mapping_table.item(i, 7).text().strip(),
+                'BIDS_name': self.mapping_table.item(i, 2).text().strip(),
+                'session': self.mapping_table.item(i, 5).text().strip(),
+                'modality_bids': self.mapping_table.item(i, 12).text().strip(),
+                'modality': self.mapping_table.item(i, 11).text().strip(),
+                'sequence': self.mapping_table.item(i, 6).text().strip(),
+                'acq_time': self.mapping_table.item(i, 9).text().strip(),
+            })
+
+        df = pd.DataFrame(rows)
+        df['acq_sort'] = pd.to_numeric(df['acq_time'].str.replace(':', ''), errors='coerce')
+        key_cols = ['StudyDescription', 'BIDS_name', 'session', 'modality_bids', 'modality', 'sequence']
+        df.sort_values(['acq_sort'], inplace=True)
+        df['rep'] = df.groupby(key_cols).cumcount() + 1
+        counts = df.groupby(key_cols)['rep'].transform('count')
+        df.loc[counts == 1, 'rep'] = ''
+        df.loc[(counts > 1) & (df['rep'] == 1), 'rep'] = ''
+
+        for i in range(self.mapping_table.rowCount()):
+            val = df.at[i, 'rep']
+            self.mapping_table.item(i, 10).setText(str(val) if str(val) else '')
+            self.row_info[i]['rep'] = str(val) if str(val) else ''
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+
+    def scanExistingStudies(self):
+        """Update BIDS names based on existing datasets."""
+        out_dir = Path(self.bids_out_dir)
+        if not out_dir.is_dir():
+            QMessageBox.warning(self, "No BIDS Output Directory", "Please select a BIDS output directory.")
+            return
+
+        studies = {self.naming_table.item(r, 0).text().strip() for r in range(self.naming_table.rowCount())}
+        existing: dict[tuple[str, str], str] = {}
+        used_by_study: dict[str, set[str]] = {}
+        has_existing: dict[str, bool] = {}
+        for study in studies:
+            safe = _safe_stem(str(study))
+            s_path = out_dir / safe / ".bids_manager" / "subject_summary.tsv"
+            has_existing[study] = s_path.exists()
+            if has_existing[study]:
+                try:
+                    df = pd.read_csv(s_path, sep="\t", keep_default_na=False)
+                    for _, row in df.iterrows():
+                        gname = str(row.get("GivenName", "")).strip()
+                        bids = str(row.get("BIDS_name", "")).strip()
+                        if gname and bids:
+                            existing[(study, gname)] = bids
+                            used_by_study.setdefault(study, set()).add(bids)
+                except Exception:
+                    pass
+
+
+        self.naming_table.blockSignals(True)
+        self.mapping_table.blockSignals(True)
+
+        for row in range(self.naming_table.rowCount()):
+            study = self.naming_table.item(row, 0).text().strip()
+            given = self.naming_table.item(row, 1).text().strip()
+            item = self.naming_table.item(row, 2)
+            current = item.text().strip()
+            mapped = existing.get((study, given))
+            used = used_by_study.setdefault(study, set())
+            if mapped:
+                new_bids = mapped
+            elif not has_existing.get(study, False):
+                new_bids = current
+            else:
+                if current and current not in used:
+                    new_bids = current
+                else:
+                    new_bids = _next_numeric_id(used)
+            if new_bids != current:
+                item.setText(new_bids)
+            used.add(new_bids)
+            for idx, info in enumerate(self.row_info):
+                if info['study'] == study and info['given'] == given:
+                    info['bids'] = new_bids
+                    self.mapping_table.item(idx, 2).setText(new_bids)
+            self.existing_maps.setdefault(study, {})[given] = new_bids
+            self.existing_used.setdefault(study, set()).add(new_bids)
+
+        self.naming_table.blockSignals(False)
+        self.mapping_table.blockSignals(False)
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateScanExistingEnabled)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
+
+
     def loadMappingTable(self):
         logging.info("loadMappingTable → Loading TSV into table …")
         """
         Load the generated TSV into the mapping_table for user editing.
-        Columns: include, subject, session, sequence, modality, modality_bids
+        Columns: include, source_folder, BIDS_name, subject, GivenName, session,
+        sequence, StudyDescription, series_uid, acq_time, rep, modality,
+        modality_bids
         """
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
 
-        # ----- integrate existing mappings for sequential conversion -----
+        # ----- load existing mappings without altering the TSV -----
         self.existing_maps = {}
         self.existing_used = {}
-        pat = re.compile(r"sub-(\d+)$")
         studies = df["StudyDescription"].fillna("").unique()
         for study in studies:
             safe = _safe_stem(str(study))
@@ -1154,19 +1642,7 @@ class BIDSManager(QMainWindow):
                     used = set(mapping.values())
                 except Exception:
                     pass
-            mask = df["StudyDescription"].fillna("") == study
-            nums = [int(m.group(1)) for name in used if (m := pat.match(name))]
-            next_id = max(nums or [0]) + 1
-            for idx in df[mask].index:
-                given = str(df.at[idx, "GivenName"])
-                if given in mapping:
-                    df.at[idx, "BIDS_name"] = mapping[given]
-                else:
-                    new_name = f"sub-{next_id:03d}"
-                    df.at[idx, "BIDS_name"] = new_name
-                    mapping[given] = new_name
-                    used.add(new_name)
-                    next_id += 1
+            # Store mapping info so we can validate name edits later on
             self.existing_maps[study] = mapping
             self.existing_used[study] = used
 
@@ -1191,37 +1667,65 @@ class BIDSManager(QMainWindow):
         for _, row in df.iterrows():
             r = self.mapping_table.rowCount()
             self.mapping_table.insertRow(r)
-            # Include: checkbox
             include_item = QTableWidgetItem()
             include_item.setFlags(include_item.flags() | Qt.ItemIsUserCheckable)
             include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
             self.mapping_table.setItem(r, 0, include_item)
-            # Subject (non-editable)
+
+            src_item = QTableWidgetItem(_clean(row.get('source_folder')))
+            src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 1, src_item)
+
             bids_name = _clean(row.get('BIDS_name'))
-            subj_item = QTableWidgetItem(bids_name)
-            subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
+            bids_item = QTableWidgetItem(bids_name)
+            bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
             study = _clean(row.get('StudyDescription'))
-            subj_item.setData(Qt.UserRole, study)
+            bids_item.setData(Qt.UserRole, study)
             self.study_set.add(study)
-            self.mapping_table.setItem(r, 1, subj_item)
-            # Session (non-editable)
+            self.mapping_table.setItem(r, 2, bids_item)
+
+            subj_item = QTableWidgetItem(_clean(row.get('subject')))
+            subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 3, subj_item)
+
+            given_item = QTableWidgetItem(_clean(row.get('GivenName')))
+            given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 4, given_item)
+
             session = _clean(row.get('session'))
             ses_item = QTableWidgetItem(session)
-            ses_item.setFlags(ses_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 2, ses_item)
-            # Sequence (editable)
+            ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 5, ses_item)
+
             seq_item = QTableWidgetItem(_clean(row.get('sequence')))
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 3, seq_item)
-            # Modality (non-editable)
+            self.mapping_table.setItem(r, 6, seq_item)
+
+            study_item = QTableWidgetItem(study)
+            study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 7, study_item)
+
+            uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
+            uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 8, uid_item)
+
+            acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
+            acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 9, acq_item)
+
+            rep_item = QTableWidgetItem(_clean(row.get('rep')))
+            # Allow editing the repeat number directly in the table
+            rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 10, rep_item)
+
             mod_item = QTableWidgetItem(_clean(row.get('modality')))
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 4, mod_item)
-            # BIDS Modality (editable)
+            self.mapping_table.setItem(r, 11, mod_item)
+
             modb = _clean(row.get('modality_bids'))
             modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 5, modb_item)
+            self.mapping_table.setItem(r, 12, modb_item)
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
@@ -1240,6 +1744,9 @@ class BIDSManager(QMainWindow):
                 'acq_time': _clean(row.get('acq_time')),
             })
         self.log_text.append("Loaded TSV into mapping table.")
+
+        # Apply always-exclude patterns before building lookup tables
+        self.applyExcludePatterns()
 
         # Build modality/sequence lookup for tree interactions
         self._rebuild_lookup_maps()
@@ -1267,6 +1774,8 @@ class BIDSManager(QMainWindow):
             bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
             self.naming_table.setItem(nr, 2, bitem)
         self.naming_table.blockSignals(False)
+        self._updateScanExistingEnabled()
+        self._updateMappingControlsEnabled()
 
 
     def populateModalitiesTree(self):
@@ -1412,7 +1921,7 @@ class BIDSManager(QMainWindow):
         for idx, info in enumerate(self.row_info):
             if info['study'] == study and info['given'] == given:
                 info['bids'] = new_bids
-                self.mapping_table.item(idx, 1).setText(new_bids)
+                self.mapping_table.item(idx, 2).setText(new_bids)
         # Keep internal mapping updated
         self.existing_maps.setdefault(study, {})[given] = new_bids
         self.existing_used.setdefault(study, set()).add(new_bids)
@@ -1448,6 +1957,207 @@ class BIDSManager(QMainWindow):
                     self.mapping_table.item(i, 0).setCheckState(Qt.Checked)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
+
+    # ----- always exclude helpers -----
+    def _exclude_add(self) -> None:
+        pattern = self.exclude_edit.text().strip()
+        if not pattern:
+            return
+        r = self.exclude_table.rowCount()
+        self.exclude_table.insertRow(r)
+        chk = QTableWidgetItem()
+        chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
+        chk.setCheckState(Qt.Checked)
+        self.exclude_table.setItem(r, 0, chk)
+        self.exclude_table.setItem(r, 1, QTableWidgetItem(pattern))
+        self.exclude_edit.clear()
+
+    def loadExcludePatterns(self) -> None:
+        if not hasattr(self, "exclude_table"):
+            return
+        self.exclude_table.setRowCount(0)
+        patterns = []
+        if self.exclude_patterns_file.exists():
+            try:
+                df = pd.read_csv(self.exclude_patterns_file, sep="\t", keep_default_na=False)
+                for _, row in df.iterrows():
+                    pat = str(row.get("pattern", ""))
+                    active = bool(int(row.get("active", 1)))
+                    patterns.append((pat, active))
+            except Exception:
+                pass
+        if not patterns:
+            patterns = [
+                ("localizer", True),
+                ("scout", True),
+                ("phoenixzipreport", True),
+                ("phoenix document", True),
+                (".pdf", True),
+                ("report", True),
+                ("physlog", True),
+            ]
+        for pat, active in patterns:
+            r = self.exclude_table.rowCount()
+            self.exclude_table.insertRow(r)
+            chk = QTableWidgetItem()
+            chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
+            chk.setCheckState(Qt.Checked if active else Qt.Unchecked)
+            self.exclude_table.setItem(r, 0, chk)
+            self.exclude_table.setItem(r, 1, QTableWidgetItem(pat))
+        self.applyExcludePatterns()
+
+    def saveExcludePatterns(self) -> None:
+        self.exclude_patterns_file.parent.mkdir(exist_ok=True, parents=True)
+        rows = []
+        for r in range(self.exclude_table.rowCount()):
+            pat = self.exclude_table.item(r, 1).text().strip()
+            if not pat:
+                continue
+            active = self.exclude_table.item(r, 0).checkState() == Qt.Checked
+            rows.append({"active": int(active), "pattern": pat})
+        pd.DataFrame(rows).to_csv(self.exclude_patterns_file, sep="\t", index=False)
+        QMessageBox.information(self, "Saved", f"Updated {self.exclude_patterns_file}")
+        self.applyExcludePatterns()
+
+    def applyExcludePatterns(self) -> None:
+        if not hasattr(self, "exclude_table"):
+            return
+        patterns = [
+            self.exclude_table.item(r, 1).text().strip().lower()
+            for r in range(self.exclude_table.rowCount())
+            if self.exclude_table.item(r, 0).checkState() == Qt.Checked
+        ]
+        for r in range(self.mapping_table.rowCount()):
+            seq = self.mapping_table.item(r, 6).text().lower()
+            if any(p in seq for p in patterns):
+                self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
+
+    # ----- sequence dictionary helpers -----
+    def _seq_add(self, mod: str) -> None:
+        if mod not in self.seq_inputs or mod not in self.seq_lists:
+            return
+        pat = self.seq_inputs[mod].text().strip()
+        if not pat:
+            return
+        table = self.seq_lists[mod]
+        r = table.rowCount()
+        table.insertRow(r)
+        table.setItem(r, 0, QTableWidgetItem(pat))
+        self.seq_inputs[mod].clear()
+
+    def _seq_remove(self, mod: str) -> None:
+        if mod not in self.seq_lists:
+            return
+        table = self.seq_lists[mod]
+        rows = sorted({item.row() for item in table.selectedItems()}, reverse=True)
+        for r in rows:
+            table.removeRow(r)
+
+    def loadSequenceDictionary(self) -> None:
+        if not hasattr(self, "seq_tabs_widget"):
+            return
+
+        self.seq_tabs_widget.clear()
+        self.seq_lists = {}
+        self.seq_inputs = {}
+        entries: defaultdict[str, list[str]] = defaultdict(list)
+        if self.seq_dict_file.exists():
+            try:
+                df = pd.read_csv(self.seq_dict_file, sep="\t", keep_default_na=False)
+                for _, row in df.iterrows():
+                    pat = str(row.get("pattern", "")).strip()
+                    mod = str(row.get("modality", "")).strip()
+                    if pat and mod:
+                        entries[mod].append(pat)
+            except Exception:
+                pass
+        if not entries:
+            from . import dicom_inventory
+
+            for mod, pats in dicom_inventory.BIDS_PATTERNS.items():
+                entries[mod].extend(pats)
+
+        for mod in sorted(entries.keys()):
+            tab = QWidget()
+            lay = QVBoxLayout(tab)
+            table = QTableWidget()
+            table.setColumnCount(1)
+            table.setHorizontalHeaderLabels(["Pattern"])
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+            for pat in entries[mod]:
+                r = table.rowCount()
+                table.insertRow(r)
+                table.setItem(r, 0, QTableWidgetItem(pat))
+            self.seq_lists[mod] = table
+            lay.addWidget(table)
+
+            row = QHBoxLayout()
+            edit = QLineEdit()
+            self.seq_inputs[mod] = edit
+            row.addWidget(edit)
+            add_btn = QPushButton("Add")
+            add_btn.clicked.connect(lambda _=False, m=mod: self._seq_add(m))
+            row.addWidget(add_btn)
+            rm_btn = QPushButton("Remove")
+            rm_btn.clicked.connect(lambda _=False, m=mod: self._seq_remove(m))
+            row.addWidget(rm_btn)
+            lay.addLayout(row)
+
+            save_btn = QPushButton("Save")
+            save_btn.clicked.connect(self.saveSequenceDictionary)
+            lay.addWidget(save_btn, alignment=Qt.AlignRight)
+
+            self.seq_tabs_widget.addTab(tab, mod)
+
+        self.applySequenceDictionary()
+
+    def saveSequenceDictionary(self) -> None:
+        if not hasattr(self, "seq_lists"):
+            return
+        self.seq_dict_file.parent.mkdir(exist_ok=True, parents=True)
+        rows = []
+        for mod, table in self.seq_lists.items():
+            for r in range(table.rowCount()):
+                pat = table.item(r, 0).text().strip()
+                if pat:
+                    rows.append({"modality": mod, "pattern": pat})
+        pd.DataFrame(rows).to_csv(self.seq_dict_file, sep="\t", index=False)
+        QMessageBox.information(self, "Saved", f"Updated {self.seq_dict_file}")
+        self.applySequenceDictionary()
+
+    def restoreSequenceDefaults(self) -> None:
+        """Restore the built-in sequence dictionary."""
+        from . import dicom_inventory
+
+        dicom_inventory.restore_sequence_dictionary()
+        self.loadSequenceDictionary()
+        QMessageBox.information(self, "Restored", "Default sequence dictionary restored")
+
+    def applySequenceDictionary(self) -> None:
+        if not hasattr(self, "seq_lists"):
+            return
+        from . import dicom_inventory
+
+        patterns = defaultdict(list)
+        for mod, table in self.seq_lists.items():
+            for r in range(table.rowCount()):
+                pat = table.item(r, 0).text().strip().lower()
+                if pat:
+                    patterns[mod].append(pat)
+        dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+        if self.mapping_table.rowCount() > 0:
+            for i in range(self.mapping_table.rowCount()):
+                seq = self.mapping_table.item(i, 6).text()
+                mod = dicom_inventory.guess_modality(seq)
+                modb = dicom_inventory.modality_to_container(mod)
+                self.mapping_table.item(i, 11).setText(mod)
+                self.mapping_table.item(i, 12).setText(modb)
+                if i < len(self.row_info):
+                    self.row_info[i]['mod'] = mod
+                    self.row_info[i]['modb'] = modb
+            self._rebuild_lookup_maps()
+            QTimer.singleShot(0, self.populateModalitiesTree)
+            QTimer.singleShot(0, self.populateSpecificTree)
 
     def _rebuild_lookup_maps(self):
         """Recompute internal lookup tables for tree interactions."""
@@ -1660,8 +2370,8 @@ class BIDSManager(QMainWindow):
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
-                seq = self.mapping_table.item(i, 3).text()
-                modb = self.mapping_table.item(i, 5).text()
+                seq = self.mapping_table.item(i, 6).text()
+                modb = self.mapping_table.item(i, 12).text()
 
                 # Update df_orig with canonical BIDS name
                 df_orig.at[i, 'BIDS_name'] = info['bids']
@@ -1795,6 +2505,7 @@ class BIDSManager(QMainWindow):
             self.tree.setRootIndex(self.model.index(p))
             self.viewer.clear()
             self.updateStats()
+            self.loadExcludePatterns()
 
     def onTreeClicked(self, idx: QModelIndex):
         """When a file is clicked in the tree, load metadata if JSON/TSV."""
@@ -2202,69 +2913,266 @@ class IntendedForDialog(QDialog):
         self.resize(900, 500)
         self.bids_root = bids_root
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        (
+            self.bold_tab,
+            self.bold_tree,
+            self.bold_intended,
+            self.bold_func_list,
+            self.bold_remove,
+            self.bold_add,
+            self.bold_save,
+        ) = self._build_tab("bold")
+        self.tabs.addTab(self.bold_tab, "BOLD")
+
+        (
+            self.dwi_tab,
+            self.dwi_tree,
+            self.dwi_intended,
+            self.dwi_func_list,
+            self.dwi_remove,
+            self.dwi_add,
+            self.dwi_save,
+        ) = self._build_tab("dwi")
+
+        self.b0_box = QCheckBox("Treat DWI b0 maps as fieldmaps")
+        self.b0_box.toggled.connect(self._on_b0_toggle)
+        layout.addWidget(self.b0_box)
+
+        self.data = {}
+        self._init_b0_state()
+        self._collect()
+
+    # ---- helpers ----
+    def _build_tab(self, mode: str):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Fieldmap images:"))
-        self.left_tree = QTreeWidget()
-        self.left_tree.setHeaderHidden(True)
-        self.left_tree.itemSelectionChanged.connect(self.on_left_selected)
-        left_layout.addWidget(self.left_tree)
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        if mode == "bold":
+            tree.itemSelectionChanged.connect(lambda: self._on_left_selected("bold"))
+        else:
+            tree.itemSelectionChanged.connect(lambda: self._on_left_selected("dwi"))
+        left_layout.addWidget(tree)
         layout.addLayout(left_layout, 2)
 
         mid_layout = QVBoxLayout()
         mid_layout.addWidget(QLabel("IntendedFor:"))
-        self.intended_list = QListWidget()
-        self.intended_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        mid_layout.addWidget(self.intended_list)
+        intended = QListWidget()
+        intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        mid_layout.addWidget(intended)
         rm_save = QHBoxLayout()
-        self.remove_btn = QPushButton("Remove")
-        self.remove_btn.clicked.connect(self.remove_selected)
-        self.save_btn = QPushButton("Save")
-        self.save_btn.clicked.connect(self.save_changes)
-        rm_save.addWidget(self.remove_btn)
-        rm_save.addWidget(self.save_btn)
+        remove = QPushButton("Remove")
+        remove.clicked.connect(lambda: self._remove_selected(mode))
+        save = QPushButton("Save")
+        save.clicked.connect(lambda: self._save_changes(mode))
+        rm_save.addWidget(remove)
+        rm_save.addWidget(save)
         rm_save.addStretch()
         mid_layout.addLayout(rm_save)
         layout.addLayout(mid_layout, 2)
 
         right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("Functional images:"))
-        self.func_list = QListWidget()
-        self.func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        right_layout.addWidget(self.func_list)
-        self.add_btn = QPushButton("← Add")
-        self.add_btn.clicked.connect(self.add_selected)
-        right_layout.addWidget(self.add_btn)
+        label = "Functional images:" if mode == "bold" else "Diffusion images:"
+        right_layout.addWidget(QLabel(label))
+        func_list = QListWidget()
+        func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        right_layout.addWidget(func_list)
+        add_btn = QPushButton("← Add")
+        add_btn.clicked.connect(lambda: self._add_selected(mode))
+        right_layout.addWidget(add_btn)
         right_layout.addStretch()
         layout.addLayout(right_layout, 2)
 
-        self.data = {}
+        return widget, tree, intended, func_list, remove, add_btn, save
+
+    def _init_b0_state(self) -> None:
+        has_b0 = self._has_any_b0()
+        fmap_b0 = self._fmap_has_b0()
+        self.b0_box.setEnabled(has_b0)
+        self.b0_box.setChecked(fmap_b0)
+        if fmap_b0 and self.tabs.indexOf(self.dwi_tab) == -1:
+            self.tabs.addTab(self.dwi_tab, "DWI")
+
+    def _on_b0_toggle(self) -> None:
+        if self.b0_box.isChecked():
+            if self.tabs.indexOf(self.dwi_tab) == -1:
+                self.tabs.addTab(self.dwi_tab, "DWI")
+        else:
+            idx = self.tabs.indexOf(self.dwi_tab)
+            if idx != -1:
+                self.tabs.removeTab(idx)
         self._collect()
 
-    # ---- helpers ----
     def _collect(self) -> None:
+        self.bold_tree.clear()
+        if self.tabs.indexOf(self.dwi_tab) != -1:
+            self.dwi_tree.clear()
+        self.data.clear()
+        if self.b0_box.isChecked():
+            self._move_b0_maps()
+        else:
+            self._restore_b0_maps()
         for sub in sorted(self.bids_root.glob('sub-*')):
             if not sub.is_dir():
                 continue
-            sub_item = QTreeWidgetItem([sub.name])
-            self.left_tree.addTopLevelItem(sub_item)
+            sub_item_bold = QTreeWidgetItem([sub.name])
+            self.bold_tree.addTopLevelItem(sub_item_bold)
+            sub_item_dwi = None
+            if self.tabs.indexOf(self.dwi_tab) != -1:
+                sub_item_dwi = QTreeWidgetItem([sub.name])
+                self.dwi_tree.addTopLevelItem(sub_item_dwi)
             sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
             if sessions:
                 for ses in sessions:
-                    ses_item = QTreeWidgetItem([ses.name])
-                    sub_item.addChild(ses_item)
-                    self._add_fmaps(ses, ses_item, sub.name, ses.name)
+                    ses_item_bold = QTreeWidgetItem([ses.name])
+                    sub_item_bold.addChild(ses_item_bold)
+                    ses_item_dwi = None
+                    if sub_item_dwi is not None:
+                        ses_item_dwi = QTreeWidgetItem([ses.name])
+                        sub_item_dwi.addChild(ses_item_dwi)
+                    self._add_fmaps(ses, ses_item_bold, ses_item_dwi, sub.name, ses.name)
             else:
-                self._add_fmaps(sub, sub_item, sub.name, None)
-            sub_item.setExpanded(True)
+                self._add_fmaps(sub, sub_item_bold, sub_item_dwi, sub.name, None)
+            sub_item_bold.setExpanded(True)
+            if sub_item_dwi is not None:
+                sub_item_dwi.setExpanded(True)
 
-    def _add_fmaps(self, root: Path, parent_item: QTreeWidgetItem,
+    def _move_b0_maps(self) -> None:
+        """Move DWI b0/epi images into the ``fmap`` folder."""
+        rename_map: dict[str, str] = {}
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                dwi_dir = root / 'dwi'
+                if not dwi_dir.is_dir():
+                    continue
+                fmap_dir = root / 'fmap'
+                fmap_dir.mkdir(exist_ok=True)
+                for nii in dwi_dir.glob('*.nii*'):
+                    name = nii.name.lower()
+                    if 'b0' not in name and '_epi' not in name:
+                        continue
+                    dst = fmap_dir / nii.name
+                    if not dst.exists():
+                        nii.rename(dst)
+                        rename_map[(nii.relative_to(self.bids_root)).as_posix()] = (
+                            dst.relative_to(self.bids_root).as_posix()
+                        )
+                    base = re.sub(r'\.nii(\.gz)?$', '', nii.name, flags=re.I)
+                    for ext in ['.json', '.bval', '.bvec']:
+                        src = dwi_dir / (base + ext)
+                        if src.exists():
+                            dst_file = fmap_dir / src.name
+                            if not dst_file.exists():
+                                src.rename(dst_file)
+                                rename_map[(src.relative_to(self.bids_root)).as_posix()] = (
+                                    dst_file.relative_to(self.bids_root).as_posix()
+                                )
+        if rename_map:
+            try:
+                from .scans_utils import update_scans_with_map
+
+                update_scans_with_map(self.bids_root, rename_map)
+            except Exception:
+                pass
+
+    def _restore_b0_maps(self) -> None:
+        """Move previously relocated b0/epi images back to ``dwi``."""
+        rename_map: dict[str, str] = {}
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                fmap_dir = root / 'fmap'
+                dwi_dir = root / 'dwi'
+                if not fmap_dir.is_dir() or not dwi_dir.is_dir():
+                    continue
+                for nii in fmap_dir.glob('*.nii*'):
+                    name = nii.name.lower()
+                    if 'b0' not in name and '_epi' not in name:
+                        continue
+                    dst = dwi_dir / nii.name
+                    if not dst.exists():
+                        nii.rename(dst)
+                        rename_map[(nii.relative_to(self.bids_root)).as_posix()] = (
+                            dst.relative_to(self.bids_root).as_posix()
+                        )
+                    base = re.sub(r'\.nii(\.gz)?$', '', nii.name, flags=re.I)
+                    for ext in ['.json', '.bval', '.bvec']:
+                        src = fmap_dir / (base + ext)
+                        if src.exists():
+                            dst_file = dwi_dir / src.name
+                            if not dst_file.exists():
+                                src.rename(dst_file)
+                                rename_map[(src.relative_to(self.bids_root)).as_posix()] = (
+                                    dst_file.relative_to(self.bids_root).as_posix()
+                                )
+        if rename_map:
+            try:
+                from .scans_utils import update_scans_with_map
+
+                update_scans_with_map(self.bids_root, rename_map)
+            except Exception:
+                pass
+
+    def _has_any_b0(self) -> bool:
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                for folder in [root / 'dwi', root / 'fmap']:
+                    if not folder.is_dir():
+                        continue
+                    for nii in folder.glob('*.nii*'):
+                        if self._is_b0(nii.name):
+                            return True
+        return False
+
+    def _fmap_has_b0(self) -> bool:
+        for sub in self.bids_root.glob('sub-*'):
+            if not sub.is_dir():
+                continue
+            sessions = [s for s in sub.glob('ses-*') if s.is_dir()]
+            roots = sessions or [sub]
+            for root in roots:
+                fmap_dir = root / 'fmap'
+                if not fmap_dir.is_dir():
+                    continue
+                for nii in fmap_dir.glob('*.nii*'):
+                    if self._is_b0(nii.name):
+                        return True
+        return False
+
+    @staticmethod
+    def _is_b0(name: str) -> bool:
+        lower = name.lower()
+        return 'b0' in lower or '_epi' in lower
+
+    def _add_fmaps(self, root: Path, bold_parent: QTreeWidgetItem,
+                   dwi_parent: QTreeWidgetItem | None,
                    sub: str, ses: str | None) -> None:
         fmap_dir = root / 'fmap'
         func_dir = root / 'func'
+        dwi_dir = root / 'dwi'
         func_files = [f.relative_to(root).as_posix()
                       for f in sorted(func_dir.glob('*.nii*')) if f.is_file()]
+        dwi_files = [f.relative_to(root).as_posix()
+                     for f in sorted(dwi_dir.glob('*.nii*')) if f.is_file()]
         groups: dict[str, list[Path]] = {}
         if fmap_dir.is_dir():
             for js in fmap_dir.glob('*.json'):
@@ -2274,17 +3182,25 @@ class IntendedForDialog(QDialog):
                 groups.setdefault(base, []).append(js)
         for base, files in groups.items():
             key = (sub, ses, base)
+            bold_int, dwi_int = self._load_intended(files[0], root)
             self.data[key] = {
                 'jsons': files,
-                'funcs': func_files,
-                'intended': self._load_intended(files[0], root),
+                'funcs_bold': func_files,
+                'funcs_dwi': dwi_files,
+                'intended_bold': bold_int,
+                'intended_dwi': dwi_int,
                 'root': root,
             }
-            item = QTreeWidgetItem([base])
-            item.setData(0, Qt.UserRole, key)
-            parent_item.addChild(item)
+            if not (self.b0_box.isChecked() and self._is_b0(base)):
+                item_bold = QTreeWidgetItem([base])
+                item_bold.setData(0, Qt.UserRole, key)
+                bold_parent.addChild(item_bold)
+            if dwi_parent is not None and self._is_b0(base):
+                item_dwi = QTreeWidgetItem([base])
+                item_dwi.setData(0, Qt.UserRole, key)
+                dwi_parent.addChild(item_dwi)
 
-    def _load_intended(self, path: Path, root: Path) -> list[str]:
+    def _load_intended(self, path: Path, root: Path) -> tuple[list[str], list[str]]:
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
@@ -2300,64 +3216,76 @@ class IntendedForDialog(QDialog):
                 return parts.as_posix()
 
             if isinstance(val, str):
-                return [_strip(val)]
+                vals = [_strip(val)]
             elif isinstance(val, list):
-                return [_strip(v) for v in val]
+                vals = [_strip(v) for v in val]
+            else:
+                vals = []
+            bold = [v for v in vals if '/func/' in v]
+            dwi = [v for v in vals if '/dwi/' in v]
+            return bold, dwi
         except Exception:
             pass
-        return []
+        return [], []
 
-    # ---- slots ----
-    def on_left_selected(self) -> None:
-        it = self.left_tree.currentItem()
+    def _on_left_selected(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        intended = self.bold_intended if mode == "bold" else self.dwi_intended
+        funcs = self.bold_func_list if mode == "bold" else self.dwi_func_list
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data.get(key, {})
-        self.intended_list.clear()
-        for f in info.get('intended', []):
-            self.intended_list.addItem(f)
-        self.func_list.clear()
-        for f in info.get('funcs', []):
-            self.func_list.addItem(f)
+        intended.clear()
+        for f in info.get(f'intended_{mode}', []):
+            intended.addItem(f)
+        funcs.clear()
+        for f in info.get(f'funcs_{mode}', []):
+            funcs.addItem(f)
 
-    def add_selected(self) -> None:
-        it = self.left_tree.currentItem()
+    def _add_selected(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        func_list = self.bold_func_list if mode == "bold" else self.dwi_func_list
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data[key]
-        for sel in self.func_list.selectedItems():
+        for sel in func_list.selectedItems():
             path = sel.text()
-            if path not in info['intended']:
-                info['intended'].append(path)
-        self.on_left_selected()
+            if path not in info[f'intended_{mode}']:
+                info[f'intended_{mode}'].append(path)
+        self._on_left_selected(mode)
 
-    def remove_selected(self) -> None:
-        it = self.left_tree.currentItem()
+    def _remove_selected(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        intended = self.bold_intended if mode == "bold" else self.dwi_intended
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data[key]
-        remove = [s.text() for s in self.intended_list.selectedItems()]
-        info['intended'] = [p for p in info['intended'] if p not in remove]
-        self.on_left_selected()
+        remove = [s.text() for s in intended.selectedItems()]
+        info[f'intended_{mode}'] = [p for p in info[f'intended_{mode}'] if p not in remove]
+        self._on_left_selected(mode)
 
-    def save_changes(self) -> None:
-        it = self.left_tree.currentItem()
+    def _save_changes(self, mode: str) -> None:
+        tree = self.bold_tree if mode == "bold" else self.dwi_tree
+        it = tree.currentItem()
         if not it:
             return
         key = it.data(0, Qt.UserRole)
         if not key:
             return
         info = self.data[key]
-        val = sorted(info['intended'])
+        val = sorted(info['intended_bold'] + info['intended_dwi'])
         prefix = info['root'].relative_to(self.bids_root)
         cleaned = []
         for p in val:
