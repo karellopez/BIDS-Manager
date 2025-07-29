@@ -808,6 +808,15 @@ class BIDSManager(QMainWindow):
 
         self.tsv_group = QGroupBox("Scanned data viewer")
         tsv_layout = QVBoxLayout(self.tsv_group)
+        self.tsv_detach_button = QPushButton("»")
+        self.tsv_detach_button.setFixedWidth(20)
+        self.tsv_detach_button.setFixedHeight(20)
+        self.tsv_detach_button.clicked.connect(self.detachTSVWindow)
+        self.tsv_detach_button.setFocusPolicy(Qt.NoFocus)
+        header_row_tsv = QHBoxLayout()
+        header_row_tsv.addStretch()
+        header_row_tsv.addWidget(self.tsv_detach_button)
+        tsv_layout.addLayout(header_row_tsv)
         self.tsv_tabs = QTabWidget()
         tsv_layout.addWidget(self.tsv_tabs)
 
@@ -848,15 +857,6 @@ class BIDSManager(QMainWindow):
         self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
         self.tsv_detect_rep_button = QPushButton("Detect repeats")
         self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
-        self.tsv_detach_button = QPushButton("»")
-        self.tsv_detach_button.setFixedWidth(20)
-        self.tsv_detach_button.setFixedHeight(20)
-        self.tsv_detach_button.clicked.connect(self.detachTSVWindow)
-        self.tsv_detach_button.setFocusPolicy(Qt.NoFocus)
-        header_row_tsv = QHBoxLayout()
-        header_row_tsv.addStretch()
-        header_row_tsv.addWidget(self.tsv_detach_button)
-        metadata_layout.addLayout(header_row_tsv)
         metadata_layout.addWidget(self.mapping_table)
         btn_row_tsv.addStretch()
         btn_row_tsv.addWidget(self.tsv_load_button)
@@ -871,27 +871,8 @@ class BIDSManager(QMainWindow):
         # --- Sequence dictionary tab ---
         dict_tab = QWidget()
         dict_layout = QVBoxLayout(dict_tab)
-        self.seq_table = QTableWidget()
-        self.seq_table.setColumnCount(2)
-        self.seq_table.setHorizontalHeaderLabels(["Modality", "Pattern"])
-        d_hdr = self.seq_table.horizontalHeader()
-        d_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        d_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
-        dict_layout.addWidget(self.seq_table)
-
-        add_row = QHBoxLayout()
-        self.seq_mod_edit = QLineEdit()
-        self.seq_pat_edit = QLineEdit()
-        add_row.addWidget(self.seq_mod_edit)
-        add_row.addWidget(self.seq_pat_edit)
-        add_btn = QPushButton("Add")
-        add_btn.clicked.connect(self._seq_add)
-        add_row.addWidget(add_btn)
-        dict_layout.addLayout(add_row)
-
-        self.seq_save_btn = QPushButton("Save")
-        self.seq_save_btn.clicked.connect(self.saveSequenceDictionary)
-        dict_layout.addWidget(self.seq_save_btn, alignment=Qt.AlignRight)
+        self.seq_tabs_widget = QTabWidget()
+        dict_layout.addWidget(self.seq_tabs_widget)
 
         self.tsv_tabs.addTab(dict_tab, "Sequence dictionary")
         self.loadSequenceDictionary()
@@ -2049,23 +2030,26 @@ class BIDSManager(QMainWindow):
                 self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
 
     # ----- sequence dictionary helpers -----
-    def _seq_add(self) -> None:
-        mod = self.seq_mod_edit.text().strip()
-        pat = self.seq_pat_edit.text().strip()
-        if not mod or not pat:
+    def _seq_add(self, mod: str) -> None:
+        if mod not in self.seq_inputs or mod not in self.seq_lists:
             return
-        r = self.seq_table.rowCount()
-        self.seq_table.insertRow(r)
-        self.seq_table.setItem(r, 0, QTableWidgetItem(mod))
-        self.seq_table.setItem(r, 1, QTableWidgetItem(pat))
-        self.seq_mod_edit.clear()
-        self.seq_pat_edit.clear()
+        pat = self.seq_inputs[mod].text().strip()
+        if not pat:
+            return
+        table = self.seq_lists[mod]
+        r = table.rowCount()
+        table.insertRow(r)
+        table.setItem(r, 0, QTableWidgetItem(pat))
+        self.seq_inputs[mod].clear()
 
     def loadSequenceDictionary(self) -> None:
-        if not hasattr(self, "seq_table"):
+        if not hasattr(self, "seq_tabs_widget"):
             return
-        self.seq_table.setRowCount(0)
-        entries = []
+
+        self.seq_tabs_widget.clear()
+        self.seq_lists = {}
+        self.seq_inputs = {}
+        entries: defaultdict[str, list[str]] = defaultdict(list)
         if self.seq_dict_file.exists():
             try:
                 df = pd.read_csv(self.seq_dict_file, sep="\t", keep_default_na=False)
@@ -2073,45 +2057,71 @@ class BIDSManager(QMainWindow):
                     pat = str(row.get("pattern", "")).strip()
                     mod = str(row.get("modality", "")).strip()
                     if pat and mod:
-                        entries.append((mod, pat))
+                        entries[mod].append(pat)
             except Exception:
                 pass
         if not entries:
             from . import dicom_inventory
 
             for mod, pats in dicom_inventory.BIDS_PATTERNS.items():
-                for pat in pats:
-                    entries.append((mod, pat))
-        for mod, pat in entries:
-            r = self.seq_table.rowCount()
-            self.seq_table.insertRow(r)
-            self.seq_table.setItem(r, 0, QTableWidgetItem(mod))
-            self.seq_table.setItem(r, 1, QTableWidgetItem(pat))
+                entries[mod].extend(pats)
+
+        for mod in sorted(entries.keys()):
+            tab = QWidget()
+            lay = QVBoxLayout(tab)
+            table = QTableWidget()
+            table.setColumnCount(1)
+            table.setHorizontalHeaderLabels(["Pattern"])
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+            for pat in entries[mod]:
+                r = table.rowCount()
+                table.insertRow(r)
+                table.setItem(r, 0, QTableWidgetItem(pat))
+            self.seq_lists[mod] = table
+            lay.addWidget(table)
+
+            row = QHBoxLayout()
+            edit = QLineEdit()
+            self.seq_inputs[mod] = edit
+            row.addWidget(edit)
+            add_btn = QPushButton("Add")
+            add_btn.clicked.connect(lambda _=False, m=mod: self._seq_add(m))
+            row.addWidget(add_btn)
+            lay.addLayout(row)
+
+            save_btn = QPushButton("Save")
+            save_btn.clicked.connect(self.saveSequenceDictionary)
+            lay.addWidget(save_btn, alignment=Qt.AlignRight)
+
+            self.seq_tabs_widget.addTab(tab, mod)
+
         self.applySequenceDictionary()
 
     def saveSequenceDictionary(self) -> None:
+        if not hasattr(self, "seq_lists"):
+            return
         self.seq_dict_file.parent.mkdir(exist_ok=True, parents=True)
         rows = []
-        for r in range(self.seq_table.rowCount()):
-            mod = self.seq_table.item(r, 0).text().strip()
-            pat = self.seq_table.item(r, 1).text().strip()
-            if mod and pat:
-                rows.append({"modality": mod, "pattern": pat})
+        for mod, table in self.seq_lists.items():
+            for r in range(table.rowCount()):
+                pat = table.item(r, 0).text().strip()
+                if pat:
+                    rows.append({"modality": mod, "pattern": pat})
         pd.DataFrame(rows).to_csv(self.seq_dict_file, sep="\t", index=False)
         QMessageBox.information(self, "Saved", f"Updated {self.seq_dict_file}")
         self.applySequenceDictionary()
 
     def applySequenceDictionary(self) -> None:
-        if not hasattr(self, "seq_table"):
+        if not hasattr(self, "seq_lists"):
             return
         from . import dicom_inventory
 
         patterns = defaultdict(list)
-        for r in range(self.seq_table.rowCount()):
-            mod = self.seq_table.item(r, 0).text().strip()
-            pat = self.seq_table.item(r, 1).text().strip().lower()
-            if mod and pat:
-                patterns[mod].append(pat)
+        for mod, table in self.seq_lists.items():
+            for r in range(table.rowCount()):
+                pat = table.item(r, 0).text().strip().lower()
+                if pat:
+                    patterns[mod].append(pat)
         dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
         if self.mapping_table.rowCount() > 0:
             for i in range(self.mapping_table.rowCount()):
