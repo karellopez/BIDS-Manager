@@ -52,11 +52,11 @@ from collections import defaultdict
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout, QGridLayout,
-    QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
+    QTableWidget, QTableWidgetItem, QGroupBox, QGridLayout,
+    QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QListWidgetItem)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -316,6 +316,7 @@ class BIDSManager(QMainWindow):
             pass
         self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
         self.theme_file = self.pref_dir / "theme.txt"
+        self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -781,6 +782,7 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(False)
         self.tsv_stop_button.clicked.connect(self.stopInventory)
         btn_row = QHBoxLayout()
+        btn_row.addStretch()
         btn_row.addWidget(self.tsv_button)
         btn_row.addWidget(self.tsv_stop_button)
         btn_row.addStretch()
@@ -806,6 +808,12 @@ class BIDSManager(QMainWindow):
 
         self.tsv_group = QGroupBox("Scanned data viewer")
         tsv_layout = QVBoxLayout(self.tsv_group)
+        self.tsv_tabs = QTabWidget()
+        tsv_layout.addWidget(self.tsv_tabs)
+
+        # --- Scanned metadata tab ---
+        metadata_tab = QWidget()
+        metadata_layout = QVBoxLayout(metadata_tab)
         self.mapping_table = QTableWidget()
         # +1 column for the original subject label shown in the inventory TSV
         self.mapping_table.setColumnCount(13)
@@ -848,13 +856,45 @@ class BIDSManager(QMainWindow):
         header_row_tsv = QHBoxLayout()
         header_row_tsv.addStretch()
         header_row_tsv.addWidget(self.tsv_detach_button)
-        tsv_layout.addLayout(header_row_tsv)
-        tsv_layout.addWidget(self.mapping_table)
+        metadata_layout.addLayout(header_row_tsv)
+        metadata_layout.addWidget(self.mapping_table)
+        btn_row_tsv.addStretch()
         btn_row_tsv.addWidget(self.tsv_load_button)
         btn_row_tsv.addWidget(self.tsv_apply_button)
         btn_row_tsv.addWidget(self.tsv_generate_ids_button)
         btn_row_tsv.addWidget(self.tsv_detect_rep_button)
-        tsv_layout.addLayout(btn_row_tsv)
+        btn_row_tsv.addStretch()
+        metadata_layout.addLayout(btn_row_tsv)
+
+        self.tsv_tabs.addTab(metadata_tab, "Scanned metadata")
+
+        # --- Sequence dictionary tab ---
+        dict_tab = QWidget()
+        dict_layout = QVBoxLayout(dict_tab)
+        self.seq_table = QTableWidget()
+        self.seq_table.setColumnCount(2)
+        self.seq_table.setHorizontalHeaderLabels(["Modality", "Pattern"])
+        d_hdr = self.seq_table.horizontalHeader()
+        d_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        d_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        dict_layout.addWidget(self.seq_table)
+
+        add_row = QHBoxLayout()
+        self.seq_mod_edit = QLineEdit()
+        self.seq_pat_edit = QLineEdit()
+        add_row.addWidget(self.seq_mod_edit)
+        add_row.addWidget(self.seq_pat_edit)
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._seq_add)
+        add_row.addWidget(add_btn)
+        dict_layout.addLayout(add_row)
+
+        self.seq_save_btn = QPushButton("Save")
+        self.seq_save_btn.clicked.connect(self.saveSequenceDictionary)
+        dict_layout.addWidget(self.seq_save_btn, alignment=Qt.AlignRight)
+
+        self.tsv_tabs.addTab(dict_tab, "Sequence dictionary")
+        self.loadSequenceDictionary()
         self.left_split.addWidget(self.tsv_group)
 
         self.filter_group = QGroupBox("Filter")
@@ -1001,6 +1041,7 @@ class BIDSManager(QMainWindow):
         btn_row.addStretch()
         btn_row.addWidget(self.run_button)
         btn_row.addWidget(self.run_stop_button)
+        btn_row.addStretch()
 
         # Combine preview panel and run button so the splitter keeps the
         # original layout but allows resizing versus the log output.
@@ -2006,6 +2047,85 @@ class BIDSManager(QMainWindow):
             seq = self.mapping_table.item(r, 6).text().lower()
             if any(p in seq for p in patterns):
                 self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
+
+    # ----- sequence dictionary helpers -----
+    def _seq_add(self) -> None:
+        mod = self.seq_mod_edit.text().strip()
+        pat = self.seq_pat_edit.text().strip()
+        if not mod or not pat:
+            return
+        r = self.seq_table.rowCount()
+        self.seq_table.insertRow(r)
+        self.seq_table.setItem(r, 0, QTableWidgetItem(mod))
+        self.seq_table.setItem(r, 1, QTableWidgetItem(pat))
+        self.seq_mod_edit.clear()
+        self.seq_pat_edit.clear()
+
+    def loadSequenceDictionary(self) -> None:
+        if not hasattr(self, "seq_table"):
+            return
+        self.seq_table.setRowCount(0)
+        entries = []
+        if self.seq_dict_file.exists():
+            try:
+                df = pd.read_csv(self.seq_dict_file, sep="\t", keep_default_na=False)
+                for _, row in df.iterrows():
+                    pat = str(row.get("pattern", "")).strip()
+                    mod = str(row.get("modality", "")).strip()
+                    if pat and mod:
+                        entries.append((mod, pat))
+            except Exception:
+                pass
+        if not entries:
+            from . import dicom_inventory
+
+            for mod, pats in dicom_inventory.BIDS_PATTERNS.items():
+                for pat in pats:
+                    entries.append((mod, pat))
+        for mod, pat in entries:
+            r = self.seq_table.rowCount()
+            self.seq_table.insertRow(r)
+            self.seq_table.setItem(r, 0, QTableWidgetItem(mod))
+            self.seq_table.setItem(r, 1, QTableWidgetItem(pat))
+        self.applySequenceDictionary()
+
+    def saveSequenceDictionary(self) -> None:
+        self.seq_dict_file.parent.mkdir(exist_ok=True, parents=True)
+        rows = []
+        for r in range(self.seq_table.rowCount()):
+            mod = self.seq_table.item(r, 0).text().strip()
+            pat = self.seq_table.item(r, 1).text().strip()
+            if mod and pat:
+                rows.append({"modality": mod, "pattern": pat})
+        pd.DataFrame(rows).to_csv(self.seq_dict_file, sep="\t", index=False)
+        QMessageBox.information(self, "Saved", f"Updated {self.seq_dict_file}")
+        self.applySequenceDictionary()
+
+    def applySequenceDictionary(self) -> None:
+        if not hasattr(self, "seq_table"):
+            return
+        from . import dicom_inventory
+
+        patterns = defaultdict(list)
+        for r in range(self.seq_table.rowCount()):
+            mod = self.seq_table.item(r, 0).text().strip()
+            pat = self.seq_table.item(r, 1).text().strip().lower()
+            if mod and pat:
+                patterns[mod].append(pat)
+        dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+        if self.mapping_table.rowCount() > 0:
+            for i in range(self.mapping_table.rowCount()):
+                seq = self.mapping_table.item(i, 6).text()
+                mod = dicom_inventory.guess_modality(seq)
+                modb = dicom_inventory.modality_to_container(mod)
+                self.mapping_table.item(i, 11).setText(mod)
+                self.mapping_table.item(i, 12).setText(modb)
+                if i < len(self.row_info):
+                    self.row_info[i]['mod'] = mod
+                    self.row_info[i]['modb'] = modb
+            self._rebuild_lookup_maps()
+            QTimer.singleShot(0, self.populateModalitiesTree)
+            QTimer.singleShot(0, self.populateSpecificTree)
 
     def _rebuild_lookup_maps(self):
         """Recompute internal lookup tables for tree interactions."""

@@ -45,6 +45,10 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
+# Directory used to store persistent user preferences
+PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
+SEQ_DICT_FILE = PREF_DIR / "sequence_dictionary.tsv"
+
 # Acceptable DICOM file extensions (lower case)
 DICOM_EXTS = (".dcm", ".ima")
 
@@ -91,6 +95,28 @@ BIDS_PATTERNS = {
     # misc (kept for completeness)
     "physio" : ("physiolog", "physio", "pulse", "resp"),
 }
+
+
+def load_sequence_dictionary() -> None:
+    """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
+    global BIDS_PATTERNS
+    if not SEQ_DICT_FILE.exists():
+        return
+    try:
+        df = pd.read_csv(SEQ_DICT_FILE, sep="\t", keep_default_na=False)
+    except Exception:
+        return
+    patterns: defaultdict[str, list[str]] = defaultdict(list)
+    for _, row in df.iterrows():
+        mod = str(row.get("modality", "")).strip()
+        pat = str(row.get("pattern", "")).strip().lower()
+        if mod and pat:
+            patterns[mod].append(pat)
+    if patterns:
+        BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+
+
+load_sequence_dictionary()
 
 def guess_modality(series: str) -> str:
     """Return first matching fine label; otherwise 'unknown'."""
