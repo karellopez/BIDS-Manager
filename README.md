@@ -28,7 +28,8 @@ You can install BIDS Manager in two ways:
 ### 1. One-click installers <sup>(recommended)</sup>
 
 1. **Download** the ZIP package:  
-   **[📦 One-click Installers](https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/blob/main/Installers/Installers.zip)**
+   **[📦 One-click Installers](https://github.com/ANCPLabOldenburg/BIDS-Manager/raw/main/Installers/Installers.zip
+)**
 2. **Extract** the ZIP file and run the script for your operating system:
 
 | OS               | Script                        | How to Run                         | Duration |
