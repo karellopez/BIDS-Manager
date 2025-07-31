@@ -1,10 +1,60 @@
+
 # BIDS Manager
 
-This repository provides a PyQt-based GUI and helper scripts to convert DICOM folders into BIDS datasets and edit their metadata.
+**BIDS Manager** is a **PyQt-based** GUI that converts **DICOM** folders into **BIDS**-compliant datasets and allows easy metadata editing.
+
+---
+
+## Requirements
+
+| Software  | Minimum Version | Notes                                                   |
+|----------|-----------------|---------------------------------------------------------|
+| **Python** | 3.10            | Installed automatically if you use the one-click installers |
+| **Git**    | —               | Must be installed manually (see below)                 |
+
+### Installing Git
+
+| Platform          | Command / Action                                   |
+|-------------------|----------------------------------------------------|
+| **Windows**       | Download and run the installer: <https://git-scm.com/download/win> |
+| **Ubuntu/Debian** | `sudo apt-get update && sudo apt-get install git`  |
+
+---
 
 ## Installation
 
+You can install BIDS Manager in two ways:
+
+### 1. One-click installers <sup>(recommended)</sup>
+
+1. **Download** the ZIP package:  
+   **[📦 One-click Installers](https://github.com/ANCPLabOldenburg/BIDS-Manager/blob/main/Installers/Installers.zip)**
+2. **Extract** the ZIP file and run the script for your operating system:
+
+| OS               | Script                        | How to Run                         | Duration |
+|------------------|-------------------------------|------------------------------------|---------|
+| **Windows 10/11**| `install_bids_manager.bat`     | Double-click                        | ≈ 5 min |
+| **Linux**        | `install_bids_manager.sh`      | `./install_bids_manager.sh`         | ≈ 5 min |
+
+3. After the installation finishes, you will find two shortcuts on your desktop:
+
+| OS          | Launch                    | Uninstall                      |
+|-------------|---------------------------|--------------------------------|
+| **Windows** | `run_bidsmanager.bat`      | `uninstall_bidsmanager.bat`    |
+| **Linux**   | **BIDS Manager** (launcher)| `uninstall_bidsmanager.sh`     |
+
+---
+
+### 2. Install in a virtual environment (advanced)
+
 ```bash
+# 1. Create a virtual environment
+python3 -m venv <env_name>
+
+# 2. Activate it
+source <env_name>/bin/activate          # On Windows: <env_name>\Scripts\activate
+
+# 3. Install BIDS Manager from GitHub
 pip install git+https://github.com/ANCPLabOldenburg/BIDS-Manager.git
 ```
 
