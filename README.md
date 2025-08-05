@@ -10,14 +10,6 @@
 | Software  | Minimum Version | Notes                                                   |
 |----------|-----------------|---------------------------------------------------------|
 | **Python** | 3.10            | Installed automatically if you use the one-click installers |
-| **Git**    | —               | Must be installed manually (see below)                 |
-
-### Installing Git
-
-| Platform          | Command / Action                                   |
-|-------------------|----------------------------------------------------|
-| **Windows**       | Download and run the installer: <https://git-scm.com/download/win> |
-| **Ubuntu/Debian** | `sudo apt-get update && sudo apt-get install git`  |
 
 ---
 
@@ -56,7 +48,7 @@ python3 -m venv <env_name>
 source <env_name>/bin/activate          # On Windows: <env_name>\Scripts\activate
 
 # 3. Install BIDS Manager from GitHub
-pip install git+https://github.com/ANCPLabOldenburg/BIDS-Manager.git
+pip install bids-manager
 ```
 
 The package declares all dependencies including `heudiconv`, so installation
