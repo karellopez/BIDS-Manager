@@ -50,8 +50,32 @@ PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
 SEQ_DICT_FILE = PREF_DIR / "sequence_dictionary.tsv"
 
 # Acceptable DICOM file extensions (lower case)
+# Siemens scanners sometimes omit extensions altogether, so we also
+# perform a light-weight header check for files with no suffix.
 DICOM_EXTS = (".dcm", ".ima")
 
+
+def is_dicom_file(path: str) -> bool:
+    """Return ``True`` if *path* looks like a DICOM file.
+
+    Files with a known DICOM extension are accepted immediately.  For
+    extensionless files we peek at the standard ``DICM`` marker located
+    128 bytes into the file.  Any I/O error or missing marker results in
+    ``False``.
+    """
+
+    name = Path(path).name.lower()
+    if name.endswith(DICOM_EXTS):
+        return True
+    # If the filename contains a dot it has some other extension – skip it
+    if "." in name:
+        return False
+    try:
+        with open(path, "rb") as f:
+            f.seek(128)
+            return f.read(4) == b"DICM"
+    except Exception:
+        return False
 
 # ----------------------------------------------------------------------
 # 1.  Patterns: SeriesDescription → fine-grained modality label
@@ -228,8 +252,9 @@ def scan_dicoms_long(
     file_list = []
     for root, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if fname.lower().endswith(DICOM_EXTS):
-                file_list.append(os.path.join(root, fname))
+            fpath = os.path.join(root, fname)
+            if is_dicom_file(fpath):
+                file_list.append(fpath)
 
     def _read_one(fpath: str):
         try:
