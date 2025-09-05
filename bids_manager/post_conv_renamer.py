@@ -27,6 +27,12 @@ import json
 import re
 import sys
 
+# Validate generated filenames against the BIDS schema
+try:
+    from .bids_schema import is_valid_bids_name
+except Exception:  # pragma: no cover - fallback when running as script
+    from bids_schema import is_valid_bids_name  # type: ignore
+
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
 # -----------------------------------------------------------------------------
@@ -68,8 +74,11 @@ def process_fmap_dir(fmap_dir: Path) -> None:
                 # remove trailing _fmap before extension
                 new_name = FMAP_SUFFIX_RE.sub('', interim)
                 new_name = _move_rep_suffix(new_name)
-                file.rename(fmap_dir / new_name)
-                print(f"Renamed: {name} → {new_name}")
+                if is_valid_bids_name(new_name):
+                    file.rename(fmap_dir / new_name)
+                    print(f"Renamed: {name} → {new_name}")
+                else:
+                    print(f"Skipping invalid BIDS name: {new_name}")
                 break
         else:
             # apply phase rule for plain fmap (no echo)
@@ -77,8 +86,11 @@ def process_fmap_dir(fmap_dir: Path) -> None:
                 # replace _fmap with _phasediff
                 new_name = name.replace('_fmap', '_phasediff')
                 new_name = _move_rep_suffix(new_name)
-                file.rename(fmap_dir / new_name)
-                print(f"Renamed: {name} → {new_name}")
+                if is_valid_bids_name(new_name):
+                    file.rename(fmap_dir / new_name)
+                    print(f"Renamed: {name} → {new_name}")
+                else:
+                    print(f"Skipping invalid BIDS name: {new_name}")
 
 # -----------------------------------------------------------------------------
 # Main processing function
@@ -175,11 +187,15 @@ def _rename_in_scans(tsv: Path, bids_root: Path) -> None:
                 new_name = _move_rep_suffix(new_name)
                 break
         else:
-            if new_name.lower().endswith((".nii", ".nii.gz", ".json")) and "_fmap" in new_name and not any(rep in new_name.lower() for rep in ["magnitude1", "magnitude2"]):
+            if (
+                new_name.lower().endswith((".nii", ".nii.gz", ".json"))
+                and "_fmap" in new_name
+                and not any(rep in new_name.lower() for rep in ["magnitude1", "magnitude2"])
+            ):
                 new_name = new_name.replace("_fmap", "_phasediff")
                 new_name = _move_rep_suffix(new_name)
 
-        if new_name != path.name:
+        if new_name != path.name and is_valid_bids_name(new_name):
             candidate = tsv.parent / path.parent / new_name
             if candidate.exists():
                 df.at[idx, "filename"] = (path.parent / new_name).as_posix()
