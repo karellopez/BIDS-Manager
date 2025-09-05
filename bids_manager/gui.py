@@ -9,6 +9,11 @@ import pandas as pd
 import numpy as np
 import threading
 import time
+import pydicom  # used to inspect DICOM headers when checking for mixed sessions
+try:  # prefer relative import but fall back to direct when running as a script
+    from .run_heudiconv_from_heuristic import is_dicom_file  # reuse existing helper
+except Exception:  # pragma: no cover - packaging edge cases
+    from run_heudiconv_from_heuristic import is_dicom_file  # type: ignore
 try:
     import nibabel as nib
 except ModuleNotFoundError as exc:
@@ -1343,6 +1348,69 @@ class BIDSManager(QMainWindow):
         ]
         self.inventory_process.start(sys.executable, args)
 
+    # ------------------------------------------------------------------
+    # Helpers for detecting and reorganising multiple sessions in a
+    # single folder
+    # ------------------------------------------------------------------
+    def _find_conflicting_studies(self, root_dir: str) -> dict:
+        """Return folders containing more than one StudyInstanceUID.
+
+        Parameters
+        ----------
+        root_dir : str
+            Top level directory that may contain mixed-session folders.
+
+        Returns
+        -------
+        dict
+            Mapping of folder path → {study_uid: [file1, file2, ...]} for
+            folders that contain DICOMs from multiple sessions.
+        """
+
+        conflicts: dict[str, dict[str, list[str]]] = {}
+        for folder, _dirs, files in os.walk(root_dir):
+            study_map: dict[str, list[str]] = {}
+            for fname in files:
+                fpath = os.path.join(folder, fname)
+                if not is_dicom_file(fpath):
+                    continue
+                try:
+                    ds = pydicom.dcmread(
+                        fpath, stop_before_pixels=True, specific_tags=["StudyInstanceUID"]
+                    )
+                    uid = str(getattr(ds, "StudyInstanceUID", "")).strip()
+                except Exception:
+                    continue
+                study_map.setdefault(uid, []).append(fpath)
+            if len(study_map) > 1:
+                conflicts[folder] = study_map
+        return conflicts
+
+    def _reorganize_conflicting_sessions(self, conflicts: dict) -> None:
+        """Move additional session files into separate subfolders.
+
+        Parameters
+        ----------
+        conflicts : dict
+            Output of :meth:`_find_conflicting_studies`.
+        """
+
+        for folder, uid_map in conflicts.items():
+            uids = list(uid_map.keys())
+            # keep first UID in place, move others
+            for idx, uid in enumerate(uids[1:], start=1):
+                new_dir = os.path.join(folder, f"session{idx}")
+                suffix = idx
+                while os.path.exists(new_dir):
+                    suffix += 1
+                    new_dir = os.path.join(folder, f"session{suffix}")
+                os.makedirs(new_dir, exist_ok=True)
+                for fpath in uid_map[uid]:
+                    shutil.move(fpath, os.path.join(new_dir, os.path.basename(fpath)))
+                self.log_text.append(
+                    f"Moved {len(uid_map[uid])} files with StudyInstanceUID {uid} to {new_dir}."
+                )
+
     def _inventoryFinished(self):
         ok = self.inventory_process.exitCode() == 0 if self.inventory_process else False
         self.inventory_process = None
@@ -1350,6 +1418,25 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(False)
         self._stop_spinner()
         if ok:
+            conflicts = self._find_conflicting_studies(self.dicom_dir)
+            if conflicts:
+                folders = "\n".join(conflicts.keys())
+                msg = (
+                    "Multiple sessions were detected in the following folders:\n"
+                    f"{folders}\n\n"
+                    "Would you like to move secondary sessions into their own subfolders?"
+                )
+                resp = QMessageBox.question(
+                    self,
+                    "Multiple sessions detected",
+                    msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if resp == QMessageBox.Yes:
+                    self._reorganize_conflicting_sessions(conflicts)
+                    # re-run inventory after reorganisation
+                    self.runInventory()
+                    return
             self.log_text.append("TSV generation finished.")
             self.loadMappingTable()
         else:
