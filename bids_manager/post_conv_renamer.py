@@ -72,7 +72,7 @@ def apply_custom_renames(bids_root: Path, mapping_file: Path) -> dict[str, str]:
     bids_root : Path
         Root of the BIDS dataset.
     mapping_file : Path
-        TSV file with ``<old relative path>\t<new relative path>`` per line.
+        TSV file with ``<relative path>\t<new name>`` per line.
 
     Returns
     -------
@@ -91,19 +91,16 @@ def apply_custom_renames(bids_root: Path, mapping_file: Path) -> dict[str, str]:
             if len(parts) == 2:
                 entries[parts[0]] = parts[1]
 
-    for rel, new_rel in entries.items():
+    for rel, new_name in entries.items():
         src = bids_root / rel
         if not src.exists():
             continue
-        dst = bids_root / new_rel
+        dst = src.with_name(new_name)
         try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
             side_old = _sidecar_path(src)
             src.rename(dst)
             if side_old.exists():
-                side_new = _sidecar_path(dst)
-                side_new.parent.mkdir(parents=True, exist_ok=True)
-                side_old.rename(side_new)
+                side_old.rename(_sidecar_path(dst))
             rename_map[rel] = str(dst.relative_to(bids_root))
             print(f"Renamed: {rel} → {rename_map[rel]}")
         except Exception as exc:  # pragma: no cover - file system issues
@@ -147,7 +144,7 @@ def post_fmap_rename(bids_root: Path, map_file: Path | None = None) -> None:
 
     Besides the original fieldmap-specific renaming, this function can also
     apply arbitrary file renames provided via ``map_file``.  The mapping file
-    should list ``<old relative path>\t<new relative path>`` pairs.
+    should list ``<relative path>\t<new name>`` pairs.
     """
     if not bids_root.is_dir():
         print(f"Error: '{bids_root}' is not a directory", file=sys.stderr)
