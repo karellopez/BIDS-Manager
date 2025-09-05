@@ -27,10 +27,6 @@ import json
 import re
 import sys
 
-# Internal helper to map sequence descriptions to BIDS suffixes
-from .schema_renamer import bidsify_sequence
-from .scans_utils import update_scans_with_map
-
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
 # -----------------------------------------------------------------------------
@@ -103,13 +99,9 @@ def post_fmap_rename(bids_root: Path) -> None:
     # downstream tools know which functional runs they apply to.
     add_intended_for(bids_root)
 
-    # Refresh filenames recorded in ``*_scans.tsv`` to match fieldmap renames
+    # Finally, refresh filenames recorded in ``*_scans.tsv`` to match the new
+    # fieldmap file names.
     update_scans_tsv(bids_root)
-
-    # Perform generic renaming based on the BIDS schema for any remaining files
-    rename_map = rename_to_schema(bids_root)
-    if rename_map:
-        update_scans_with_map(bids_root, rename_map)
 
 
 def _update_intended_for(root: Path, bids_root: Path) -> None:
@@ -208,42 +200,6 @@ def update_scans_tsv(bids_root: Path) -> None:
         for root in roots:
             for tsv in root.glob("*_scans.tsv"):
                 _rename_in_scans(tsv, bids_root)
-
-
-def rename_to_schema(bids_root: Path) -> dict[str, str]:
-    """Rename files using BIDS schema knowledge.
-
-    This scans through all NIfTI images and their common sidecar files and
-    attempts to replace the free-form trailing part of the filename with the
-    closest BIDS suffix.  A mapping of original → new relative paths is
-    returned so callers can update ``*_scans.tsv`` files accordingly.
-    """
-    rename_map: dict[str, str] = {}
-    for nii in bids_root.rglob("*.nii*"):
-        # Remove extension (handles .nii and .nii.gz)
-        stem = re.sub(r"\.nii(\.gz)?$", "", nii.name, flags=re.I)
-        if "_" not in stem:
-            continue
-        base, suffix = stem.rsplit("_", 1)
-        new_suffix = bidsify_sequence(suffix)
-        if new_suffix == suffix:
-            continue
-        new_name = f"{base}_{new_suffix}{''.join(nii.suffixes)}"
-        new_path = nii.with_name(new_name)
-        nii.rename(new_path)
-        rename_map[(nii.relative_to(bids_root)).as_posix()] = (
-            new_path.relative_to(bids_root).as_posix()
-        )
-        # Rename common sidecars
-        for ext in [".json", ".bval", ".bvec"]:
-            old_side = nii.with_suffix("").with_suffix(ext)
-            if old_side.exists():
-                new_side = new_path.with_suffix("").with_suffix(ext)
-                old_side.rename(new_side)
-                rename_map[(old_side.relative_to(bids_root)).as_posix()] = (
-                    new_side.relative_to(bids_root).as_posix()
-                )
-    return rename_map
 
 # -----------------------------------------------------------------------------
 # Run immediately when executed
