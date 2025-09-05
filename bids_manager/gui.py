@@ -1106,7 +1106,9 @@ class BIDSManager(QMainWindow):
         if not study or not rel:
             return
         new_name = item.text(1).strip()
-        self.rename_mappings.setdefault(study, {})[rel] = new_name
+        current = self.rename_mappings.setdefault(study, {}).get(rel, "")
+        dest_path = Path(current) if current else Path(rel)
+        self.rename_mappings[study][rel] = dest_path.with_name(new_name).as_posix()
 
     def generatePreview(self):
         logging.info("generatePreview → Building preview tree …")
@@ -1155,25 +1157,40 @@ class BIDSManager(QMainWindow):
                     rel_parts = full[1:] if multi_study else full
                     rel = "/".join([p for p in rel_parts if p])
                     item = QTreeWidgetItem(["/".join(full), fname])
-                    item.setFlags(item.flags() | Qt.ItemIsEditable)
                     item.setData(0, Qt.UserRole, study)
                     item.setData(0, Qt.UserRole + 1, rel)
                     self.preview_text.addTopLevelItem(item)
-                    self.rename_mappings.setdefault(study, {})[rel] = fname
                     self._add_preview_path(full)
             else:
                 fname = f"{base}.nii.gz"
-                full = path_parts + [fname]
-                rel_parts = full[1:] if multi_study else full
+                old_full = path_parts + [fname]
+                rel_parts = old_full[1:] if multi_study else old_full
                 rel = "/".join([p for p in rel_parts if p])
                 suggested = guess_bids_name(subj, ses, seq, info.get('rep'))
-                item = QTreeWidgetItem(["/".join(full), suggested])
+
+                # Destination path: by default matches the source directory, but
+                # diffusion derivatives (identified by ``desc-`` in the suggested
+                # name) are moved under ``derivatives/dti``.
+                dest_parts = path_parts.copy()
+                if modb == "dwi" and "_desc-" in suggested:
+                    dest_parts = []
+                    if multi_study:
+                        dest_parts.append(study)
+                    dest_parts.extend(["derivatives", "dti", subj])
+                    if ses:
+                        dest_parts.append(ses)
+                    dest_parts.append("dwi")
+                dest_full = dest_parts + [suggested]
+                dest_rel_parts = dest_full[1:] if multi_study else dest_full
+                dest_rel = "/".join([p for p in dest_rel_parts if p])
+
+                item = QTreeWidgetItem(["/".join(old_full), suggested])
                 item.setFlags(item.flags() | Qt.ItemIsEditable)
                 item.setData(0, Qt.UserRole, study)
                 item.setData(0, Qt.UserRole + 1, rel)
                 self.preview_text.addTopLevelItem(item)
-                self.rename_mappings.setdefault(study, {})[rel] = suggested
-                self._add_preview_path(full)
+                self.rename_mappings.setdefault(study, {})[rel] = dest_rel
+                self._add_preview_path(dest_full)
 
         self.preview_text.blockSignals(False)
         self.preview_text.expandAll()
