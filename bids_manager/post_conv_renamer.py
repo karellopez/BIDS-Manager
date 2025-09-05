@@ -27,6 +27,11 @@ import json
 import re
 import sys
 
+try:  # allow standalone execution
+    from .scans_utils import update_scans_with_map
+except Exception:  # pragma: no cover - script mode
+    from scans_utils import update_scans_with_map  # type: ignore
+
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
 # -----------------------------------------------------------------------------
@@ -50,6 +55,57 @@ def _move_rep_suffix(name: str) -> str:
     name = re.sub(r"(_rep-\d+)(_magnitude[12])", r"\2\1", name)
     name = re.sub(r"(_rep-\d+)(_phasediff)", r"\2\1", name)
     return name
+
+
+def _sidecar_path(img: Path) -> Path:
+    """Return the JSON sidecar path for a given image file."""
+    if img.suffixes[-2:] == [".nii", ".gz"]:
+        return img.with_suffix("").with_suffix(".json")
+    return img.with_suffix(".json")
+
+
+def apply_custom_renames(bids_root: Path, mapping_file: Path) -> dict[str, str]:
+    """Rename files based on a mapping TSV file.
+
+    Parameters
+    ----------
+    bids_root : Path
+        Root of the BIDS dataset.
+    mapping_file : Path
+        TSV file with ``<relative path>\t<new name>`` per line.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping of old relative paths to new relative paths used to update
+        ``scans.tsv`` files.
+    """
+    rename_map: dict[str, str] = {}
+    if not mapping_file or not mapping_file.exists():
+        return rename_map
+
+    entries: dict[str, str] = {}
+    with open(mapping_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip().split("\t")
+            if len(parts) == 2:
+                entries[parts[0]] = parts[1]
+
+    for rel, new_name in entries.items():
+        src = bids_root / rel
+        if not src.exists():
+            continue
+        dst = src.with_name(new_name)
+        try:
+            side_old = _sidecar_path(src)
+            src.rename(dst)
+            if side_old.exists():
+                side_old.rename(_sidecar_path(dst))
+            rename_map[rel] = str(dst.relative_to(bids_root))
+            print(f"Renamed: {rel} → {rename_map[rel]}")
+        except Exception as exc:  # pragma: no cover - file system issues
+            print(f"Failed to rename {rel}: {exc}")
+    return rename_map
 
 # -----------------------------------------------------------------------------
 # Process a single fmap directory
@@ -83,15 +139,22 @@ def process_fmap_dir(fmap_dir: Path) -> None:
 # -----------------------------------------------------------------------------
 # Main processing function
 # -----------------------------------------------------------------------------
-def post_fmap_rename(bids_root: Path) -> None:
-    """Walk ``bids_root`` and apply :func:`process_fmap_dir` to each ``fmap`` folder."""
+def post_fmap_rename(bids_root: Path, map_file: Path | None = None) -> None:
+    """Apply post-conversion renaming steps to ``bids_root``.
+
+    Besides the original fieldmap-specific renaming, this function can also
+    apply arbitrary file renames provided via ``map_file``.  The mapping file
+    should list ``<relative path>\t<new name>`` pairs.
+    """
     if not bids_root.is_dir():
         print(f"Error: '{bids_root}' is not a directory", file=sys.stderr)
         return
+
+    rename_map = {}
+    if map_file:
+        rename_map = apply_custom_renames(bids_root, map_file)
+
     fmap_dirs = list(bids_root.rglob('fmap'))
-    if not fmap_dirs:
-        print(f"No 'fmap' directories found under {bids_root}")
-        return
     for fmap_dir in fmap_dirs:
         process_fmap_dir(fmap_dir)
 
@@ -99,9 +162,9 @@ def post_fmap_rename(bids_root: Path) -> None:
     # downstream tools know which functional runs they apply to.
     add_intended_for(bids_root)
 
-    # Finally, refresh filenames recorded in ``*_scans.tsv`` to match the new
-    # fieldmap file names.
+    # Update scans.tsv files with new fieldmap names and any custom renames
     update_scans_tsv(bids_root)
+    update_scans_with_map(bids_root, rename_map)
 
 
 def _update_intended_for(root: Path, bids_root: Path) -> None:
@@ -209,13 +272,15 @@ def main() -> None:
 
     import argparse
 
-    parser = argparse.ArgumentParser(description="Rename BIDS fieldmap files")
+    parser = argparse.ArgumentParser(description="Rename files in a BIDS dataset")
     parser.add_argument('bids_root', help='Path to BIDS dataset root')
+    parser.add_argument('--map', help='TSV mapping of old paths to new names')
     args = parser.parse_args()
 
     bids_root = Path(args.bids_root)
-    print(f"Starting fieldmap rename in: {bids_root}")
-    post_fmap_rename(bids_root)
+    map_file = Path(args.map) if args.map else None
+    print(f"Starting post-conversion rename in: {bids_root}")
+    post_fmap_rename(bids_root, map_file)
     print("Done.")
 
 

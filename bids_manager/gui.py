@@ -78,6 +78,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 import logging  # debug logging
 import signal
+from .name_guesser import guess_bids_name
 import random
 import string
 try:
@@ -309,6 +310,10 @@ class BIDSManager(QMainWindow):
         self.conv_process = None       # QProcess for the conversion pipeline
         self.conv_stage = 0            # Tracks which step of the pipeline ran
         self.heurs_to_rename = []      # List of heuristics pending rename
+
+        # Mapping of original preview paths to user-edited names.
+        # Structure: {study: {relative_path: new_name}}
+        self.rename_mappings = {}
 
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
@@ -996,7 +1001,10 @@ class BIDSManager(QMainWindow):
         text_tab = QWidget()
         text_lay = QVBoxLayout(text_tab)
         self.preview_text = QTreeWidget()
-        self.preview_text.setHeaderLabels(["BIDS Path"])
+        # Two columns: current relative path and suggested/new name
+        self.preview_text.setColumnCount(2)
+        self.preview_text.setHeaderLabels(["Current Path", "Suggested Name"])
+        self.preview_text.itemChanged.connect(self._previewNameEdited)
         text_lay.addWidget(self.preview_text)
         self.preview_tabs.addTab(text_tab, "Text")
 
@@ -1089,11 +1097,24 @@ class BIDSManager(QMainWindow):
                 parent.addChild(match)
             parent = match
 
+    def _previewNameEdited(self, item, column):
+        """Record user edits to suggested preview names."""
+        if column != 1:  # Only care about edits to the second column
+            return
+        study = item.data(0, Qt.UserRole)
+        rel = item.data(0, Qt.UserRole + 1)
+        if not study or not rel:
+            return
+        new_name = item.text(1).strip()
+        self.rename_mappings.setdefault(study, {})[rel] = new_name
+
     def generatePreview(self):
         logging.info("generatePreview → Building preview tree …")
         """Populate preview tabs based on checked sequences."""
+        self.preview_text.blockSignals(True)
         self.preview_text.clear()
         self.preview_tree.clear()
+        self.rename_mappings = {}
         multi_study = len(self.study_set) > 1
 
         selected = []
@@ -1126,17 +1147,35 @@ class BIDSManager(QMainWindow):
             base = _dedup_parts(*base_parts)
 
             if modb == "fmap":
+                # Fieldmaps follow a special naming scheme; we simply mirror
+                # the generated filenames but still allow user edits.
                 for suffix in ["magnitude1", "magnitude2", "phasediff"]:
                     fname = f"{base}_{suffix}.nii.gz"
                     full = path_parts + [fname]
-                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
+                    rel_parts = full[1:] if multi_study else full
+                    rel = "/".join([p for p in rel_parts if p])
+                    item = QTreeWidgetItem(["/".join(full), fname])
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    item.setData(0, Qt.UserRole, study)
+                    item.setData(0, Qt.UserRole + 1, rel)
+                    self.preview_text.addTopLevelItem(item)
+                    self.rename_mappings.setdefault(study, {})[rel] = fname
                     self._add_preview_path(full)
             else:
                 fname = f"{base}.nii.gz"
                 full = path_parts + [fname]
-                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
+                rel_parts = full[1:] if multi_study else full
+                rel = "/".join([p for p in rel_parts if p])
+                suggested = guess_bids_name(subj, ses, seq, info.get('rep'))
+                item = QTreeWidgetItem(["/".join(full), suggested])
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                item.setData(0, Qt.UserRole, study)
+                item.setData(0, Qt.UserRole + 1, rel)
+                self.preview_text.addTopLevelItem(item)
+                self.rename_mappings.setdefault(study, {})[rel] = suggested
                 self._add_preview_path(full)
 
+        self.preview_text.blockSignals(False)
         self.preview_text.expandAll()
         self.preview_tree.expandAll()
 
@@ -2569,6 +2608,18 @@ class BIDSManager(QMainWindow):
         bids_path = os.path.join(self.bids_out_dir, dataset)
         self.log_text.append(f"Renaming fieldmaps for {dataset}…")
         args = [self.rename_script, bids_path]
+        mapping = self.rename_mappings.get(dataset)
+        if mapping:
+            map_dir = Path(bids_path) / ".bids_manager"
+            try:
+                map_dir.mkdir(exist_ok=True, parents=True)
+                map_file = map_dir / "rename_map.tsv"
+                with open(map_file, "w", encoding="utf-8") as f:
+                    for rel, new in mapping.items():
+                        f.write(f"{rel}\t{new}\n")
+                args.extend(["--map", str(map_file)])
+            except Exception:
+                pass
         self.conv_process.start(sys.executable, args)
 
     def _store_heuristics(self):
