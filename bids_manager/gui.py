@@ -1387,28 +1387,41 @@ class BIDSManager(QMainWindow):
         return conflicts
 
     def _reorganize_conflicting_sessions(self, conflicts: dict) -> None:
-        """Move additional session files into separate subfolders.
+        """Move files for **all** sessions into separate subfolders.
+
+        This method ensures that each unique ``StudyInstanceUID`` found within a
+        folder is placed in its own subdirectory.  Previously only the
+        additional sessions were moved, leaving the first session's files in the
+        root folder, which could lead to HeuDiConv processing multiple sessions
+        together and crashing.  By relocating every session we guarantee a clean
+        one-session-per-folder layout.
 
         Parameters
         ----------
         conflicts : dict
-            Output of :meth:`_find_conflicting_studies`.
+            Output of :meth:`_find_conflicting_studies` mapping folder paths to
+            ``StudyInstanceUID`` → list of files.
         """
 
         for folder, uid_map in conflicts.items():
-            uids = list(uid_map.keys())
-            # keep first UID in place, move others
-            for idx, uid in enumerate(uids[1:], start=1):
+            # Iterate over each StudyInstanceUID and move its files into a
+            # unique ``sessionX`` directory.
+            for idx, (uid, files) in enumerate(uid_map.items(), start=1):
+                # Determine a unique destination directory.  We increment the
+                # numeric suffix if a folder with the same name already exists.
                 new_dir = os.path.join(folder, f"session{idx}")
                 suffix = idx
                 while os.path.exists(new_dir):
                     suffix += 1
                     new_dir = os.path.join(folder, f"session{suffix}")
                 os.makedirs(new_dir, exist_ok=True)
-                for fpath in uid_map[uid]:
+
+                # Move each file belonging to the current UID into ``new_dir``.
+                for fpath in files:
                     shutil.move(fpath, os.path.join(new_dir, os.path.basename(fpath)))
+
                 self.log_text.append(
-                    f"Moved {len(uid_map[uid])} files with StudyInstanceUID {uid} to {new_dir}."
+                    f"Moved {len(files)} files with StudyInstanceUID {uid} to {new_dir}."
                 )
 
     def _inventoryFinished(self):
@@ -1424,7 +1437,7 @@ class BIDSManager(QMainWindow):
                 msg = (
                     "Multiple sessions were detected in the following folders:\n"
                     f"{folders}\n\n"
-                    "Would you like to move secondary sessions into their own subfolders?"
+                    "Would you like to move each session into its own subfolder?"
                 )
                 resp = QMessageBox.question(
                     self,
