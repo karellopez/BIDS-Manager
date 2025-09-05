@@ -12,10 +12,17 @@ from pathlib import Path
 import re
 from typing import Dict
 
-try:
+# ``PyYAML`` is used to parse the BIDS schema at runtime.  Without it the
+# suffix/entity map would be empty and filename suggestions would be
+# essentially meaningless.  Importing it lazily gives a clear error if the
+# dependency is missing instead of silently producing wrong names.
+try:  # pragma: no cover - import guard exercised only when dependency missing
     import yaml  # type: ignore
-except Exception:  # pragma: no cover - fallback if PyYAML missing
-    yaml = None  # type: ignore
+except ModuleNotFoundError as exc:  # pragma: no cover - handled gracefully
+    raise ModuleNotFoundError(
+        "PyYAML is required for filename inference. Please install it to "
+        "enable BIDS name suggestions."
+    ) from exc
 
 # ---------------------------------------------------------------------------
 # Load suffix definitions from the BIDS schema
@@ -69,22 +76,27 @@ def _extract_entities(seq: str, datatype: str, suffix: str) -> Dict[str, str]:
         m = pattern.search(seq)
         if m:
             entities[name] = m.group("val")
-    # For functional data, if no explicit ``task`` is present, guess from
-    # neighbouring tokens around the suffix. This heuristic aims to provide
-    # a reasonable default.
+    # For functional data, if no explicit ``task`` is present, derive it from
+    # tokens that appear after the suffix.  The algorithm walks these tokens in
+    # reverse order (nearest to the end first) and picks the first "human"
+    # looking token—i.e., one that is not an entity tag and does not contain
+    # digits which often represent acquisition parameters.
     if datatype == "func" and "task" not in entities:
         tokens = seq.split("_")
         try:
             idx = tokens.index(suffix)
-        except ValueError:
+        except ValueError:  # suffix not found; give up
             idx = -1
         candidates = tokens[idx + 1 :] if idx >= 0 else []
-        for tok in candidates:
+        for tok in reversed(candidates):
             if not tok or tok in SUFFIX_MAP:
                 continue
-            if not any(tok.startswith(f"{e}-") for e in ENTITY_REGEXES):
-                entities["task"] = tok
-                break
+            if any(tok.startswith(f"{e}-") for e in ENTITY_REGEXES):
+                continue
+            if any(ch.isdigit() for ch in tok):
+                continue
+            entities["task"] = tok
+            break
     return entities
 
 
@@ -103,23 +115,46 @@ def guess_bids_name(subj: str, ses: str, seq: str, run: str | None = None) -> st
     tokens = seq.split("_")
     suffix = ""
     datatype = ""
-    # Identify the first token that matches a known BIDS suffix
+    # Identify the first token that matches a known BIDS suffix.  Matching is
+    # case-insensitive and allows partial matches so that a sequence token like
+    # "t1" will correctly map to the ``T1w`` suffix defined in the schema.
     for tok in tokens:
-        if tok in SUFFIX_MAP:
-            suffix = tok
-            datatype = str(SUFFIX_MAP[tok].get("datatype", ""))
+        tok_l = tok.lower()
+        for suf, spec in SUFFIX_MAP.items():
+            suf_l = suf.lower()
+            if tok_l == suf_l or tok_l.startswith(suf_l) or suf_l.startswith(tok_l):
+                suffix = suf
+                datatype = str(spec.get("datatype", ""))
+                break
+        if suffix:
             break
     if not suffix:
-        # Fallback to the last token if nothing matched
+        # Generic diffusion sequences often include ``diff`` or ``dwi`` in the
+        # protocol name but not the exact ``dwi`` suffix.  Treat such cases as
+        # diffusion images.
+        for tok in tokens:
+            tok_l = tok.lower()
+            if tok_l.startswith("diff") or tok_l.startswith("dwi"):
+                suffix = "dwi"
+                datatype = str(SUFFIX_MAP.get("dwi", {}).get("datatype", ""))
+                break
+    if not suffix:
+        # Fallback to the last token if nothing matched at all
         suffix = tokens[-1]
-    entities = _extract_entities(seq, datatype, suffix)
+    entities: Dict[str, str] = {}
+    if datatype == "dwi" and suffix.lower() not in {"dwi", "sbref"}:
+        # Scanner-generated diffusion derivatives (e.g., ``ADC``) should be
+        # treated as ``desc-<suffix>`` files with a ``dwi`` suffix.
+        entities["desc"] = suffix
+        suffix = "dwi"
+    entities.update(_extract_entities(seq, datatype, suffix))
     if run and run.strip() and "run" not in entities:
         entities["run"] = run.strip()
 
     parts = [subj]
     if ses:
         parts.append(ses)
-    for key in ["task", "acq", "ce", "rec", "dir", "run", "echo", "part"]:
+    for key in ["task", "acq", "ce", "rec", "dir", "run", "echo", "part", "desc"]:
         val = entities.get(key)
         if val:
             parts.append(f"{key}-{val}")
