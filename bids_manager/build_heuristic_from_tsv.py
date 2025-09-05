@@ -16,6 +16,9 @@ from textwrap import dedent
 import pandas as pd
 import re
 
+# Internal imports
+from .schema_renamer import bidsify_sequence
+
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -31,8 +34,15 @@ def clean(text: str) -> str:
 
 
 def safe_stem(seq: str) -> str:
-    """Clean SeriesDescription for use in a filename."""
-    return re.sub(r"[^0-9A-Za-z_-]+", "_", seq.strip()).strip("_")
+    """Return a BIDS compliant stem for *seq*.
+
+    The incoming ``seq`` originates from the DICOM ``SeriesDescription`` and is
+    therefore free-form.  We first attempt to map this description to a valid
+    BIDS suffix using :func:`bidsify_sequence`.  The result is then sanitised so
+    it can be safely used within filenames.
+    """
+    bids_seq = bidsify_sequence(seq)
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", bids_seq.strip()).strip("_")
 
 
 def dedup_parts(*parts: str) -> str:
