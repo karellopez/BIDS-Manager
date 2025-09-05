@@ -14,7 +14,6 @@ import os
 from typing import Dict, List, Optional
 import pandas as pd
 import re
-import pydicom
 
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
@@ -87,52 +86,6 @@ def detect_depth(folder: Path) -> int:
             rel = Path(root).relative_to(folder)
             return len(rel.parts)
     raise RuntimeError(f"No DICOMs under {folder}")
-
-
-def group_study_dirs(folder: Path) -> List[List[Path]]:
-    """Return directories grouped by StudyInstanceUID.
-
-    If only a single StudyInstanceUID is present, the returned list
-    contains one item with ``folder`` itself. Otherwise, each element is a
-    list of directories containing DICOMs for a unique StudyInstanceUID."""
-
-    groups: Dict[str, List[Path]] = {}
-    for root, _dirs, files in os.walk(folder):
-        dicoms = [f for f in files if is_dicom_file(os.path.join(root, f))]
-        if not dicoms:
-            continue
-        first = os.path.join(root, dicoms[0])
-        try:
-            ds = pydicom.dcmread(first, stop_before_pixels=True, specific_tags=["StudyInstanceUID"])
-        except Exception:
-            continue
-        uid = getattr(ds, "StudyInstanceUID", None)
-        if uid:
-            groups.setdefault(uid, []).append(Path(root))
-    if len(groups) <= 1:
-        return [[folder]]
-    return [sorted(set(paths)) for paths in groups.values()]
-
-
-def heudi_cmd_from_files(file_dirs: List[Path], subject: str, heuristic: Path, bids_out: Path) -> List[str]:
-    """Build a ``heudiconv`` command operating on explicit directories."""
-
-    return [
-        "heudiconv",
-        "--files",
-        *[str(d) for d in file_dirs],
-        "-s",
-        subject,
-        "-f",
-        str(heuristic),
-        "-c",
-        "dcm2niix",
-        "-o",
-        str(bids_out),
-        "-b",
-        "--minmeta",
-        "--overwrite",
-    ]
 
 
 def heudi_cmd(raw_root: Path,
@@ -233,29 +186,24 @@ def run_heudiconv(raw_root: Path,
     cleaned_ids      = sorted(sid_map.keys())
     phys_folders     = [clean2phys[c] for c in cleaned_ids]
 
+    depth = detect_depth(raw_root / phys_folders[0])
+
     print("Raw root    :", raw_root)
     print("Heuristic   :", heuristic)
     print("Output BIDS :", bids_out)
-    print("Folders     :", phys_folders, "\n")
+    print("Folders     :", phys_folders)
+    print("Depth       :", depth, "\n")
 
     bids_out.mkdir(parents=True, exist_ok=True)
 
     if per_folder:
         for phys in phys_folders:
             print(f"── {phys} ──")
-            full = raw_root / phys
-            groups = group_study_dirs(full)
-            for dirs in groups:
-                if len(dirs) == 1 and dirs[0] == full:
-                    depth = detect_depth(full)
-                    cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth)
-                else:
-                    cmd = heudi_cmd_from_files(dirs, phys, heuristic, bids_out)
-                print(" ".join(cmd))
-                subprocess.run(cmd, check=True)
-                print()
+            cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth)
+            print(" ".join(cmd))
+            subprocess.run(cmd, check=True)
+            print()
     else:
-        depth = detect_depth(raw_root / phys_folders[0])
         cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth)
         print(" ".join(cmd))
         subprocess.run(cmd, check=True)
