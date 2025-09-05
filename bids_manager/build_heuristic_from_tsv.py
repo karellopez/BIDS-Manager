@@ -16,8 +16,6 @@ from textwrap import dedent
 import pandas as pd
 import re
 
-from .bids_schema import build_filename
-
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -35,6 +33,16 @@ def clean(text: str) -> str:
 def safe_stem(seq: str) -> str:
     """Clean SeriesDescription for use in a filename."""
     return re.sub(r"[^0-9A-Za-z_-]+", "_", seq.strip()).strip("_")
+
+
+def dedup_parts(*parts: str) -> str:
+    """Return underscore-joined *parts* with consecutive repeats removed."""
+    tokens: list[str] = []
+    for part in parts:
+        for t in str(part).split("_"):
+            if t and (not tokens or t != tokens[-1]):
+                tokens.append(t)
+    return "_".join(tokens)
 
 
 # -----------------------------------------------------------------------------
@@ -102,17 +110,10 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         container = row.get("modality_bids", "misc") or "misc"
         stem = safe_stem(row["sequence"])
 
-        entities: dict[str, str] = {}
-        for part in bids.split("_"):
-            if "-" in part:
-                k, v = part.split("-", 1)
-                entities[k] = v
-        if ses and "ses" not in entities:
-            entities["ses"] = ses
+        base_parts = [bids, ses, stem]
         if rep_counts.loc[idx] > 1:
-            entities["rep"] = str(rep_num)
-        base = build_filename(entities, stem, "", strict=False)
-
+            base_parts.append(f"rep-{rep_num}")
+        base = dedup_parts(*base_parts)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 

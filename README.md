@@ -68,28 +68,6 @@ After installation the following commands become available:
 
 All utilities provide `-h/--help` for details.
 
-### BIDS schema utilities
-
-The package exposes a small programmatic API for working with BIDS filenames
-driven by the official schema:
-
-```python
-from bids_manager.bids_schema import (
-    get_entities, get_suffixes, get_entity_order,
-    parse_filename, build_filename,
-)
-
-parts = parse_filename("sub-01_ses-1_task-rest_run-1_bold.nii.gz")
-# {'entities': {'sub': '01', 'ses': '1', 'task': 'rest', 'run': '1'},
-#  'suffix': 'bold', 'extension': '.nii.gz'}
-
-name = build_filename(parts['entities'], parts['suffix'], parts['extension'])
-# 'sub-01_ses-1_task-rest_run-1_bold.nii.gz'
-```
-
-These helpers centralise access to the bundled BIDS schema and ensure filenames
-are assembled in the correct entity order.
-
 ### Recent updates
 
 - The TSV produced by `dicom-inventory` can now be loaded directly in the GUI and
