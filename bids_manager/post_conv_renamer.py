@@ -24,8 +24,9 @@ No CLI arguments required.
 """
 from pathlib import Path
 import json
-import re
 import sys
+
+from .bids_schema import parse_filename, build_filename
 
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
@@ -33,23 +34,30 @@ import sys
 BIDS_ROOT = Path("/path/to/your/BIDS_dataset")
 
 # -----------------------------------------------------------------------------
-# Rename rules based on filename patterns
+# Helpers
 # -----------------------------------------------------------------------------
-RENAME_RULES = [
-    # echo-1 → magnitude1
-    (re.compile(r"echo[-_]?1", re.I), "magnitude1"),
-    # echo-2 → magnitude2
-    (re.compile(r"echo[-_]?2", re.I), "magnitude2"),
-]
-# Match plain '_fmap' before .nii, .nii.gz or .json
-FMAP_SUFFIX_RE = re.compile(r"_fmap(?=(\.nii(?:\.gz)?|\.json)$)", re.I)
 
+def _rename_fmap(filename: str) -> str | None:
+    """Return new name for a fieldmap file or ``None`` if unchanged."""
 
-def _move_rep_suffix(name: str) -> str:
-    """Ensure ``_rep-N`` appears after magnitude/phase suffix."""
-    name = re.sub(r"(_rep-\d+)(_magnitude[12])", r"\2\1", name)
-    name = re.sub(r"(_rep-\d+)(_phasediff)", r"\2\1", name)
-    return name
+    try:
+        parts = parse_filename(filename, strict=False)
+    except ValueError:
+        return None
+
+    if parts["suffix"] != "fmap":
+        return None
+
+    entities = dict(parts["entities"])
+    echo = entities.pop("echo", None)
+    if echo == "1":
+        suffix = "magnitude1"
+    elif echo == "2":
+        suffix = "magnitude2"
+    else:
+        suffix = "phasediff"
+
+    return build_filename(entities, suffix, parts["extension"], strict=False)
 
 # -----------------------------------------------------------------------------
 # Process a single fmap directory
@@ -59,26 +67,10 @@ def process_fmap_dir(fmap_dir: Path) -> None:
     for file in sorted(fmap_dir.iterdir()):
         if not file.is_file():
             continue
-        name = file.name
-        # apply echo rules
-        for pattern, replacement in RENAME_RULES:
-            if pattern.search(name) and name.lower().endswith(('.nii', '.nii.gz', '.json')):
-                # replace echo tag
-                interim = pattern.sub(replacement, name)
-                # remove trailing _fmap before extension
-                new_name = FMAP_SUFFIX_RE.sub('', interim)
-                new_name = _move_rep_suffix(new_name)
-                file.rename(fmap_dir / new_name)
-                print(f"Renamed: {name} → {new_name}")
-                break
-        else:
-            # apply phase rule for plain fmap (no echo)
-            if name.lower().endswith(('.nii', '.nii.gz', '.json')) and '_fmap' in name and not any(rep in name.lower() for rep in ['magnitude1', 'magnitude2']):
-                # replace _fmap with _phasediff
-                new_name = name.replace('_fmap', '_phasediff')
-                new_name = _move_rep_suffix(new_name)
-                file.rename(fmap_dir / new_name)
-                print(f"Renamed: {name} → {new_name}")
+        new_name = _rename_fmap(file.name)
+        if new_name and new_name != file.name:
+            file.rename(fmap_dir / new_name)
+            print(f"Renamed: {file.name} → {new_name}")
 
 # -----------------------------------------------------------------------------
 # Main processing function
@@ -167,19 +159,8 @@ def _rename_in_scans(tsv: Path, bids_root: Path) -> None:
         path = Path(fname)
         if "fmap" not in path.parts:
             continue
-        new_name = path.name
-        for pattern, replacement in RENAME_RULES:
-            if pattern.search(new_name) and new_name.lower().endswith((".nii", ".nii.gz", ".json")):
-                interim = pattern.sub(replacement, new_name)
-                new_name = FMAP_SUFFIX_RE.sub("", interim)
-                new_name = _move_rep_suffix(new_name)
-                break
-        else:
-            if new_name.lower().endswith((".nii", ".nii.gz", ".json")) and "_fmap" in new_name and not any(rep in new_name.lower() for rep in ["magnitude1", "magnitude2"]):
-                new_name = new_name.replace("_fmap", "_phasediff")
-                new_name = _move_rep_suffix(new_name)
-
-        if new_name != path.name:
+        new_name = _rename_fmap(path.name)
+        if new_name and new_name != path.name:
             candidate = tsv.parent / path.parent / new_name
             if candidate.exists():
                 df.at[idx, "filename"] = (path.parent / new_name).as_posix()

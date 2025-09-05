@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
+from .bids_schema import parse_filename, build_filename
+
 
 def update_scans_with_map(bids_root: Path, rename_map: dict[str, str]) -> None:
     """Update filenames in ``*_scans.tsv`` after renaming files.
@@ -57,7 +59,16 @@ def refresh_scans_filenames(bids_root: Path) -> None:
         sessions = [s for s in sub.glob("ses-*") if s.is_dir()]
         roots = sessions or [sub]
         for root in roots:
-            files = {f.name: f.relative_to(root).as_posix() for f in root.rglob('*') if f.is_file()}
+            files = {}
+            for f in root.rglob('*'):
+                if not f.is_file():
+                    continue
+                try:
+                    parts = parse_filename(f.name)
+                except ValueError:
+                    continue
+                key = build_filename(parts["entities"], parts["suffix"], parts["extension"])
+                files[key] = f.relative_to(root).as_posix()
             for tsv in root.glob("*_scans.tsv"):
                 _refresh_single(tsv, files, bids_root)
 
@@ -70,7 +81,12 @@ def _refresh_single(tsv: Path, file_map: dict[str, str], bids_root: Path) -> Non
     changed = False
     for idx, fname in enumerate(df["filename"]):
         base = Path(fname).name
-        new = file_map.get(base)
+        try:
+            parts = parse_filename(base)
+            key = build_filename(parts["entities"], parts["suffix"], parts["extension"])
+        except ValueError:
+            continue
+        new = file_map.get(key)
         if new and new != fname:
             df.at[idx, "filename"] = new
             changed = True
