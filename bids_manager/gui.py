@@ -86,8 +86,6 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     HAS_PSUTIL = False
 
-# BIDS schema helper to validate filenames
-from .bids_schema import is_valid_bids_name
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
 ICON_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Icon.png"
@@ -2819,21 +2817,10 @@ class RemapDialog(QDialog):
                     pat_item = tbl.item(r, 0)
                     rep_item = tbl.item(r, 1)
                     if pat_item and pat_item.text():
-                        new_name = re.sub(
-                            pat_item.text(),
-                            rep_item.text() if rep_item else "",
-                            new_name,
-                        )
+                        new_name = re.sub(pat_item.text(), rep_item.text() if rep_item else "", new_name)
             if new_name != name:
-                if is_valid_bids_name(new_name):
-                    item = QTreeWidgetItem(
-                        [path.relative_to(self.bids_root).as_posix(), new_name]
-                    )
-                    self.preview_tree.addTopLevelItem(item)
-                else:
-                    logging.warning(
-                        "Skipping preview for invalid BIDS name: %s", new_name
-                    )
+                item = QTreeWidgetItem([path.relative_to(self.bids_root).as_posix(), new_name])
+                self.preview_tree.addTopLevelItem(item)
         self.preview_tree.expandAll()
 
     def apply(self):
@@ -2843,14 +2830,10 @@ class RemapDialog(QDialog):
             it = self.preview_tree.topLevelItem(i)
             orig_rel = Path(it.text(0))
             orig = self.bids_root / orig_rel
-            new_name = it.text(1)
-            if not is_valid_bids_name(new_name):
-                logging.warning("Skipping invalid BIDS name: %s", new_name)
-                continue
-            new = orig.with_name(new_name)
+            new = orig.with_name(it.text(1))
             orig.rename(new)
             rename_map[orig_rel.as_posix()] = (
-                (orig_rel.parent / new_name).as_posix()
+                (orig_rel.parent / it.text(1)).as_posix()
             )
         if rename_map:
             try:
