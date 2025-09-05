@@ -51,9 +51,8 @@ source <env_name>/bin/activate          # On Windows: <env_name>\Scripts\activat
 pip install bids-manager
 ```
 
-The package declares all dependencies including `dcm2niix` (and
-`heudiconv` for backwards compatibility), so installation pulls
-everything required to run the GUI and helper scripts.
+The package declares all dependencies including `heudiconv`, so installation
+pulls everything required to run the GUI and helper scripts.
 All core requirements are version pinned in `pyproject.toml` to ensure
 consistent installations.
 
@@ -62,8 +61,7 @@ After installation the following commands become available:
 - `bids-manager` – main GUI combining conversion and editing tools
 - `dicom-inventory` – generate `subject_summary.tsv` from a DICOM directory
 - `build-heuristic` – create a HeuDiConv heuristic from the TSV
-- `run-dcm2niix` – convert DICOM data using `dcm2niix` guided by `scans.tsv`
-- `run-heudiconv` – run HeuDiConv using the generated heuristic (legacy)
+- `run-heudiconv` – run HeuDiConv using the generated heuristic
 - `post-conv-renamer` – rename fieldmap files after conversion
 - `bids-editor` – standalone metadata editor
 - `fill-bids-ignore` – interactively update `.bidsignore`
@@ -74,8 +72,6 @@ All utilities provide `-h/--help` for details.
 
 - The TSV produced by `dicom-inventory` can now be loaded directly in the GUI and
   its file name customised before generation.
-- New `run-dcm2niix` command replaces HeuDiConv by calling `dcm2niix`
-  directly while still honouring instructions from `scans.tsv`.
 - The Batch Rename tool previews changes and allows restricting the scope to
   specific subjects.
 - A "Set Intended For" dialog lets you manually edit fieldmap IntendedFor lists

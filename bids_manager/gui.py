@@ -4,6 +4,7 @@ import sys
 import os
 import json
 import re
+import shutil
 import pandas as pd
 import numpy as np
 import threading
@@ -272,6 +273,7 @@ class BIDSManager(QMainWindow):
         self.dicom_dir = ""         # Raw DICOM directory
         self.bids_out_dir = ""      # Output BIDS directory
         self.tsv_path = ""          # Path to subject_summary.tsv
+        self.heuristic_dir = ""     # Directory with heuristics
         # Lookup containers used to synchronise the mapping table with the
         # modality trees.  Keys are different path elements and values are lists
         # of row indices in ``self.mapping_table``.
@@ -301,6 +303,7 @@ class BIDSManager(QMainWindow):
         self.inventory_process = None  # QProcess for dicom_inventory
         self.conv_process = None       # QProcess for the conversion pipeline
         self.conv_stage = 0            # Tracks which step of the pipeline ran
+        self.heurs_to_rename = []      # List of heuristics pending rename
 
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
@@ -2383,7 +2386,7 @@ class BIDSManager(QMainWindow):
             df_orig.to_csv(self.tsv_path, sep="\t", index=False)
             self.log_text.append("Saved updated TSV.")
 
-            # Write temporary TSV for conversion if using given names
+            # Write temporary TSV for heuristic generation if using given names
             if self.use_bids_names:
                 self.tsv_for_conv = self.tsv_path
             else:
@@ -2396,13 +2399,15 @@ class BIDSManager(QMainWindow):
 
         # Paths for scripts
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.run_script = os.path.join(script_dir, "run_dcm2niix_from_scans.py")
+        self.build_script = os.path.join(script_dir, "build_heuristic_from_tsv.py")
+        self.run_script = os.path.join(script_dir, "run_heudiconv_from_heuristic.py")
         self.rename_script = os.path.join(script_dir, "post_conv_renamer.py")
 
-        # Track progress: 0 → conversion, 1 → post‑processing
+        self.heuristic_dir = os.path.join(self.bids_out_dir, "heuristics")
+        self.heurs_to_rename = []
         self.conv_stage = 0
 
-        self.log_text.append("Running dcm2niix…")
+        self.log_text.append("Building heuristics…")
         self._start_spinner("Converting")
         self.run_button.setEnabled(False)
         self.run_stop_button.setEnabled(True)
@@ -2415,36 +2420,69 @@ class BIDSManager(QMainWindow):
             self.conv_process.setStandardOutputFile(QProcess.nullDevice())
             self.conv_process.setStandardErrorFile(QProcess.nullDevice())
         self.conv_process.finished.connect(self._convStepFinished)
-        args = [self.run_script, self.dicom_dir, self.tsv_for_conv, self.bids_out_dir]
+        args = [self.build_script, self.tsv_for_conv, self.heuristic_dir]
         self.conv_process.start(sys.executable, args)
 
     def _convStepFinished(self, exitCode, _status):
         if self.conv_stage == 0:
             if exitCode != 0:
-                QMessageBox.critical(self, "Error", "dcm2niix conversion failed")
+                QMessageBox.critical(self, "Error", "build_heuristic failed")
                 self.stopConversion()
                 return
-            self.log_text.append("dcm2niix conversion complete.")
+            self.log_text.append(f"Heuristics written to {self.heuristic_dir}")
             self.conv_stage = 1
-            self._runNextRename()
+            self.log_text.append("Running HeuDiConv…")
+            args = [self.run_script, self.dicom_dir, self.heuristic_dir, self.bids_out_dir, '--subject-tsv', self.tsv_path]
+            self.conv_process.start(sys.executable, args)
         elif self.conv_stage == 1:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "run_heudiconv failed")
+                self.stopConversion()
+                return
+            self.log_text.append("HeuDiConv conversion complete.")
+            self.conv_stage = 2
+            self.heurs_to_rename = list(Path(self.heuristic_dir).glob("heuristic_*.py"))
+            self._runNextRename()
+        elif self.conv_stage == 2:
             if exitCode != 0:
                 QMessageBox.critical(self, "Error", "post_conv_renamer failed")
                 self.stopConversion()
                 return
-            self.log_text.append("Conversion pipeline finished successfully.")
-            if getattr(self, 'tsv_for_conv', self.tsv_path) != self.tsv_path:
-                try:
-                    os.remove(self.tsv_for_conv)
-                except Exception:
-                    pass
-            self.stopConversion(success=True)
+            if self.heurs_to_rename:
+                self._runNextRename()
+            else:
+                self.log_text.append("Conversion pipeline finished successfully.")
+                self._store_heuristics()
+                if getattr(self, 'tsv_for_conv', self.tsv_path) != self.tsv_path:
+                    try:
+                        os.remove(self.tsv_for_conv)
+                    except Exception:
+                        pass
+                self.stopConversion(success=True)
 
     def _runNextRename(self):
-        """Run the post‑processing script after conversion."""
-        self.log_text.append("Applying BIDS post‑processing…")
-        args = [self.rename_script, self.bids_out_dir]
+        if not self.heurs_to_rename:
+            self._convStepFinished(0, 0)
+            return
+        heur = self.heurs_to_rename.pop(0)
+        dataset = heur.stem.replace("heuristic_", "")
+        bids_path = os.path.join(self.bids_out_dir, dataset)
+        self.log_text.append(f"Renaming fieldmaps for {dataset}…")
+        args = [self.rename_script, bids_path]
         self.conv_process.start(sys.executable, args)
+
+    def _store_heuristics(self):
+        """Move heuristics into each dataset's .bids_manager folder."""
+        try:
+            hdir = Path(self.heuristic_dir)
+            for heur in hdir.glob("heuristic_*.py"):
+                dataset = heur.stem.replace("heuristic_", "")
+                dst = Path(self.bids_out_dir) / dataset / ".bids_manager"
+                dst.mkdir(exist_ok=True)
+                shutil.move(str(heur), dst / heur.name)
+            shutil.rmtree(hdir, ignore_errors=True)
+        except Exception as exc:
+            logging.warning(f"Failed to move heuristics: {exc}")
 
     def stopConversion(self, success: bool = False):
         if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
