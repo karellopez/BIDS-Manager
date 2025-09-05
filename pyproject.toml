@@ -29,7 +29,6 @@ dependencies = [
     "psutil==7.0.0",
     "matplotlib==3.10.3",
     "joblib==1.4.2",
-    "PyYAML==6.0.2",
 ]
 
 [project.urls]

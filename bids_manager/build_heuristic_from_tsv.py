@@ -16,8 +16,6 @@ from textwrap import dedent
 import pandas as pd
 import re
 
-from .schema_naming import bidsify_stem
-
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -33,8 +31,8 @@ def clean(text: str) -> str:
 
 
 def safe_stem(seq: str) -> str:
-    """Return a BIDS-compliant stem for ``seq`` using the schema."""
-    return bidsify_stem(seq)
+    """Clean SeriesDescription for use in a filename."""
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", seq.strip()).strip("_")
 
 
 def dedup_parts(*parts: str) -> str:
