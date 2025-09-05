@@ -10,7 +10,6 @@ import numpy as np
 import threading
 import time
 import pydicom  # used to inspect DICOM headers when checking for mixed sessions
-from .schema_renamer import bidsify_sequence
 try:  # prefer relative import but fall back to direct when running as a script
     from .run_heudiconv_from_heuristic import is_dicom_file  # reuse existing helper
 except Exception:  # pragma: no cover - packaging edge cases
@@ -1105,15 +1104,14 @@ class BIDSManager(QMainWindow):
         rep_counts = defaultdict(int)
         for info in selected:
             subj_key = info['bids'] if self.use_bids_names else f"sub-{info['given']}"
-            seq_bids = bidsify_sequence(info['seq'])
-            key = (subj_key, info['ses'], seq_bids)
+            key = (subj_key, info['ses'], info['seq'])
             rep_counts[key] += 1
 
         for info in selected:
             subj = info['bids'] if self.use_bids_names else f"sub-{info['given']}"
             study = info['study']
             ses = info['ses']
-            seq = bidsify_sequence(info['seq'])
+            seq = info['seq']
             modb = info['modb']
 
             path_parts = []
