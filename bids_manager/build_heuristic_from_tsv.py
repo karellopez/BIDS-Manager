@@ -88,31 +88,39 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     buf.append("}\n\n")
 
     # 3 ─ template keys ----------------------------------------------------
-    # Include series UID (or explicit ``rep``) in the key so repeated
-    # acquisitions map to distinct heuristic entries.
+    # Include series UID (or rep) in the key to handle repeated sequences
     seq2key: dict[tuple[str, str, str, str, str], str] = {}
     key_defs: list[tuple[str, str]] = []
 
+    rep_counts = (
+        df.groupby(["BIDS_name", "session", "sequence"], dropna=False)["sequence"].transform("count")
+    )
+    rep_index = (
+        df.groupby(["BIDS_name", "session", "sequence"], dropna=False).cumcount() + 1
+    )
+
     key_def_set = set()
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         ses_raw = row.get("session", "")
         ses = "" if pd.isna(ses_raw) else str(ses_raw).strip()
         folder = Path(str(row.get("source_folder", "."))).name
+        rep_num = rep_index.loc[idx]
         uid_field = str(row.get("series_uid", ""))
         bids = row["BIDS_name"]
         container = row.get("modality_bids", "misc") or "misc"
         stem = safe_stem(row["sequence"])
 
-        rep_raw = str(row.get("rep", "")).strip()
-        rep_tag = f"rep-{rep_raw}" if rep_raw and rep_raw not in {"0", "1"} else ""
-
-        base_parts = [p for p in [bids, ses, stem, rep_tag] if p]
+        base_parts = [bids, ses, stem]
+        if rep_counts.loc[idx] > 1:
+            base_parts.append(f"rep-{rep_num}")
         base = dedup_parts(*base_parts)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 
-        key_parts = [p for p in [bids, ses, stem, rep_tag] if p]
-        key_var = "key_" + clean("_".join(key_parts))
+        key_parts = [bids, ses, stem]
+        if rep_counts.loc[idx] > 1:
+            key_parts.append(f"rep-{rep_num}")
+        key_var = "key_" + clean("_".join(p for p in key_parts if p))
         if key_var not in key_def_set:
             key_defs.append((key_var, template))
             key_def_set.add(key_var)

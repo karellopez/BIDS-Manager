@@ -65,9 +65,7 @@ def test_duplicate_names_numbered(tmp_path):
     _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig2.json")
     series = [
         SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig1"}),
-        # Explicitly mark the second acquisition as repeat number 2 so that
-        # build_preview_names appends "(2)" instead of auto‑detecting repeats.
-        SeriesInfo("001", None, "T1w", "mprage", 2, {"current_bids": "sub-001_orig2"}),
+        SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig2"}),
     ]
     proposals = build_preview_names(series, schema)
     rename_map = apply_post_conversion_rename(tmp_path, proposals)
