@@ -318,13 +318,23 @@ def _move_dwi_derivatives(bids_root: Path, pipeline_name: str, rename_map: Dict[
 def build_preview_names(
     inventory_rows: Iterable[SeriesInfo], schema: SchemaInfo
 ) -> List[Tuple[SeriesInfo, str, str]]:
+    """Return proposed BIDS basenames for each series.
+
+    The GUI's inventory table already contains a ``rep`` column that
+    explicitly tracks repeated acquisitions.  Earlier versions of this
+    function tried to infer repeats by counting identical sequences, which
+    occasionally misidentified distinct series (e.g. ``bold_SBRef`` or DWI
+    derivatives) as duplicates.  Now we rely solely on the provided ``rep``
+    value: ``rep`` > 1 results in a ``(<rep>)`` suffix, otherwise the base
+    name is used as-is.
+    """
+
     out = []
-    counts: Dict[Tuple[str, str], int] = {}
     for s in inventory_rows:
         dt, base = propose_bids_basename(s, schema)
-        key = (dt, base)
-        counts[key] = counts.get(key, 0) + 1
-        final_base = base if counts[key] == 1 else f"{base}({counts[key]})"
+        # ``rep`` defaults to 1 for the first occurrence; only values >1 are
+        # considered repeats and reflected in the proposed basename.
+        final_base = f"{base}({s.rep})" if (s.rep and s.rep > 1) else base
         out.append((s, dt, final_base))
     return out
 
