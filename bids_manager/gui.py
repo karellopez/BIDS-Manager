@@ -86,20 +86,6 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     HAS_PSUTIL = False
 
-from bids_manager.renaming.config import (
-    DEFAULT_SCHEMA_DIR,
-    ENABLE_SCHEMA_RENAMER,
-    ENABLE_FIELDMap_NORMALIZATION,
-    ENABLE_DWI_DERIVATIVES_MOVE,
-    DERIVATIVES_PIPELINE_NAME,
-)
-from bids_manager.renaming.schema_renamer import (
-    load_bids_schema,
-    SeriesInfo,
-    build_preview_names,
-    apply_post_conversion_rename,
-)
-
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
 ICON_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Icon.png"
@@ -213,62 +199,6 @@ def _format_subject_id(num: int) -> str:
     return "".join(reversed(letters)) + f"{digits:03d}"
 
 
-def _compute_bids_preview(df, schema):
-    """Return mapping of row index to proposed datatype and basename."""
-    out = {}
-    if not schema:
-        return out
-    rows = []
-    idxs = []
-    for i, row in df.iterrows():
-        subject = str(row.get("subject") or row.get("sub") or "UNK")
-        session = row.get("session") or row.get("ses") or None
-        modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
-        sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
-        rep = row.get("rep") or row.get("repeat") or 1
-        extra = {}
-        for key in ("task", "acq", "run", "dir", "echo"):
-            if row.get(key):
-                extra[key] = str(row.get(key))
-        rows.append(SeriesInfo(subject, session, modality, sequence, int(rep or 1), extra))
-        idxs.append(i)
-    proposals = build_preview_names(rows, schema)
-    for (series, dt, base), idx in zip(proposals, idxs):
-        out[idx] = (dt, base)
-    return out
-
-
-def _build_series_list_from_df(df):
-    rows = []
-    for _, row in df.iterrows():
-        subject = str(row.get("subject") or row.get("sub") or "UNK")
-        session = row.get("session") or row.get("ses") or None
-        modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
-        sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
-        rep = row.get("rep") or row.get("repeat") or 1
-        extra = {}
-        for key in ("task", "acq", "run", "dir", "echo"):
-            if row.get(key):
-                extra[key] = str(row.get(key))
-        rows.append(SeriesInfo(subject, session, modality, sequence, int(rep or 1), extra))
-    return rows
-
-
-def _post_conversion_schema_rename(bids_root, df, schema):
-    if not (ENABLE_SCHEMA_RENAMER and schema):
-        return {}
-    series_list = _build_series_list_from_df(df)
-    proposals = build_preview_names(series_list, schema)
-    rename_map = apply_post_conversion_rename(
-        bids_root=bids_root,
-        proposals=proposals,
-        also_normalize_fieldmaps=ENABLE_FIELDMap_NORMALIZATION,
-        handle_dwi_derivatives=ENABLE_DWI_DERIVATIVES_MOVE,
-        derivatives_pipeline_name=DERIVATIVES_PIPELINE_NAME,
-    )
-    return rename_map
-
-
 def _random_subject_id(existing: set[str]) -> str:
     """Return a unique random 3-letter/3-digit identifier."""
     while True:
@@ -370,20 +300,9 @@ class BIDSManager(QMainWindow):
         self.spec_mod_rows_given = {}
         self.spec_seq_rows_given = {}
         # Existing mappings found in output datasets
-       self.existing_maps = {}
-       self.existing_used = {}
-       self.use_bids_names = True
-
-        # Schema-driven renamer
-        self._schema = None
-        if ENABLE_SCHEMA_RENAMER:
-            try:
-                self._schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
-            except Exception as e:  # pragma: no cover - schema loading is optional
-                print(f"[WARN] Could not load BIDS schema: {e}")
-                self._schema = None
-        self.inventory_df = pd.DataFrame()
-        self._current_dataset_path = None
+        self.existing_maps = {}
+        self.existing_used = {}
+        self.use_bids_names = True
 
         # Async process handles for inventory and conversion steps
         self.inventory_process = None  # QProcess for dicom_inventory
@@ -911,8 +830,7 @@ class BIDSManager(QMainWindow):
         metadata_layout = QVBoxLayout(metadata_tab)
         self.mapping_table = QTableWidget()
         # +1 column for the original subject label shown in the inventory TSV
-        # +1 column for the proposed BIDS name preview
-        self.mapping_table.setColumnCount(14)
+        self.mapping_table.setColumnCount(13)
         self.mapping_table.setHorizontalHeaderLabels([
             "include",
             "source_folder",
@@ -927,7 +845,6 @@ class BIDSManager(QMainWindow):
             "rep",
             "modality",
             "modality_bids",
-            "Proposed BIDS name",
         ])
         hdr = self.mapping_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -1809,15 +1726,6 @@ class BIDSManager(QMainWindow):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
 
-        preview_map = _compute_bids_preview(df, self._schema)
-        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-        df["Proposed BIDS name"] = df.apply(
-            lambda r: f"{r['proposed_datatype']}/{r['proposed_basename']}.nii.gz" if r["proposed_basename"] else "",
-            axis=1,
-        )
-        self.inventory_df = df
-
         # ----- load existing mappings without altering the TSV -----
         self.existing_maps = {}
         self.existing_used = {}
@@ -1918,10 +1826,6 @@ class BIDSManager(QMainWindow):
             modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 12, modb_item)
-
-            preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
-            preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 13, preview_item)
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
@@ -2644,17 +2548,6 @@ class BIDSManager(QMainWindow):
                 QMessageBox.critical(self, "Error", "post_conv_renamer failed")
                 self.stopConversion()
                 return
-            try:
-                rename_map = _post_conversion_schema_rename(
-                    self._current_dataset_path or self.bids_out_dir,
-                    self.inventory_df,
-                    self._schema,
-                )
-                self.log_text.append(
-                    f"Schema renamer moved/renamed {len(rename_map)} files."
-                )
-            except Exception as exc:  # pragma: no cover - non-fatal
-                logging.warning(f"Schema renamer failed: {exc}")
             if self.heurs_to_rename:
                 self._runNextRename()
             else:
@@ -2675,7 +2568,6 @@ class BIDSManager(QMainWindow):
         dataset = heur.stem.replace("heuristic_", "")
         bids_path = os.path.join(self.bids_out_dir, dataset)
         self.log_text.append(f"Renaming fieldmaps for {dataset}…")
-        self._current_dataset_path = bids_path
         args = [self.rename_script, bids_path]
         self.conv_process.start(sys.executable, args)
 
