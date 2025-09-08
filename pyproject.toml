@@ -31,6 +31,9 @@ dependencies = [
     "joblib==1.4.2",
 ]
 
+[project.optional-dependencies]
+schema = ["PyYAML>=6.0"]
+
 [project.urls]
 Homepage = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
 Documentation = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
