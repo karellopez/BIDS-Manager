@@ -31,9 +31,6 @@ dependencies = [
     "joblib==1.4.2",
 ]
 
-[project.optional-dependencies]
-schema = ["PyYAML>=6.0"]
-
 [project.urls]
 Homepage = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
 Documentation = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
@@ -49,7 +46,7 @@ post-conv-renamer = "bids_manager.post_conv_renamer:main"
 fill-bids-ignore = "bids_manager.fill_bids_ignore:main"
 
 [tool.setuptools]
-packages = ["bids_manager", "bids_manager.renaming"]
+packages = ["bids_manager"]
 include-package-data = true
 
 [tool.setuptools.package-data]
