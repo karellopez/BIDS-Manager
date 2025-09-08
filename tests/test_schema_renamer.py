@@ -55,3 +55,19 @@ def test_schema_renamer_end_to_end(tmp_path):
     assert (tmp_path / "sub-001" / "fmap" / "sub-001_phasediff.nii.gz").exists()
     rename_map2 = apply_post_conversion_rename(tmp_path, proposals)
     assert rename_map2 == {}
+
+
+def test_duplicate_names_numbered(tmp_path):
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+    _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig1.nii.gz")
+    _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig1.json")
+    _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig2.nii.gz")
+    _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig2.json")
+    series = [
+        SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig1"}),
+        SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig2"}),
+    ]
+    proposals = build_preview_names(series, schema)
+    rename_map = apply_post_conversion_rename(tmp_path, proposals)
+    assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w.nii.gz").exists()
+    assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w(2).nii.gz").exists()

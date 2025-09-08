@@ -224,8 +224,6 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     run = None
     if series.extra and "run" in series.extra:
         run = series.extra["run"]
-    elif series.rep and int(series.rep) > 1:
-        run = str(series.rep)
     if run:
         run_s = _sanitize_token(str(run))
         if run_s and run_s != "1":
@@ -321,9 +319,13 @@ def build_preview_names(
     inventory_rows: Iterable[SeriesInfo], schema: SchemaInfo
 ) -> List[Tuple[SeriesInfo, str, str]]:
     out = []
+    counts: Dict[Tuple[str, str], int] = {}
     for s in inventory_rows:
         dt, base = propose_bids_basename(s, schema)
-        out.append((s, dt, base))
+        key = (dt, base)
+        counts[key] = counts.get(key, 0) + 1
+        final_base = base if counts[key] == 1 else f"{base}({counts[key]})"
+        out.append((s, dt, final_base))
     return out
 
 
@@ -385,7 +387,7 @@ def apply_post_conversion_rename(
             k = 2
             cand = new
             while cand.exists():
-                cand = new.with_name(f"{stem}__{k}{ext}")
+                cand = new.with_name(f"{stem}({k}){ext}")
                 k += 1
             new = cand
             rename_map[old] = new
