@@ -318,13 +318,26 @@ def _move_dwi_derivatives(bids_root: Path, pipeline_name: str, rename_map: Dict[
 def build_preview_names(
     inventory_rows: Iterable[SeriesInfo], schema: SchemaInfo
 ) -> List[Tuple[SeriesInfo, str, str]]:
-    out = []
-    counts: Dict[Tuple[str, str], int] = {}
+    """Build mapping tuples for a set of series.
+
+    Unlike the previous implementation, repetitions are determined *solely* by
+    the ``rep`` field supplied with each :class:`SeriesInfo`.  If ``rep`` is
+    ``None`` or ``1`` the base name is used as-is.  Any value greater than ``1``
+    results in a ``(N)`` suffix being appended, which keeps the first occurrence
+    untouched and numbers subsequent ones.  This respects the repeat detection
+    logic computed during inventory generation and avoids inferring repeats from
+    matching sequence patterns alone.
+    """
+
+    out: List[Tuple[SeriesInfo, str, str]] = []
     for s in inventory_rows:
         dt, base = propose_bids_basename(s, schema)
-        key = (dt, base)
-        counts[key] = counts.get(key, 0) + 1
-        final_base = base if counts[key] == 1 else f"{base}({counts[key]})"
+        # ``rep`` already encodes whether this series is a repeat.  Only append
+        # a numeric suffix when ``rep`` is explicitly > 1.
+        if s.rep and s.rep > 1:
+            final_base = f"{base}({s.rep})"
+        else:
+            final_base = base
         out.append((s, dt, final_base))
     return out
 
