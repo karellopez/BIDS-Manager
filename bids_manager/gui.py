@@ -135,6 +135,13 @@ class _ImageLabel(_AutoUpdateLabel):
             self._click_fn(event)
         super().mousePressEvent(event)
 
+def _extract_subject(row) -> str:
+    """Return subject identifier prioritising ``BIDS_name`` and stripping ``sub-``."""
+    subj = str(row.get("BIDS_name") or row.get("subject") or row.get("sub") or "UNK")
+    if subj.lower().startswith("sub-"):
+        subj = subj[4:]
+    return subj
+
 def _compute_bids_preview(df, schema):
     """Returns a dict {row_index: (datatype, basename)} for preview; safe if schema is None."""
     out = {}
@@ -143,7 +150,7 @@ def _compute_bids_preview(df, schema):
     rows = []
     idxs = []
     for i, row in df.iterrows():
-        subject = str(row.get("subject") or row.get("sub") or "UNK")
+        subject = _extract_subject(row)
         session = row.get("session") or row.get("ses") or None
         modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
         sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
@@ -889,13 +896,13 @@ class BIDSManager(QMainWindow):
             "GivenName",
             "session",
             "sequence",
+            "Proposed BIDS name",
             "StudyDescription",
             "series_uid",
             "acq_time",
             "rep",
             "modality",
             "modality_bids",
-            "Proposed BIDS name",
         ])
         hdr = self.mapping_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -1047,14 +1054,16 @@ class BIDSManager(QMainWindow):
         text_tab = QWidget()
         text_lay = QVBoxLayout(text_tab)
         self.preview_text = QTreeWidget()
-        self.preview_text.setHeaderLabels(["BIDS Path"])
+        self.preview_text.setColumnCount(2)
+        self.preview_text.setHeaderLabels(["BIDS Path", "Original Sequence"])
         text_lay.addWidget(self.preview_text)
         self.preview_tabs.addTab(text_tab, "Text")
 
         tree_tab = QWidget()
         tree_lay = QVBoxLayout(tree_tab)
         self.preview_tree = QTreeWidget()
-        self.preview_tree.setHeaderLabels(["BIDS Structure"])
+        self.preview_tree.setColumnCount(2)
+        self.preview_tree.setHeaderLabels(["BIDS Structure", "Original Sequence"])
         tree_lay.addWidget(self.preview_tree)
         self.preview_tabs.addTab(tree_tab, "Tree")
 
@@ -1122,13 +1131,11 @@ class BIDSManager(QMainWindow):
 
         self.tabs.addTab(self.convert_tab, "Converter")
 
-    def _add_preview_path(self, parts):
-        """Insert path components into the preview tree if missing."""
-        # ``parts`` represents a sequence of folders/files in a BIDS path. This
-        # helper walks the preview tree and adds nodes so that the structure is
-        # displayed hierarchically.
+    def _add_preview_path(self, parts, orig_seq):
+        """Insert path components into the preview tree, storing ``orig_seq`` on the leaf."""
+        # ``parts`` is a sequence of folder/file names comprising a BIDS path.
         parent = self.preview_tree.invisibleRootItem()
-        for part in parts:
+        for idx, part in enumerate(parts):
             match = None
             for i in range(parent.childCount()):
                 child = parent.child(i)
@@ -1136,9 +1143,11 @@ class BIDSManager(QMainWindow):
                     match = child
                     break
             if match is None:
-                match = QTreeWidgetItem([part])
+                match = QTreeWidgetItem([part, ""])  # second column filled on leaf
                 parent.addChild(match)
             parent = match
+            if idx == len(parts) - 1:
+                parent.setText(1, orig_seq)
 
     def generatePreview(self):
         logging.info("generatePreview → Building preview tree …")
@@ -1163,6 +1172,27 @@ class BIDSManager(QMainWindow):
             study = info['study']
             ses = info['ses']
             modb = info['modb']
+            seq = info['seq']
+
+            # Preview for DWI derivative maps moved to derivatives/
+            tag = None
+            if modb == 'dwi':
+                seq_low = seq.lower()
+                for t in ("adc", "fa", "tracew", "colfa"):
+                    if t in seq_low:
+                        tag = t.upper()
+                        break
+            if tag:
+                path_parts = []
+                if multi_study:
+                    path_parts.append(study)
+                path_parts.extend(["derivatives", DERIVATIVES_PIPELINE_NAME, subj, ses, "dwi"])
+                fname_prefix = "_".join([p for p in [subj, ses] if p])
+                fname = f"{fname_prefix}_desc-{tag}_dwi.nii.gz"
+                full = [p for p in path_parts if p] + [fname]
+                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                self._add_preview_path(full, seq)
+                continue
 
             prop_dt = info.get('prop_dt')
             prop_base = info.get('prop_base')
@@ -1173,11 +1203,10 @@ class BIDSManager(QMainWindow):
                 path_parts.extend([subj, ses, prop_dt])
                 fname = f"{prop_base}.nii.gz"
                 full = [p for p in path_parts if p] + [fname]
-                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
-                self._add_preview_path(full)
+                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                self._add_preview_path(full, seq)
                 continue
 
-            seq = info['seq']
             path_parts = []
             if multi_study:
                 path_parts.append(study)
@@ -1193,13 +1222,13 @@ class BIDSManager(QMainWindow):
                 for suffix in ["magnitude1", "magnitude2", "phasediff"]:
                     fname = f"{base}_{suffix}.nii.gz"
                     full = path_parts + [fname]
-                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
-                    self._add_preview_path(full)
+                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                    self._add_preview_path(full, seq)
             else:
                 fname = f"{base}.nii.gz"
                 full = path_parts + [fname]
-                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
-                self._add_preview_path(full)
+                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                self._add_preview_path(full, seq)
 
         self.preview_text.expandAll()
         self.preview_tree.expandAll()
@@ -1549,12 +1578,13 @@ class BIDSManager(QMainWindow):
             df.at[i, "GivenName"] = self.mapping_table.item(i, 4).text()
             df.at[i, "session"] = self.mapping_table.item(i, 5).text()
             df.at[i, "sequence"] = self.mapping_table.item(i, 6).text()
-            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 7).text()
-            df.at[i, "series_uid"] = self.mapping_table.item(i, 8).text()
-            df.at[i, "acq_time"] = self.mapping_table.item(i, 9).text()
-            df.at[i, "rep"] = self.mapping_table.item(i, 10).text()
-            df.at[i, "modality"] = self.mapping_table.item(i, 11).text()
-            df.at[i, "modality_bids"] = self.mapping_table.item(i, 12).text()
+            df.at[i, "Proposed BIDS name"] = self.mapping_table.item(i, 7).text()
+            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 8).text()
+            df.at[i, "series_uid"] = self.mapping_table.item(i, 9).text()
+            df.at[i, "acq_time"] = self.mapping_table.item(i, 10).text()
+            df.at[i, "rep"] = self.mapping_table.item(i, 11).text()
+            df.at[i, "modality"] = self.mapping_table.item(i, 12).text()
+            df.at[i, "modality_bids"] = self.mapping_table.item(i, 13).text()
 
         # When editing the scanned data table we assume the user knows what
         # they are doing, so we do not enforce BIDS naming rules or uniqueness
@@ -1594,7 +1624,7 @@ class BIDSManager(QMainWindow):
         id_map: dict[tuple[str, str], str] = {}
         for i in range(self.mapping_table.rowCount()):
             bids = self.mapping_table.item(i, 2).text().strip()
-            study = self.mapping_table.item(i, 7).text().strip()
+            study = self.mapping_table.item(i, 8).text().strip()
             if not bids:
                 continue
 
@@ -1681,13 +1711,13 @@ class BIDSManager(QMainWindow):
         rows = []
         for i in range(self.mapping_table.rowCount()):
             rows.append({
-                'StudyDescription': self.mapping_table.item(i, 7).text().strip(),
+                'StudyDescription': self.mapping_table.item(i, 8).text().strip(),
                 'BIDS_name': self.mapping_table.item(i, 2).text().strip(),
                 'session': self.mapping_table.item(i, 5).text().strip(),
-                'modality_bids': self.mapping_table.item(i, 12).text().strip(),
-                'modality': self.mapping_table.item(i, 11).text().strip(),
+                'modality_bids': self.mapping_table.item(i, 13).text().strip(),
+                'modality': self.mapping_table.item(i, 12).text().strip(),
                 'sequence': self.mapping_table.item(i, 6).text().strip(),
-                'acq_time': self.mapping_table.item(i, 9).text().strip(),
+                'acq_time': self.mapping_table.item(i, 10).text().strip(),
             })
 
         df = pd.DataFrame(rows)
@@ -1701,7 +1731,7 @@ class BIDSManager(QMainWindow):
 
         for i in range(self.mapping_table.rowCount()):
             val = df.at[i, 'rep']
-            self.mapping_table.item(i, 10).setText(str(val) if str(val) else '')
+            self.mapping_table.item(i, 11).setText(str(val) if str(val) else '')
             self.row_info[i]['rep'] = str(val) if str(val) else ''
 
         self._rebuild_lookup_maps()
@@ -1873,35 +1903,35 @@ class BIDSManager(QMainWindow):
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 6, seq_item)
 
+            preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
+            preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 7, preview_item)
+
             study_item = QTableWidgetItem(study)
             study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 7, study_item)
+            self.mapping_table.setItem(r, 8, study_item)
 
             uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
             uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 8, uid_item)
+            self.mapping_table.setItem(r, 9, uid_item)
 
             acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
             acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 9, acq_item)
+            self.mapping_table.setItem(r, 10, acq_item)
 
             rep_item = QTableWidgetItem(_clean(row.get('rep')))
             # Allow editing the repeat number directly in the table
             rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 10, rep_item)
+            self.mapping_table.setItem(r, 11, rep_item)
 
             mod_item = QTableWidgetItem(_clean(row.get('modality')))
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 11, mod_item)
+            self.mapping_table.setItem(r, 12, mod_item)
 
             modb = _clean(row.get('modality_bids'))
             modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 12, modb_item)
-
-            preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
-            preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 13, preview_item)
+            self.mapping_table.setItem(r, 13, modb_item)
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
@@ -1961,7 +1991,7 @@ class BIDSManager(QMainWindow):
     def _build_series_list_from_df(self, df):
         rows = []
         for _, row in df.iterrows():
-            subject = str(row.get("subject") or row.get("sub") or "UNK")
+            subject = _extract_subject(row)
             session = row.get("session") or row.get("ses") or None
             modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
             sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
@@ -2362,8 +2392,8 @@ class BIDSManager(QMainWindow):
                 seq = self.mapping_table.item(i, 6).text()
                 mod = dicom_inventory.guess_modality(seq)
                 modb = dicom_inventory.modality_to_container(mod)
-                self.mapping_table.item(i, 11).setText(mod)
-                self.mapping_table.item(i, 12).setText(modb)
+                self.mapping_table.item(i, 12).setText(mod)
+                self.mapping_table.item(i, 13).setText(modb)
                 if i < len(self.row_info):
                     self.row_info[i]['mod'] = mod
                     self.row_info[i]['modb'] = modb
@@ -2583,7 +2613,7 @@ class BIDSManager(QMainWindow):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
                 seq = self.mapping_table.item(i, 6).text()
-                modb = self.mapping_table.item(i, 12).text()
+                modb = self.mapping_table.item(i, 13).text()
 
                 # Update df_orig with canonical BIDS name
                 df_orig.at[i, 'BIDS_name'] = info['bids']
