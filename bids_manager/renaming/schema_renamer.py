@@ -236,27 +236,45 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
 # -------------------------- Post-conv renaming ------------------------
 
 def _glob_candidates(dt_dir: Path, subject: str, original_seq: str) -> List[Path]:
-    seq_clean = _SANITIZE_TOKEN.sub("", original_seq or "").lower()
-    seq_wc = _SANITIZE_TOKEN.sub("*", (original_seq or "").lower())
-    globs = [
-        f"sub-*{seq_clean}*.*",
-        f"sub-*{seq_wc}*.*",
-        f"sub-*{seq_clean}*.nii.gz",
-        f"sub-*{seq_wc}*.nii.gz",
-        f"sub-*{seq_clean}*.json",
-        f"sub-*{seq_wc}*.json",
-    ]
-    out = []
-    for g in globs:
-        out.extend([p for p in dt_dir.glob(g) if p.is_file()])
+    """Return files in ``dt_dir`` whose names loosely match ``original_seq``.
+
+    ``heudiconv`` preserves the letter case of the DICOM ``SeriesDescription``
+    when generating filenames.  Earlier versions of this helper lower‑cased the
+    search pattern which broke matching on case‑sensitive filesystems whenever a
+    sequence contained uppercase characters.  To make the lookup robust we build
+    glob patterns using both the original and a lower‑cased variant of the
+    sequence name and collect the unique matches.
+    """
+
+    seq = original_seq or ""
+    seq_clean = _SANITIZE_TOKEN.sub("", seq)
+    seq_wc = _SANITIZE_TOKEN.sub("*", seq)
+
+    patterns: List[str] = []
+    for token in {seq_clean, seq_clean.lower()}:
+        if token:
+            patterns.extend([
+                f"sub-*{token}*.*",
+                f"sub-*{token}*.nii.gz",
+                f"sub-*{token}*.json",
+            ])
+    for token in {seq_wc, seq_wc.lower()}:
+        if token:
+            patterns.extend([
+                f"sub-*{token}*.*",
+                f"sub-*{token}*.nii.gz",
+                f"sub-*{token}*.json",
+            ])
+
+    out: List[Path] = []
     seen = set()
-    unique = []
-    for p in out:
-        if p in seen:
-            continue
-        seen.add(p)
-        unique.append(p)
-    return unique
+    for g in patterns:
+        for p in dt_dir.glob(g):
+            if not p.is_file() or p in seen:
+                continue
+            seen.add(p)
+            out.append(p)
+    return out
 
 
 def _rename_file_set(old: Path, new_basename: str, rename_map: Dict[Path, Path]) -> None:

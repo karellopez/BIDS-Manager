@@ -1990,7 +1990,20 @@ class BIDSManager(QMainWindow):
 
     def _build_series_list_from_df(self, df):
         rows = []
-        for _, row in df.iterrows():
+
+        # ``heudiconv`` initially names outputs using a simplified stem derived
+        # from the DICOM SeriesDescription.  To later locate those files for
+        # renaming we reconstruct that stem here.  We mirror the logic used by
+        # :mod:`build_heuristic_from_tsv` which appends ``rep-<N>`` when a
+        # sequence appears multiple times for a given subject/session.
+        rep_counts = (
+            df.groupby(["BIDS_name", "session", "sequence"], dropna=False)["sequence"].transform("count")
+        )
+        rep_index = (
+            df.groupby(["BIDS_name", "session", "sequence"], dropna=False).cumcount() + 1
+        )
+
+        for idx, row in df.iterrows():
             subject = _extract_subject(row)
             session = row.get("session") or row.get("ses") or None
             modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
@@ -1999,17 +2012,30 @@ class BIDSManager(QMainWindow):
             # ``None`` for non-repeated series and cast to ``int`` when present.
             rep_val = row.get("rep") or row.get("repeat")
             rep = int(rep_val) if rep_val else None
-            extra = {}
+
+            extra: dict[str, str] = {}
             for key in ("task", "acq", "run", "dir", "echo"):
                 if row.get(key):
                     extra[key] = str(row.get(key))
-            # "GivenName" holds the filename produced by the converter, which we
-            # use as the current BIDS basename when searching for files to
-            # rename.  "BIDS_name" represents the proposed final name and should
-            # not be used for lookup here.
-            if row.get("GivenName"):
-                extra["current_bids"] = str(row.get("GivenName"))
+
+            # Reconstruct the basename produced by the converter so
+            # :func:`apply_post_conversion_rename` can locate existing files even
+            # when their names no longer contain the raw sequence.  This uses the
+            # subject ID, optional session, a "safe" version of the sequence and
+            # ``rep-<N>`` when duplicates exist.
+            if row.get("BIDS_name") and sequence:
+                base_parts = [
+                    str(row["BIDS_name"]),
+                    session or "",
+                    _safe_stem(sequence),
+                ]
+                if rep_counts.iloc[idx] > 1:
+                    base_parts.append(f"rep-{rep_index.iloc[idx]}")
+                current_base = _dedup_parts(*base_parts)
+                extra["current_bids"] = current_base
+
             rows.append(SeriesInfo(subject, session, modality, sequence, rep, extra))
+
         return rows
 
     def _post_conversion_schema_rename(self, bids_root: str, df):
