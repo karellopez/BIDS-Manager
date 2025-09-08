@@ -36,9 +36,9 @@ def test_schema_renamer_end_to_end(tmp_path):
     create_fake_dataset(tmp_path)
     schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
     series = [
-        SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig"}),
-        SeriesInfo("001", None, "bold", "fmri_rest", 1, {"current_bids": "sub-001_run1"}),
-        SeriesInfo("001", None, "dwi", "ep2d_diff", 1, {"current_bids": "sub-001_raw"}),
+        SeriesInfo("001", None, "T1w", "mprage", None, {"current_bids": "sub-001_orig"}),
+        SeriesInfo("001", None, "bold", "fmri_rest", None, {"current_bids": "sub-001_run1"}),
+        SeriesInfo("001", None, "dwi", "ep2d_diff", None, {"current_bids": "sub-001_raw"}),
     ]
     proposals = build_preview_names(series, schema)
     rename_map = apply_post_conversion_rename(tmp_path, proposals)
@@ -64,8 +64,8 @@ def test_duplicate_names_numbered(tmp_path):
     _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig2.nii.gz")
     _touch(tmp_path / "sub-001" / "anat" / "sub-001_orig2.json")
     series = [
-        SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig1"}),
-        SeriesInfo("001", None, "T1w", "mprage", 1, {"current_bids": "sub-001_orig2"}),
+        SeriesInfo("001", None, "T1w", "mprage", None, {"current_bids": "sub-001_orig1"}),
+        SeriesInfo("001", None, "T1w", "mprage", 2, {"current_bids": "sub-001_orig2"}),
     ]
     proposals = build_preview_names(series, schema)
     rename_map = apply_post_conversion_rename(tmp_path, proposals)

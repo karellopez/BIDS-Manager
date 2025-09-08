@@ -1995,14 +1995,21 @@ class BIDSManager(QMainWindow):
             session = row.get("session") or row.get("ses") or None
             modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
             sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
-            rep = row.get("rep") or row.get("repeat") or 1
+            # ``rep`` encodes repeat acquisitions detected earlier.  Leave it as
+            # ``None`` for non-repeated series and cast to ``int`` when present.
+            rep_val = row.get("rep") or row.get("repeat")
+            rep = int(rep_val) if rep_val else None
             extra = {}
             for key in ("task", "acq", "run", "dir", "echo"):
                 if row.get(key):
                     extra[key] = str(row.get(key))
-            if row.get("BIDS_name"):
-                extra["current_bids"] = str(row.get("BIDS_name"))
-            rows.append(SeriesInfo(subject, session, modality, sequence, int(rep or 1), extra))
+            # "GivenName" holds the filename produced by the converter, which we
+            # use as the current BIDS basename when searching for files to
+            # rename.  "BIDS_name" represents the proposed final name and should
+            # not be used for lookup here.
+            if row.get("GivenName"):
+                extra["current_bids"] = str(row.get("GivenName"))
+            rows.append(SeriesInfo(subject, session, modality, sequence, rep, extra))
         return rows
 
     def _post_conversion_schema_rename(self, bids_root: str, df):
