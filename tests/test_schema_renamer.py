@@ -43,18 +43,10 @@ def test_schema_renamer_end_to_end(tmp_path):
     proposals = build_preview_names(series, schema)
     rename_map = apply_post_conversion_rename(tmp_path, proposals)
     assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w.nii.gz").exists()
-    assert (
-        tmp_path / "sub-001" / "func" / "sub-001_task-rest_acq-fmrirest_bold.nii.gz"
-    ).exists()
-    assert (
-        tmp_path / "sub-001" / "dwi" / "sub-001_acq-ep2ddiff_dwi.nii.gz"
-    ).exists()
-    assert (
-        tmp_path / "sub-001" / "dwi" / "sub-001_acq-ep2ddiff_dwi.bval"
-    ).exists()
-    assert (
-        tmp_path / "sub-001" / "dwi" / "sub-001_acq-ep2ddiff_dwi.bvec"
-    ).exists()
+    assert (tmp_path / "sub-001" / "func" / "sub-001_task-rest_bold.nii.gz").exists()
+    assert (tmp_path / "sub-001" / "dwi" / "sub-001_dwi.nii.gz").exists()
+    assert (tmp_path / "sub-001" / "dwi" / "sub-001_dwi.bval").exists()
+    assert (tmp_path / "sub-001" / "dwi" / "sub-001_dwi.bvec").exists()
     for suffix in ["ADC", "FA", "TRACEW", "ColFA"]:
         out = tmp_path / "derivatives" / DERIVATIVES_PIPELINE_NAME / "sub-001" / "dwi" / f"sub-001_desc-{suffix}_dwi.nii.gz"
         assert out.exists()
@@ -113,4 +105,4 @@ def test_fieldmap_runs_and_task_hits(tmp_path):
         "sub-001_run-02_phasediff",
     ]
     # Task hit "custom" should be used
-    assert task_base == "sub-001_task-custom_acq-customsequence_bold"
+    assert task_base == "sub-001_task-custom_bold"
