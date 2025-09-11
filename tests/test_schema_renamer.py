@@ -43,10 +43,18 @@ def test_schema_renamer_end_to_end(tmp_path):
     proposals = build_preview_names(series, schema)
     rename_map = apply_post_conversion_rename(tmp_path, proposals)
     assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w.nii.gz").exists()
-    assert (tmp_path / "sub-001" / "func" / "sub-001_task-rest_bold.nii.gz").exists()
-    assert (tmp_path / "sub-001" / "dwi" / "sub-001_dwi.nii.gz").exists()
-    assert (tmp_path / "sub-001" / "dwi" / "sub-001_dwi.bval").exists()
-    assert (tmp_path / "sub-001" / "dwi" / "sub-001_dwi.bvec").exists()
+    assert (
+        tmp_path / "sub-001" / "func" / "sub-001_task-rest_acq-fmrirest_bold.nii.gz"
+    ).exists()
+    assert (
+        tmp_path / "sub-001" / "dwi" / "sub-001_acq-ep2ddiff_dwi.nii.gz"
+    ).exists()
+    assert (
+        tmp_path / "sub-001" / "dwi" / "sub-001_acq-ep2ddiff_dwi.bval"
+    ).exists()
+    assert (
+        tmp_path / "sub-001" / "dwi" / "sub-001_acq-ep2ddiff_dwi.bvec"
+    ).exists()
     for suffix in ["ADC", "FA", "TRACEW", "ColFA"]:
         out = tmp_path / "derivatives" / DERIVATIVES_PIPELINE_NAME / "sub-001" / "dwi" / f"sub-001_desc-{suffix}_dwi.nii.gz"
         assert out.exists()
@@ -70,4 +78,39 @@ def test_duplicate_names_numbered(tmp_path):
     proposals = build_preview_names(series, schema)
     rename_map = apply_post_conversion_rename(tmp_path, proposals)
     assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w.nii.gz").exists()
-    assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w(2).nii.gz").exists()
+    assert (tmp_path / "sub-001" / "anat" / "sub-001_T1w_rep-2.nii.gz").exists()
+
+
+def test_fieldmap_runs_and_task_hits(tmp_path):
+    """Fieldmaps with run numbers should keep distinct names and task_hits
+    should influence task detection."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+
+    # Two fieldmap series with run tokens in their sequence names
+    fm1 = SeriesInfo("001", None, "phasediff", "fmap_run-1", None, {})
+    fm2 = SeriesInfo("001", None, "phasediff", "fmap_run-2", None, {})
+
+    # Series with custom task hits. The sequence itself has no known task
+    # tokens but ``task_hits`` provides a hint.
+    task_series = SeriesInfo(
+        "001",
+        None,
+        "bold",
+        "customsequence",
+        None,
+        {"task_hits": "custom"},
+    )
+
+    proposals = build_preview_names([fm1, fm2, task_series], schema)
+
+    # Extract basenames for easier assertions
+    fmap_bases = [base for (_, dt, base) in proposals[:2]]
+    task_base = proposals[2][2]
+
+    assert fmap_bases == [
+        "sub-001_run-01_phasediff",
+        "sub-001_run-02_phasediff",
+    ]
+    # Task hit "custom" should be used
+    assert task_base == "sub-001_task-custom_acq-customsequence_bold"

@@ -175,7 +175,6 @@ def guess_task_from_sequence(sequence: str) -> str:
         return "unknown"
     
     # First strip any run tokens that might interfere
-    sequence = _strip_run_tokens(sequence)
     seq_lower = sequence.lower()
     
     # Check for resting state patterns first
@@ -209,10 +208,19 @@ def generate_bids_name(row, rep_num: int, rep_count: int, only_last_repeated: bo
         session_raw = ""
     ses = _normalize_session(session_raw)
     
-    # Strip run tokens from sequence before processing
-    sequence = _strip_run_tokens(str(row.get("sequence", "")))
+    # Keep the original sequence so that run information can be extracted later
+    # by ``propose_bids_basename``.  This mirrors the behaviour of the GUI.
+    sequence = str(row.get("sequence", ""))
     modality = str(row.get("modality", ""))
-    
+
+    # Collect optional entities such as task hints.  We include ``task_hits`` so
+    # the same automatic task detection used by the GUI applies when building a
+    # heuristic directly from a TSV file.
+    extra: dict[str, str] = {}
+    for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
+        if row.get(key):
+            extra[key] = str(row.get(key))
+
     # Create SeriesInfo exactly like the GUI does
     schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
     series = SeriesInfo(
@@ -221,7 +229,7 @@ def generate_bids_name(row, rep_num: int, rep_count: int, only_last_repeated: bo
         modality=modality,
         sequence=sequence,
         rep=(None if only_last_repeated else int(rep_num) if rep_count > 1 else None),
-        extra={},
+        extra=extra,
     )
     
     # Use the exact same preview logic to get the proposed name
@@ -232,7 +240,7 @@ def generate_bids_name(row, rep_num: int, rep_count: int, only_last_repeated: bo
     # - Task detection with fallback to full sequence for uniqueness  
     # - Repetition handling with _rep-N
     # - Fieldmap suffix normalization
-    # - Removal of stray run-N tokens
+    # - Preservation of run numbers when present
     
     return base
 

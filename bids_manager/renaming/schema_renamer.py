@@ -44,6 +44,27 @@ def _strip_run_tokens(sequence: str) -> str:
     return sequence
 
 
+def _extract_run_number(sequence: Optional[str]) -> Optional[int]:
+    """Return run number encoded in a sequence name if present.
+
+    Fieldmaps and some other acquisitions may encode ``run`` information in
+    the original ``SeriesDescription``.  Previously this information was
+    stripped which caused different runs to collide under the same BIDS name
+    (e.g. two fieldmaps both renamed to ``run-1``).  This helper captures the
+    run number before any cleaning takes place so the caller can explicitly
+    emit a ``run-<N>`` entity, preserving uniqueness.
+    """
+    if not sequence:
+        return None
+    m = re.search(r"run-?0*(\d+)", sequence, flags=re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
 def _guess_task_from_text(*candidates: Optional[str]) -> Optional[str]:
     """Extract task name from text candidates.
     
@@ -72,8 +93,14 @@ def _guess_task_from_text(*candidates: Optional[str]) -> Optional[str]:
                 return "rest"
     
     # Check for other common task patterns
-    task_hints = ("movie", "nback", "flanker", "stroop", "motor", "checker", "checkerboard", 
-                  "exec", "paradigma", "paradigm", "task", "activation")
+    task_hints = (
+        # Common explicit task labels
+        "movie", "nback", "flanker", "stroop", "motor", "checker", "checkerboard",
+        # Atypical labels observed in some centers
+        "exec", "paradigma", "paradigm", "sparse", "mb",
+        # Generic fallbacks
+        "task", "activation",
+    )
     for c in clean_candidates:
         if not c:
             continue
@@ -259,6 +286,10 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     when no specific task hint is found.
     """
     suffix = _normalize_suffix(series.modality)
+    # Update the series object so any external tables reflect the normalized
+    # modality used for the proposed BIDS name (prevents "bold" vs "func" mismatches
+    # in the GUI).
+    series.modality = suffix
     datatype = _choose_datatype(suffix, schema)
     required = set(schema.suffix_requirements.get(suffix, []))
 
@@ -268,16 +299,43 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         raise ValueError("SeriesInfo.subject is required and must be alphanumeric")
     parts.append(f"sub-{sub}")
 
-    ses = _sanitize_token(series.session or "")
+    ses_raw = series.session or ""
+    ses = _sanitize_token(ses_raw)
+    # Users sometimes supply session strings already prefixed with ``ses-``.
+    # After sanitization this would yield ``ses<suffix>`` which in turn produces
+    # names like ``ses-sesspre``.  Strip a leading ``ses`` token if present so the
+    # final name always follows ``ses-<label>``.
+    if ses_raw.lower().startswith(("ses-", "ses_")) and ses.lower().startswith("ses"):
+        ses = ses[3:]
     if ses:
         parts.append(f"ses-{ses}")
 
     # Strip run tokens from sequence before any processing
+    # Capture run number before sanitising the sequence.  We keep the original
+    # run information so that different fieldmaps (or any other modality using
+    # runs) do not collide in their proposed BIDS names.
+    run_number = _extract_run_number(series.sequence)
     clean_sequence = _strip_run_tokens(series.sequence)
 
     if "task" in required or suffix in ("bold", "sbref"):
         task_hint = series.extra.get("task") if series.extra else None
-        # First try explicit task hint, then try to guess from sequence
+
+        # ``task_hits`` is an optional list of keywords extracted by the GUI
+        # or TSV importer.  If provided we try to match any of those hits
+        # against the sequence name.  The first match becomes the task label.
+        if not task_hint and series.extra:
+            hits = series.extra.get("task_hits")
+            if hits:
+                for token in re.split(r"[;,\s]+", str(hits)):
+                    token_s = _sanitize_token(token)
+                    if not token_s:
+                        continue
+                    if token_s.lower() in clean_sequence.lower():
+                        task_hint = token_s
+                        break
+
+        # First try explicit or hit-based task hints, then try to guess from
+        # the sequence text itself.
         task = _sanitize_token(task_hint) or _guess_task_from_text(clean_sequence)
         
         # If no specific task hint found, use the full sanitized sequence
@@ -329,11 +387,15 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         if direction:
             parts.append(f"dir-{direction}")
 
-    # Never emit run-<N> in filenames; repetitions are handled elsewhere by
-    # appending `_rep-<N>` (outside of this function) to keep a single
-    # convention and avoid collisions.
-    # The old run logic is completely removed.
+    # Preserve run information if we detected it earlier.  BIDS recommends
+    # zero padding the run number to two digits for consistency.
+    if run_number is not None:
+        parts.append(f"run-{run_number:02d}")
 
+    # Repetition numbering (same acquisition repeated) is handled by
+    # ``build_preview_names`` using the ``_rep-<N>`` suffix.  Here we only add
+    # the BIDS ``run-`` entity when it is explicitly encoded in the original
+    # sequence name.
     parts.append(suffix)
     return datatype, "_".join(parts)
 
@@ -518,11 +580,11 @@ def build_preview_names(
             final_base = f"{base}_rep-{s.rep}"
         else:
             final_base = base
-        # Ensure no stray run-<N> (we rely solely on _rep-<N>)
-        final_base = re.sub(r"_run-\d+", "", final_base)
-        
-        # Additional cleanup: remove any remaining run- patterns
-        final_base = re.sub(r"run-\d+_?", "", final_base)
+
+        # Clean up any redundant underscores that may have appeared after
+        # assembling entities.  We intentionally preserve explicit ``run-``
+        # numbers which are now part of ``base`` to avoid collisions between
+        # different fieldmap runs.
         final_base = re.sub(r"_+", "_", final_base).strip("_")
         out.append((s, dt, final_base))
     return out
