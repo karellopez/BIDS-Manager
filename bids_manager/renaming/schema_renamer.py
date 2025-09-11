@@ -27,21 +27,63 @@ def _sanitize_token(x: Optional[str]) -> Optional[str]:
     return _SANITIZE_TOKEN.sub("", x).strip()
 
 
+def _strip_run_tokens(sequence: str) -> str:
+    """Remove any run-N tokens from sequence name before processing.
+    
+    This ensures we don't have run- artifacts in the original sequence names
+    that could cause confusion with our repetition handling.
+    """
+    if not sequence:
+        return sequence
+    # Remove run-N patterns (run-01, run-1, etc.)
+    sequence = re.sub(r"_?run-\d+_?", "_", sequence, flags=re.IGNORECASE)
+    sequence = re.sub(r"^run-\d+_", "", sequence, flags=re.IGNORECASE)
+    sequence = re.sub(r"_run-\d+$", "", sequence, flags=re.IGNORECASE)
+    # Clean up multiple underscores
+    sequence = re.sub(r"_+", "_", sequence).strip("_")
+    return sequence
+
+
 def _guess_task_from_text(*candidates: Optional[str]) -> Optional[str]:
-    for c in candidates:
+    """Extract task name from text candidates.
+    
+    This function tries to find meaningful task hints, but if none are found,
+    it will return None so the caller can use the full sequence as a fallback
+    to ensure uniqueness.
+    """
+    # First strip run tokens from all candidates
+    clean_candidates = [_strip_run_tokens(c) if c else c for c in candidates]
+    
+    for c in clean_candidates:
         if not c:
             continue
         m = _TASK_TOKEN.search(c)
         if m:
             return _sanitize_token(m.group(1))
-    hints = ("rest", "resting", "movie", "nback", "flanker", "stroop", "motor", "checker", "checkerboard")
-    for c in candidates:
+    
+    # Check for resting state patterns first
+    resting_patterns = ("rs", "_rs", "rs_", "rest", "resting")
+    for c in clean_candidates:
         if not c:
             continue
         low = c.lower()
-        for h in hints:
-            if h in low:
-                return _sanitize_token(h)
+        for pattern in resting_patterns:
+            if pattern in low:
+                return "rest"
+    
+    # Check for other common task patterns
+    task_hints = ("movie", "nback", "flanker", "stroop", "motor", "checker", "checkerboard", 
+                  "exec", "paradigma", "paradigm", "task", "activation")
+    for c in clean_candidates:
+        if not c:
+            continue
+        low = c.lower()
+        for hint in task_hints:
+            if hint in low:
+                return _sanitize_token(hint)
+    
+    # DON'T try to extract parts here - return None so caller can use full sequence
+    # This ensures different sequences never get the same task name
     return None
 
 
@@ -50,6 +92,28 @@ def _resolve_ext(name: str) -> str:
         if name.endswith(ext):
             return ext
     return Path(name).suffix
+
+
+def _detect_dwi_derivative(sequence: str) -> Optional[str]:
+    """Return standardized map name if ``sequence`` looks like a DWI derivative.
+
+    Only a small, explicit set is considered a derivative according to the
+    user's policy. Anything else is treated as raw DWI.
+    """
+    s = (sequence or "").lower()
+    if "colfa" in s:
+        return "ColFA"
+    if "fa" in s and "colfa" not in s:
+        return "FA"
+    if "tensor" in s:
+        return "TENSOR"
+    if "adc" in s:
+        return "ADC"
+    if "trace" in s:
+        return "TRACE"
+    if "tracew" in s:
+        return "TRACE"
+    return None
 
 
 def _replace_stem_keep_ext(src: Path, new_basename: str) -> Path:
@@ -169,6 +233,10 @@ def _normalize_suffix(modality: str) -> str:
 
 
 def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
+    # Handle DWI derivatives first
+    if suffix.lower() in ("adc", "fa", "tracew", "colfa", "expadc"):
+        return "derivatives"
+    
     dts = schema.suffix_to_datatypes.get(suffix)
     if dts:
         pref = ("anat", "func", "dwi", "fmap", "perf", "pet", "meg", "eeg", "ieeg")
@@ -184,6 +252,12 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
 
 
 def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, str]:
+    """Propose a BIDS basename for a series.
+    
+    This function guarantees that different sequence names will never produce
+    identical BIDS names by using the full sanitized sequence as a fallback
+    when no specific task hint is found.
+    """
     suffix = _normalize_suffix(series.modality)
     datatype = _choose_datatype(suffix, schema)
     required = set(schema.suffix_requirements.get(suffix, []))
@@ -198,16 +272,50 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     if ses:
         parts.append(f"ses-{ses}")
 
-    if "task" in required or suffix in ("bold", "sbref"):
-        task = series.extra.get("task") if series.extra else None
-        task = _sanitize_token(task) or _guess_task_from_text(series.sequence)
-        parts.append(f"task-{task or 'unknown'}")
+    # Strip run tokens from sequence before any processing
+    clean_sequence = _strip_run_tokens(series.sequence)
 
-    acq = series.extra.get("acq") if series.extra else None
-    if acq:
-        acq = _sanitize_token(acq)
-        if acq:
-            parts.append(f"acq-{acq}")
+    if "task" in required or suffix in ("bold", "sbref"):
+        task_hint = series.extra.get("task") if series.extra else None
+        # First try explicit task hint, then try to guess from sequence
+        task = _sanitize_token(task_hint) or _guess_task_from_text(clean_sequence)
+        
+        # If no specific task hint found, use the full sanitized sequence
+        # This ensures different sequences NEVER get the same BIDS name
+        if not task:
+            task = _sanitize_token(clean_sequence)[:48]  # Truncate for safety
+            if not task:
+                task = "unknown"
+        
+        parts.append(f"task-{task}")
+
+    # Detect DWI derivative from the sequence text itself and adjust datatype
+    # and suffix accordingly so Preview/Table point to the derivatives tree and
+    # not raw dwi/.
+    map_name = _detect_dwi_derivative(clean_sequence)
+    if map_name:
+        datatype = "derivatives"
+        # Keep an acquisition discriminator for uniqueness between different
+        # series descriptions.
+        acq_token = _sanitize_token(clean_sequence)[:32]
+        if acq_token:
+            parts.append(f"acq-{acq_token}")
+        parts.append(f"desc-{map_name}")
+        # Force suffix used later to dwi
+        suffix = "dwi"
+    else:
+        # For non-derivatives, add acquisition tag if we need uniqueness
+        # This handles cases where different sequences would otherwise get same name
+        acq = series.extra.get("acq") if series.extra else None
+        if not acq and datatype not in ("anat", "fmap"):  # Don't auto-add acq for anatomy/fieldmaps
+            # Use sequence as acquisition for uniqueness if no explicit acq
+            acq_token = _sanitize_token(clean_sequence)[:32]
+            if acq_token and len(acq_token) > 0:
+                parts.append(f"acq-{acq_token}")
+        elif acq:
+            acq = _sanitize_token(acq)
+            if acq:
+                parts.append(f"acq-{acq}")
 
     echo = series.extra.get("echo") if series.extra else None
     if echo:
@@ -221,13 +329,10 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         if direction:
             parts.append(f"dir-{direction}")
 
-    run = None
-    if series.extra and "run" in series.extra:
-        run = series.extra["run"]
-    if run:
-        run_s = _sanitize_token(str(run))
-        if run_s and run_s != "1":
-            parts.append(f"run-{run_s}")
+    # Never emit run-<N> in filenames; repetitions are handled elsewhere by
+    # appending `_rep-<N>` (outside of this function) to keep a single
+    # convention and avoid collisions.
+    # The old run logic is completely removed.
 
     parts.append(suffix)
     return datatype, "_".join(parts)
@@ -257,6 +362,9 @@ def _glob_candidates(dt_dir: Path, subject: str, original_seq: str) -> List[Path
                 f"sub-*{token}*.*",
                 f"sub-*{token}*.nii.gz",
                 f"sub-*{token}*.json",
+                f"*{token}*.*",  # Also try without sub- prefix
+                f"*{token}*.nii.gz",
+                f"*{token}*.json",
             ])
     for token in {seq_wc, seq_wc.lower()}:
         if token:
@@ -264,6 +372,9 @@ def _glob_candidates(dt_dir: Path, subject: str, original_seq: str) -> List[Path
                 f"sub-*{token}*.*",
                 f"sub-*{token}*.nii.gz",
                 f"sub-*{token}*.json",
+                f"*{token}*.*",  # Also try without sub- prefix
+                f"*{token}*.nii.gz",
+                f"*{token}*.json",
             ])
 
     out: List[Path] = []
@@ -283,6 +394,56 @@ def _rename_file_set(old: Path, new_basename: str, rename_map: Dict[Path, Path])
         return
     newp.parent.mkdir(parents=True, exist_ok=True)
     rename_map[old] = newp
+
+
+def _process_series_in_dir(dt_dir: Path, series: "SeriesInfo", new_base: str, rename_map: Dict[Path, Path], 
+                          bids_root: Path, derivatives_pipeline_name: str, is_derivative: bool) -> None:
+    """Process a series in a specific directory, finding and renaming files."""
+    candidates: List[Path] = []
+    
+    # First try to find files using the original sequence name (heudiconv naming)
+    candidates = _glob_candidates(dt_dir, series.subject, series.sequence)
+    
+    # If no files found with sequence matching, try the current_bids field as fallback
+    if not candidates:
+        current = series.extra.get("current_bids") if series.extra else None
+        if current:
+            for ext in _BIDS_EXTS:
+                p = dt_dir / f"{current}{ext}"
+                if p.exists():
+                    candidates.append(p)
+    
+    # Debug: print what we found (only if no candidates found)
+    if not candidates:
+        print(f"No candidates found for {series.sequence} in {dt_dir}")
+        # List all files in the directory for debugging
+        all_files = list(dt_dir.glob("*"))
+        if all_files:
+            print(f"  Available files in {dt_dir}:")
+            for f in all_files:
+                print(f"    - {f.name}")
+        else:
+            print(f"  Directory {dt_dir} is empty or doesn't exist")
+    
+    for p in candidates:
+        if not any(p.name.endswith(ext) for ext in _BIDS_EXTS):
+            continue
+        
+        if is_derivative:
+            # For derivatives, move to proper derivatives folder
+            deriv_dir = bids_root / "derivatives" / derivatives_pipeline_name
+            sub_name = f"sub-{_sanitize_token(series.subject)}"
+            final_dir = deriv_dir / sub_name
+            if series.session:
+                final_dir = final_dir / f"ses-{_sanitize_token(series.session)}"
+            final_dir = final_dir / "dwi"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create new path in derivatives
+            new_file = final_dir / _replace_stem_keep_ext(p, new_base).name
+            rename_map[p] = new_file
+        else:
+            _rename_file_set(p, new_base, rename_map)
 
 
 def _normalize_fieldmaps(dt_dir: Path, rename_map: Dict[Path, Path]) -> None:
@@ -350,12 +511,19 @@ def build_preview_names(
     out: List[Tuple[SeriesInfo, str, str]] = []
     for s in inventory_rows:
         dt, base = propose_bids_basename(s, schema)
-        # ``rep`` already encodes whether this series is a repeat.  Only append
-        # a numeric suffix when ``rep`` is explicitly > 1.
+        # Reflect repeats using `_rep-<N>` instead of `(N)` so Preview/Table
+        # match the final conversion/heuristic behavior and never introduce
+        # parentheses which break some shell invocations.
         if s.rep and s.rep > 1:
-            final_base = f"{base}({s.rep})"
+            final_base = f"{base}_rep-{s.rep}"
         else:
             final_base = base
+        # Ensure no stray run-<N> (we rely solely on _rep-<N>)
+        final_base = re.sub(r"_run-\d+", "", final_base)
+        
+        # Additional cleanup: remove any remaining run- patterns
+        final_base = re.sub(r"run-\d+_?", "", final_base)
+        final_base = re.sub(r"_+", "_", final_base).strip("_")
         out.append((s, dt, final_base))
     return out
 
@@ -371,26 +539,48 @@ def apply_post_conversion_rename(
     rename_map: Dict[Path, Path] = {}
 
     # main renaming based on proposals
+    print(f"Processing {len(proposals)} proposals for renaming:")
+    for i, (series, datatype, new_base) in enumerate(proposals):
+        print(f"  {i+1}. {series.sequence} -> {datatype}/{new_base}")
+    
     for series, datatype, new_base in proposals:
-        dt_dir = bids_root / f"sub-{_sanitize_token(series.subject)}"
-        if series.session:
-            dt_dir = dt_dir / f"ses-{_sanitize_token(series.session)}"
-        dt_dir = dt_dir / datatype
-        if not dt_dir.exists():
-            continue
-        candidates: List[Path] = []
-        current = series.extra.get("current_bids") if series.extra else None
-        if current:
-            for ext in _BIDS_EXTS:
-                p = dt_dir / f"{current}{ext}"
-                if p.exists():
-                    candidates.append(p)
-        if not candidates:
-            candidates = _glob_candidates(dt_dir, series.subject, series.sequence)
-        for p in candidates:
-            if not any(p.name.endswith(ext) for ext in _BIDS_EXTS):
+        # Handle derivatives specially - they need special path handling
+        if datatype == "derivatives":
+            # For derivatives, search in both dwi and misc folders
+            search_dirs = []
+            base_dir = bids_root / f"sub-{_sanitize_token(series.subject)}"
+            if series.session:
+                base_dir = base_dir / f"ses-{_sanitize_token(series.session)}"
+            
+            # Check dwi folder first (most likely location for DWI derivatives)
+            dwi_dir = base_dir / "dwi"
+            if dwi_dir.exists():
+                search_dirs.append(dwi_dir)
+            
+            # Check misc folder
+            misc_dir = base_dir / "misc"
+            if misc_dir.exists():
+                search_dirs.append(misc_dir)
+            
+            # Also check if they're already in derivatives
+            deriv_dir = bids_root / "derivatives" / derivatives_pipeline_name / f"sub-{_sanitize_token(series.subject)}"
+            if series.session:
+                deriv_dir = deriv_dir / f"ses-{_sanitize_token(series.session)}"
+            deriv_dir = deriv_dir / "dwi"
+            if deriv_dir.exists():
+                search_dirs.append(deriv_dir)
+                
+            # Process all search directories
+            for dt_dir in search_dirs:
+                _process_series_in_dir(dt_dir, series, new_base, rename_map, bids_root, derivatives_pipeline_name, True)
+        else:
+            dt_dir = bids_root / f"sub-{_sanitize_token(series.subject)}"
+            if series.session:
+                dt_dir = dt_dir / f"ses-{_sanitize_token(series.session)}"
+            dt_dir = dt_dir / datatype
+            if not dt_dir.exists():
                 continue
-            _rename_file_set(p, new_base, rename_map)
+            _process_series_in_dir(dt_dir, series, new_base, rename_map, bids_root, derivatives_pipeline_name, False)
 
     # fieldmaps normalization
     if also_normalize_fieldmaps:

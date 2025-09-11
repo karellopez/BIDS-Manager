@@ -156,11 +156,29 @@ def restore_sequence_dictionary() -> None:
 load_sequence_dictionary()
 
 def guess_modality(series: str) -> str:
-    """Return first matching fine label; otherwise 'unknown'."""
+    """Return first matching fine-grained modality label or 'unknown'.
+
+    Important details:
+    - We classify common vendor DWI derivative maps (ADC/FA/TRACEW/ColFA/expADC)
+      before general DWI detection to keep them out of the raw `dwi/` tree.
+    - Matching is performed on the lower-cased SeriesDescription.
+    """
     s = series.lower()
+
+    # Recognize common scanner-generated maps as derivatives
+    dwi_derivatives = [
+        "_adc", "_fa", "_tracew", "_colfa", "_expadc",
+        " adc", " fa", " tracew", " colfa", " expadc",
+        "adc", "fa", "tracew", "colfa", "expadc",
+    ]
+    for deriv in dwi_derivatives:
+        if deriv in s:
+            return "dwi_derivative"
+
     for label, pats in BIDS_PATTERNS.items():
         if any(p in s for p in pats):
             return label
+
     return "unknown"
 
 
@@ -201,6 +219,7 @@ BIDS_CONTAINER = {
     "scout":"anat", "report":"anat", "refscan":"anat",
     "bold":"func", "SBRef":"func",
     "dwi":"dwi",
+    "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
     "fmap":"fmap",
 }
 def modality_to_container(mod: str) -> str:

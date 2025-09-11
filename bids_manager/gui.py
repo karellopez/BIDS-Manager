@@ -2024,11 +2024,10 @@ class BIDSManager(QMainWindow):
             # subject ID, optional session, a "safe" version of the sequence and
             # ``rep-<N>`` when duplicates exist.
             if row.get("BIDS_name") and sequence:
-                base_parts = [
-                    str(row["BIDS_name"]),
-                    session or "",
-                    _safe_stem(sequence),
-                ]
+                base_parts = [str(row["BIDS_name"])]
+                if session:
+                    base_parts.append(session)
+                base_parts.append(_safe_stem(sequence))
                 if rep_counts.iloc[idx] > 1:
                     base_parts.append(f"rep-{rep_index.iloc[idx]}")
                 current_base = _dedup_parts(*base_parts)
