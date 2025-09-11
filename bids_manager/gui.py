@@ -157,7 +157,7 @@ def _compute_bids_preview(df, schema):
         rep = row.get("rep") or row.get("repeat") or 1
 
         extra = {}
-        for key in ("task", "acq", "run", "dir", "echo"):
+        for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
             if row.get(key):
                 extra[key] = str(row.get(key))
 
@@ -2014,7 +2014,7 @@ class BIDSManager(QMainWindow):
             rep = int(rep_val) if rep_val else None
 
             extra: dict[str, str] = {}
-            for key in ("task", "acq", "run", "dir", "echo"):
+            for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
                 if row.get(key):
                     extra[key] = str(row.get(key))
 
