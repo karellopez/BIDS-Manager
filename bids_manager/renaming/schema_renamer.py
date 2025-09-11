@@ -362,15 +362,13 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         # Force suffix used later to dwi
         suffix = "dwi"
     else:
-        # For non-derivatives, add acquisition tag if we need uniqueness
-        # This handles cases where different sequences would otherwise get same name
+        # For non-derivatives, only include an acquisition label if one was
+        # explicitly provided. Previously, the sequence text was used as a
+        # fallback to guarantee uniqueness, which produced long
+        # ``acq-<pattern>`` tokens. These were confusing and not BIDS
+        # recommended, so we now omit ``acq`` unless the caller supplies it.
         acq = series.extra.get("acq") if series.extra else None
-        if not acq and datatype not in ("anat", "fmap"):  # Don't auto-add acq for anatomy/fieldmaps
-            # Use sequence as acquisition for uniqueness if no explicit acq
-            acq_token = _sanitize_token(clean_sequence)[:32]
-            if acq_token and len(acq_token) > 0:
-                parts.append(f"acq-{acq_token}")
-        elif acq:
+        if acq:
             acq = _sanitize_token(acq)
             if acq:
                 parts.append(f"acq-{acq}")
