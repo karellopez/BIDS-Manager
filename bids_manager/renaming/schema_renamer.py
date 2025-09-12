@@ -383,7 +383,12 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     run_number = _extract_run_number(series.sequence)
     clean_sequence = _strip_run_tokens(series.sequence)
 
-    if "task" in required or suffix in ("bold", "sbref"):
+    # ``task`` labels are mandatory for some suffixes (as per the schema
+    # requirements) and also desirable for functional reference scans and
+    # physiological recordings so that supporting files share the same base
+    # name as their associated BOLD runs.  Treat ``physio`` like ``bold`` and
+    # ``sbref`` so that it inherits task/run context from the sequence text.
+    if "task" in required or suffix in ("bold", "sbref", "physio"):
         task_hint = series.extra.get("task") if series.extra else None
 
         # ``task_hits`` is an optional list of keywords extracted by the GUI
