@@ -8,6 +8,7 @@ from bids_manager.renaming.schema_renamer import (
     apply_post_conversion_rename,
 )
 from bids_manager.renaming.config import DEFAULT_SCHEMA_DIR, DERIVATIVES_PIPELINE_NAME
+from bids_manager.dicom_inventory import guess_modality
 
 
 def _touch(path: Path):
@@ -130,3 +131,32 @@ def test_dwi_direction_and_acq_detection():
         "sub-001_acq-15_dir-ap_dwi",
         "sub-001_acq-15b0_dir-ap_dwi",
     ]
+
+
+def test_sbref_and_physio_detection():
+    """SBRef and physio sequences should not be misclassified as bold."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+
+    # SeriesDescriptions containing "bold" tokens should still be detected
+    # as SBRef or physio when those hints are present.
+    sbref_series = SeriesInfo("001", None, "SBRef", "fmri_sbref", None, {})
+    phys_series = SeriesInfo("001", None, "physio", "fmri_physio", None, {})
+
+    proposals = build_preview_names([sbref_series, phys_series], schema)
+
+    (_, dt_sbref, base_sbref), (_, dt_phys, base_phys) = proposals
+
+    assert dt_sbref == "func"
+    assert base_sbref.endswith("_sbref")
+
+    assert dt_phys == "func"
+    assert base_phys.endswith("_physio")
+
+
+def test_guess_modality_prefers_sbref_and_physio():
+    """When sequences contain bold tokens, SBRef/physio patterns win."""
+
+    assert guess_modality("fmri_sbref") == "SBRef"
+    assert guess_modality("BOLD_SBRef") == "SBRef"
+    assert guess_modality("fmri_physio") == "physio"
