@@ -1819,24 +1819,11 @@ class BIDSManager(QMainWindow):
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-
-        if "proposed_datatype" not in df.columns or "proposed_basename" not in df.columns:
-            preview_map = _compute_bids_preview(df, self._schema)
-            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-        else:
-            df["proposed_datatype"] = df["proposed_datatype"].fillna("")
-            df["proposed_basename"] = df["proposed_basename"].fillna("")
-
-        def _ext(mod: str) -> str:
-            return ".tsv" if str(mod).lower() == "physio" else ".nii.gz"
-
+        preview_map = _compute_bids_preview(df, self._schema)
+        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
         df["Proposed BIDS name"] = df.apply(
-            lambda r: (
-                f"{r['proposed_datatype']}/{r['proposed_basename']}{_ext(r['modality'])}"
-                if r["proposed_basename"]
-                else ""
-            ),
+            lambda r: (f"{r['proposed_datatype']}/{r['proposed_basename']}.nii.gz") if r["proposed_basename"] else "",
             axis=1,
         )
         self.inventory_df = df
@@ -2443,32 +2430,6 @@ class BIDSManager(QMainWindow):
                     self.row_info[i]['mod'] = mod
                     self.row_info[i]['modb'] = modb
             self._rebuild_lookup_maps()
-
-            # Recompute proposed names to reflect the updated dictionary
-            if hasattr(self, "inventory_df"):
-                preview_map = _compute_bids_preview(self.inventory_df, self._schema)
-                self.inventory_df["proposed_datatype"] = [
-                    preview_map.get(i, ("", ""))[0] for i in self.inventory_df.index
-                ]
-                self.inventory_df["proposed_basename"] = [
-                    preview_map.get(i, ("", ""))[1] for i in self.inventory_df.index
-                ]
-
-                def _ext(mod: str) -> str:
-                    return ".tsv" if str(mod).lower() == "physio" else ".nii.gz"
-
-                self.inventory_df["Proposed BIDS name"] = self.inventory_df.apply(
-                    lambda r: (
-                        f"{r['proposed_datatype']}/{r['proposed_basename']}{_ext(r['modality'])}"
-                        if r["proposed_basename"]
-                        else ""
-                    ),
-                    axis=1,
-                )
-                for i in range(self.mapping_table.rowCount()):
-                    self.mapping_table.setItem(
-                        i, 7, QTableWidgetItem(self.inventory_df.at[i, "Proposed BIDS name"])
-                    )
             QTimer.singleShot(0, self.populateModalitiesTree)
             QTimer.singleShot(0, self.populateSpecificTree)
 
