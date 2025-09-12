@@ -9,7 +9,7 @@ Why you want this
 -----------------
 * Lets you review **all** SeriesDescriptions, subjects, sessions and file counts
   before converting anything.
-* Column `include` defaults to 1 except for scout/report/physlog sequences,
+* Column `include` defaults to 1 except for scout/report/physio sequences,
   which start at 0 so they are skipped by default.
 * Generated table is the single source of truth you feed into a helper script
   that writes the HeuDiConv heuristic.
@@ -22,7 +22,7 @@ session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
 source_folder  – relative path from the DICOM root to the folder containing the
                  series
-include        – defaults to 1 but scout/report/physlog rows start at 0
+include        – defaults to 1 but scout/report/physio rows start at 0
 sequence       – original SeriesDescription
 series_uid     – DICOM SeriesInstanceUID identifying a specific acquisition
 rep            – 1, 2, … if multiple SeriesInstanceUIDs share the same description
@@ -98,10 +98,15 @@ BIDS_PATTERNS = {
     "PDw"    : ("gre-nm", "gre_nm"),
     "scout"  : ("localizer", "scout"),
     "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
-    "refscan": ("type-ref", "reference", "refscan"),
     # functional
     "bold"   : ("fmri", "bold", "task-"),
-    "SBRef"  : ("sbref",),
+    "SBRef"  : (
+        "sbref",
+        "type-ref",
+        "reference",
+        "refscan",
+        "ref",
+    ),
     # diffusion
     "dwi"    : ("dti", "dwi", "diff"),
     # field maps
@@ -216,7 +221,7 @@ def classify_fieldmap_type(img_list: list) -> str:
 BIDS_CONTAINER = {
     "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
     "MTw":"anat", "PDw":"anat",
-    "scout":"anat", "report":"anat", "refscan":"anat",
+    "scout":"anat", "report":"anat",
     "bold":"func", "SBRef":"func",
     "dwi":"dwi",
     "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
@@ -380,7 +385,11 @@ def scan_dicoms_long(
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
-                if fine_mod in {"scout", "report"} or "physlog" in series.lower():
+                # Skip scout, report, and physiological recordings by default so
+                # they don't get processed unless explicitly enabled. Also
+                # catch legacy "physlog" labels which sometimes appear in the
+                # SeriesDescription.
+                if fine_mod in {"scout", "report", "physio"} or "physlog" in series.lower():
                     include = 0
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)

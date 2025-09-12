@@ -92,6 +92,7 @@ from .renaming.schema_renamer import (
     SeriesInfo,
     build_preview_names,
     apply_post_conversion_rename,
+    compose_proposed_name,
 )
 try:
     import psutil
@@ -168,6 +169,8 @@ def _compute_bids_preview(df, schema):
     for (series, dt, base), idx in zip(proposals, idxs):
         out[idx] = (dt, base)
     return out
+
+
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -1823,7 +1826,9 @@ class BIDSManager(QMainWindow):
         df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
         df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
         df["Proposed BIDS name"] = df.apply(
-            lambda r: (f"{r['proposed_datatype']}/{r['proposed_basename']}.nii.gz") if r["proposed_basename"] else "",
+            lambda r: compose_proposed_name(
+                r.get("modality", ""), r["proposed_datatype"], r["proposed_basename"]
+            ),
             axis=1,
         )
         self.inventory_df = df
