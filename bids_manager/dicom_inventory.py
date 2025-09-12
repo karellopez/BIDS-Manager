@@ -9,8 +9,8 @@ Why you want this
 -----------------
 * Lets you review **all** SeriesDescriptions, subjects, sessions and file counts
   before converting anything.
-* Column `include` defaults to 1 except for scout/report/physlog/physio
-  sequences, which start at 0 so they are skipped by default.
+* Column `include` defaults to 1 except for scout/report/physlog sequences,
+  which start at 0 so they are skipped by default.
 * Generated table is the single source of truth you feed into a helper script
   that writes the HeuDiConv heuristic.
 
@@ -22,7 +22,7 @@ session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
 source_folder  – relative path from the DICOM root to the folder containing the
                  series
-include        – defaults to 1 but scout/report/physlog/physio rows start at 0
+include        – defaults to 1 but scout/report/physlog rows start at 0
 sequence       – original SeriesDescription
 series_uid     – DICOM SeriesInstanceUID identifying a specific acquisition
 rep            – 1, 2, … if multiple SeriesInstanceUIDs share the same description
@@ -31,9 +31,6 @@ modality       – fine label inferred from patterns (T1w, bold, dwi, …)
 modality_bids  – top-level container (anat, func, dwi, fmap) derived from
                  *modality*
 n_files        – number of DICOM files (.dcm or .ima) with that SeriesDescription
-proposed_datatype – suggested BIDS top-level folder (anat, func, etc.)
-proposed_basename – recommended filename stem without extension
-Proposed BIDS name – full `<datatype>/<basename><ext>` suggestion
 GivenName … StudyDescription – demographics copied from the first header seen
 """
 
@@ -101,9 +98,10 @@ BIDS_PATTERNS = {
     "PDw"    : ("gre-nm", "gre_nm"),
     "scout"  : ("localizer", "scout"),
     "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
+    "refscan": ("type-ref", "reference", "refscan"),
     # functional
     "bold"   : ("fmri", "bold", "task-"),
-    "SBRef"  : ("sbref", "type-ref", "reference", "refscan", "ref"),
+    "SBRef"  : ("sbref",),
     # diffusion
     "dwi"    : ("dti", "dwi", "diff"),
     # field maps
@@ -127,15 +125,8 @@ DEFAULT_BIDS_PATTERNS = {m: tuple(pats) for m, pats in BIDS_PATTERNS.items()}
 
 
 def load_sequence_dictionary() -> None:
-    """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`.
-
-    When no custom dictionary exists, this resets :data:`BIDS_PATTERNS` to the
-    built-in defaults so the application always has a complete set of
-    detection rules without requiring the user to manually restore them.
-    """
+    """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
     global BIDS_PATTERNS
-    # Start with bundled defaults in case the preference file is missing
-    BIDS_PATTERNS = {m: tuple(pats) for m, pats in DEFAULT_BIDS_PATTERNS.items()}
     if not SEQ_DICT_FILE.exists():
         return
     try:
@@ -225,8 +216,8 @@ def classify_fieldmap_type(img_list: list) -> str:
 BIDS_CONTAINER = {
     "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
     "MTw":"anat", "PDw":"anat",
-    "scout":"anat", "report":"anat",
-    "bold":"func", "SBRef":"func", "physio":"func",
+    "scout":"anat", "report":"anat", "refscan":"anat",
+    "bold":"func", "SBRef":"func",
     "dwi":"dwi",
     "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
     "fmap":"fmap",
@@ -389,7 +380,7 @@ def scan_dicoms_long(
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
-                if fine_mod in {"scout", "report", "physio"} or "physlog" in series.lower():
+                if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
@@ -475,53 +466,6 @@ def scan_dicoms_long(
         fmap_df.loc[~repeat_mask, "rep"] = ""
 
         df = pd.concat([df[~fmap_mask], fmap_df], ignore_index=True, sort=False)
-
-    # --------------------------------------------------------------
-    # Generate proposed BIDS names using the renamer's helper logic
-    # --------------------------------------------------------------
-    try:
-        from .renaming.schema_renamer import (
-            load_bids_schema,
-            SeriesInfo,
-            build_preview_names,
-        )
-        from .renaming.config import DEFAULT_SCHEMA_DIR
-
-        schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
-        series_info = []
-        for _, row in df.iterrows():
-            subj = str(row["BIDS_name"])
-            if subj.lower().startswith("sub-"):
-                subj = subj[4:]
-            rep = row["rep"] if str(row.get("rep", "")).isdigit() else 1
-            series_info.append(
-                SeriesInfo(
-                    subj,
-                    row.get("session") or None,
-                    str(row.get("modality", "")),
-                    str(row.get("sequence", "")),
-                    int(rep),
-                    {},
-                )
-            )
-
-        proposals = build_preview_names(series_info, schema)
-        df["proposed_datatype"] = [dt for (_, dt, _) in proposals]
-        df["proposed_basename"] = [base for (_, _, base) in proposals]
-
-        def _ext(mod: str) -> str:
-            return ".tsv" if str(mod).lower() == "physio" else ".nii.gz"
-
-        df["Proposed BIDS name"] = [
-            f"{dt}/{base}{_ext(mod)}" if base else ""
-            for dt, base, mod in zip(
-                df["proposed_datatype"], df["proposed_basename"], df["modality"]
-            )
-        ]
-    except Exception:
-        df["proposed_datatype"] = ""
-        df["proposed_basename"] = ""
-        df["Proposed BIDS name"] = ""
 
     df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
 
