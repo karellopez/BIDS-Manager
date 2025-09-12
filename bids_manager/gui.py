@@ -1201,10 +1201,13 @@ class BIDSManager(QMainWindow):
                 if multi_study:
                     path_parts.append(study)
                 path_parts.extend([subj, ses, prop_dt])
-                fname = f"{prop_base}.nii.gz"
-                full = [p for p in path_parts if p] + [fname]
-                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
-                self._add_preview_path(full, seq)
+                files = [f"{prop_base}.nii.gz"]
+                if prop_base.endswith("_physio"):
+                    files = [f"{prop_base}.tsv", f"{prop_base}.json"]
+                for fname in files:
+                    full = [p for p in path_parts if p] + [fname]
+                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                    self._add_preview_path(full, seq)
                 continue
 
             path_parts = []
@@ -1822,10 +1825,15 @@ class BIDSManager(QMainWindow):
         preview_map = _compute_bids_preview(df, self._schema)
         df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
         df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-        df["Proposed BIDS name"] = df.apply(
-            lambda r: (f"{r['proposed_datatype']}/{r['proposed_basename']}.nii.gz") if r["proposed_basename"] else "",
-            axis=1,
-        )
+        def _prop_path(r):
+            base = r.get("proposed_basename")
+            dt = r.get("proposed_datatype")
+            if not base:
+                return ""
+            ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+            return f"{dt}/{base}{ext}"
+
+        df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
         self.inventory_df = df
 
         # ----- load existing mappings without altering the TSV -----
