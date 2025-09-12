@@ -3177,7 +3177,8 @@ class AuthorshipDialog(QDialog):
             "Bsc. Pablo Alexis Olguín Baxman\n"
             "Dr. Amirhussein Abdolalizadeh Saleh\n"
             "Dr. Tina Schmitt\n"
-            "Dr.-Ing. Andreas Spiegler"
+            "Dr.-Ing. Andreas Spiegler\n"
+            "Msc. Shari Hiltner"
         )
         ack.setWordWrap(True)
         ack.setAlignment(Qt.AlignCenter)
