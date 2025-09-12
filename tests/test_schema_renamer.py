@@ -154,6 +154,22 @@ def test_sbref_and_physio_detection():
     assert base_phys.endswith("_physio")
 
 
+def test_physio_naming_preserves_task_and_run():
+    """Physio recordings should share task/run labels with their BOLD runs."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+
+    bold = SeriesInfo("001", None, "bold", "task-two_run-01_bold", None, {})
+    phys = SeriesInfo("001", None, "physio", "task-two_run-01_physio", None, {})
+
+    proposals = build_preview_names([bold, phys], schema)
+
+    bases = {base for (_, _, base) in proposals}
+
+    assert "sub-001_task-two_run-01_bold" in bases
+    assert "sub-001_task-two_run-01_physio" in bases
+
+
 def test_guess_modality_prefers_sbref_and_physio():
     """When sequences contain bold tokens, SBRef/physio patterns win."""
 
