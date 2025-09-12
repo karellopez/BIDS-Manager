@@ -1,5 +1,8 @@
 import shutil
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bids_manager.renaming.schema_renamer import (
     load_bids_schema,
@@ -130,3 +133,30 @@ def test_dwi_direction_and_acq_detection():
         "sub-001_acq-15_dir-ap_dwi",
         "sub-001_acq-15b0_dir-ap_dwi",
     ]
+
+
+def test_sbref_patterns_and_physio_naming(monkeypatch, tmp_path):
+    """SBRef patterns should be detected and physio sequences named correctly."""
+
+    from bids_manager import dicom_inventory
+
+    # Ensure default dictionary loads when no preference file exists
+    monkeypatch.setattr(dicom_inventory, "SEQ_DICT_FILE", tmp_path / "seq.tsv")
+    dicom_inventory.BIDS_PATTERNS = {}
+    dicom_inventory.load_sequence_dictionary()
+
+    sbref_pats = dicom_inventory.BIDS_PATTERNS.get("SBRef", ())
+    for token in ("sbref", "type-ref", "reference", "refscan", "ref"):
+        assert token in sbref_pats
+    assert "refscan" not in dicom_inventory.BIDS_PATTERNS
+
+    # Guess modality using new patterns
+    assert dicom_inventory.guess_modality("my refscan") == "SBRef"
+    assert dicom_inventory.guess_modality("Reference") == "SBRef"
+
+    # Physio naming should produce func/*_physio
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+    series = [SeriesInfo("001", None, "physio", "physio_rest", None, {})]
+    proposals = build_preview_names(series, schema)
+    assert proposals[0][1] == "func"
+    assert proposals[0][2].endswith("_physio")
