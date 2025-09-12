@@ -43,7 +43,6 @@ Tracker = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 [project.scripts]
 bids-manager = "bids_manager.gui:main"
 dicom-inventory = "bids_manager.dicom_inventory:main"
-dicom-metadata-deep-mining = "bids_manager.dicom_metadata_deep_mining:main"
 build-heuristic = "bids_manager.build_heuristic_from_tsv:main"
 run-heudiconv = "bids_manager.run_heudiconv_from_heuristic:main"
 post-conv-renamer = "bids_manager.post_conv_renamer:main"

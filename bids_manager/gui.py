@@ -354,7 +354,6 @@ class BIDSManager(QMainWindow):
         # Async process handles for inventory and conversion steps
         self.inventory_process = None  # QProcess for dicom_inventory
         self.conv_process = None       # QProcess for the conversion pipeline
-        self.deep_process = None       # QProcess for metadata deep mining
         self.conv_stage = 0            # Tracks which step of the pipeline ran
         self.heurs_to_rename = []      # List of heuristics pending rename
 
@@ -1275,10 +1274,6 @@ class BIDSManager(QMainWindow):
         ignore_act = QAction("Edit .bidsignore…", self)
         ignore_act.triggered.connect(self.launchBidsIgnore)
         tools_menu.addAction(ignore_act)
-
-        deep_act = QAction("DICOM Metadata Deep Mining…", self)
-        deep_act.triggered.connect(self.launchDicomDeepMining)
-        tools_menu.addAction(deep_act)
         edit_layout.addWidget(menu)
 
         # Splitter between left (tree & stats) and right (metadata)
@@ -2894,40 +2889,6 @@ class BIDSManager(QMainWindow):
         dlg = BidsIgnoreDialog(self, self.bids_root)
         dlg.exec_()
 
-    def launchDicomDeepMining(self):
-        """Open dialog to run the DICOM metadata deep mining tool."""
-        dlg = DicomDeepMiningDialog(self)
-        if dlg.exec_() != QDialog.Accepted:
-            return
-        dicom_dir = dlg.dicom_dir
-        out_dir = dlg.output_dir
-        fname = dlg.file_name
-        if not dicom_dir or not out_dir or not fname:
-            QMessageBox.warning(self, "Deep Mining", "Please select all fields")
-            return
-        out_path = str(Path(out_dir) / fname)
-        if self.deep_process and self.deep_process.state() != QProcess.NotRunning:
-            QMessageBox.warning(self, "Deep Mining", "Process already running")
-            return
-        self.deep_process = QProcess(self)
-        self.deep_process.setProcessChannelMode(QProcess.ForwardedChannels)
-        self.deep_process.finished.connect(
-            lambda code, _status: QMessageBox.information(
-                self,
-                "Deep Mining",
-                "Completed" if code == 0 else f"Process exited with code {code}",
-            )
-        )
-        self.deep_process.start(
-            sys.executable,
-            [
-                "-m",
-                "bids_manager.dicom_metadata_deep_mining",
-                dicom_dir,
-                out_path,
-            ],
-        )
-
 
 class RemapDialog(QDialog):
     """
@@ -3732,62 +3693,6 @@ class BidsIgnoreDialog(QDialog):
         self.ignore_file.write_text("\n".join(sorted(self.entries)) + "\n")
         QMessageBox.information(self, "Saved", f"Updated {self.ignore_file}")
         self.accept()
-
-
-class DicomDeepMiningDialog(QDialog):
-    """Dialog to configure and launch metadata deep mining."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("DICOM Metadata Deep Mining")
-        layout = QGridLayout(self)
-
-        layout.addWidget(QLabel("Raw data Dir:"), 0, 0)
-        self.dicom_edit = QLineEdit()
-        self.dicom_edit.setReadOnly(True)
-        btn_dicom = QPushButton("Browse…")
-        btn_dicom.clicked.connect(self._choose_dicom)
-        layout.addWidget(self.dicom_edit, 0, 1)
-        layout.addWidget(btn_dicom, 0, 2)
-
-        layout.addWidget(QLabel("Output Dir:"), 1, 0)
-        self.out_edit = QLineEdit()
-        self.out_edit.setReadOnly(True)
-        btn_out = QPushButton("Browse…")
-        btn_out.clicked.connect(self._choose_out)
-        layout.addWidget(self.out_edit, 1, 1)
-        layout.addWidget(btn_out, 1, 2)
-
-        layout.addWidget(QLabel("File Name:"), 2, 0)
-        self.name_edit = QLineEdit("metadata.tsv")
-        layout.addWidget(self.name_edit, 2, 1, 1, 2)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box, 3, 0, 1, 3)
-
-    def _choose_dicom(self):
-        d = QFileDialog.getExistingDirectory(self, "Select DICOM directory")
-        if d:
-            self.dicom_edit.setText(d)
-
-    def _choose_out(self):
-        d = QFileDialog.getExistingDirectory(self, "Select output directory")
-        if d:
-            self.out_edit.setText(d)
-
-    @property
-    def dicom_dir(self) -> str:
-        return self.dicom_edit.text()
-
-    @property
-    def output_dir(self) -> str:
-        return self.out_edit.text()
-
-    @property
-    def file_name(self) -> str:
-        return self.name_edit.text()
 
 
 class MetadataViewer(QWidget):
