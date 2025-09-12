@@ -6,8 +6,10 @@ from bids_manager.renaming.schema_renamer import (
     SeriesInfo,
     build_preview_names,
     apply_post_conversion_rename,
+    default_extension_for_suffix,
 )
 from bids_manager.renaming.config import DEFAULT_SCHEMA_DIR, DERIVATIVES_PIPELINE_NAME
+from bids_manager.dicom_inventory import guess_modality
 
 
 def _touch(path: Path):
@@ -130,3 +132,23 @@ def test_dwi_direction_and_acq_detection():
         "sub-001_acq-15_dir-ap_dwi",
         "sub-001_acq-15b0_dir-ap_dwi",
     ]
+
+
+def test_sbref_patterns_detected():
+    """Reference scans should be classified as SBRef."""
+
+    for seq in ["Type-Ref", "Reference", "Refscan", "ref"]:
+        assert guess_modality(seq) == "SBRef"
+
+
+def test_physio_datatype_and_extension():
+    """Physiological recordings default to func datatype and .tsv extension."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+    series = [SeriesInfo("001", None, "physio", "physio_rest", None, {"task": "rest"})]
+    proposals = build_preview_names(series, schema)
+    dt, base = proposals[0][1], proposals[0][2]
+
+    assert dt == "func"
+    assert base.endswith("_physio")
+    assert default_extension_for_suffix("physio") == ".tsv"

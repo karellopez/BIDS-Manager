@@ -92,6 +92,7 @@ from .renaming.schema_renamer import (
     SeriesInfo,
     build_preview_names,
     apply_post_conversion_rename,
+    default_extension_for_suffix,
 )
 try:
     import psutil
@@ -1823,7 +1824,11 @@ class BIDSManager(QMainWindow):
         df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
         df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
         df["Proposed BIDS name"] = df.apply(
-            lambda r: (f"{r['proposed_datatype']}/{r['proposed_basename']}.nii.gz") if r["proposed_basename"] else "",
+            lambda r: (
+                f"{r['proposed_datatype']}/{r['proposed_basename']}{default_extension_for_suffix(r['proposed_basename'].rsplit('_', 1)[-1])}"
+            )
+            if r["proposed_basename"]
+            else "",
             axis=1,
         )
         self.inventory_df = df
@@ -2268,7 +2273,7 @@ class BIDSManager(QMainWindow):
                 ("phoenix document", True),
                 (".pdf", True),
                 ("report", True),
-                ("physlog", True),
+                ("physio", True),
             ]
         for pat, active in patterns:
             r = self.exclude_table.rowCount()
