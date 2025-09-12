@@ -332,6 +332,8 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
     
     dts = schema.suffix_to_datatypes.get(suffix)
     if dts:
+        if suffix == "physio" and "func" in dts:
+            return "func"
         pref = ("anat", "func", "dwi", "fmap", "perf", "pet", "meg", "eeg", "ieeg")
         for p in pref:
             if p in dts:
@@ -339,7 +341,7 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
         return dts[0]
     return {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
-        "bold": "func", "sbref": "func", "dwi": "dwi",
+        "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
         "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
     }.get(suffix, "misc")
 
