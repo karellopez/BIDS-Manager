@@ -45,22 +45,6 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
-# Preview naming helpers
-try:
-    from .renaming.schema_renamer import (
-        SeriesInfo,
-        build_preview_names,
-        load_bids_schema,
-    )
-    from .renaming.config import DEFAULT_SCHEMA_DIR
-except Exception:  # pragma: no cover - fallback for CLI use
-    from renaming.schema_renamer import (  # type: ignore
-        SeriesInfo,
-        build_preview_names,
-        load_bids_schema,
-    )
-    from renaming.config import DEFAULT_SCHEMA_DIR  # type: ignore
-
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
 SEQ_DICT_FILE = PREF_DIR / "sequence_dictionary.tsv"
@@ -114,17 +98,10 @@ BIDS_PATTERNS = {
     "PDw"    : ("gre-nm", "gre_nm"),
     "scout"  : ("localizer", "scout"),
     "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
+    "refscan": ("type-ref", "reference", "refscan"),
     # functional
     "bold"   : ("fmri", "bold", "task-"),
-    # reference scans are SBRef in BIDS –
-    # collect all legacy "ref" patterns here
-    "SBRef"  : (
-        "sbref",
-        "type-ref",
-        "reference",
-        "refscan",
-        "ref",
-    ),
+    "SBRef"  : ("sbref",),
     # diffusion
     "dwi"    : ("dti", "dwi", "diff"),
     # field maps
@@ -239,7 +216,7 @@ def classify_fieldmap_type(img_list: list) -> str:
 BIDS_CONTAINER = {
     "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
     "MTw":"anat", "PDw":"anat",
-    "scout":"anat", "report":"anat",
+    "scout":"anat", "report":"anat", "refscan":"anat",
     "bold":"func", "SBRef":"func",
     "dwi":"dwi",
     "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
@@ -403,8 +380,7 @@ def scan_dicoms_long(
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
-                # Skip scout, report and physiologs by default
-                if fine_mod in {"scout", "report", "physio"} or "physlog" in series.lower():
+                if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
@@ -492,43 +468,6 @@ def scan_dicoms_long(
         df = pd.concat([df[~fmap_mask], fmap_df], ignore_index=True, sort=False)
 
     df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
-
-    # ------------------------------------------------------------------
-    # 4. Generate proposed BIDS names
-    # ------------------------------------------------------------------
-    try:
-        schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
-        series_list = []
-        idxs = []
-        for i, row in df.iterrows():
-            subj = str(row.get("BIDS_name", ""))
-            if subj.lower().startswith("sub-"):
-                subj = subj[4:]
-            session = row.get("session") or None
-            modality = str(row.get("modality") or "")
-            sequence = str(row.get("sequence") or "")
-            rep_val = row.get("rep")
-            rep = int(rep_val) if str(rep_val).isdigit() else None
-            extra = {}
-            for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
-                if row.get(key):
-                    extra[key] = str(row.get(key))
-            series_list.append(SeriesInfo(subj, session, modality, sequence, rep, extra))
-            idxs.append(i)
-
-        proposals = build_preview_names(series_list, schema)
-        for (series, dt, base), i in zip(proposals, idxs):
-            df.at[i, "proposed_datatype"] = dt
-            df.at[i, "proposed_basename"] = base
-            suffix = base.rsplit("_", 1)[-1].lower()
-            ext = ".tsv" if suffix == "physio" else ".nii.gz"
-            df.at[i, "Proposed BIDS name"] = f"{dt}/{base}{ext}"
-
-        # Reorder columns so proposed names sit next to modality info
-        base_cols = columns + ["proposed_datatype", "proposed_basename", "Proposed BIDS name"]
-        df = df.reindex(columns=base_cols)
-    except Exception:
-        pass
 
     # optional TSV export
     if output_tsv:

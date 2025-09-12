@@ -142,10 +142,6 @@ def _extract_subject(row) -> str:
         subj = subj[4:]
     return subj
 
-def _infer_extension(basename: str) -> str:
-    """Return appropriate file extension for a proposed basename."""
-    return ".tsv" if basename.lower().endswith("_physio") else ".nii.gz"
-
 def _compute_bids_preview(df, schema):
     """Returns a dict {row_index: (datatype, basename)} for preview; safe if schema is None."""
     out = {}
@@ -1205,7 +1201,7 @@ class BIDSManager(QMainWindow):
                 if multi_study:
                     path_parts.append(study)
                 path_parts.extend([subj, ses, prop_dt])
-                fname = f"{prop_base}{_infer_extension(prop_base)}"
+                fname = f"{prop_base}.nii.gz"
                 full = [p for p in path_parts if p] + [fname]
                 self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
                 self._add_preview_path(full, seq)
@@ -1229,7 +1225,7 @@ class BIDSManager(QMainWindow):
                     self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
                     self._add_preview_path(full, seq)
             else:
-                fname = f"{base}{_infer_extension(base)}"
+                fname = f"{base}.nii.gz"
                 full = path_parts + [fname]
                 self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
                 self._add_preview_path(full, seq)
@@ -1823,27 +1819,13 @@ class BIDSManager(QMainWindow):
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-        if {"proposed_datatype", "proposed_basename"} <= set(df.columns):
-            df["Proposed BIDS name"] = df.apply(
-                lambda r: (
-                    f"{r['proposed_datatype']}/{r['proposed_basename']}{_infer_extension(r['proposed_basename'])}"
-                )
-                if r.get("proposed_basename")
-                else "",
-                axis=1,
-            )
-        else:
-            preview_map = _compute_bids_preview(df, self._schema)
-            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-            df["Proposed BIDS name"] = df.apply(
-                lambda r: (
-                    f"{r['proposed_datatype']}/{r['proposed_basename']}{_infer_extension(r['proposed_basename'])}"
-                )
-                if r["proposed_basename"]
-                else "",
-                axis=1,
-            )
+        preview_map = _compute_bids_preview(df, self._schema)
+        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+        df["Proposed BIDS name"] = df.apply(
+            lambda r: (f"{r['proposed_datatype']}/{r['proposed_basename']}.nii.gz") if r["proposed_basename"] else "",
+            axis=1,
+        )
         self.inventory_df = df
 
         # ----- load existing mappings without altering the TSV -----

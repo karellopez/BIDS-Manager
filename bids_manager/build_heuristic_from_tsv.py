@@ -7,7 +7,7 @@ Simple heuristic that:
 2. **Uses the raw SeriesDescription** (cleaned) as the filename stem – no
    added `rep-*`, task, or echo logic.
 3. Skips only modalities listed in `SKIP_BY_DEFAULT` (`report`,
-   `physio`).
+   `physio`, `refscan`).
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ except Exception:
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-SKIP_BY_DEFAULT = {"report", "physio"}
+SKIP_BY_DEFAULT = {"report", "physio", "refscan"}
 
 # -----------------------------------------------------------------------------
 # Helper functions
