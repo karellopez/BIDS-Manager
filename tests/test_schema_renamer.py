@@ -106,3 +106,27 @@ def test_fieldmap_runs_and_task_hits(tmp_path):
     ]
     # Task hit "custom" should be used
     assert task_base == "sub-001_task-custom_bold"
+
+
+def test_dwi_direction_and_acq_detection():
+    """DWI series should capture dir/acq hints from their sequence names."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+    series = [
+        # Modality "dti" should normalise to dwi and pick up LR/RL directions
+        SeriesInfo("001", None, "dti", "DTI_LR", None, {}),
+        SeriesInfo("001", None, "dti", "DTI_RL", None, {}),
+        # Numbers combined with direction should become an acq label
+        SeriesInfo("001", None, "dwi", "15_AP", None, {}),
+        SeriesInfo("001", None, "dwi", "15b0_AP", None, {}),
+    ]
+
+    proposals = build_preview_names(series, schema)
+    bases = [base for (_, _, base) in proposals]
+
+    assert bases == [
+        "sub-001_dir-lr_dwi",
+        "sub-001_dir-rl_dwi",
+        "sub-001_acq-15_dir-ap_dwi",
+        "sub-001_acq-15b0_dir-ap_dwi",
+    ]

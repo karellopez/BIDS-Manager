@@ -143,6 +143,59 @@ def _detect_dwi_derivative(sequence: str) -> Optional[str]:
     return None
 
 
+def _infer_dwi_acq_dir(sequence: str) -> Tuple[Optional[str], Optional[str]]:
+    """Infer acquisition and direction tokens from a DWI sequence name.
+
+    Parameters
+    ----------
+    sequence:
+        Original sequence description (e.g. ``"DTI_LR"``).
+
+    Returns
+    -------
+    acq, dir:
+        Potential ``acq`` and ``dir`` entities extracted from the sequence. If no
+        recognizable pattern is found, both are ``None``.
+
+    Notes
+    -----
+    This helper looks for common diffusion naming conventions such as
+    ``LR``/``RL`` and ``AP``/``PA`` for phase‑encoding direction as well as
+    tokens like ``b0`` or ``15b0`` which typically indicate a specific
+    acquisition. The goal is to keep these informative hints in the proposed
+    BIDS name without requiring the user to supply explicit ``acq``/``dir``
+    values.
+    """
+
+    if not sequence:
+        return None, None
+
+    # Replace non alphanumeric characters with spaces to simplify pattern
+    # detection while preserving word boundaries.
+    clean = _SANITIZE_TOKEN.sub(" ", sequence).lower()
+
+    # Direction tokens are usually short (AP/PA/LR/RL). Use word boundaries to
+    # avoid picking up unintended substrings.
+    m_dir = re.search(r"(?<![a-z0-9])(lr|rl|ap|pa)(?![a-z0-9])", clean)
+    direction = m_dir.group(1) if m_dir else None
+
+    acq: Optional[str] = None
+    # ``15b0`` or ``b0`` patterns take precedence.
+    m_b0 = re.search(r"(?<![a-z0-9])(\d*b0)(?![a-z0-9])", clean)
+    if m_b0:
+        acq = m_b0.group(1)
+    else:
+        # If no ``b0`` token is present but a direction exists, capture a plain
+        # numeric token such as ``15`` to distinguish acquisitions with different
+        # numbers of directions.
+        if direction:
+            m_num = re.search(r"(?<![a-z0-9])(\d+)(?![a-z0-9])", clean)
+            if m_num:
+                acq = m_num.group(1)
+
+    return acq, direction
+
+
 def _replace_stem_keep_ext(src: Path, new_basename: str) -> Path:
     ext = _resolve_ext(src.name)
     return src.with_name(f"{new_basename}{ext}")
@@ -254,9 +307,22 @@ class SeriesInfo:
 
 
 def _normalize_suffix(modality: str) -> str:
+    """Return a canonical BIDS suffix for a given modality string.
+
+    The DICOM ``SeriesDescription`` or user‑supplied modality labels can use a
+    wide range of capitalisation patterns or legacy terms (e.g. ``DTI`` instead
+    of ``dwi``).  This helper performs a case‑insensitive normalisation so later
+    logic only needs to work with the official BIDS suffixes.
+    """
+
     m = modality.strip()
-    alias = {"SBRef": "sbref", "SBREF": "sbref", "T2*": "T2star", "t2star": "T2star"}
-    return alias.get(m, m)
+    alias = {
+        "sbref": "sbref",
+        "t2*": "T2star",
+        "t2star": "T2star",
+        "dti": "dwi",
+    }
+    return alias.get(m.lower(), m)
 
 
 def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
@@ -350,6 +416,7 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     # Detect DWI derivative from the sequence text itself and adjust datatype
     # and suffix accordingly so Preview/Table point to the derivatives tree and
     # not raw dwi/.
+    direction: Optional[str] = None
     map_name = _detect_dwi_derivative(clean_sequence)
     if map_name:
         datatype = "derivatives"
@@ -361,6 +428,7 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         parts.append(f"desc-{map_name}")
         # Force suffix used later to dwi
         suffix = "dwi"
+        direction = series.extra.get("dir") if series.extra else None
     else:
         # For non-derivatives, only include an acquisition label if one was
         # explicitly provided. Previously, the sequence text was used as a
@@ -368,6 +436,18 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         # ``acq-<pattern>`` tokens. These were confusing and not BIDS
         # recommended, so we now omit ``acq`` unless the caller supplies it.
         acq = series.extra.get("acq") if series.extra else None
+        direction = series.extra.get("dir") if series.extra else None
+
+        if suffix == "dwi":
+            # Infer missing ``acq``/``dir`` tokens from the sequence itself so
+            # that common diffusion naming conventions (e.g. ``DTI_LR``) remain
+            # distinguishable without manual intervention.
+            inf_acq, inf_dir = _infer_dwi_acq_dir(clean_sequence)
+            if not direction:
+                direction = inf_dir
+            if not acq:
+                acq = inf_acq
+
         if acq:
             acq = _sanitize_token(acq)
             if acq:
@@ -379,7 +459,6 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         if echo:
             parts.append(f"echo-{echo}")
 
-    direction = series.extra.get("dir") if series.extra else None
     if direction:
         direction = _sanitize_token(direction)
         if direction:
