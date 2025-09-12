@@ -196,6 +196,18 @@ def _infer_dwi_acq_dir(sequence: str) -> Tuple[Optional[str], Optional[str]]:
     return acq, direction
 
 
+def compose_proposed_name(modality: str, datatype: str, basename: str) -> str:
+    """Return a full proposed filename with an appropriate extension.
+
+    Physiological recordings are stored as TSV files, whereas imaging data
+    defaults to NIfTI. The JSON sidecar is implied to share the same stem.
+    """
+    if not basename:
+        return ""
+    ext = ".tsv" if modality.lower() == "physio" else ".nii.gz"
+    return f"{datatype}/{basename}{ext}"
+
+
 def _replace_stem_keep_ext(src: Path, new_basename: str) -> Path:
     ext = _resolve_ext(src.name)
     return src.with_name(f"{new_basename}{ext}")
