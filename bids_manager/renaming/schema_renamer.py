@@ -17,33 +17,6 @@ except Exception:  # pragma: no cover
 
 _BIDS_EXTS = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv")
 
-# Default file extensions by suffix used for previewing proposed names. Imaging
-# data typically uses NIfTI (.nii.gz) while physiological/stimulus recordings
-# are tabular (.tsv). JSON sidecars are automatically handled during renaming
-# and do not require special casing here.
-_DEFAULT_EXT_BY_SUFFIX = {
-    "physio": ".tsv",
-    "stim": ".tsv",
-}
-
-
-def default_extension_for_suffix(suffix: str) -> str:
-    """Return a representative extension for a BIDS suffix.
-
-    Parameters
-    ----------
-    suffix : str
-        BIDS suffix such as ``dwi`` or ``physio``.
-
-    Returns
-    -------
-    str
-        The extension (including leading dot) that best represents files with
-        that suffix. Defaults to ``.nii.gz`` when no special case is known.
-    """
-
-    return _DEFAULT_EXT_BY_SUFFIX.get(suffix.lower(), ".nii.gz")
-
 _SANITIZE_TOKEN = re.compile(r"[^a-zA-Z0-9]+")
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
 
@@ -353,11 +326,6 @@ def _normalize_suffix(modality: str) -> str:
 
 
 def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
-    # Physiological recordings accompany functional runs and should live under
-    # ``func`` regardless of the wider schema associations.
-    if suffix.lower() == "physio":
-        return "func"
-
     # Handle DWI derivatives first
     if suffix.lower() in ("adc", "fa", "tracew", "colfa", "expadc"):
         return "derivatives"
