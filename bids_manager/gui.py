@@ -92,6 +92,7 @@ from .renaming.schema_renamer import (
     SeriesInfo,
     build_preview_names,
     apply_post_conversion_rename,
+    build_series_list_from_dataframe,
 )
 try:
     import psutil
@@ -1997,53 +1998,7 @@ class BIDSManager(QMainWindow):
 
 
     def _build_series_list_from_df(self, df):
-        rows = []
-
-        # ``heudiconv`` initially names outputs using a simplified stem derived
-        # from the DICOM SeriesDescription.  To later locate those files for
-        # renaming we reconstruct that stem here.  We mirror the logic used by
-        # :mod:`build_heuristic_from_tsv` which appends ``rep-<N>`` when a
-        # sequence appears multiple times for a given subject/session.
-        rep_counts = (
-            df.groupby(["BIDS_name", "session", "sequence"], dropna=False)["sequence"].transform("count")
-        )
-        rep_index = (
-            df.groupby(["BIDS_name", "session", "sequence"], dropna=False).cumcount() + 1
-        )
-
-        for idx, row in df.iterrows():
-            subject = _extract_subject(row)
-            session = row.get("session") or row.get("ses") or None
-            modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
-            sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
-            # ``rep`` encodes repeat acquisitions detected earlier.  Leave it as
-            # ``None`` for non-repeated series and cast to ``int`` when present.
-            rep_val = row.get("rep") or row.get("repeat")
-            rep = int(rep_val) if rep_val else None
-
-            extra: dict[str, str] = {}
-            for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
-                if row.get(key):
-                    extra[key] = str(row.get(key))
-
-            # Reconstruct the basename produced by the converter so
-            # :func:`apply_post_conversion_rename` can locate existing files even
-            # when their names no longer contain the raw sequence.  This uses the
-            # subject ID, optional session, a "safe" version of the sequence and
-            # ``rep-<N>`` when duplicates exist.
-            if row.get("BIDS_name") and sequence:
-                base_parts = [str(row["BIDS_name"])]
-                if session:
-                    base_parts.append(session)
-                base_parts.append(_safe_stem(sequence))
-                if rep_counts.iloc[idx] > 1:
-                    base_parts.append(f"rep-{rep_index.iloc[idx]}")
-                current_base = _dedup_parts(*base_parts)
-                extra["current_bids"] = current_base
-
-            rows.append(SeriesInfo(subject, session, modality, sequence, rep, extra))
-
-        return rows
+        return build_series_list_from_dataframe(df)
 
     def _post_conversion_schema_rename(self, bids_root: str, df):
         if not (ENABLE_SCHEMA_RENAMER and self._schema):
@@ -2056,6 +2011,7 @@ class BIDSManager(QMainWindow):
             also_normalize_fieldmaps=ENABLE_FIELDMap_NORMALIZATION,
             handle_dwi_derivatives=ENABLE_DWI_DERIVATIVES_MOVE,
             derivatives_pipeline_name=DERIVATIVES_PIPELINE_NAME,
+            dicom_root=getattr(self, "dicom_dir", None),
         )
         return rename_map
 

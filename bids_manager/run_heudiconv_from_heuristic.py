@@ -15,6 +15,14 @@ from typing import Dict, List, Optional
 import pandas as pd
 import re
 
+from .renaming.schema_renamer import (
+    load_bids_schema,
+    build_preview_names,
+    build_series_list_from_dataframe,
+    convert_physio_from_proposals,
+)
+from .renaming.config import DEFAULT_SCHEMA_DIR
+
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
 # extension check with a quick sniff of the header for the ``DICM`` tag.
@@ -234,6 +242,35 @@ def run_heudiconv(raw_root: Path,
 
     # Always refresh participants.tsv from the accumulated summary
     write_participants(summary_path, bids_out)
+
+    physio_df: Optional[pd.DataFrame] = None
+    if summary_path.exists():
+        try:
+            physio_df = pd.read_csv(summary_path, sep="\t", keep_default_na=False)
+            if "StudyDescription" in physio_df.columns:
+                physio_df = physio_df[
+                    physio_df["StudyDescription"].fillna("").apply(safe_stem) == bids_out.name
+                ]
+        except Exception as exc:
+            print(f"Warning: could not read {summary_path}: {exc}")
+            physio_df = None
+    elif mapping_df is not None:
+        physio_df = mapping_df
+        if "StudyDescription" in physio_df.columns:
+            physio_df = physio_df[
+                physio_df["StudyDescription"].fillna("").apply(safe_stem) == bids_out.name
+            ]
+
+    if physio_df is not None and not physio_df.empty:
+        try:
+            schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+            series_list = build_series_list_from_dataframe(physio_df)
+            proposals = build_preview_names(series_list, schema)
+            converted = convert_physio_from_proposals(proposals, bids_out, raw_root)
+            if converted:
+                print(f"Converted {converted} physio recording(s) using bidsphysio.")
+        except Exception as exc:
+            print(f"Warning: physio conversion failed: {exc}")
 
 
 # ────────────────── CLI interface ──────────────────
