@@ -11,9 +11,11 @@ from pathlib import Path
 import importlib.util
 import subprocess
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import re
+
+from .physio_conversion import convert_physiological_data
 
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
@@ -184,29 +186,49 @@ def run_heudiconv(raw_root: Path,
     sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
     clean2phys       = physical_by_clean(raw_root)
     cleaned_ids      = sorted(sid_map.keys())
-    phys_folders     = [clean2phys[c] for c in cleaned_ids]
 
-    depth = detect_depth(raw_root / phys_folders[0])
+    subject_entries: List[Tuple[str, str, str]] = []
+    for clean_id in cleaned_ids:
+        phys_folder = clean2phys.get(clean_id, "")
+        bids_subject = sid_map.get(clean_id) or clean_id
+        subject_entries.append((clean_id, phys_folder, bids_subject))
+
+    if not subject_entries:
+        raise RuntimeError("No subjects found in heuristic SID_MAP")
+
+    first_phys = subject_entries[0][1]
+    depth = detect_depth(raw_root / first_phys)
 
     print("Raw root    :", raw_root)
     print("Heuristic   :", heuristic)
     print("Output BIDS :", bids_out)
+    phys_folders = [phys for (_, phys, _) in subject_entries]
     print("Folders     :", phys_folders)
     print("Depth       :", depth, "\n")
 
     bids_out.mkdir(parents=True, exist_ok=True)
 
     if per_folder:
-        for phys in phys_folders:
+        for clean_id, phys, bids_subject in subject_entries:
             print(f"── {phys} ──")
             cmd = heudi_cmd(raw_root, [phys], heuristic, bids_out, depth)
             print(" ".join(cmd))
             subprocess.run(cmd, check=True)
+            phys_outputs = convert_physiological_data(raw_root, phys, bids_out, bids_subject)
+            if phys_outputs:
+                print(f"   Physiological recordings: {len(phys_outputs)} file(s) converted")
             print()
     else:
         cmd = heudi_cmd(raw_root, phys_folders, heuristic, bids_out, depth)
         print(" ".join(cmd))
         subprocess.run(cmd, check=True)
+
+    if not per_folder:
+        for _clean_id, phys, bids_subject in subject_entries:
+            phys_outputs = convert_physiological_data(raw_root, phys, bids_out, bids_subject)
+            if phys_outputs:
+                print(f"── {phys} ──")
+                print(f"   Physiological recordings: {len(phys_outputs)} file(s) converted")
 
     summary_path = bids_out / ".bids_manager" / "subject_summary.tsv"
     if mapping_df is not None:
