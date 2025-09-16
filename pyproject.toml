@@ -22,6 +22,7 @@ dependencies = [
     "pandas==2.3.1",
     "PyQt5==5.15.11",
     "PyQtWebEngine==5.15.7",
+    "setuptools>=70.0.0",
     "heudiconv-ancp",
     "dcm2niix==1.0.20250506",
     "nibabel==5.3.2",
@@ -29,6 +30,7 @@ dependencies = [
     "psutil==7.0.0",
     "matplotlib==3.10.3",
     "joblib==1.4.2",
+    "bidsphysio==21.6.24",
 ]
 
 [project.optional-dependencies]
