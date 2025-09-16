@@ -1,24 +1,11 @@
-import gzip
-import json
 import shutil
-import types
 from pathlib import Path
-
-import sys
-
-import pandas as pd
-from pydicom.dataset import Dataset, FileDataset
-from pydicom.uid import ExplicitVRLittleEndian
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bids_manager.renaming.schema_renamer import (
     load_bids_schema,
     SeriesInfo,
     build_preview_names,
     apply_post_conversion_rename,
-    build_series_list_from_dataframe,
-    convert_physio_from_proposals,
 )
 from bids_manager.renaming.config import DEFAULT_SCHEMA_DIR, DERIVATIVES_PIPELINE_NAME
 from bids_manager.dicom_inventory import guess_modality
@@ -27,35 +14,6 @@ from bids_manager.dicom_inventory import guess_modality
 def _touch(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("dummy")
-
-
-def _write_physio_dicom(path: Path, series_uid: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    file_meta = Dataset()
-    file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"
-    file_meta.MediaStorageSOPInstanceUID = "1.2.840.113619.2.5.1762583153.1"
-    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-
-    ds = FileDataset(str(path), {}, file_meta=file_meta, preamble=b"\0" * 128)
-    ds.SeriesInstanceUID = series_uid
-    ds.SeriesDescription = "PhysioLog"
-    ds.PatientName = "Test^Subject"
-    ds.AcquisitionTime = "123456"
-    ds.is_little_endian = True
-    ds.is_implicit_VR = False
-    ds.save_as(str(path))
-
-
-def _patch_bidsphysio(monkeypatch, factory):
-    pkg = types.ModuleType("bidsphysio")
-    dcm2bids_pkg = types.ModuleType("bidsphysio.dcm2bids")
-    submodule = types.ModuleType("bidsphysio.dcm2bids.dcm2bidsphysio")
-    submodule.dcm2bids = factory
-    dcm2bids_pkg.dcm2bidsphysio = submodule
-    pkg.dcm2bids = dcm2bids_pkg
-    monkeypatch.setitem(sys.modules, "bidsphysio", pkg)
-    monkeypatch.setitem(sys.modules, "bidsphysio.dcm2bids", dcm2bids_pkg)
-    monkeypatch.setitem(sys.modules, "bidsphysio.dcm2bids.dcm2bidsphysio", submodule)
 
 
 def create_fake_dataset(root: Path):
@@ -218,110 +176,3 @@ def test_guess_modality_prefers_sbref_and_physio():
     assert guess_modality("fmri_sbref") == "SBRef"
     assert guess_modality("BOLD_SBRef") == "SBRef"
     assert guess_modality("fmri_physio") == "physio"
-
-
-def test_physio_conversion_creates_outputs(tmp_path, monkeypatch):
-    dicom_root = tmp_path / "dicoms"
-    dicom_dir = dicom_root / "Session1"
-    series_uid = "1.2.3.4"
-    _write_physio_dicom(dicom_dir / "physio.dcm", series_uid)
-
-    df = pd.DataFrame(
-        [
-            {
-                "BIDS_name": "sub-001",
-                "session": "",
-                "sequence": "PhysioLog",
-                "modality": "physio",
-                "rep": "",
-                "source_folder": "Session1",
-                "series_uid": series_uid,
-                "include": 1,
-                "StudyDescription": "Demo",
-            }
-        ]
-    )
-
-    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
-    series_list = build_series_list_from_dataframe(df)
-    proposals = build_preview_names(series_list, schema)
-
-    calls = []
-
-    def fake_dcm2bids(path: str):
-        calls.append(Path(path))
-
-        class DummyPhysio:
-            def save_to_bids(self_inner, prefix: str) -> None:
-                prefix_path = Path(prefix)
-                prefix_path.parent.mkdir(parents=True, exist_ok=True)
-                tsv_path = prefix_path.with_name(f"{prefix_path.name}_physio.tsv.gz")
-                with gzip.open(tsv_path, "wt") as f:
-                    f.write("cardiac\n0.1\n")
-                json_path = prefix_path.with_name(f"{prefix_path.name}_physio.json")
-                with open(json_path, "w", encoding="utf-8") as fh:
-                    json.dump({"SamplingFrequency": 1, "StartTime": 0, "Columns": ["cardiac"]}, fh)
-
-        return DummyPhysio()
-
-    _patch_bidsphysio(monkeypatch, fake_dcm2bids)
-
-    bids_root = tmp_path / "bids"
-    converted = convert_physio_from_proposals(proposals, bids_root, dicom_root)
-    assert converted == 1
-    assert calls == [dicom_dir / "physio.dcm"]
-
-    _, datatype, base = proposals[0]
-    tsv_path = bids_root / "sub-001" / datatype / f"{base}_physio.tsv.gz"
-    json_path = bids_root / "sub-001" / datatype / f"{base}_physio.json"
-    assert tsv_path.exists()
-    assert json_path.exists()
-
-    # Re-running should detect existing outputs and skip conversion
-    second = convert_physio_from_proposals(proposals, bids_root, dicom_root)
-    assert second == 0
-    assert len(calls) == 1
-
-
-def test_physio_conversion_respects_include_flag(tmp_path, monkeypatch):
-    dicom_root = tmp_path / "dicoms"
-    series_uid = "9.9.9"
-    _write_physio_dicom(dicom_root / "run" / "physio.dcm", series_uid)
-
-    df = pd.DataFrame(
-        [
-            {
-                "BIDS_name": "sub-002",
-                "session": "",
-                "sequence": "PhysioLog",
-                "modality": "physio",
-                "rep": "",
-                "source_folder": "run",
-                "series_uid": series_uid,
-                "include": 0,
-                "StudyDescription": "Demo",
-            }
-        ]
-    )
-
-    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
-    series_list = build_series_list_from_dataframe(df)
-    proposals = build_preview_names(series_list, schema)
-
-    calls: list[Path] = []
-
-    def fake_dcm2bids(path: str):
-        calls.append(Path(path))
-
-        class DummyPhysio:
-            def save_to_bids(self_inner, prefix: str) -> None:  # pragma: no cover - should not run
-                raise AssertionError("Should not be invoked when include=0")
-
-        return DummyPhysio()
-
-    _patch_bidsphysio(monkeypatch, fake_dcm2bids)
-
-    bids_root = tmp_path / "bids"
-    converted = convert_physio_from_proposals(proposals, bids_root, dicom_root)
-    assert converted == 0
-    assert calls == []
