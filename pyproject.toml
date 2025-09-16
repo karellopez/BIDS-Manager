@@ -29,6 +29,7 @@ dependencies = [
     "psutil==7.0.0",
     "matplotlib==3.10.3",
     "joblib==1.4.2",
+    "bidsphysio==21.6.24",
 ]
 
 [project.optional-dependencies]
