@@ -5,7 +5,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 try:
     import yaml  # type: ignore
@@ -16,34 +16,15 @@ except Exception:  # pragma: no cover
 # ----------------------------- Utilities -----------------------------
 
 _BIDS_EXTS = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv")
-_DICOM_EXTS = (".dcm", ".ima")
 
 _SANITIZE_TOKEN = re.compile(r"[^a-zA-Z0-9]+")
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
-_SAFE_STEM_RE = re.compile(r"[^0-9A-Za-z_-]+")
 
 
 def _sanitize_token(x: Optional[str]) -> Optional[str]:
     if not x:
         return None
     return _SANITIZE_TOKEN.sub("", x).strip()
-
-
-def _safe_stem(text: str) -> str:
-    """Return a filesystem-friendly representation of ``text``."""
-
-    return _SAFE_STEM_RE.sub("_", str(text).strip()).strip("_")
-
-
-def _dedup_parts(*parts: str) -> str:
-    """Join components with underscores without repeated tokens."""
-
-    tokens: List[str] = []
-    for part in parts:
-        for token in str(part).split("_"):
-            if token and (not tokens or token != tokens[-1]):
-                tokens.append(token)
-    return "_".join(tokens)
 
 
 def _strip_run_tokens(sequence: str) -> str:
@@ -323,81 +304,6 @@ class SeriesInfo:
     sequence: str
     rep: Optional[int]
     extra: Dict[str, str]
-
-
-def _extract_subject_from_row(row: Mapping[str, Any]) -> str:
-    """Return subject identifier favouring ``BIDS_name`` and stripping ``sub-``."""
-
-    subj = str(row.get("BIDS_name") or row.get("subject") or row.get("sub") or "UNK")
-    return subj[4:] if subj.lower().startswith("sub-") else subj
-
-
-def build_series_list_from_dataframe(df: "pd.DataFrame") -> List[SeriesInfo]:
-    """Construct :class:`SeriesInfo` rows from a TSV-style dataframe.
-
-    The implementation mirrors the logic used by the GUI when preparing
-    conversion proposals so helper scripts can reuse the same behaviour
-    without importing any Qt specific code.
-    """
-
-    import pandas as pd
-
-    if df.empty:
-        return []
-
-    rep_counts = (
-        df.groupby(["BIDS_name", "session", "sequence"], dropna=False)["sequence"].transform("count")
-    )
-    rep_index = (
-        df.groupby(["BIDS_name", "session", "sequence"], dropna=False).cumcount() + 1
-    )
-
-    series_list: List[SeriesInfo] = []
-    for pos, (_, row) in enumerate(df.iterrows()):
-        subject = _extract_subject_from_row(row)
-        session = row.get("session") or row.get("ses") or None
-        if pd.isna(session) or str(session).strip() == "":
-            session = None
-
-        modality = str(
-            row.get("modality")
-            or row.get("fine_modality")
-            or row.get("BIDS_modality")
-            or ""
-        )
-        sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
-        rep_val = row.get("rep") or row.get("repeat")
-        rep = int(rep_val) if rep_val else None
-
-        extra: Dict[str, str] = {}
-        for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
-            val = row.get(key)
-            if pd.notna(val) and str(val).strip():
-                extra[key] = str(val)
-
-        for key in ("source_folder", "series_uid", "StudyDescription"):
-            if key in row:
-                val = row.get(key)
-                if pd.notna(val) and str(val).strip():
-                    extra[key] = str(val).strip()
-
-        include_val = row.get("include", 1)
-        if pd.isna(include_val):
-            include_val = 1
-        extra["include"] = str(include_val)
-
-        if row.get("BIDS_name") and sequence:
-            base_parts = [str(row["BIDS_name"])]
-            if session:
-                base_parts.append(str(session))
-            base_parts.append(_safe_stem(sequence))
-            if rep_counts.iloc[pos] > 1:
-                base_parts.append(f"rep-{rep_index.iloc[pos]}")
-            extra["current_bids"] = _dedup_parts(*base_parts)
-
-        series_list.append(SeriesInfo(subject, session, modality, sequence, rep, extra))
-
-    return series_list
 
 
 def _normalize_suffix(modality: str) -> str:
@@ -732,174 +638,6 @@ def _move_dwi_derivatives(bids_root: Path, pipeline_name: str, rename_map: Dict[
                     break
 
 
-# --------------------------- Physio helpers ---------------------------
-
-def _resolve_source_dir(dicom_root: Path, source_folder: str) -> Path:
-    """Return the directory containing the raw physio DICOM files."""
-
-    cleaned = (source_folder or "").strip()
-    if not cleaned or cleaned in {".", dicom_root.name}:
-        return dicom_root
-
-    candidate = Path(cleaned)
-    if candidate.is_absolute():
-        return candidate
-    return dicom_root / candidate
-
-
-def _looks_like_dicom(path: Path) -> bool:
-    """Heuristic check for DICOM files used when locating physio sources."""
-
-    name = path.name.lower()
-    if any(name.endswith(ext) for ext in _DICOM_EXTS):
-        return True
-    if "." in name:
-        return False
-    try:
-        with path.open("rb") as f:
-            f.seek(128)
-            return f.read(4) == b"DICM"
-    except Exception:
-        return False
-
-
-def _iter_physio_candidates(folder: Path) -> Iterable[Path]:
-    for path in sorted(folder.rglob("*")):
-        if path.is_file() and _looks_like_dicom(path):
-            yield path
-
-
-def _match_series_uid(path: Path, expected_uid: str) -> bool:
-    if not expected_uid:
-        return True
-    try:
-        import pydicom
-    except Exception:
-        return False
-    try:
-        ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
-    except Exception:
-        return False
-    actual = getattr(ds, "SeriesInstanceUID", None)
-    return bool(actual and str(actual).strip() == expected_uid)
-
-
-def _find_physio_dicom(folder: Path, series_uid: str) -> Optional[Path]:
-    for candidate in _iter_physio_candidates(folder):
-        if _match_series_uid(candidate, series_uid):
-            return candidate
-    return None
-
-
-def _is_included(extra: Mapping[str, str]) -> bool:
-    raw = extra.get("include") if extra else None
-    if raw is None:
-        return True
-    text = str(raw).strip().lower()
-    if text in {"", "1", "true", "yes", "y"}:
-        return True
-    if text in {"0", "false", "no", "n"}:
-        return False
-    try:
-        return bool(int(text))
-    except Exception:
-        return bool(raw)
-
-
-def _build_physio_prefix(series: SeriesInfo, datatype: str, new_base: str, bids_root: Path) -> Path:
-    sub = _sanitize_token(series.subject) or series.subject
-    if not sub:
-        raise ValueError("SeriesInfo.subject is required and must be alphanumeric")
-
-    base_dir = bids_root / f"sub-{sub}"
-    if series.session:
-        ses = _sanitize_token(series.session)
-        if ses:
-            base_dir = base_dir / f"ses-{ses}"
-    base_dir = base_dir / datatype
-    return base_dir / new_base
-
-
-def _convert_single_physio(
-    series: SeriesInfo,
-    datatype: str,
-    new_base: str,
-    bids_root: Path,
-    dicom_root: Path,
-) -> bool:
-    if series.modality.lower() != "physio":
-        return False
-
-    extra = series.extra or {}
-    if not _is_included(extra):
-        return False
-
-    source_folder = extra.get("source_folder", "").strip()
-    if not source_folder:
-        return False
-
-    dicom_dir = _resolve_source_dir(dicom_root, source_folder)
-    if not dicom_dir.exists():
-        print(f"Warning: physio source folder {dicom_dir} not found.")
-        return False
-
-    dicom_file = _find_physio_dicom(dicom_dir, extra.get("series_uid", "").strip())
-    if not dicom_file:
-        print(f"Warning: no physio DICOM found in {dicom_dir} for UID {extra.get('series_uid', '')}.")
-        return False
-
-    prefix = _build_physio_prefix(series, datatype, new_base, bids_root)
-    tsv_path = prefix.with_name(f"{prefix.name}_physio.tsv.gz")
-    json_path = prefix.with_name(f"{prefix.name}_physio.json")
-    if tsv_path.exists() and json_path.exists():
-        return False
-
-    try:
-        from bidsphysio.dcm2bids.dcm2bidsphysio import dcm2bids
-    except Exception as exc:
-        print(f"Warning: bidsphysio is unavailable ({exc}); skipping physio conversion.")
-        return False
-
-    try:
-        physio = dcm2bids(str(dicom_file))
-    except Exception as exc:
-        print(f"Warning: failed to read physio DICOM {dicom_file}: {exc}")
-        return False
-
-    try:
-        prefix.parent.mkdir(parents=True, exist_ok=True)
-        physio.save_to_bids(str(prefix))
-    except Exception as exc:
-        print(f"Warning: could not save physio data for {dicom_file}: {exc}")
-        return False
-
-    print(f"Converted physio DICOM {dicom_file} → {tsv_path}")
-    return True
-
-
-def convert_physio_from_proposals(
-    proposals: Iterable[Tuple[SeriesInfo, str, str]],
-    bids_root: Union[str, Path],
-    dicom_root: Union[str, Path],
-) -> int:
-    """Convert physiolog DICOM recordings to BIDS sidecars."""
-
-    bids_root = Path(bids_root)
-    dicom_root = Path(dicom_root)
-    if not dicom_root.exists():
-        print(f"Warning: DICOM root {dicom_root} not found; skipping physio conversion.")
-        return 0
-
-    converted = 0
-    for series, datatype, new_base in proposals:
-        try:
-            if _convert_single_physio(series, datatype, new_base, bids_root, dicom_root):
-                converted += 1
-        except Exception as exc:
-            print(f"Warning: physio conversion failed for {series.sequence}: {exc}")
-    return converted
-
-
 def build_preview_names(
     inventory_rows: Iterable[SeriesInfo], schema: SchemaInfo
 ) -> List[Tuple[SeriesInfo, str, str]]:
@@ -940,22 +678,15 @@ def apply_post_conversion_rename(
     also_normalize_fieldmaps: bool = True,
     handle_dwi_derivatives: bool = True,
     derivatives_pipeline_name: str = "dcm2niix",
-    dicom_root: Optional[Union[str, Path]] = None,
 ) -> Dict[Path, Path]:
     bids_root = Path(bids_root)
-    proposals = list(proposals)
     rename_map: Dict[Path, Path] = {}
 
     # main renaming based on proposals
     print(f"Processing {len(proposals)} proposals for renaming:")
     for i, (series, datatype, new_base) in enumerate(proposals):
         print(f"  {i+1}. {series.sequence} -> {datatype}/{new_base}")
-
-    if dicom_root:
-        converted = convert_physio_from_proposals(proposals, bids_root, dicom_root)
-        if converted:
-            print(f"Converted {converted} physio recording(s).")
-
+    
     for series, datatype, new_base in proposals:
         # Handle derivatives specially - they need special path handling
         if datatype == "derivatives":
