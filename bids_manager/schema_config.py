@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from ._renaming_loader import load_module
+try:
+    from ._renaming_loader import load_module
+except ImportError:  # pragma: no cover - fallback for direct execution
+    # See ``schema_renamer`` for the rationale.  When the package is not
+    # initialised (e.g. running helper scripts from a source checkout) the
+    # relative import fails, so fall back to the plain module import.
+    from _renaming_loader import load_module  # type: ignore
 
 _config = load_module("config")
 

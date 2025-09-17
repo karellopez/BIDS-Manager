@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from ._renaming_loader import load_module
+try:
+    from ._renaming_loader import load_module
+except ImportError:  # pragma: no cover - fallback for direct execution
+    # When this module is imported from a checkout via ``python path/to/script``
+    # the ``bids_manager`` package is not initialised, so relative imports fail.
+    # Importing the helper directly keeps the lightweight wrappers usable in
+    # that scenario (e.g. when ``build_heuristic_from_tsv`` falls back to
+    # absolute imports during development).
+    from _renaming_loader import load_module  # type: ignore
 
 _impl = load_module("schema_renamer")
 
