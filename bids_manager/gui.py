@@ -80,14 +80,14 @@ import logging  # debug logging
 import signal
 import random
 import string
-from .renaming.config import (
+from .schema_config import (
     DEFAULT_SCHEMA_DIR,
     ENABLE_SCHEMA_RENAMER,
     ENABLE_FIELDMap_NORMALIZATION,
     ENABLE_DWI_DERIVATIVES_MOVE,
     DERIVATIVES_PIPELINE_NAME,
 )
-from .renaming.schema_renamer import (
+from .schema_renamer import (
     load_bids_schema,
     SeriesInfo,
     build_preview_names,
