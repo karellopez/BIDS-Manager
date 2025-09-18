@@ -3835,9 +3835,14 @@ class MetadataViewer(QWidget):
             elif ext == '.tsv':
                 result['df'] = pd.read_csv(path, sep='\t', keep_default_na=False)
             elif ext in ['.nii', '.nii.gz']:
-                img = nib.load(str(path))
-                result['img'] = img
-                result['data'] = img.get_fdata()
+                try:
+                    img = nib.load(str(path))
+                    result['img'] = img
+                    data, meta = self._prepare_nifti_data(img)
+                    result['data'] = data
+                    result['meta'] = meta
+                except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
+                    result['error'] = exc
             elif dicom:
                 # ``stop_before_pixels`` avoids loading heavy pixel data
                 result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
@@ -3851,6 +3856,11 @@ class MetadataViewer(QWidget):
             t.join()
         self._stop_loading()
 
+        if result.get('error'):
+            QMessageBox.critical(self, "Error", f"Failed to load {path.name}: {result['error']}")
+            self.current_path = None
+            return
+
         if ext == '.json':
             self._setup_json_toolbar()
             self.viewer = self._json_view(path, result.get('data'))
@@ -3859,7 +3869,12 @@ class MetadataViewer(QWidget):
             self.viewer = self._tsv_view(path, result.get('df'))
         elif ext in ['.nii', '.nii.gz']:
             self._setup_nifti_toolbar()
-            self.viewer = self._nifti_view(path, (result.get('img'), result.get('data')))
+            self.viewer = self._nifti_view(
+                path,
+                result.get('img'),
+                result.get('data'),
+                result.get('meta'),
+            )
         elif dicom:
             self.viewer = self._dicom_view(path, result.get('ds'))
             self.toolbar.addStretch()
@@ -4012,8 +4027,7 @@ class MetadataViewer(QWidget):
     def _set_orientation(self, axis: int) -> None:
         """Set viewing orientation and update slice slider."""
         self.orientation = axis
-        vol_idx = getattr(self, 'vol_slider', None).value() if hasattr(self, 'vol_slider') else 0
-        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        vol = self._extract_volume()
         axis_len = vol.shape[axis]
         self.slice_slider.setMaximum(max(axis_len - 1, 0))
         self.slice_slider.setEnabled(axis_len > 1)
@@ -4021,14 +4035,81 @@ class MetadataViewer(QWidget):
         self.slice_val.setText(str(axis_len // 2))
         self._update_slice()
 
-    def _nifti_view(self, path: Path, img_data=None) -> QWidget:
+    def _prepare_nifti_data(self, img):
+        """Return array data and metadata suitable for the viewer.
+
+        ``nibabel`` returns some image types (e.g. RGB24) using a structured
+        ``void`` dtype, which cannot be promoted to ``float`` during
+        ``get_fdata``.  When that happens we reshape the data into an explicit
+        channel dimension so the rest of the viewer can treat it like any other
+        dense ``ndarray``.  The returned metadata describes the detected channel
+        axis and optional component labels so downstream code can adapt its
+        behaviour (e.g. disable the volume slider for RGB images).
+        """
+
+        meta = {'channel_axis': None, 'component_labels': None}
+        dataobj = getattr(img, 'dataobj', None)
+        dtype = getattr(dataobj, 'dtype', None)
+
+        if dtype is not None and dtype.names:
+            # Structured dtype with named fields (e.g. RGB24 -> R,G,B).  Stack
+            # each component along a new channel axis.
+            arr = np.asanyarray(dataobj)
+            channels = [np.asanyarray(arr[name]) for name in dtype.names]
+            data = np.ascontiguousarray(np.stack(channels, axis=-1))
+            meta['channel_axis'] = data.ndim - 1
+            meta['component_labels'] = list(dtype.names)
+            return data, meta
+
+        if dtype is not None and getattr(dtype, 'subdtype', None):
+            # Sub-array dtype such as ``(float32, (3,))``.  ``numpy`` already
+            # exposes the trailing shape as additional dimensions, so we only
+            # ensure the base dtype is used and track the channel axis if the
+            # sub-array is 1-D.
+            base_dtype, subshape = dtype.subdtype
+            arr = np.asarray(dataobj, dtype=base_dtype)
+            if subshape and arr.shape[-len(subshape):] != subshape:
+                arr = arr.reshape(arr.shape + subshape)
+            if len(subshape) == 1:
+                meta['channel_axis'] = arr.ndim - 1
+                meta['component_labels'] = [f'ch{idx}' for idx in range(subshape[0])]
+            return arr, meta
+
+        if dtype is not None and dtype.kind == 'V':
+            # ``void`` dtype without named fields.  Interpret the raw bytes as a
+            # trailing channel dimension so the viewer can treat it like colour
+            # data.  ``np.view`` returns a view with the same underlying data so
+            # make it contiguous for Qt image routines.
+            arr = np.asanyarray(dataobj)
+            chan_count = arr.dtype.itemsize
+            reshaped = arr.view(np.uint8).reshape(arr.shape + (chan_count,))
+            data = np.ascontiguousarray(reshaped)
+            meta['channel_axis'] = data.ndim - 1
+            meta['component_labels'] = [f'ch{idx}' for idx in range(chan_count)]
+            return data, meta
+
+        # Fallback to the standard floating-point representation.
+        return img.get_fdata(), meta
+
+    def _nifti_view(self, path: Path, img=None, data=None, meta=None) -> QWidget:
         """Create a simple viewer for NIfTI images with slice/volume controls."""
-        if img_data is None:
+        if img is None and data is None:
             self.nifti_img = nib.load(str(path))
-            data = self.nifti_img.get_fdata()
+            data, meta = self._prepare_nifti_data(self.nifti_img)
         else:
-            self.nifti_img, data = img_data
+            # ``meta`` is optional when invoked by legacy call sites/tests.
+            if data is None and isinstance(img, tuple):  # Backwards compatibility
+                img, data = img
+            self.nifti_img = img
+            if meta is None:
+                meta = {}
         self.data = data
+        self._channel_axis = meta.get('channel_axis')
+        # The viewer only supports a single non-spatial axis for volumes (time).
+        # If we detected a dedicated channel axis (e.g. RGB) we keep it and
+        # disable volume controls; otherwise treat the 4th dimension as volumes.
+        self._volume_axis = 3 if self.data.ndim == 4 and self._channel_axis is None else None
+        self._component_labels = meta.get('component_labels')
         widget = QWidget()
         vlay = QVBoxLayout(widget)
 
@@ -4093,21 +4174,47 @@ class MetadataViewer(QWidget):
         vlay.addWidget(self.splitter)
 
         # Configure volume slider range
-        n_vols = data.shape[3] if data.ndim == 4 else 1
+        n_vols = self._volume_count()
         self.vol_slider.setMaximum(max(n_vols - 1, 0))
         self.vol_slider.setEnabled(n_vols > 1)
+        self.vol_slider.setValue(0)
         self.vol_val.setText("0")
-        self.graph_btn.setVisible(n_vols > 1)
+        self.graph_btn.setVisible(self._has_volume_axis() and n_vols > 1)
 
         # Initialize orientation and slice slider
         self._set_orientation(self.orientation)
         self._update_slice()
         return widget
 
+    def _has_volume_axis(self) -> bool:
+        """Return True when the dataset has a separate volume/time axis."""
+        return self._volume_axis is not None
+
+    def _volume_count(self) -> int:
+        """Number of volumes available for the current dataset."""
+        if not self._has_volume_axis():
+            return 1
+        return self.data.shape[self._volume_axis]
+
+    def _current_volume_index(self) -> int:
+        """Index of the currently selected volume."""
+        if not self._has_volume_axis():
+            return 0
+        slider = getattr(self, 'vol_slider', None)
+        return slider.value() if slider is not None else 0
+
+    def _extract_volume(self, index: int | None = None):
+        """Return a single 3-D volume (plus optional channels) for display."""
+        if index is None:
+            index = self._current_volume_index()
+        if not self._has_volume_axis():
+            return self.data
+        return np.take(self.data, index, axis=self._volume_axis)
+
     def _update_slice(self):
         """Update displayed slice when slider moves."""
-        vol_idx = getattr(self, 'vol_slider', None).value() if hasattr(self, 'vol_slider') else 0
-        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        vol_idx = self._current_volume_index()
+        vol = self._extract_volume(vol_idx)
         axis = getattr(self, 'orientation', 2)
         slice_idx = getattr(self, 'slice_slider', None).value() if hasattr(self, 'slice_slider') else vol.shape[axis] // 2
         self.slice_val.setText(str(slice_idx))
@@ -4120,9 +4227,25 @@ class MetadataViewer(QWidget):
             slice_img = vol[:, :, slice_idx]
         # Normalise the slice to 0..1 before applying display adjustments
         arr = slice_img.astype(np.float32)
-        arr = arr - arr.min()
-        if arr.max() > 0:
-            arr = arr / arr.max()
+        if arr.ndim == 2:
+            arr = arr - arr.min()
+            max_val = arr.max()
+            if max_val > 0:
+                arr = arr / max_val
+        elif arr.ndim == 3:
+            # Normalise each colour component independently so RGB volumes keep
+            # their relative contrasts.
+            arr_min = arr.min(axis=(0, 1), keepdims=True)
+            arr = arr - arr_min
+            arr_max = arr.max(axis=(0, 1), keepdims=True)
+            arr_max[arr_max == 0] = 1.0
+            arr = arr / arr_max
+        else:
+            flat_min = arr.min()
+            arr = arr - flat_min
+            flat_max = arr.max()
+            if flat_max > 0:
+                arr = arr / flat_max
 
         # Apply brightness/contrast adjustments
         bright = getattr(self, 'bright_slider', None)
@@ -4132,10 +4255,24 @@ class MetadataViewer(QWidget):
         arr = (arr - 0.5) * c_factor + 0.5 + b_val
         arr = np.clip(arr, 0, 1)
 
-        arr = (arr * 255).astype(np.uint8)
-        arr = np.rot90(arr)
-        h, w = arr.shape
-        img = QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8)
+        arr_uint8 = (arr * 255).astype(np.uint8)
+        arr_uint8 = np.rot90(arr_uint8)
+        arr_uint8 = np.ascontiguousarray(arr_uint8)
+        if arr_uint8.ndim == 2:
+            h, w = arr_uint8.shape
+            img = QImage(arr_uint8.data, w, h, w, QImage.Format_Grayscale8)
+        elif arr_uint8.ndim == 3 and arr_uint8.shape[2] == 3:
+            h, w, _ = arr_uint8.shape
+            img = QImage(arr_uint8.data, w, h, 3 * w, QImage.Format_RGB888)
+        elif arr_uint8.ndim == 3 and arr_uint8.shape[2] == 4:
+            h, w, _ = arr_uint8.shape
+            img = QImage(arr_uint8.data, w, h, 4 * w, QImage.Format_RGBA8888)
+        else:
+            # Unexpected channel layout -> fall back to grayscale using the mean.
+            arr_gray = np.mean(arr_uint8, axis=-1).astype(np.uint8)
+            arr_gray = np.ascontiguousarray(arr_gray)
+            h, w = arr_gray.shape
+            img = QImage(arr_gray.data, w, h, w, QImage.Format_Grayscale8)
         pix = QPixmap.fromImage(img)
 
         scaled = pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -4183,8 +4320,7 @@ class MetadataViewer(QWidget):
 
     def _arr_to_voxel(self, x, y):
         # Map 2D display coordinates back to a voxel index within the volume
-        vol_idx = self.vol_slider.value()
-        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        vol = self._extract_volume()
         axis = self.orientation
         slice_idx = self.slice_slider.value()
         if axis == 0:
@@ -4203,8 +4339,7 @@ class MetadataViewer(QWidget):
     def _voxel_to_arr(self, voxel):
         """Convert a voxel index back to 2-D array coordinates for drawing."""
         i, j, k = voxel
-        vol_idx = self.vol_slider.value()
-        vol = self.data[..., vol_idx] if self.data.ndim == 4 else self.data
+        vol = self._extract_volume()
         axis = self.orientation
         if axis == 0:
             x = j
@@ -4230,12 +4365,20 @@ class MetadataViewer(QWidget):
         if self.cross_voxel is None:
             self.voxel_val_label.setText("N/A")
             return
-        vol_idx = self.vol_slider.value()
-        if self.data.ndim == 4:
-            val = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2], vol_idx]
-        else:
-            val = self.data[self.cross_voxel[0], self.cross_voxel[1], self.cross_voxel[2]]
-        self.voxel_val_label.setText(f"{val:.3g}")
+        vol = self._extract_volume()
+        val = vol[tuple(self.cross_voxel)]
+        arr = np.asarray(val)
+        if arr.ndim == 0:
+            self.voxel_val_label.setText(f"{float(arr):.3g}")
+            return
+
+        comps = arr.ravel()
+        labels = self._component_labels or []
+        parts = []
+        for idx, comp in enumerate(comps):
+            label = labels[idx] if idx < len(labels) else f"ch{idx}"
+            parts.append(f"{label}:{float(comp):.3g}")
+        self.voxel_val_label.setText(" ".join(parts))
 
     def _toggle_graph(self):
         visible = self.graph_btn.isChecked()
@@ -4249,8 +4392,8 @@ class MetadataViewer(QWidget):
 
     def _update_graph(self):
         # Redraw the time-series graph for all voxels in the selected neighborhood
-        # around ``self.cross_voxel``. Only valid for 4-D data.
-        if self.data.ndim != 4 or self.cross_voxel is None:
+        # around ``self.cross_voxel``. Only valid when a volume/time axis exists.
+        if not self._has_volume_axis() or self.cross_voxel is None:
             return
 
         level = self.scope_spin.value()
@@ -4292,7 +4435,10 @@ class MetadataViewer(QWidget):
                     ax.axis("off")
                     continue
 
-                ts_orig = self.data[i, j, k, :]
+                slicer = [i, j, k]
+                if self._has_volume_axis():
+                    slicer.append(slice(None))
+                ts_orig = np.asarray(self.data[tuple(slicer)])
                 ts = ts_orig
                 global_min = min(global_min, ts_orig.min())
                 global_max = max(global_max, ts_orig.max())
@@ -4303,7 +4449,7 @@ class MetadataViewer(QWidget):
                 ax.tick_params(left=False, bottom=False)
                 if self.mark_neighbors_box.isChecked() or (r == half and c == half):
                     self.marker_ts.append(ts)
-                    idx = self.vol_slider.value()
+                    idx = self._current_volume_index()
                     marker, = ax.plot([idx], [ts[idx]], "o", color=marker_color, markersize=dot_size)
                     self.markers.append(marker)
 
@@ -4317,10 +4463,10 @@ class MetadataViewer(QWidget):
 
     def _update_graph_marker(self):
         # Update the marker showing the current volume index on all axes
-        if not getattr(self, "markers", None) or not getattr(self, "marker_ts", None):
+        if not self._has_volume_axis() or not getattr(self, "markers", None) or not getattr(self, "marker_ts", None):
             return
         marker_color = self.palette().color(QPalette.Highlight).name()
-        idx = self.vol_slider.value()
+        idx = self._current_volume_index()
         for marker, ts in zip(self.markers, self.marker_ts):
             i = max(0, min(idx, len(ts) - 1))
             marker.set_data([i], [ts[i]])
