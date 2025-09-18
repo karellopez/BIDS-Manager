@@ -1,0 +1,7 @@
+[console_scripts]
+bids-manager = bids_manager.gui:main
+build-heuristic = bids_manager.build_heuristic_from_tsv:main
+dicom-inventory = bids_manager.dicom_inventory:main
+fill-bids-ignore = bids_manager.fill_bids_ignore:main
+post-conv-renamer = bids_manager.post_conv_renamer:main
+run-heudiconv = bids_manager.run_heudiconv_from_heuristic:main
