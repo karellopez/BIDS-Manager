@@ -886,12 +886,14 @@ class BIDSManager(QMainWindow):
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
         self.mapping_table = QTableWidget()
-        # Two extra columns expose immutable DICOM metadata (FamilyName,
-        # PatientID) alongside the editable identifiers.
+        # Expose immutable DICOM metadata (StudyDescription, FamilyName,
+        # PatientID) alongside the editable identifiers so users can see the
+        # original values while editing BIDS-specific fields.
         self.mapping_table.setColumnCount(16)
         self.mapping_table.setHorizontalHeaderLabels([
             "include",
             "source_folder",
+            "StudyDescription",
             "FamilyName",
             "PatientID",
             "BIDS_name",
@@ -900,7 +902,6 @@ class BIDSManager(QMainWindow):
             "session",
             "sequence",
             "Proposed BIDS name",
-            "StudyDescription",
             "series_uid",
             "acq_time",
             "rep",
@@ -913,7 +914,7 @@ class BIDSManager(QMainWindow):
         self.mapping_table.verticalHeader().setVisible(False)
         # Keep BIDS name edits constrained by the delegate despite the shifted
         # column indices introduced above.
-        self.mapping_table.setItemDelegateForColumn(4, SubjectDelegate(self.mapping_table))
+        self.mapping_table.setItemDelegateForColumn(5, SubjectDelegate(self.mapping_table))
         self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
         btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
@@ -1581,15 +1582,15 @@ class BIDSManager(QMainWindow):
         for i in range(self.mapping_table.rowCount()):
             df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
             df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
-            df.at[i, "FamilyName"] = self.mapping_table.item(i, 2).text()
-            df.at[i, "PatientID"] = self.mapping_table.item(i, 3).text()
-            df.at[i, "BIDS_name"] = self.mapping_table.item(i, 4).text()
-            df.at[i, "subject"] = self.mapping_table.item(i, 5).text()
-            df.at[i, "GivenName"] = self.mapping_table.item(i, 6).text()
-            df.at[i, "session"] = self.mapping_table.item(i, 7).text()
-            df.at[i, "sequence"] = self.mapping_table.item(i, 8).text()
-            df.at[i, "Proposed BIDS name"] = self.mapping_table.item(i, 9).text()
-            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 10).text()
+            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 2).text()
+            df.at[i, "FamilyName"] = self.mapping_table.item(i, 3).text()
+            df.at[i, "PatientID"] = self.mapping_table.item(i, 4).text()
+            df.at[i, "BIDS_name"] = self.mapping_table.item(i, 5).text()
+            df.at[i, "subject"] = self.mapping_table.item(i, 6).text()
+            df.at[i, "GivenName"] = self.mapping_table.item(i, 7).text()
+            df.at[i, "session"] = self.mapping_table.item(i, 8).text()
+            df.at[i, "sequence"] = self.mapping_table.item(i, 9).text()
+            df.at[i, "Proposed BIDS name"] = self.mapping_table.item(i, 10).text()
             df.at[i, "series_uid"] = self.mapping_table.item(i, 11).text()
             df.at[i, "acq_time"] = self.mapping_table.item(i, 12).text()
             df.at[i, "rep"] = self.mapping_table.item(i, 13).text()
@@ -1633,13 +1634,13 @@ class BIDSManager(QMainWindow):
 
         id_map: dict[tuple[str, str], str] = {}
         for i in range(self.mapping_table.rowCount()):
-            bids = self.mapping_table.item(i, 4).text().strip()
-            study = self.mapping_table.item(i, 10).text().strip()
+            bids = self.mapping_table.item(i, 5).text().strip()
+            study = self.mapping_table.item(i, 2).text().strip()
             if not bids:
                 continue
 
-            subj_item = self.mapping_table.item(i, 5)
-            given_item = self.mapping_table.item(i, 6)
+            subj_item = self.mapping_table.item(i, 6)
+            given_item = self.mapping_table.item(i, 7)
 
             sid = None
             prior = existing.get(study, {}).get(bids)
@@ -1695,8 +1696,8 @@ class BIDSManager(QMainWindow):
         enabled = self.mapping_table.rowCount() > 0
         if enabled:
             for r in range(self.mapping_table.rowCount()):
-                bids = self.mapping_table.item(r, 4)
-                given = self.mapping_table.item(r, 6)
+                bids = self.mapping_table.item(r, 5)
+                given = self.mapping_table.item(r, 7)
                 if bids is None or given is None or not bids.text().strip() or not given.text().strip():
                     enabled = False
                     break
@@ -1721,12 +1722,12 @@ class BIDSManager(QMainWindow):
         rows = []
         for i in range(self.mapping_table.rowCount()):
             rows.append({
-                'StudyDescription': self.mapping_table.item(i, 10).text().strip(),
-                'BIDS_name': self.mapping_table.item(i, 4).text().strip(),
-                'session': self.mapping_table.item(i, 7).text().strip(),
+                'StudyDescription': self.mapping_table.item(i, 2).text().strip(),
+                'BIDS_name': self.mapping_table.item(i, 5).text().strip(),
+                'session': self.mapping_table.item(i, 8).text().strip(),
                 'modality_bids': self.mapping_table.item(i, 15).text().strip(),
                 'modality': self.mapping_table.item(i, 14).text().strip(),
-                'sequence': self.mapping_table.item(i, 8).text().strip(),
+                'sequence': self.mapping_table.item(i, 9).text().strip(),
                 'acq_time': self.mapping_table.item(i, 12).text().strip(),
             })
 
@@ -1802,7 +1803,7 @@ class BIDSManager(QMainWindow):
             for idx, info in enumerate(self.row_info):
                 if info['study'] == study and info['given'] == given:
                     info['bids'] = new_bids
-                    self.mapping_table.item(idx, 4).setText(new_bids)
+                    self.mapping_table.item(idx, 5).setText(new_bids)
             self.existing_maps.setdefault(study, {})[given] = new_bids
             self.existing_used.setdefault(study, set()).add(new_bids)
 
@@ -1822,9 +1823,9 @@ class BIDSManager(QMainWindow):
         logging.info("loadMappingTable → Loading TSV into table …")
         """
         Load the generated TSV into the mapping_table for user editing.
-        Columns: include, source_folder, FamilyName, PatientID, BIDS_name,
-        subject, GivenName, session, sequence, Proposed BIDS name,
-        StudyDescription, series_uid, acq_time, rep, modality, modality_bids
+        Columns: include, source_folder, StudyDescription, FamilyName,
+        PatientID, BIDS_name, subject, GivenName, session, sequence,
+        Proposed BIDS name, series_uid, acq_time, rep, modality, modality_bids
         """
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
@@ -1893,46 +1894,47 @@ class BIDSManager(QMainWindow):
             src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 1, src_item)
 
+            study = _clean(row.get('StudyDescription'))
+
+            study_item = QTableWidgetItem(study)
+            study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 2, study_item)
+
             family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
             family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 2, family_item)
+            self.mapping_table.setItem(r, 3, family_item)
 
             patient_item = QTableWidgetItem(_clean(row.get('PatientID')))
             patient_item.setFlags(patient_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 3, patient_item)
+            self.mapping_table.setItem(r, 4, patient_item)
 
             bids_name = _clean(row.get('BIDS_name'))
             bids_item = QTableWidgetItem(bids_name)
             bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
-            study = _clean(row.get('StudyDescription'))
             bids_item.setData(Qt.UserRole, study)
             self.study_set.add(study)
-            self.mapping_table.setItem(r, 4, bids_item)
+            self.mapping_table.setItem(r, 5, bids_item)
 
             subj_item = QTableWidgetItem(_clean(row.get('subject')))
             subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 5, subj_item)
+            self.mapping_table.setItem(r, 6, subj_item)
 
             given_item = QTableWidgetItem(_clean(row.get('GivenName')))
             given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 6, given_item)
+            self.mapping_table.setItem(r, 7, given_item)
 
             session = _clean(row.get('session'))
             ses_item = QTableWidgetItem(session)
             ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 7, ses_item)
+            self.mapping_table.setItem(r, 8, ses_item)
 
             seq_item = QTableWidgetItem(_clean(row.get('sequence')))
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 8, seq_item)
+            self.mapping_table.setItem(r, 9, seq_item)
 
             preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
             preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 9, preview_item)
-
-            study_item = QTableWidgetItem(study)
-            study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 10, study_item)
+            self.mapping_table.setItem(r, 10, preview_item)
 
             uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
             uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
@@ -2218,7 +2220,7 @@ class BIDSManager(QMainWindow):
         for idx, info in enumerate(self.row_info):
             if info['study'] == study and info['given'] == given:
                 info['bids'] = new_bids
-                self.mapping_table.item(idx, 4).setText(new_bids)
+                self.mapping_table.item(idx, 5).setText(new_bids)
         # Keep internal mapping updated
         self.existing_maps.setdefault(study, {})[given] = new_bids
         self.existing_used.setdefault(study, set()).add(new_bids)
@@ -2325,7 +2327,7 @@ class BIDSManager(QMainWindow):
             if self.exclude_table.item(r, 0).checkState() == Qt.Checked
         ]
         for r in range(self.mapping_table.rowCount()):
-            seq = self.mapping_table.item(r, 8).text().lower()
+            seq = self.mapping_table.item(r, 9).text().lower()
             if any(p in seq for p in patterns):
                 self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
 
@@ -2444,7 +2446,7 @@ class BIDSManager(QMainWindow):
         dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
         if self.mapping_table.rowCount() > 0:
             for i in range(self.mapping_table.rowCount()):
-                seq = self.mapping_table.item(i, 8).text()
+                seq = self.mapping_table.item(i, 9).text()
                 mod = dicom_inventory.guess_modality(seq)
                 modb = dicom_inventory.modality_to_container(mod)
                 self.mapping_table.item(i, 14).setText(mod)
@@ -2667,7 +2669,7 @@ class BIDSManager(QMainWindow):
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
-                seq = self.mapping_table.item(i, 8).text()
+                seq = self.mapping_table.item(i, 9).text()
                 modb = self.mapping_table.item(i, 15).text()
 
                 # Update df_orig with canonical BIDS name
