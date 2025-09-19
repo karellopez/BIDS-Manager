@@ -62,6 +62,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
+from typing import Optional, Sequence
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
@@ -69,7 +70,8 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget
+)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -3720,6 +3722,279 @@ class BidsIgnoreDialog(QDialog):
         self.accept()
 
 
+class Volume3DDialog(QDialog):
+    """Interactive 3-D renderer for NIfTI volumes."""
+
+    def __init__(
+        self,
+        parent,
+        data: np.ndarray,
+        meta: Optional[dict] = None,
+        voxel_sizes: Optional[Sequence[float]] = None,
+        default_mode: Optional[str] = None,
+        title: Optional[str] = None,
+        dark_theme: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title or "3D Volume Viewer")
+        self.resize(900, 700)
+
+        self._raw = np.asarray(data)
+        if self._raw.ndim < 3:
+            raise ValueError("3-D rendering requires data with at least three axes")
+
+        self._meta = meta or {}
+        self._voxel_sizes = self._normalise_voxel_sizes(voxel_sizes)
+        self._dark_theme = bool(dark_theme)
+        self._max_points = 120_000
+        self._colorbar = None
+        self._initialising = True
+
+        self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
+        self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
+        self._axis_bg = "#202020" if self._dark_theme else "#f8f8f8"
+
+        layout = QVBoxLayout(self)
+
+        self.canvas = FigureCanvas(plt.Figure(figsize=(6, 6)))
+        self.canvas.figure.patch.set_facecolor(self._canvas_bg)
+        layout.addWidget(self.canvas)
+        self.ax = self.canvas.figure.add_subplot(111, projection="3d")
+        self._configure_axes_appearance(self.ax)
+        self.ax.view_init(elev=20, azim=-60)
+
+        controls = QHBoxLayout()
+        layout.addLayout(controls)
+        controls.addWidget(QLabel("Aggregation:"))
+        self.agg_combo = QComboBox()
+        self._aggregators = {}
+        self._init_aggregator_options()
+        controls.addWidget(self.agg_combo)
+        controls.addSpacing(12)
+
+        controls.addWidget(QLabel("Threshold:"))
+        self.thresh_slider = QSlider(Qt.Horizontal)
+        self.thresh_slider.setRange(0, 100)
+        self.thresh_slider.setValue(60)
+        self.thresh_slider.valueChanged.connect(self._update_plot)
+        controls.addWidget(self.thresh_slider)
+        self.thresh_label = QLabel("0.60")
+        controls.addWidget(self.thresh_label)
+        controls.addSpacing(12)
+
+        controls.addWidget(QLabel("Point size:"))
+        self.point_slider = QSlider(Qt.Horizontal)
+        self.point_slider.setRange(1, 12)
+        self.point_slider.setValue(4)
+        self.point_slider.valueChanged.connect(self._update_plot)
+        controls.addWidget(self.point_slider)
+        controls.addStretch()
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        default_name = None
+        if default_mode and default_mode in self._aggregators:
+            default_name = default_mode
+        elif self._raw.ndim > 3:
+            if self._meta.get("is_rgb"):
+                default_name = "Mean |value|"
+            else:
+                default_name = "RMS (DTI)"
+
+        if default_name:
+            self.agg_combo.setCurrentText(default_name)
+
+        self.agg_combo.currentTextChanged.connect(self._on_agg_change)
+
+        self._initialising = False
+
+        self._scalar_volume: Optional[np.ndarray] = None
+        self._normalised_volume: Optional[np.ndarray] = None
+        self._downsampled: Optional[np.ndarray] = None
+        self._downsample_step = 1
+
+        self._compute_scalar_volume()
+        self._update_plot()
+
+    def _normalise_voxel_sizes(self, voxel_sizes):
+        if not voxel_sizes:
+            return (1.0, 1.0, 1.0)
+        values = tuple(float(v) for v in voxel_sizes[:3])
+        if len(values) < 3:
+            values = values + (1.0,) * (3 - len(values))
+        return tuple(max(1e-6, abs(v)) for v in values)
+
+    def _init_aggregator_options(self) -> None:
+        if self._raw.ndim <= 3:
+            self._aggregators["Intensity"] = "Intensity"
+            self.agg_combo.addItem("Intensity")
+            self.agg_combo.setEnabled(False)
+        else:
+            for name in ("RMS (DTI)", "Mean |value|", "Max |value|", "First volume"):
+                self._aggregators[name] = name
+                self.agg_combo.addItem(name)
+
+    def _configure_axes_appearance(self, axis):
+        axis.set_facecolor(self._axis_bg)
+        axis.xaxis.set_pane_color((*axis.get_facecolor()[:3], 0.15))
+        axis.yaxis.set_pane_color((*axis.get_facecolor()[:3], 0.15))
+        axis.zaxis.set_pane_color((*axis.get_facecolor()[:3], 0.15))
+        for ax in (axis.xaxis, axis.yaxis, axis.zaxis):
+            ax.label.set_color(self._fg_color)
+            ax.set_tick_params(colors=self._fg_color)
+        axis.grid(False)
+
+    def _on_agg_change(self):
+        if self._initialising:
+            return
+        self._compute_scalar_volume()
+        self._update_plot()
+
+    def _compute_scalar_volume(self) -> None:
+        arr = np.asarray(self._raw, dtype=np.float32)
+        if arr.ndim <= 3:
+            scalar = arr
+        else:
+            axis = arr.ndim - 1
+            mode = self.agg_combo.currentText()
+            if mode == "RMS (DTI)":
+                scalar = np.sqrt(np.nanmean(np.square(arr), axis=axis))
+            elif mode == "Max |value|":
+                scalar = np.nanmax(np.abs(arr), axis=axis)
+            elif mode == "First volume":
+                scalar = np.abs(np.take(arr, 0, axis=axis))
+            else:
+                scalar = np.nanmean(np.abs(arr), axis=axis)
+        scalar = np.nan_to_num(scalar, nan=0.0, posinf=0.0, neginf=0.0)
+        self._scalar_volume = scalar
+        finite = np.isfinite(scalar)
+        if not finite.any():
+            self._normalised_volume = np.zeros_like(scalar, dtype=np.float32)
+        else:
+            min_val = float(np.min(scalar[finite]))
+            max_val = float(np.max(scalar[finite]))
+            if abs(max_val - min_val) < 1e-6:
+                self._normalised_volume = np.zeros_like(scalar, dtype=np.float32)
+            else:
+                norm = (scalar - min_val) / (max_val - min_val)
+                self._normalised_volume = norm.astype(np.float32, copy=False)
+        self._prepare_downsampled()
+
+    def _prepare_downsampled(self) -> None:
+        vol = self._normalised_volume
+        if vol is None:
+            self._downsampled = None
+            self._downsample_step = 1
+            return
+        step = 1
+        total = float(vol.size)
+        if total > self._max_points:
+            step = int(np.ceil(np.cbrt(total / self._max_points)))
+        step = max(1, step)
+        slices = tuple(slice(None, None, step) for _ in range(3))
+        self._downsampled = vol[slices]
+        self._downsample_step = step
+
+    def _update_plot(self):
+        if self._downsampled is None:
+            return
+
+        if self._colorbar is not None:
+            try:
+                self._colorbar.remove()
+            except Exception:
+                pass
+            self._colorbar = None
+
+        thr = self.thresh_slider.value() / 100.0
+        self.thresh_label.setText(f"{thr:.2f}")
+        downsampled = self._downsampled
+        mask = downsampled >= thr
+        coords = np.argwhere(mask)
+
+        self.ax.cla()
+        self._configure_axes_appearance(self.ax)
+
+        if coords.size == 0:
+            self.ax.text(
+                0.5,
+                0.5,
+                0.5,
+                "No voxels above threshold",
+                transform=self.ax.transAxes,
+                ha="center",
+                va="center",
+                color=self._fg_color,
+            )
+            self.ax.set_xlim(0, 1)
+            self.ax.set_ylim(0, 1)
+            self.ax.set_zlim(0, 1)
+            self.ax.set_box_aspect((1, 1, 1))
+            self.ax.set_xlabel("X")
+            self.ax.set_ylabel("Y")
+            self.ax.set_zlabel("Z")
+            self.status_label.setText(
+                f"No voxels above threshold {thr:.2f}. Try lowering the value."
+            )
+            self.canvas.draw_idle()
+            return
+
+        values = downsampled[mask]
+        step = self._downsample_step
+        coords_mm = coords.astype(np.float32)
+        for dim in range(3):
+            coords_mm[:, dim] *= step * self._voxel_sizes[dim]
+
+        displayed = coords_mm.shape[0]
+        if displayed > self._max_points:
+            idx = np.linspace(0, displayed - 1, self._max_points, dtype=int)
+            coords_mm = coords_mm[idx]
+            values = values[idx]
+            displayed = coords_mm.shape[0]
+
+        sc = self.ax.scatter(
+            coords_mm[:, 0],
+            coords_mm[:, 1],
+            coords_mm[:, 2],
+            c=values,
+            cmap="viridis",
+            s=self.point_slider.value(),
+            alpha=0.6,
+            linewidths=0,
+        )
+
+        extents = [
+            (0.0, max(1e-3, (downsampled.shape[i] - 1) * step * self._voxel_sizes[i]))
+            for i in range(3)
+        ]
+        self.ax.set_xlim(*extents[0])
+        self.ax.set_ylim(*extents[1])
+        self.ax.set_zlim(*extents[2])
+        self.ax.set_box_aspect([
+            max(1e-3, e[1] - e[0]) for e in extents
+        ])
+        self.ax.set_xlabel("Left–Right (mm)")
+        self.ax.set_ylabel("Posterior–Anterior (mm)")
+        self.ax.set_zlabel("Inferior–Superior (mm)")
+
+        self._colorbar = self.canvas.figure.colorbar(sc, ax=self.ax, pad=0.1, shrink=0.7)
+        if self._dark_theme:
+            self._colorbar.ax.yaxis.set_tick_params(color=self._fg_color)
+            for tick in self._colorbar.ax.get_yticklabels():
+                tick.set_color(self._fg_color)
+
+        total_voxels = 0
+        if self._normalised_volume is not None:
+            total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
+        self.status_label.setText(
+            f"Showing {displayed:,} voxels (threshold {thr:.2f}); "
+            f"downsample step {step}, total above threshold {total_voxels:,}."
+        )
+        self.canvas.draw_idle()
+
+
 class MetadataViewer(QWidget):
     """
     Metadata viewer/editor for JSON and TSV sidecars (from bids_editor_ancpbids).
@@ -3998,6 +4273,10 @@ class MetadataViewer(QWidget):
         self.toolbar.addWidget(self.co_btn)
         self.toolbar.addWidget(self.ax_btn)
 
+        self.view3d_btn = QPushButton("3D View")
+        self.view3d_btn.clicked.connect(self._show_3d_view)
+        self.toolbar.addWidget(self.view3d_btn)
+
         self.graph_btn = QPushButton("Graph")
         self.graph_btn.setCheckable(True)
         self.graph_btn.clicked.connect(self._toggle_graph)
@@ -4045,6 +4324,54 @@ class MetadataViewer(QWidget):
         self.value_row.addWidget(self.voxel_val_label)
         self.value_row.addStretch()
         self.toolbar.addStretch()
+
+    def _show_3d_view(self) -> None:
+        """Launch the interactive 3-D renderer for the loaded volume."""
+
+        if getattr(self, "data", None) is None:
+            QMessageBox.warning(self, "3D Viewer", "No NIfTI volume is currently loaded.")
+            return
+
+        voxel_sizes = None
+        if getattr(self, "nifti_img", None) is not None:
+            try:
+                zooms = self.nifti_img.header.get_zooms()
+                voxel_sizes = tuple(float(v) for v in zooms[:3])
+            except Exception:  # pragma: no cover - defensive: malformed header
+                voxel_sizes = None
+
+        default_mode = None
+        if self.current_path:
+            name = self.current_path.name.lower()
+            if any(tag in name for tag in ("dwi", "dti", "diffusion")):
+                default_mode = "RMS (DTI)"
+
+        title = (
+            f"3D View – {self.current_path.name}"
+            if self.current_path is not None
+            else "3D Volume Viewer"
+        )
+
+        try:
+            dialog = Volume3DDialog(
+                self,
+                self.data,
+                meta=getattr(self, "_nifti_meta", {}),
+                voxel_sizes=voxel_sizes,
+                default_mode=default_mode,
+                title=title,
+                dark_theme=self._is_dark_theme(),
+            )
+        except Exception as exc:  # pragma: no cover - interactive error reporting
+            logging.exception("Failed to initialise 3-D viewer")
+            QMessageBox.critical(
+                self,
+                "3D Viewer",
+                f"Unable to open 3D view: {exc}",
+            )
+            return
+
+        dialog.exec_()
 
     def _add_field(self):
         """Insert a new key/value pair into JSON tree."""
