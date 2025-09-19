@@ -85,6 +85,7 @@ from PyQt5.QtGui import (
     QIcon,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.pyplot as plt
 import logging  # debug logging
 import signal
@@ -108,6 +109,13 @@ try:
     HAS_PSUTIL = True
 except Exception:  # pragma: no cover - optional dependency
     HAS_PSUTIL = False
+
+try:  # Surface reconstruction for the 3-D viewer (optional dependency)
+    from skimage import measure as sk_measure
+    HAS_SKIMAGE = True
+except Exception:  # pragma: no cover - optional dependency
+    sk_measure = None
+    HAS_SKIMAGE = False
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -3737,7 +3745,9 @@ class Volume3DDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title or "3D Volume Viewer")
-        self.resize(900, 700)
+        self.resize(1200, 900)
+        self.setMinimumSize(780, 560)
+        self.setSizeGripEnabled(True)
 
         self._raw = np.asarray(data)
         if self._raw.ndim < 3:
@@ -3747,8 +3757,11 @@ class Volume3DDialog(QDialog):
         self._voxel_sizes = self._normalise_voxel_sizes(voxel_sizes)
         self._dark_theme = bool(dark_theme)
         self._max_points = 120_000
+        self._surface_step = 1
         self._colorbar = None
         self._initialising = True
+        self._scalar_min = 0.0
+        self._scalar_max = 0.0
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -3757,38 +3770,120 @@ class Volume3DDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.canvas = FigureCanvas(plt.Figure(figsize=(6, 6)))
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas.setMinimumSize(600, 600)
         self.canvas.figure.patch.set_facecolor(self._canvas_bg)
-        layout.addWidget(self.canvas)
+        self.canvas.figure.subplots_adjust(left=0.05, right=0.88, bottom=0.08, top=0.95)
+        layout.addWidget(self.canvas, stretch=1)
         self.ax = self.canvas.figure.add_subplot(111, projection="3d")
         self._configure_axes_appearance(self.ax)
         self.ax.view_init(elev=20, azim=-60)
 
         controls = QHBoxLayout()
         layout.addLayout(controls)
-        controls.addWidget(QLabel("Aggregation:"))
+        agg_label = QLabel("Aggregation:")
+        controls.addWidget(agg_label)
         self.agg_combo = QComboBox()
         self._aggregators = {}
         self._init_aggregator_options()
         controls.addWidget(self.agg_combo)
         controls.addSpacing(12)
 
-        controls.addWidget(QLabel("Threshold:"))
+        render_label = QLabel("Render mode:")
+        controls.addWidget(render_label)
+        self.render_mode_combo = QComboBox()
+        self.render_mode_combo.addItems(["Point cloud", "Surface mesh"])
+        self.render_mode_combo.setToolTip("Switch between scattered voxels and iso-surface rendering.")
+        controls.addWidget(self.render_mode_combo)
+        controls.addSpacing(12)
+
+        self.thresh_text = QLabel("Threshold:")
+        controls.addWidget(self.thresh_text)
         self.thresh_slider = QSlider(Qt.Horizontal)
         self.thresh_slider.setRange(0, 100)
         self.thresh_slider.setValue(60)
+        self.thresh_slider.setPageStep(5)
+        self.thresh_slider.setToolTip("Minimum normalised intensity included in the rendering.")
         self.thresh_slider.valueChanged.connect(self._update_plot)
         controls.addWidget(self.thresh_slider)
         self.thresh_label = QLabel("0.60")
         controls.addWidget(self.thresh_label)
         controls.addSpacing(12)
 
-        controls.addWidget(QLabel("Point size:"))
+        self.point_label = QLabel("Point size:")
+        controls.addWidget(self.point_label)
         self.point_slider = QSlider(Qt.Horizontal)
         self.point_slider.setRange(1, 12)
         self.point_slider.setValue(4)
+        self.point_slider.setToolTip("Marker diameter for point-cloud rendering.")
         self.point_slider.valueChanged.connect(self._update_plot)
         controls.addWidget(self.point_slider)
         controls.addStretch()
+
+        options_group = QGroupBox("Rendering options")
+        layout.addWidget(options_group)
+        options = QGridLayout(options_group)
+
+        options.addWidget(QLabel("Colormap:"), 0, 0)
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems([
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "cubehelix",
+            "Greys",
+            "bone",
+        ])
+        self.colormap_combo.setToolTip("Select the matplotlib colormap for voxel intensities.")
+        options.addWidget(self.colormap_combo, 0, 1)
+
+        options.addWidget(QLabel("Opacity:"), 0, 2)
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(60)
+        self.opacity_slider.setToolTip("Control transparency for the rendered primitives.")
+        options.addWidget(self.opacity_slider, 0, 3)
+        self.opacity_label = QLabel("0.60")
+        options.addWidget(self.opacity_label, 0, 4)
+
+        options.addWidget(QLabel("Max points:"), 1, 0)
+        self.max_points_spin = QSpinBox()
+        self.max_points_spin.setRange(1_000, 500_000)
+        self.max_points_spin.setSingleStep(5_000)
+        self.max_points_spin.setValue(self._max_points)
+        self.max_points_spin.setToolTip("Upper bound on voxels rendered in point-cloud mode.")
+        options.addWidget(self.max_points_spin, 1, 1)
+
+        self.downsample_label = QLabel("Voxel step:")
+        options.addWidget(self.downsample_label, 1, 2)
+        self.downsample_spin = QSpinBox()
+        self.downsample_spin.setRange(0, 8)
+        self.downsample_spin.setSpecialValueText("Auto")
+        self.downsample_spin.setValue(0)
+        self.downsample_spin.setToolTip(
+            "Manual stride for downsampling (0 keeps automatic selection)."
+        )
+        options.addWidget(self.downsample_spin, 1, 3)
+
+        self.surface_step_label = QLabel("Surface step:")
+        options.addWidget(self.surface_step_label, 1, 4)
+        self.surface_step_spin = QSpinBox()
+        self.surface_step_spin.setRange(1, 5)
+        self.surface_step_spin.setValue(self._surface_step)
+        self.surface_step_spin.setToolTip(
+            "Step size passed to marching cubes (higher values decimate the mesh)."
+        )
+        options.addWidget(self.surface_step_spin, 1, 5)
+
+        self.axes_checkbox = QCheckBox("Show axes and frame")
+        self.axes_checkbox.setChecked(True)
+        self.axes_checkbox.setToolTip("Toggle axis panes and tick labels in the 3-D view.")
+        options.addWidget(self.axes_checkbox, 2, 0, 1, 2)
+
+        options.setColumnStretch(3, 1)
+        options.setColumnStretch(5, 1)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -3807,6 +3902,13 @@ class Volume3DDialog(QDialog):
             self.agg_combo.setCurrentText(default_name)
 
         self.agg_combo.currentTextChanged.connect(self._on_agg_change)
+        self.render_mode_combo.currentTextChanged.connect(self._on_render_mode_change)
+        self.colormap_combo.currentTextChanged.connect(lambda _: self._update_plot())
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        self.max_points_spin.valueChanged.connect(self._on_max_points_change)
+        self.downsample_spin.valueChanged.connect(self._on_downsample_change)
+        self.surface_step_spin.valueChanged.connect(self._on_surface_step_change)
+        self.axes_checkbox.toggled.connect(self._update_plot)
 
         self._initialising = False
 
@@ -3814,6 +3916,8 @@ class Volume3DDialog(QDialog):
         self._normalised_volume: Optional[np.ndarray] = None
         self._downsampled: Optional[np.ndarray] = None
         self._downsample_step = 1
+
+        self._update_mode_dependent_controls()
 
         self._compute_scalar_volume()
         self._update_plot()
@@ -3871,10 +3975,14 @@ class Volume3DDialog(QDialog):
         self._scalar_volume = scalar
         finite = np.isfinite(scalar)
         if not finite.any():
+            self._scalar_min = 0.0
+            self._scalar_max = 0.0
             self._normalised_volume = np.zeros_like(scalar, dtype=np.float32)
         else:
             min_val = float(np.min(scalar[finite]))
             max_val = float(np.max(scalar[finite]))
+            self._scalar_min = min_val
+            self._scalar_max = max_val
             if abs(max_val - min_val) < 1e-6:
                 self._normalised_volume = np.zeros_like(scalar, dtype=np.float32)
             else:
@@ -3888,17 +3996,24 @@ class Volume3DDialog(QDialog):
             self._downsampled = None
             self._downsample_step = 1
             return
-        step = 1
-        total = float(vol.size)
-        if total > self._max_points:
-            step = int(np.ceil(np.cbrt(total / self._max_points)))
+        manual_step = 0
+        if hasattr(self, "downsample_spin"):
+            manual_step = int(self.downsample_spin.value())
+        if manual_step > 0:
+            step = manual_step
+        else:
+            step = 1
+            total = float(vol.size)
+            if total > self._max_points:
+                step = int(np.ceil(np.cbrt(total / self._max_points)))
         step = max(1, step)
         slices = tuple(slice(None, None, step) for _ in range(3))
         self._downsampled = vol[slices]
         self._downsample_step = step
 
     def _update_plot(self):
-        if self._downsampled is None:
+        if self._downsampled is None or self._normalised_volume is None:
+            self.status_label.setText("No scalar volume available for rendering.")
             return
 
         if self._colorbar is not None:
@@ -3910,12 +4025,32 @@ class Volume3DDialog(QDialog):
 
         thr = self.thresh_slider.value() / 100.0
         self.thresh_label.setText(f"{thr:.2f}")
-        downsampled = self._downsampled
-        mask = downsampled >= thr
-        coords = np.argwhere(mask)
 
         self.ax.cla()
-        self._configure_axes_appearance(self.ax)
+        if self.axes_checkbox.isChecked():
+            self._configure_axes_appearance(self.ax)
+        else:
+            self.ax.set_axis_off()
+
+        cmap = self.colormap_combo.currentText() or "viridis"
+        alpha = self.opacity_slider.value() / 100.0
+        mode = self.render_mode_combo.currentText()
+
+        if mode == "Surface mesh":
+            self._draw_surface_mesh(thr, cmap, alpha)
+        else:
+            self._draw_point_cloud(thr, cmap, alpha)
+
+        self.canvas.draw_idle()
+
+    def _draw_point_cloud(self, thr: float, cmap_name: str, alpha: float) -> None:
+        downsampled = self._downsampled
+        if downsampled is None:
+            self.status_label.setText("No data available for point-cloud rendering.")
+            return
+
+        mask = downsampled >= thr
+        coords = np.argwhere(mask)
 
         if coords.size == 0:
             self.ax.text(
@@ -3936,9 +4071,8 @@ class Volume3DDialog(QDialog):
             self.ax.set_ylabel("Y")
             self.ax.set_zlabel("Z")
             self.status_label.setText(
-                f"No voxels above threshold {thr:.2f}. Try lowering the value."
+                f"No voxels above threshold {thr:.2f}. Lower the threshold to reveal data."
             )
-            self.canvas.draw_idle()
             return
 
         values = downsampled[mask]
@@ -3954,14 +4088,16 @@ class Volume3DDialog(QDialog):
             values = values[idx]
             displayed = coords_mm.shape[0]
 
+        norm = plt.Normalize(0.0, 1.0)
         sc = self.ax.scatter(
             coords_mm[:, 0],
             coords_mm[:, 1],
             coords_mm[:, 2],
             c=values,
-            cmap="viridis",
+            cmap=cmap_name,
+            norm=norm,
             s=self.point_slider.value(),
-            alpha=0.6,
+            alpha=alpha,
             linewidths=0,
         )
 
@@ -3979,20 +4115,208 @@ class Volume3DDialog(QDialog):
         self.ax.set_ylabel("Posterior–Anterior (mm)")
         self.ax.set_zlabel("Inferior–Superior (mm)")
 
-        self._colorbar = self.canvas.figure.colorbar(sc, ax=self.ax, pad=0.1, shrink=0.7)
-        if self._dark_theme:
-            self._colorbar.ax.yaxis.set_tick_params(color=self._fg_color)
-            for tick in self._colorbar.ax.get_yticklabels():
-                tick.set_color(self._fg_color)
+        self._colorbar = self.canvas.figure.colorbar(sc, ax=self.ax, pad=0.08, shrink=0.75)
+        self._apply_colorbar_theme()
 
-        total_voxels = 0
-        if self._normalised_volume is not None:
-            total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
+        total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
+        spin = getattr(self, "downsample_spin", None)
+        downsample_source = "manual" if spin and spin.value() > 0 else "auto"
         self.status_label.setText(
-            f"Showing {displayed:,} voxels (threshold {thr:.2f}); "
-            f"downsample step {step}, total above threshold {total_voxels:,}."
+            "Point cloud: "
+            f"{displayed:,} voxels (threshold {thr:.2f}, opacity {alpha:.2f}, "
+            f"point size {self.point_slider.value()}). "
+            f"Downsample step {step} ({downsample_source}); "
+            f"total voxels ≥ threshold {total_voxels:,}."
         )
-        self.canvas.draw_idle()
+
+    def _draw_surface_mesh(self, thr: float, cmap_name: str, alpha: float) -> None:
+        if not HAS_SKIMAGE:
+            self.ax.text(
+                0.5,
+                0.5,
+                0.5,
+                "Install scikit-image to enable\nmesh rendering",
+                transform=self.ax.transAxes,
+                ha="center",
+                va="center",
+                color=self._fg_color,
+            )
+            self.ax.set_xlim(0, 1)
+            self.ax.set_ylim(0, 1)
+            self.ax.set_zlim(0, 1)
+            self.ax.set_box_aspect((1, 1, 1))
+            self.status_label.setText(
+                "Surface rendering requires the optional 'scikit-image' dependency."
+            )
+            return
+
+        volume = self._normalised_volume
+        if volume is None:
+            self.status_label.setText("No scalar volume available for rendering.")
+            return
+
+        step = self._downsample_step
+        slices = tuple(slice(None, None, step) for _ in range(3))
+        reduced = volume[slices]
+
+        if min(reduced.shape) < 2:
+            self.status_label.setText(
+                "Volume is too small after downsampling to compute a surface mesh."
+            )
+            return
+
+        vol_min = float(np.min(reduced))
+        vol_max = float(np.max(reduced))
+        if not (vol_min < thr < vol_max):
+            self.ax.text(
+                0.5,
+                0.5,
+                0.5,
+                (
+                    f"Iso level {thr:.2f} outside data range\n"
+                    f"[{vol_min:.2f}, {vol_max:.2f}]"
+                ),
+                transform=self.ax.transAxes,
+                ha="center",
+                va="center",
+                color=self._fg_color,
+            )
+            self.ax.set_xlim(0, 1)
+            self.ax.set_ylim(0, 1)
+            self.ax.set_zlim(0, 1)
+            self.ax.set_box_aspect((1, 1, 1))
+            self.status_label.setText(
+                f"Iso level {thr:.2f} is outside the volume range [{vol_min:.2f}, {vol_max:.2f}]."
+            )
+            return
+
+        try:
+            verts, faces, _normals, values = sk_measure.marching_cubes(
+                reduced,
+                level=thr,
+                step_size=max(1, self._surface_step),
+                spacing=(
+                    step * self._voxel_sizes[2],
+                    step * self._voxel_sizes[1],
+                    step * self._voxel_sizes[0],
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self.status_label.setText(f"Marching cubes failed: {exc}")
+            self.ax.text(
+                0.5,
+                0.5,
+                0.5,
+                "Surface reconstruction failed",
+                transform=self.ax.transAxes,
+                ha="center",
+                va="center",
+                color=self._fg_color,
+            )
+            self.ax.set_xlim(0, 1)
+            self.ax.set_ylim(0, 1)
+            self.ax.set_zlim(0, 1)
+            self.ax.set_box_aspect((1, 1, 1))
+            return
+
+        if verts.size == 0 or faces.size == 0:
+            self.status_label.setText(
+                f"No closed surface found at iso level {thr:.2f}; adjust the slider."
+            )
+            return
+
+        verts_xyz = verts[:, [2, 1, 0]]
+        cmap = plt.get_cmap(cmap_name)
+        norm = plt.Normalize(0.0, 1.0)
+        vertex_values = np.clip(values, 0.0, 1.0)
+        face_intensity = vertex_values[faces].mean(axis=1)
+        face_colors = cmap(face_intensity)
+
+        mesh = Poly3DCollection(verts_xyz[faces], facecolors=face_colors)
+        mesh.set_edgecolor((0, 0, 0, 0))
+        mesh.set_alpha(alpha)
+        mesh.set_linewidth(0.0)
+        self.ax.add_collection3d(mesh)
+
+        mins = np.min(verts_xyz, axis=0)
+        maxs = np.max(verts_xyz, axis=0)
+        ranges = np.maximum(maxs - mins, 1e-3)
+        self.ax.set_xlim(mins[0], maxs[0])
+        self.ax.set_ylim(mins[1], maxs[1])
+        self.ax.set_zlim(mins[2], maxs[2])
+        self.ax.set_box_aspect(ranges)
+        self.ax.set_xlabel("Left–Right (mm)")
+        self.ax.set_ylabel("Posterior–Anterior (mm)")
+        self.ax.set_zlabel("Inferior–Superior (mm)")
+
+        mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        mappable.set_array([0.0, 1.0])
+        self._colorbar = self.canvas.figure.colorbar(mappable, ax=self.ax, pad=0.08, shrink=0.75)
+        self._apply_colorbar_theme()
+
+        total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
+        spin = getattr(self, "downsample_spin", None)
+        downsample_source = "manual" if spin and spin.value() > 0 else "auto"
+        self.status_label.setText(
+            "Surface mesh: "
+            f"{verts.shape[0]:,} vertices / {faces.shape[0]:,} faces (iso {thr:.2f}, "
+            f"opacity {alpha:.2f}). Downsample step {step} ({downsample_source}); "
+            f"marching step {self._surface_step}. Total voxels ≥ level {total_voxels:,}."
+        )
+
+    def _apply_colorbar_theme(self) -> None:
+        if self._colorbar is None:
+            return
+        self._colorbar.set_label("Normalised intensity", color=self._fg_color)
+        self._colorbar.ax.yaxis.set_tick_params(color=self._fg_color)
+        for tick in self._colorbar.ax.get_yticklabels():
+            tick.set_color(self._fg_color)
+
+    def _on_render_mode_change(self, _mode: str) -> None:
+        if self._initialising:
+            return
+        self._update_mode_dependent_controls()
+        self._update_plot()
+
+    def _update_mode_dependent_controls(self) -> None:
+        mode = self.render_mode_combo.currentText()
+        is_surface = mode == "Surface mesh"
+        self.point_label.setVisible(not is_surface)
+        self.point_slider.setVisible(not is_surface)
+        self.point_slider.setEnabled(not is_surface)
+        self.surface_step_label.setEnabled(is_surface)
+        self.surface_step_spin.setEnabled(is_surface)
+        if is_surface:
+            self.thresh_text.setText("Iso level:")
+            self.thresh_slider.setToolTip(
+                "Iso-surface level within the normalised volume (0–1)."
+            )
+        else:
+            self.thresh_text.setText("Threshold:")
+            self.thresh_slider.setToolTip(
+                "Minimum normalised intensity included in the rendering."
+            )
+
+    def _on_opacity_change(self, value: int) -> None:
+        self.opacity_label.setText(f"{value / 100.0:.2f}")
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_max_points_change(self, value: int) -> None:
+        self._max_points = int(value)
+        self._prepare_downsampled()
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_downsample_change(self, _value: int) -> None:
+        self._prepare_downsampled()
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_surface_step_change(self, value: int) -> None:
+        self._surface_step = max(1, int(value))
+        if not self._initialising and self.render_mode_combo.currentText() == "Surface mesh":
+            self._update_plot()
 
 
 class MetadataViewer(QWidget):
