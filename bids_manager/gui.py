@@ -3778,6 +3778,9 @@ class Volume3DDialog(QDialog):
         self.ax = self.canvas.figure.add_subplot(111, projection="3d")
         self._configure_axes_appearance(self.ax)
         self.ax.view_init(elev=20, azim=-60)
+        # Store the original axes bounds so they can be restored after
+        # Matplotlib colorbar calls temporarily shrink the plotting area.
+        self._ax_initial_bounds = tuple(self.ax.get_position().bounds)
 
         controls = QHBoxLayout()
         layout.addLayout(controls)
@@ -4027,6 +4030,8 @@ class Volume3DDialog(QDialog):
         self.thresh_label.setText(f"{thr:.2f}")
 
         self.ax.cla()
+        if hasattr(self, "_ax_initial_bounds"):
+            self.ax.set_position(self._ax_initial_bounds)
         if self.axes_checkbox.isChecked():
             self._configure_axes_appearance(self.ax)
         else:
