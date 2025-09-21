@@ -6,6 +6,8 @@ import json
 import re
 import shutil
 import importlib.util
+from contextlib import contextmanager
+from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 try:  # NumPy exposes structured-array helpers from ``numpy.lib``
@@ -88,6 +90,7 @@ from PyQt5.QtGui import (
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import logging  # debug logging
 import signal
 import random
@@ -117,6 +120,16 @@ try:  # Surface reconstruction for the 3-D viewer (optional dependency)
 except Exception:  # pragma: no cover - optional dependency
     sk_measure = None
     HAS_SKIMAGE = False
+
+try:  # Intent codes help detect the role of each GIfTI data array
+    from nibabel.nifti1 import intent_codes as _nifti_intent_codes
+except Exception:  # pragma: no cover - defensive: nibabel should always provide this
+    _nifti_intent_codes = {}
+
+try:  # FreeSurfer geometry loader (part of nibabel)
+    import nibabel.freesurfer.io as _fsio
+except Exception:  # pragma: no cover - optional FreeSurfer support
+    _fsio = None
 
 _CUPY_SPEC = importlib.util.find_spec("cupy")
 if _CUPY_SPEC is not None:
@@ -197,6 +210,44 @@ def _compute_bids_preview(df, schema):
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
+
+@dataclass
+class _GPUDevice:
+    """Description of a CUDA-capable GPU as reported by CuPy."""
+
+    index: int
+    name: str
+    integrated: bool
+    total_memory: int = 0
+    compute_capability: tuple[int, int] = (0, 0)
+
+    def display_name(self) -> str:
+        kind = "Integrated" if self.integrated else "Discrete"
+        return f"GPU {self.index}: {self.name} ({kind})"
+
+    def tooltip(self) -> str:
+        parts = [self.name.strip() or f"Device {self.index}"]
+        parts.append("Integrated GPU" if self.integrated else "Discrete GPU")
+        if self.total_memory:
+            parts.append(f"{self.total_memory / (1024 ** 3):.1f} GiB VRAM")
+        major, minor = self.compute_capability
+        if major or minor:
+        parts.append(f"Compute capability {major}.{minor}")
+        return ", ".join(parts)
+
+
+# Common FreeSurfer surface suffixes to detect geometry files.
+FREESURFER_SURFACE_SUFFIXES = {
+    ".pial",
+    ".white",
+    ".inflated",
+    ".sphere",
+    ".smoothwm",
+    ".orig",
+    ".midthickness",
+    ".graymid",
+}
+
 def _terminate_process_tree(pid: int):
     """Terminate a process and all of its children without killing the GUI."""
     # Protect against invalid PIDs which may occur if a process fails to start
@@ -258,6 +309,100 @@ def _dedup_parts(*parts: str) -> str:
 def _safe_stem(text: str) -> str:
     """Return filename-friendly version of ``text``."""
     return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
+
+
+def _load_gifti_surface(path: Path) -> dict[str, Any]:
+    """Load a GIfTI surface file and return vertices, faces and optional scalars."""
+
+    img = nib.load(str(path))
+    if not hasattr(img, "darrays"):
+        raise ValueError("File is not a GIfTI surface image.")
+
+    pointset_code = _nifti_intent_codes.get("NIFTI_INTENT_POINTSET")
+    triangle_code = _nifti_intent_codes.get("NIFTI_INTENT_TRIANGLE")
+    vertices = None
+    faces = None
+    scalar_candidates: list[np.ndarray] = []
+
+    for arr in getattr(img, "darrays", []):
+        intent = getattr(arr, "intent", None)
+        if arr.data is None:
+            continue
+        data = np.asarray(arr.data)
+        if intent == pointset_code and vertices is None:
+            vertices = data.astype(np.float32, copy=False)
+        elif intent == triangle_code and faces is None:
+            faces = data.astype(np.int64, copy=False)
+        elif data.size and data.ndim in (1, 2):
+            candidate = data.astype(np.float32, copy=False)
+            if candidate.ndim == 2 and candidate.shape[1] == 1:
+                candidate = candidate[:, 0]
+            scalar_candidates.append(candidate)
+
+    if vertices is None or faces is None:
+        raise ValueError(
+            "GIfTI image does not contain both POINTSET (vertices) and TRIANGLE (faces) arrays."
+        )
+
+    if vertices.ndim != 2 or vertices.shape[1] < 3:
+        raise ValueError("GIfTI surface does not provide 3-D coordinates.")
+
+    faces = faces.astype(np.int32, copy=False)
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("GIfTI surface triangles must be an array of shape (N, 3).")
+    if faces.size and faces.max(initial=0) >= vertices.shape[0]:
+        raise ValueError("GIfTI surface references vertices outside of the pointset array.")
+
+    scalars = None
+    for candidate in scalar_candidates:
+        if candidate.shape[0] == vertices.shape[0]:
+            scalars = candidate.astype(np.float32, copy=False)
+            break
+
+    metadata = {}
+    try:
+        if getattr(img, "meta", None):
+            metadata = dict(img.meta)
+    except Exception:  # pragma: no cover - meta access best-effort only
+        metadata = {}
+
+    return {
+        "vertices": vertices[:, :3].astype(np.float32, copy=False),
+        "faces": faces,
+        "scalars": scalars,
+        "metadata": metadata,
+        "source": "gifti",
+    }
+
+
+def _load_freesurfer_surface(path: Path) -> dict[str, Any]:
+    """Load a FreeSurfer binary surface file using nibabel."""
+
+    if _fsio is None:
+        raise RuntimeError(
+            "FreeSurfer surface support requires nibabel with freesurfer.io available."
+        )
+
+    metadata: dict[str, Any] = {}
+    try:
+        verts, faces, metadata = _fsio.read_geometry(str(path), read_metadata=True)
+    except TypeError:  # pragma: no cover - older nibabel versions
+        verts, faces = _fsio.read_geometry(str(path))
+    verts = np.asarray(verts, dtype=np.float32)
+    faces = np.asarray(faces, dtype=np.int32)
+
+    if verts.ndim != 2 or verts.shape[1] < 3:
+        raise ValueError("FreeSurfer surface must contain 3-D vertex coordinates.")
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("FreeSurfer surface triangles must have shape (N, 3).")
+
+    return {
+        "vertices": verts[:, :3],
+        "faces": faces,
+        "scalars": None,
+        "metadata": metadata or {},
+        "source": "freesurfer",
+    }
 
 
 def _format_subject_id(num: int) -> str:
@@ -3770,8 +3915,8 @@ class Volume3DDialog(QDialog):
         self._initialising = True
         self._scalar_min = 0.0
         self._scalar_max = 0.0
-        self._gpu_enabled = self._cupy_has_device()
-        self._gpu_label = self._gpu_device_label() if self._gpu_enabled else ""
+        self._gpu_devices = self._enumerate_gpu_devices()
+        self._gpu_enabled = bool(self._gpu_devices)
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -3813,11 +3958,16 @@ class Volume3DDialog(QDialog):
         device_label = QLabel("Device:")
         controls.addWidget(device_label)
         self.device_combo = QComboBox()
-        self.device_combo.addItem("CPU", userData="cpu")
+        self.device_combo.addItem("CPU", userData=("cpu", None))
         if self._gpu_enabled:
-            label = f"GPU ({self._gpu_label})" if self._gpu_label else "GPU"
-            self.device_combo.addItem(label, userData="gpu")
-            self.device_combo.setToolTip("Use GPU acceleration via CuPy when available.")
+            for dev in self._gpu_devices:
+                label = dev.display_name()
+                self.device_combo.addItem(label, userData=("cupy", dev.index))
+                idx = self.device_combo.count() - 1
+                self.device_combo.setItemData(idx, dev.tooltip(), Qt.ToolTipRole)
+            self.device_combo.setToolTip(
+                "Use GPU acceleration via CuPy. Select the desired device when multiple GPUs are available."
+            )
         else:
             self.device_combo.setToolTip(
                 "GPU acceleration requires the optional CuPy dependency and a CUDA-capable device."
@@ -3961,32 +4111,69 @@ class Volume3DDialog(QDialog):
             values = values + (1.0,) * (3 - len(values))
         return tuple(max(1e-6, abs(v)) for v in values)
 
-    def _cupy_has_device(self) -> bool:
+    def _enumerate_gpu_devices(self) -> list[_GPUDevice]:
         if cp is None:
-            return False
+            return []
         try:
-            return cp.cuda.runtime.getDeviceCount() > 0
+            count = int(cp.cuda.runtime.getDeviceCount())
         except Exception:  # pragma: no cover - depends on GPU availability
-            return False
-
-    def _gpu_device_label(self) -> str:
-        if cp is None:
-            return ""
-        try:
-            device = cp.cuda.Device()
-            props = cp.cuda.runtime.getDeviceProperties(int(device))
-            name: Any = props.get("name", "")
+            return []
+        devices: list[_GPUDevice] = []
+        for idx in range(count):
+            try:
+                props = cp.cuda.runtime.getDeviceProperties(idx)
+            except Exception:  # pragma: no cover - depends on GPU availability
+                continue
+            name: Any = props.get("name", f"GPU {idx}")
             if isinstance(name, bytes):
-                return name.decode("utf-8", errors="ignore").strip()
-            return str(name).strip()
-        except Exception:  # pragma: no cover - depends on GPU availability
-            return "CuPy GPU"
+                name = name.decode("utf-8", errors="ignore")
+            integrated = bool(props.get("integrated", 0))
+            total_mem = int(props.get("totalGlobalMem", 0) or 0)
+            major = int(props.get("major", 0) or 0)
+            minor = int(props.get("minor", 0) or 0)
+            devices.append(
+                _GPUDevice(
+                    index=idx,
+                    name=str(name).strip() or f"GPU {idx}",
+                    integrated=integrated,
+                    total_memory=total_mem,
+                    compute_capability=(major, minor),
+                )
+            )
+        return devices
+
+    def _selected_gpu_device(self) -> Optional[_GPUDevice]:
+        if not self._gpu_enabled:
+            return None
+        combo = getattr(self, "device_combo", None)
+        if combo is None:
+            return None
+        data = combo.currentData()
+        if not data or data[0] != "cupy":
+            return None
+        gpu_index = data[1]
+        for dev in self._gpu_devices:
+            if dev.index == gpu_index:
+                return dev
+        return None
+
+    @contextmanager
+    def _gpu_device_context(self):
+        device = self._selected_gpu_device()
+        if device is None or cp is None:
+            yield None
+            return
+        with cp.cuda.Device(device.index):
+            yield device
+
+    def _device_summary(self) -> str:
+        gpu = self._selected_gpu_device()
+        if gpu is None:
+            return "CPU"
+        return gpu.display_name()
 
     def _use_gpu(self) -> bool:
-        combo = getattr(self, "device_combo", None)
-        if not self._gpu_enabled or combo is None:
-            return False
-        return combo.currentData() == "gpu"
+        return cp is not None and self._selected_gpu_device() is not None
 
     def _on_device_change(self, _index: int) -> None:
         self._sync_gpu_volume()
@@ -3999,18 +4186,20 @@ class Volume3DDialog(QDialog):
             self._normalised_volume_gpu = None
             return
         if self._use_gpu() and self._normalised_volume is not None:
-            self._normalised_volume_gpu = cp.asarray(self._normalised_volume)
-        else:
-            self._normalised_volume_gpu = None
+            with self._gpu_device_context():
+                self._normalised_volume_gpu = cp.asarray(self._normalised_volume)
+            return
+        self._normalised_volume_gpu = None
 
     def _sync_gpu_downsampled(self) -> None:
         if not self._gpu_enabled:
             self._downsampled_gpu = None
             return
         if self._use_gpu() and self._downsampled is not None:
-            self._downsampled_gpu = cp.asarray(self._downsampled)
-        else:
-            self._downsampled_gpu = None
+            with self._gpu_device_context():
+                self._downsampled_gpu = cp.asarray(self._downsampled)
+            return
+        self._downsampled_gpu = None
 
     def _clear_colorbar(self) -> None:
         if self._colorbar is not None:
@@ -4169,25 +4358,26 @@ class Volume3DDialog(QDialog):
         step = self._downsample_step
 
         if use_gpu:
-            downsampled_gpu = self._downsampled_gpu
-            mask = downsampled_gpu >= thr
-            coords_gpu = cp.argwhere(mask)
-            if coords_gpu.size == 0:
-                coords_mm = np.empty((0, 3), dtype=np.float32)
-                values = np.empty((0,), dtype=np.float32)
-            else:
-                coords_gpu = coords_gpu.astype(cp.float32)
-                scale = cp.asarray(self._voxel_sizes, dtype=cp.float32) * step
-                coords_gpu *= scale
-                values_gpu = downsampled_gpu[mask]
-                displayed = int(coords_gpu.shape[0])
-                if displayed > self._max_points:
-                    idx = cp.linspace(0, displayed - 1, self._max_points, dtype=cp.int32)
-                    coords_gpu = coords_gpu[idx]
-                    values_gpu = values_gpu[idx]
-                coords_mm = cp.asnumpy(coords_gpu)
-                values = cp.asnumpy(values_gpu)
-            shape = downsampled_gpu.shape
+            with self._gpu_device_context():
+                downsampled_gpu = self._downsampled_gpu
+                mask = downsampled_gpu >= thr
+                coords_gpu = cp.argwhere(mask)
+                if coords_gpu.size == 0:
+                    coords_mm = np.empty((0, 3), dtype=np.float32)
+                    values = np.empty((0,), dtype=np.float32)
+                else:
+                    coords_gpu = coords_gpu.astype(cp.float32)
+                    scale = cp.asarray(self._voxel_sizes, dtype=cp.float32) * step
+                    coords_gpu *= scale
+                    values_gpu = downsampled_gpu[mask]
+                    displayed = int(coords_gpu.shape[0])
+                    if displayed > self._max_points:
+                        idx = cp.linspace(0, displayed - 1, self._max_points, dtype=cp.int32)
+                        coords_gpu = coords_gpu[idx]
+                        values_gpu = values_gpu[idx]
+                    coords_mm = cp.asnumpy(coords_gpu)
+                    values = cp.asnumpy(values_gpu)
+                shape = downsampled_gpu.shape
         else:
             mask = downsampled >= thr
             coords = np.argwhere(mask)
@@ -4262,16 +4452,17 @@ class Volume3DDialog(QDialog):
         self._apply_colorbar_theme()
 
         if use_gpu and self._normalised_volume_gpu is not None:
-            total_voxels = int(cp.count_nonzero(self._normalised_volume_gpu >= thr))
+            with self._gpu_device_context():
+                total_voxels = int(cp.count_nonzero(self._normalised_volume_gpu >= thr))
         else:
             total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
         spin = getattr(self, "downsample_spin", None)
         downsample_source = "manual" if spin and spin.value() > 0 else "auto"
-        device = "GPU" if use_gpu else "CPU"
+        device = self._device_summary()
         self.status_label.setText(
             "Point cloud: "
             f"{displayed:,} voxels (threshold {thr:.2f}, opacity {alpha:.2f}, "
-            f"point size {self.point_slider.value()}, {device} mode). "
+            f"point size {self.point_slider.value()}, {device}). "
             f"Downsample step {step} ({downsample_source}); "
             f"total voxels ≥ threshold {total_voxels:,}."
         )
@@ -4404,12 +4595,12 @@ class Volume3DDialog(QDialog):
         total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
         spin = getattr(self, "downsample_spin", None)
         downsample_source = "manual" if spin and spin.value() > 0 else "auto"
-        device_note = "GPU" if self._use_gpu() else "CPU"
+        device_note = self._device_summary()
         extra = " (surface extraction runs on CPU)" if self._use_gpu() else ""
         self.status_label.setText(
             "Surface mesh: "
             f"{verts.shape[0]:,} vertices / {faces.shape[0]:,} faces (iso {thr:.2f}, "
-            f"opacity {alpha:.2f}, {device_note} mode{extra}). Downsample step {step} "
+            f"opacity {alpha:.2f}, {device_note}{extra}). Downsample step {step} "
             f"({downsample_source}); marching step {self._surface_step}. Total voxels ≥ "
             f"level {total_voxels:,}."
         )
@@ -4466,8 +4657,241 @@ class Volume3DDialog(QDialog):
     def _on_surface_step_change(self, value: int) -> None:
         self._surface_step = max(1, int(value))
         if not self._initialising and self.render_mode_combo.currentText() == "Surface mesh":
-            self._update_plot()
+        self._update_plot()
 
+
+class SurfaceViewerWidget(QWidget):
+    """Embedded Matplotlib viewer for triangular surface meshes."""
+
+    def __init__(
+        self,
+        parent: QWidget,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        scalars: Optional[np.ndarray] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        dark_theme: bool = False,
+    ) -> None:
+        super().__init__(parent)
+
+        self._vertices = np.asarray(vertices, dtype=np.float32)
+        self._faces = np.asarray(faces, dtype=np.int32)
+        self._metadata = metadata or {}
+        self._dark_theme = bool(dark_theme)
+        self._colorbar = None
+        self._colorbar_axes = None
+        self._norm: Optional[plt.Normalize] = None
+        self._face_values: Optional[np.ndarray] = None
+
+        scalar_array = None
+        if scalars is not None:
+            scalar_array = np.asarray(scalars, dtype=np.float32)
+            if scalar_array.ndim > 1:
+                scalar_array = np.squeeze(scalar_array)
+            if scalar_array.shape[0] != self._vertices.shape[0]:
+                scalar_array = None
+        self._scalars = scalar_array
+
+        self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
+        self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
+        self._axis_bg = "#202020" if self._dark_theme else "#f8f8f8"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.canvas = FigureCanvas(plt.Figure(figsize=(6, 6)))
+        self.canvas.figure.patch.set_facecolor(self._canvas_bg)
+        self.canvas.figure.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.95)
+        layout.addWidget(self.canvas, stretch=1)
+
+        self.ax = self.canvas.figure.add_subplot(111, projection="3d")
+        self._configure_axes()
+        self.reset_view()
+
+        tris = self._vertices[self._faces]
+        self._mesh = Poly3DCollection(tris, linewidths=0.08)
+        self._mesh.set_edgecolor((0, 0, 0, 0.25))
+        self.ax.add_collection3d(self._mesh)
+
+        self._update_bounds()
+        self._update_scalar_norm()
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(6, 4, 6, 4)
+        layout.addLayout(controls)
+
+        controls.addWidget(QLabel("Appearance:"))
+        self.color_combo = QComboBox()
+        self._populate_color_options()
+        self.color_combo.currentIndexChanged.connect(self._update_colors)
+        controls.addWidget(self.color_combo)
+
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Opacity:"))
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(85)
+        self.opacity_slider.setToolTip("Surface transparency")
+        self.opacity_slider.valueChanged.connect(self._update_opacity)
+        controls.addWidget(self.opacity_slider)
+
+        controls.addSpacing(12)
+        self.edges_check = QCheckBox("Show edges")
+        self.edges_check.setChecked(False)
+        self.edges_check.toggled.connect(self._update_edges)
+        controls.addWidget(self.edges_check)
+
+        self.axes_check = QCheckBox("Show axes")
+        self.axes_check.setChecked(False)
+        self.axes_check.toggled.connect(self._toggle_axes)
+        controls.addWidget(self.axes_check)
+
+        controls.addStretch()
+
+        self._update_colors()
+        self._update_opacity()
+        self._update_edges(False)
+        self._toggle_axes(False)
+
+    def _configure_axes(self) -> None:
+        self.ax.set_facecolor(self._axis_bg)
+        self.ax.xaxis.set_pane_color((*self.ax.get_facecolor()[:3], 0.15))
+        self.ax.yaxis.set_pane_color((*self.ax.get_facecolor()[:3], 0.15))
+        self.ax.zaxis.set_pane_color((*self.ax.get_facecolor()[:3], 0.15))
+        for axis in (self.ax.xaxis, self.ax.yaxis, self.ax.zaxis):
+            axis.label.set_color(self._fg_color)
+            axis.set_tick_params(colors=self._fg_color)
+        self.ax.set_xlabel("X (mm)")
+        self.ax.set_ylabel("Y (mm)")
+        self.ax.set_zlabel("Z (mm)")
+
+    def _update_bounds(self) -> None:
+        verts = self._vertices[:, :3]
+        if verts.size == 0:
+            self.ax.set_xlim(0, 1)
+            self.ax.set_ylim(0, 1)
+            self.ax.set_zlim(0, 1)
+            self.ax.set_box_aspect((1, 1, 1))
+            return
+        mins = np.min(verts, axis=0)
+        maxs = np.max(verts, axis=0)
+        ranges = np.maximum(maxs - mins, 1e-3)
+        self.ax.set_xlim(mins[0], maxs[0])
+        self.ax.set_ylim(mins[1], maxs[1])
+        self.ax.set_zlim(mins[2], maxs[2])
+        self.ax.set_box_aspect(ranges)
+
+    def _populate_color_options(self) -> None:
+        self.color_combo.addItem("Steel blue", ("solid", "#4f81bd"))
+        self.color_combo.addItem("Pearl gray", ("solid", "#d0d4dc"))
+        self.color_combo.addItem("Copper", ("solid", "#b87333"))
+        if self._scalars is not None and self._norm is not None:
+            for cmap_name in [
+                "viridis",
+                "plasma",
+                "inferno",
+                "magma",
+                "cividis",
+                "Spectral",
+                "coolwarm",
+            ]:
+                self.color_combo.addItem(f"Colormap – {cmap_name}", ("cmap", cmap_name))
+
+    def _update_scalar_norm(self) -> None:
+        if self._scalars is None:
+            self._norm = None
+            self._face_values = None
+            return
+        finite = np.isfinite(self._scalars)
+        if not finite.any():
+            self._norm = None
+            self._face_values = None
+            return
+        vmin = float(np.min(self._scalars[finite]))
+        vmax = float(np.max(self._scalars[finite]))
+        if abs(vmax - vmin) < 1e-8:
+            self._norm = None
+            self._face_values = None
+            return
+        self._norm = plt.Normalize(vmin, vmax)
+        try:
+            self._face_values = np.nanmean(self._scalars[self._faces], axis=1)
+        except Exception:
+            self._face_values = None
+
+    def _clear_colorbar(self) -> None:
+        if self._colorbar is not None:
+            try:
+                self._colorbar.remove()
+            except Exception:  # pragma: no cover - Matplotlib quirks
+                pass
+            self._colorbar = None
+        if self._colorbar_axes is not None:
+            try:
+                self._colorbar_axes.remove()
+            except Exception:  # pragma: no cover - Matplotlib quirks
+                pass
+            self._colorbar_axes = None
+
+    def _apply_colorbar_theme(self) -> None:
+        if self._colorbar is None:
+            return
+        self._colorbar.set_label("Scalar value", color=self._fg_color)
+        self._colorbar.ax.yaxis.set_tick_params(color=self._fg_color)
+        for tick in self._colorbar.ax.get_yticklabels():
+            tick.set_color(self._fg_color)
+
+    def _update_colorbar(self, cmap_name: str) -> None:
+        self._clear_colorbar()
+        if self._norm is None or self._face_values is None:
+            return
+        cmap = plt.get_cmap(cmap_name)
+        mappable = plt.cm.ScalarMappable(norm=self._norm, cmap=cmap)
+        mappable.set_array(self._face_values)
+        self._colorbar = self.canvas.figure.colorbar(mappable, ax=self.ax, shrink=0.6)
+        self._colorbar_axes = self._colorbar.ax
+        self._apply_colorbar_theme()
+
+    def _update_colors(self) -> None:
+        data = self.color_combo.currentData()
+        if not data:
+            return
+        mode, value = data
+        if mode == "cmap" and self._norm is not None and self._face_values is not None:
+            cmap = plt.get_cmap(str(value))
+            colours = cmap(self._norm(self._face_values))
+            self._mesh.set_facecolor(colours)
+            self._update_colorbar(str(value))
+        else:
+            self._mesh.set_facecolor(str(value))
+            self._clear_colorbar()
+        self.canvas.draw_idle()
+
+    def _update_opacity(self) -> None:
+        alpha = self.opacity_slider.value() / 100.0
+        self._mesh.set_alpha(alpha)
+        self.canvas.draw_idle()
+
+    def _update_edges(self, checked: bool) -> None:
+        if checked:
+            self._mesh.set_linewidth(0.2)
+            self._mesh.set_edgecolor((0.0, 0.0, 0.0, 0.4))
+        else:
+            self._mesh.set_linewidth(0.0)
+            self._mesh.set_edgecolor((0.0, 0.0, 0.0, 0.0))
+        self.canvas.draw_idle()
+
+    def _toggle_axes(self, checked: bool) -> None:
+        if checked:
+            self._configure_axes()
+            self.ax.set_axis_on()
+        else:
+            self.ax.set_axis_off()
+        self.canvas.draw_idle()
+
+    def reset_view(self) -> None:
+        self.ax.view_init(elev=20, azim=-60)
+        self.canvas.draw_idle()
 
 class MetadataViewer(QWidget):
     """
@@ -4507,6 +4931,7 @@ class MetadataViewer(QWidget):
         self.viewer = None
         self.current_path = None
         self.data = None  # holds loaded NIfTI data when viewing images
+        self.surface_info: Optional[dict[str, Any]] = None
 
     def clear(self):
         """Clear the toolbar and viewer when switching files."""
@@ -4535,6 +4960,7 @@ class MetadataViewer(QWidget):
             self.layout().removeWidget(self.viewer)
             self.viewer.deleteLater()
             self.viewer = None
+        self.surface_info = None
         self.loading_label.hide()
         self._load_timer.stop()
         self.welcome.show()
@@ -4644,27 +5070,35 @@ class MetadataViewer(QWidget):
         self.welcome.hide()
         ext = _get_ext(path)
         dicom = is_dicom_file(str(path))
+        is_surface_file = ext == '.gii' or ext in FREESURFER_SURFACE_SUFFIXES
         self._start_loading("Loading")
         # ``worker`` reads the file in a separate thread so the UI can keep
         # updating the spinner while potentially large data is loaded.
         result = {}
 
         def worker():
-            if ext == '.json':
-                result['data'] = json.loads(path.read_text(encoding='utf-8'))
-            elif ext == '.tsv':
-                result['df'] = pd.read_csv(path, sep='\t', keep_default_na=False)
-            elif ext in ['.nii', '.nii.gz']:
-                img = nib.load(str(path))
-                result['img'] = img
-                data, meta = self._get_nifti_data(img)
-                result['data'] = data
-                result['nifti_meta'] = meta
-            elif dicom:
-                # ``stop_before_pixels`` avoids loading heavy pixel data
-                result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
+            try:
+                if ext == '.json':
+                    result['data'] = json.loads(path.read_text(encoding='utf-8'))
+                elif ext == '.tsv':
+                    result['df'] = pd.read_csv(path, sep='\t', keep_default_na=False)
+                elif ext in ['.nii', '.nii.gz']:
+                    img = nib.load(str(path))
+                    result['img'] = img
+                    data, meta = self._get_nifti_data(img)
+                    result['data'] = data
+                    result['nifti_meta'] = meta
+                elif ext == '.gii':
+                    result['surface'] = _load_gifti_surface(path)
+                elif ext in FREESURFER_SURFACE_SUFFIXES:
+                    result['surface'] = _load_freesurfer_surface(path)
+                elif dicom:
+                    # ``stop_before_pixels`` avoids loading heavy pixel data
+                    result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
+            except Exception as exc:
+                result['error'] = exc
 
-        if ext in ['.json', '.tsv', '.nii', '.nii.gz'] or dicom:
+        if ext in ['.json', '.tsv', '.nii', '.nii.gz', '.gii'] or dicom or ext in FREESURFER_SURFACE_SUFFIXES:
             t = threading.Thread(target=worker)
             t.start()
             while t.is_alive():
@@ -4672,6 +5106,17 @@ class MetadataViewer(QWidget):
                 time.sleep(0.05)
             t.join()
         self._stop_loading()
+
+        error = result.get('error')
+        if error:
+            logging.exception("Failed to load %s", path)
+            QMessageBox.critical(
+                self,
+                "Viewer",
+                f"Unable to load {path.name}: {error}",
+            )
+            self.clear()
+            return
 
         if ext == '.json':
             self._setup_json_toolbar()
@@ -4689,6 +5134,22 @@ class MetadataViewer(QWidget):
                     result.get('nifti_meta'),
                 ),
             )
+        elif is_surface_file:
+            surface = result.get('surface')
+            if not surface:
+                QMessageBox.warning(
+                    self,
+                    "Surface Viewer",
+                    f"{path.name} does not contain a supported surface mesh.",
+                )
+                self.clear()
+                return
+            self.data = None
+            if hasattr(self, 'nifti_img'):
+                self.nifti_img = None
+            self.surface_info = surface
+            self._setup_surface_toolbar(surface)
+            self.viewer = self._surface_view(path, surface)
         elif dicom:
             self.viewer = self._dicom_view(path, result.get('ds'))
             self.toolbar.addStretch()
@@ -4798,6 +5259,58 @@ class MetadataViewer(QWidget):
         self.value_row.addWidget(self.voxel_val_label)
         self.value_row.addStretch()
         self.toolbar.addStretch()
+
+    def _setup_surface_toolbar(self, surface: dict[str, Any]) -> None:
+        """Populate the toolbar with surface-specific controls."""
+
+        vertices = np.asarray(surface.get("vertices", []))
+        faces = np.asarray(surface.get("faces", []))
+        v_count = int(vertices.shape[0]) if vertices.ndim >= 2 else len(vertices)
+        f_count = int(faces.shape[0]) if faces.ndim >= 2 else len(faces)
+
+        self.toolbar.addWidget(QLabel("Surface:"))
+        counts_label = QLabel(f"{v_count:,} vertices / {f_count:,} faces")
+        counts_label.setObjectName("surfaceCountsLabel")
+        self.toolbar.addWidget(counts_label)
+
+        self.reset_surface_btn = QPushButton("Reset View")
+        self.reset_surface_btn.setToolTip("Restore the default 3-D camera orientation.")
+        self.reset_surface_btn.clicked.connect(self._reset_surface_view)
+        self.toolbar.addWidget(self.reset_surface_btn)
+
+        self.toolbar.addStretch()
+
+        if vertices.ndim >= 2 and vertices.shape[1] >= 3 and vertices.size:
+            mins = np.min(vertices[:, :3], axis=0)
+            maxs = np.max(vertices[:, :3], axis=0)
+            spans = maxs - mins
+            span_label = QLabel(
+                f"Span: Δx {spans[0]:.1f} mm, Δy {spans[1]:.1f} mm, Δz {spans[2]:.1f} mm"
+            )
+            self.value_row.addWidget(span_label)
+        self.value_row.addStretch()
+
+    def _reset_surface_view(self) -> None:
+        viewer = getattr(self, "viewer", None)
+        if viewer and hasattr(viewer, "reset_view"):
+            viewer.reset_view()
+
+    def _surface_view(self, path: Path, surface: dict[str, Any]) -> QWidget:
+        """Create the surface viewer widget for GIfTI/FreeSurfer meshes."""
+
+        vertices = np.asarray(surface.get("vertices", []), dtype=np.float32)
+        faces = np.asarray(surface.get("faces", []), dtype=np.int32)
+        scalars = surface.get("scalars")
+        widget = SurfaceViewerWidget(
+            self,
+            vertices=vertices,
+            faces=faces,
+            scalars=scalars,
+            metadata=surface.get("metadata", {}),
+            dark_theme=self._is_dark_theme(),
+        )
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        return widget
 
     def _show_3d_view(self) -> None:
         """Launch the interactive 3-D renderer for the loaded volume."""
