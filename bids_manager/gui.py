@@ -5,6 +5,7 @@ import os
 import json
 import re
 import shutil
+import importlib.util
 import pandas as pd
 import numpy as np
 try:  # NumPy exposes structured-array helpers from ``numpy.lib``
@@ -62,7 +63,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
@@ -116,6 +117,12 @@ try:  # Surface reconstruction for the 3-D viewer (optional dependency)
 except Exception:  # pragma: no cover - optional dependency
     sk_measure = None
     HAS_SKIMAGE = False
+
+_CUPY_SPEC = importlib.util.find_spec("cupy")
+if _CUPY_SPEC is not None:
+    import cupy as cp  # type: ignore
+else:  # pragma: no cover - GPU optional dependency unavailable
+    cp = None  # type: ignore[assignment]
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -3759,9 +3766,12 @@ class Volume3DDialog(QDialog):
         self._max_points = 120_000
         self._surface_step = 1
         self._colorbar = None
+        self._colorbar_axes = None
         self._initialising = True
         self._scalar_min = 0.0
         self._scalar_max = 0.0
+        self._gpu_enabled = self._cupy_has_device()
+        self._gpu_label = self._gpu_device_label() if self._gpu_enabled else ""
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -3798,6 +3808,22 @@ class Volume3DDialog(QDialog):
         self.render_mode_combo.addItems(["Point cloud", "Surface mesh"])
         self.render_mode_combo.setToolTip("Switch between scattered voxels and iso-surface rendering.")
         controls.addWidget(self.render_mode_combo)
+        controls.addSpacing(12)
+
+        device_label = QLabel("Device:")
+        controls.addWidget(device_label)
+        self.device_combo = QComboBox()
+        self.device_combo.addItem("CPU", userData="cpu")
+        if self._gpu_enabled:
+            label = f"GPU ({self._gpu_label})" if self._gpu_label else "GPU"
+            self.device_combo.addItem(label, userData="gpu")
+            self.device_combo.setToolTip("Use GPU acceleration via CuPy when available.")
+        else:
+            self.device_combo.setToolTip(
+                "GPU acceleration requires the optional CuPy dependency and a CUDA-capable device."
+            )
+        self.device_combo.currentIndexChanged.connect(self._on_device_change)
+        controls.addWidget(self.device_combo)
         controls.addSpacing(12)
 
         self.thresh_text = QLabel("Threshold:")
@@ -3917,7 +3943,9 @@ class Volume3DDialog(QDialog):
 
         self._scalar_volume: Optional[np.ndarray] = None
         self._normalised_volume: Optional[np.ndarray] = None
+        self._normalised_volume_gpu: Optional[Any] = None
         self._downsampled: Optional[np.ndarray] = None
+        self._downsampled_gpu: Optional[Any] = None
         self._downsample_step = 1
 
         self._update_mode_dependent_controls()
@@ -3932,6 +3960,91 @@ class Volume3DDialog(QDialog):
         if len(values) < 3:
             values = values + (1.0,) * (3 - len(values))
         return tuple(max(1e-6, abs(v)) for v in values)
+
+    def _cupy_has_device(self) -> bool:
+        if cp is None:
+            return False
+        try:
+            return cp.cuda.runtime.getDeviceCount() > 0
+        except Exception:  # pragma: no cover - depends on GPU availability
+            return False
+
+    def _gpu_device_label(self) -> str:
+        if cp is None:
+            return ""
+        try:
+            device = cp.cuda.Device()
+            props = cp.cuda.runtime.getDeviceProperties(int(device))
+            name: Any = props.get("name", "")
+            if isinstance(name, bytes):
+                return name.decode("utf-8", errors="ignore").strip()
+            return str(name).strip()
+        except Exception:  # pragma: no cover - depends on GPU availability
+            return "CuPy GPU"
+
+    def _use_gpu(self) -> bool:
+        combo = getattr(self, "device_combo", None)
+        if not self._gpu_enabled or combo is None:
+            return False
+        return combo.currentData() == "gpu"
+
+    def _on_device_change(self, _index: int) -> None:
+        self._sync_gpu_volume()
+        self._prepare_downsampled()
+        if not self._initialising:
+            self._update_plot()
+
+    def _sync_gpu_volume(self) -> None:
+        if not self._gpu_enabled:
+            self._normalised_volume_gpu = None
+            return
+        if self._use_gpu() and self._normalised_volume is not None:
+            self._normalised_volume_gpu = cp.asarray(self._normalised_volume)
+        else:
+            self._normalised_volume_gpu = None
+
+    def _sync_gpu_downsampled(self) -> None:
+        if not self._gpu_enabled:
+            self._downsampled_gpu = None
+            return
+        if self._use_gpu() and self._downsampled is not None:
+            self._downsampled_gpu = cp.asarray(self._downsampled)
+        else:
+            self._downsampled_gpu = None
+
+    def _clear_colorbar(self) -> None:
+        if self._colorbar is not None:
+            try:
+                self._colorbar.remove()
+            except Exception:  # pragma: no cover - matplotlib behaviour
+                pass
+            self._colorbar = None
+        if self._colorbar_axes is not None:
+            try:
+                self._colorbar_axes.remove()
+            except Exception:  # pragma: no cover - matplotlib behaviour
+                pass
+            self._colorbar_axes = None
+
+    def _create_colorbar(self, mappable: Any, **kwargs: Any) -> None:
+        bounds = getattr(self, "_ax_initial_bounds", None)
+        if bounds is None:
+            self._colorbar = self.canvas.figure.colorbar(mappable, ax=self.ax, **kwargs)
+            self._colorbar_axes = self._colorbar.ax
+            return
+
+        x0, y0, width, height = bounds
+        pad = min(0.04, width * 0.1)
+        cbar_width = min(0.035, width * 0.12)
+        left = min(0.95 - cbar_width, x0 + width + pad)
+        bottom = y0 + height * 0.05
+        cbar_height = height * 0.9
+        left = max(0.02, left)
+        bottom = max(0.05, bottom)
+        rect = [left, bottom, cbar_width, cbar_height]
+        cax = self.canvas.figure.add_axes(rect)
+        self._colorbar = self.canvas.figure.colorbar(mappable, cax=cax, **kwargs)
+        self._colorbar_axes = cax
 
     def _init_aggregator_options(self) -> None:
         if self._raw.ndim <= 3:
@@ -3991,6 +4104,7 @@ class Volume3DDialog(QDialog):
             else:
                 norm = (scalar - min_val) / (max_val - min_val)
                 self._normalised_volume = norm.astype(np.float32, copy=False)
+        self._sync_gpu_volume()
         self._prepare_downsampled()
 
     def _prepare_downsampled(self) -> None:
@@ -3998,6 +4112,7 @@ class Volume3DDialog(QDialog):
         if vol is None:
             self._downsampled = None
             self._downsample_step = 1
+            self._sync_gpu_downsampled()
             return
         manual_step = 0
         if hasattr(self, "downsample_spin"):
@@ -4013,18 +4128,14 @@ class Volume3DDialog(QDialog):
         slices = tuple(slice(None, None, step) for _ in range(3))
         self._downsampled = vol[slices]
         self._downsample_step = step
+        self._sync_gpu_downsampled()
 
     def _update_plot(self):
         if self._downsampled is None or self._normalised_volume is None:
             self.status_label.setText("No scalar volume available for rendering.")
             return
 
-        if self._colorbar is not None:
-            try:
-                self._colorbar.remove()
-            except Exception:
-                pass
-            self._colorbar = None
+        self._clear_colorbar()
 
         thr = self.thresh_slider.value() / 100.0
         self.thresh_label.setText(f"{thr:.2f}")
@@ -4054,10 +4165,49 @@ class Volume3DDialog(QDialog):
             self.status_label.setText("No data available for point-cloud rendering.")
             return
 
-        mask = downsampled >= thr
-        coords = np.argwhere(mask)
+        use_gpu = self._use_gpu() and self._downsampled_gpu is not None
+        step = self._downsample_step
 
-        if coords.size == 0:
+        if use_gpu:
+            downsampled_gpu = self._downsampled_gpu
+            mask = downsampled_gpu >= thr
+            coords_gpu = cp.argwhere(mask)
+            if coords_gpu.size == 0:
+                coords_mm = np.empty((0, 3), dtype=np.float32)
+                values = np.empty((0,), dtype=np.float32)
+            else:
+                coords_gpu = coords_gpu.astype(cp.float32)
+                scale = cp.asarray(self._voxel_sizes, dtype=cp.float32) * step
+                coords_gpu *= scale
+                values_gpu = downsampled_gpu[mask]
+                displayed = int(coords_gpu.shape[0])
+                if displayed > self._max_points:
+                    idx = cp.linspace(0, displayed - 1, self._max_points, dtype=cp.int32)
+                    coords_gpu = coords_gpu[idx]
+                    values_gpu = values_gpu[idx]
+                coords_mm = cp.asnumpy(coords_gpu)
+                values = cp.asnumpy(values_gpu)
+            shape = downsampled_gpu.shape
+        else:
+            mask = downsampled >= thr
+            coords = np.argwhere(mask)
+
+            if coords.size == 0:
+                coords_mm = np.empty((0, 3), dtype=np.float32)
+                values = np.empty((0,), dtype=np.float32)
+            else:
+                coords_mm = coords.astype(np.float32)
+                for dim in range(3):
+                    coords_mm[:, dim] *= step * self._voxel_sizes[dim]
+                values = downsampled[mask]
+                displayed = coords_mm.shape[0]
+                if displayed > self._max_points:
+                    idx = np.linspace(0, displayed - 1, self._max_points, dtype=int)
+                    coords_mm = coords_mm[idx]
+                    values = values[idx]
+            shape = downsampled.shape
+
+        if coords_mm.size == 0:
             self.ax.text(
                 0.5,
                 0.5,
@@ -4080,19 +4230,7 @@ class Volume3DDialog(QDialog):
             )
             return
 
-        values = downsampled[mask]
-        step = self._downsample_step
-        coords_mm = coords.astype(np.float32)
-        for dim in range(3):
-            coords_mm[:, dim] *= step * self._voxel_sizes[dim]
-
         displayed = coords_mm.shape[0]
-        if displayed > self._max_points:
-            idx = np.linspace(0, displayed - 1, self._max_points, dtype=int)
-            coords_mm = coords_mm[idx]
-            values = values[idx]
-            displayed = coords_mm.shape[0]
-
         norm = plt.Normalize(0.0, 1.0)
         sc = self.ax.scatter(
             coords_mm[:, 0],
@@ -4107,7 +4245,7 @@ class Volume3DDialog(QDialog):
         )
 
         extents = [
-            (0.0, max(1e-3, (downsampled.shape[i] - 1) * step * self._voxel_sizes[i]))
+            (0.0, max(1e-3, (shape[i] - 1) * step * self._voxel_sizes[i]))
             for i in range(3)
         ]
         self.ax.set_xlim(*extents[0])
@@ -4120,16 +4258,20 @@ class Volume3DDialog(QDialog):
         self.ax.set_ylabel("Posterior–Anterior (mm)")
         self.ax.set_zlabel("Inferior–Superior (mm)")
 
-        self._colorbar = self.canvas.figure.colorbar(sc, ax=self.ax, pad=0.08, shrink=0.75)
+        self._create_colorbar(sc)
         self._apply_colorbar_theme()
 
-        total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
+        if use_gpu and self._normalised_volume_gpu is not None:
+            total_voxels = int(cp.count_nonzero(self._normalised_volume_gpu >= thr))
+        else:
+            total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
         spin = getattr(self, "downsample_spin", None)
         downsample_source = "manual" if spin and spin.value() > 0 else "auto"
+        device = "GPU" if use_gpu else "CPU"
         self.status_label.setText(
             "Point cloud: "
             f"{displayed:,} voxels (threshold {thr:.2f}, opacity {alpha:.2f}, "
-            f"point size {self.point_slider.value()}). "
+            f"point size {self.point_slider.value()}, {device} mode). "
             f"Downsample step {step} ({downsample_source}); "
             f"total voxels ≥ threshold {total_voxels:,}."
         )
@@ -4256,17 +4398,20 @@ class Volume3DDialog(QDialog):
 
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         mappable.set_array([0.0, 1.0])
-        self._colorbar = self.canvas.figure.colorbar(mappable, ax=self.ax, pad=0.08, shrink=0.75)
+        self._create_colorbar(mappable)
         self._apply_colorbar_theme()
 
         total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
         spin = getattr(self, "downsample_spin", None)
         downsample_source = "manual" if spin and spin.value() > 0 else "auto"
+        device_note = "GPU" if self._use_gpu() else "CPU"
+        extra = " (surface extraction runs on CPU)" if self._use_gpu() else ""
         self.status_label.setText(
             "Surface mesh: "
             f"{verts.shape[0]:,} vertices / {faces.shape[0]:,} faces (iso {thr:.2f}, "
-            f"opacity {alpha:.2f}). Downsample step {step} ({downsample_source}); "
-            f"marching step {self._surface_step}. Total voxels ≥ level {total_voxels:,}."
+            f"opacity {alpha:.2f}, {device_note} mode{extra}). Downsample step {step} "
+            f"({downsample_source}); marching step {self._surface_step}. Total voxels ≥ "
+            f"level {total_voxels:,}."
         )
 
     def _apply_colorbar_theme(self) -> None:
