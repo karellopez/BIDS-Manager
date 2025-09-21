@@ -30,6 +30,7 @@ dependencies = [
     "psutil==7.0.0",
     "matplotlib==3.10.3",
     "joblib==1.4.2",
+    "scikit-image==0.24.0",
 ]
 
 [project.optional-dependencies]
