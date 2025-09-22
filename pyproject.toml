@@ -31,6 +31,8 @@ dependencies = [
     "matplotlib==3.10.3",
     "joblib==1.4.2",
     "scikit-image==0.24.0",
+    "pyqtgraph==0.13.7",
+    "PyOpenGL==3.1.7",
 ]
 
 [project.optional-dependencies]
