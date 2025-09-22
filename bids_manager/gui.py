@@ -85,8 +85,8 @@ from PyQt5.QtGui import (
     QIcon,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import logging  # debug logging
 import signal
 import random
@@ -3833,6 +3833,9 @@ class Volume3DDialog(QDialog):
         self._mesh_item: Optional[gl.GLMeshItem] = None
         self._axis_item: Optional[gl.GLAxisItem] = None
         self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._color_intensity = 1.0
+        self._ambient_light = 0.25
+        self._light_intensity = 1.0
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -3916,9 +3919,15 @@ class Volume3DDialog(QDialog):
             "inferno",
             "magma",
             "cividis",
+            "turbo",
+            "Spectral",
+            "coolwarm",
             "cubehelix",
             "Greys",
             "bone",
+            "twilight",
+            "YlGnBu",
+            "YlOrBr",
         ])
         self.colormap_combo.setToolTip(
             "Select the matplotlib colormap for voxel intensities."
@@ -3926,18 +3935,30 @@ class Volume3DDialog(QDialog):
         self.colormap_combo.currentTextChanged.connect(lambda _: self._update_plot())
         options.addWidget(self.colormap_combo, 0, 1)
 
-        options.addWidget(QLabel("Opacity:"), 1, 0)
+        options.addWidget(QLabel("Colour intensity:"), 1, 0)
+        self.color_intensity_slider = QSlider(Qt.Horizontal)
+        self.color_intensity_slider.setRange(10, 200)
+        self.color_intensity_slider.setValue(100)
+        self.color_intensity_slider.setToolTip(
+            "Scale the brightness of mapped colours ( < 1 darkens, > 1 brightens )."
+        )
+        self.color_intensity_slider.valueChanged.connect(self._on_color_intensity_change)
+        options.addWidget(self.color_intensity_slider, 1, 1)
+        self.color_intensity_label = QLabel("1.00×")
+        options.addWidget(self.color_intensity_label, 1, 2)
+
+        options.addWidget(QLabel("Opacity:"), 2, 0)
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(80)
         self.opacity_slider.setToolTip(
             "Global alpha applied to rendered points or the surface mesh."
         )
-        options.addWidget(self.opacity_slider, 1, 1)
+        options.addWidget(self.opacity_slider, 2, 1)
         self.opacity_label = QLabel("0.80")
-        options.addWidget(self.opacity_label, 1, 2)
+        options.addWidget(self.opacity_label, 2, 2)
 
-        options.addWidget(QLabel("Maximum points:"), 2, 0)
+        options.addWidget(QLabel("Maximum points:"), 3, 0)
         self.max_points_spin = QSpinBox()
         self.max_points_spin.setRange(1_000, 500_000)
         self.max_points_spin.setSingleStep(5_000)
@@ -3945,30 +3966,76 @@ class Volume3DDialog(QDialog):
         self.max_points_spin.setToolTip(
             "Upper bound on voxels displayed in point-cloud mode."
         )
-        options.addWidget(self.max_points_spin, 2, 1)
+        options.addWidget(self.max_points_spin, 3, 1)
 
-        options.addWidget(QLabel("Downsample step:"), 3, 0)
+        options.addWidget(QLabel("Downsample step:"), 4, 0)
         self.downsample_spin = QSpinBox()
         self.downsample_spin.setRange(0, 8)
         self.downsample_spin.setValue(0)
         self.downsample_spin.setToolTip(
             "Manual voxel stride applied before rendering (0 = automatic)."
         )
-        options.addWidget(self.downsample_spin, 3, 1)
+        options.addWidget(self.downsample_spin, 4, 1)
 
         self.surface_step_label = QLabel("Marching cubes step:")
-        options.addWidget(self.surface_step_label, 4, 0)
+        options.addWidget(self.surface_step_label, 5, 0)
         self.surface_step_spin = QSpinBox()
         self.surface_step_spin.setRange(1, 6)
         self.surface_step_spin.setValue(self._surface_step)
         self.surface_step_spin.setToolTip(
             "Sampling stride for marching cubes when computing iso-surfaces."
         )
-        options.addWidget(self.surface_step_spin, 4, 1)
+        options.addWidget(self.surface_step_spin, 5, 1)
+
+        options.addWidget(QLabel("Light azimuth:"), 6, 0)
+        self.light_azimuth_slider = QSlider(Qt.Horizontal)
+        self.light_azimuth_slider.setRange(0, 359)
+        self.light_azimuth_slider.setValue(315)
+        self.light_azimuth_slider.setToolTip(
+            "Rotate the directional light around the volume (degrees)."
+        )
+        self.light_azimuth_slider.valueChanged.connect(self._on_light_azimuth_change)
+        options.addWidget(self.light_azimuth_slider, 6, 1)
+        self.light_azimuth_label = QLabel("315°")
+        options.addWidget(self.light_azimuth_label, 6, 2)
+
+        options.addWidget(QLabel("Light elevation:"), 7, 0)
+        self.light_elevation_slider = QSlider(Qt.Horizontal)
+        self.light_elevation_slider.setRange(-90, 90)
+        self.light_elevation_slider.setValue(30)
+        self.light_elevation_slider.setToolTip(
+            "Tilt the light above or below the horizon (degrees)."
+        )
+        self.light_elevation_slider.valueChanged.connect(self._on_light_elevation_change)
+        options.addWidget(self.light_elevation_slider, 7, 1)
+        self.light_elevation_label = QLabel("30°")
+        options.addWidget(self.light_elevation_label, 7, 2)
+
+        options.addWidget(QLabel("Light intensity:"), 8, 0)
+        self.light_intensity_slider = QSlider(Qt.Horizontal)
+        self.light_intensity_slider.setRange(0, 200)
+        self.light_intensity_slider.setValue(120)
+        self.light_intensity_slider.setToolTip(
+            "Strength of the directional light applied to meshes."
+        )
+        self.light_intensity_slider.valueChanged.connect(self._on_light_intensity_change)
+        options.addWidget(self.light_intensity_slider, 8, 1)
+        self.light_intensity_label = QLabel("1.20×")
+        options.addWidget(self.light_intensity_label, 8, 2)
 
         self.axes_checkbox = QCheckBox("Show axes")
         self.axes_checkbox.setChecked(False)
-        options.addWidget(self.axes_checkbox, 5, 0, 1, 2)
+        options.addWidget(self.axes_checkbox, 9, 0, 1, 3)
+        self._mesh_only_widgets = [
+            self.surface_step_label,
+            self.surface_step_spin,
+            self.light_azimuth_slider,
+            self.light_azimuth_label,
+            self.light_elevation_slider,
+            self.light_elevation_label,
+            self.light_intensity_slider,
+            self.light_intensity_label,
+        ]
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -3993,6 +4060,12 @@ class Volume3DDialog(QDialog):
         self.downsample_spin.valueChanged.connect(self._on_downsample_change)
         self.surface_step_spin.valueChanged.connect(self._on_surface_step_change)
         self.axes_checkbox.toggled.connect(self._on_axes_toggle)
+
+        # Initialise labels and derived state without triggering redraws.
+        self._on_color_intensity_change(self.color_intensity_slider.value())
+        self._on_light_azimuth_change(self.light_azimuth_slider.value())
+        self._on_light_elevation_change(self.light_elevation_slider.value())
+        self._on_light_intensity_change(self.light_intensity_slider.value())
 
         self._initialising = False
         self._update_mode_dependent_controls()
@@ -4151,8 +4224,11 @@ class Volume3DDialog(QDialog):
     def _map_colors(self, values: np.ndarray, cmap_name: str, alpha: float) -> np.ndarray:
         cmap = plt.get_cmap(cmap_name)
         # Clamp to the normalised range and map to RGBA so OpenGL can upload a
-        # single colour array for all voxels.
+        # single colour array for all voxels.  The brightness slider scales the
+        # RGB components uniformly to make it easy to dim very bright volumes.
         colours = np.asarray(cmap(np.clip(values, 0.0, 1.0)), dtype=np.float32)
+        brightness = float(self._color_intensity)
+        colours[:, :3] = np.clip(colours[:, :3] * brightness, 0.0, 1.0)
         colours[:, 3] *= alpha
         return colours
 
@@ -4168,10 +4244,16 @@ class Volume3DDialog(QDialog):
         fig = self._colorbar_canvas.figure
         fig.clf()
         # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
-        # persistent reference for the current normalisation range.
-        ax = fig.add_axes([0.35, 0.05, 0.3, 0.9])
-        norm = plt.Normalize(vmin, vmax)
-        mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap_name)
+        # persistent reference for the current normalisation range.  The
+        # colormap is rescaled with the same brightness multiplier used by the
+        # OpenGL items so legend colours always match the rendered geometry.
+        ax = fig.add_axes([0.25, 0.08, 0.5, 0.84])
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+        base_cmap = plt.get_cmap(cmap_name)
+        samples = base_cmap(np.linspace(0.0, 1.0, 256))
+        samples[:, :3] = np.clip(samples[:, :3] * float(self._color_intensity), 0.0, 1.0)
+        adjusted_cmap = mcolors.ListedColormap(samples)
+        mappable = plt.cm.ScalarMappable(norm=norm, cmap=adjusted_cmap)
         fig.colorbar(mappable, cax=ax)
         ax.yaxis.set_ticks_position("right")
         ax.yaxis.set_label_position("right")
@@ -4183,14 +4265,52 @@ class Volume3DDialog(QDialog):
         fig.patch.set_facecolor(self._canvas_bg)
         self._colorbar_canvas.draw_idle()
 
+    def _light_direction(self) -> np.ndarray:
+        azimuth = math.radians(float(self.light_azimuth_slider.value()))
+        elevation = math.radians(float(self.light_elevation_slider.value()))
+        direction = np.array(
+            [
+                math.cos(elevation) * math.cos(azimuth),
+                math.cos(elevation) * math.sin(azimuth),
+                math.sin(elevation),
+            ],
+            dtype=np.float32,
+        )
+        length = float(np.linalg.norm(direction))
+        if length < 1e-6:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        return direction / length
+
+    def _shade_mesh_colors(
+        self, meshdata: gl.MeshData, colours: np.ndarray
+    ) -> np.ndarray:
+        try:
+            normals = meshdata.vertexNormals()
+        except Exception:
+            return colours
+        if normals is None or normals.shape[0] != colours.shape[0]:
+            return colours
+        light_vec = self._light_direction()
+        diffuse = np.clip(np.dot(normals, light_vec), 0.0, 1.0)
+        lighting = self._ambient_light + self._light_intensity * diffuse
+        colours[:, :3] = np.clip(colours[:, :3] * lighting[:, None], 0.0, 1.0)
+        return colours
+
     def _update_scene_bounds(self, mins: np.ndarray, maxs: np.ndarray) -> None:
         spans = np.maximum(maxs - mins, 1e-3)
         # Update the camera centre/distance so the current geometry fits snugly
         # inside the viewport regardless of the downsampling level.
         center = (mins + maxs) / 2.0
         self._current_bounds = (mins, maxs)
+        current_angles = {
+            "azimuth": self.view.opts.get("azimuth", -60),
+            "elevation": self.view.opts.get("elevation", 20),
+            "roll": self.view.opts.get("roll", 0),
+        }
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
+        for key, value in current_angles.items():
+            self.view.opts[key] = value
         self._update_axis_item()
 
     def _update_axis_item(self) -> None:
@@ -4209,6 +4329,28 @@ class Volume3DDialog(QDialog):
 
     def _on_axes_toggle(self, _checked: bool) -> None:
         self._update_axis_item()
+
+    def _on_color_intensity_change(self, value: int) -> None:
+        self._color_intensity = max(0.1, value / 100.0)
+        self.color_intensity_label.setText(f"{self._color_intensity:.2f}×")
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_light_azimuth_change(self, value: int) -> None:
+        self.light_azimuth_label.setText(f"{value}°")
+        if not self._initialising and self.render_mode_combo.currentText() == "Surface mesh":
+            self._update_plot()
+
+    def _on_light_elevation_change(self, value: int) -> None:
+        self.light_elevation_label.setText(f"{value}°")
+        if not self._initialising and self.render_mode_combo.currentText() == "Surface mesh":
+            self._update_plot()
+
+    def _on_light_intensity_change(self, value: int) -> None:
+        self._light_intensity = max(0.0, value / 100.0)
+        self.light_intensity_label.setText(f"{self._light_intensity:.2f}×")
+        if not self._initialising and self.render_mode_combo.currentText() == "Surface mesh":
+            self._update_plot()
 
     def _update_plot(self):
         if self._downsampled is None or self._normalised_volume is None:
@@ -4315,6 +4457,7 @@ class Volume3DDialog(QDialog):
             self._scatter_item = gl.GLScatterPlotItem(pxMode=True)
             self.view.addItem(self._scatter_item)
         self._scatter_item.setData(pos=coords_mm, color=colors, size=float(self.point_slider.value()))
+        self._scatter_item.setGLOptions("translucent" if alpha < 1.0 else "opaque")
 
         mins = coords_mm.min(axis=0)
         maxs = coords_mm.max(axis=0)
@@ -4412,6 +4555,7 @@ class Volume3DDialog(QDialog):
         meshdata = gl.MeshData(vertexes=verts_xyz, faces=faces)
         vertex_values = np.clip(values, 0.0, 1.0)
         vertex_colors = self._map_colors(vertex_values, cmap_name, alpha)
+        vertex_colors = self._shade_mesh_colors(meshdata, vertex_colors)
         meshdata.setVertexColors(vertex_colors)
 
         if self._mesh_item is None:
@@ -4453,6 +4597,8 @@ class Volume3DDialog(QDialog):
         self.point_slider.setEnabled(not is_surface)
         self.surface_step_label.setEnabled(is_surface)
         self.surface_step_spin.setEnabled(is_surface)
+        for widget in self._mesh_only_widgets:
+            widget.setEnabled(is_surface)
         if is_surface:
             self.thresh_text.setText("Iso level:")
             self.thresh_slider.setToolTip(
@@ -4508,6 +4654,7 @@ class Surface3DDialog(QDialog):
         self.resize(1200, 900)
         self.setMinimumSize(780, 560)
         self.setSizeGripEnabled(True)
+        self._initialising = True
 
         verts = np.asarray(vertices, dtype=np.float32)
         faces_arr = np.asarray(faces, dtype=np.int32)
@@ -4537,6 +4684,9 @@ class Surface3DDialog(QDialog):
         self._mesh_item: Optional[gl.GLMeshItem] = None
         self._axis_item: Optional[gl.GLAxisItem] = None
         self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._color_intensity = 1.0
+        self._ambient_light = 0.25
+        self._light_intensity = 1.0
 
         layout = QVBoxLayout(self)
 
@@ -4577,9 +4727,15 @@ class Surface3DDialog(QDialog):
             "inferno",
             "magma",
             "cividis",
+            "turbo",
+            "Spectral",
+            "coolwarm",
             "cubehelix",
             "Greys",
             "bone",
+            "twilight",
+            "YlGnBu",
+            "YlOrBr",
         ])
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_change)
         controls.addWidget(self.colormap_combo)
@@ -4601,17 +4757,75 @@ class Surface3DDialog(QDialog):
         controls.addWidget(self.axes_checkbox)
         controls.addStretch()
 
+        options_group = QGroupBox("Display options")
+        layout.addWidget(options_group)
+        options = QGridLayout(options_group)
+
+        options.addWidget(QLabel("Colour intensity:"), 0, 0)
+        self.color_intensity_slider = QSlider(Qt.Horizontal)
+        self.color_intensity_slider.setRange(10, 200)
+        self.color_intensity_slider.setValue(100)
+        self.color_intensity_slider.setToolTip(
+            "Scale the brightness of the surface colours ( < 1 darkens, > 1 brightens )."
+        )
+        self.color_intensity_slider.valueChanged.connect(self._on_color_intensity_change)
+        options.addWidget(self.color_intensity_slider, 0, 1)
+        self.color_intensity_label = QLabel("1.00×")
+        options.addWidget(self.color_intensity_label, 0, 2)
+
+        options.addWidget(QLabel("Light azimuth:"), 1, 0)
+        self.light_azimuth_slider = QSlider(Qt.Horizontal)
+        self.light_azimuth_slider.setRange(0, 359)
+        self.light_azimuth_slider.setValue(315)
+        self.light_azimuth_slider.setToolTip(
+            "Rotate the directional light around the surface (degrees)."
+        )
+        self.light_azimuth_slider.valueChanged.connect(self._on_light_azimuth_change)
+        options.addWidget(self.light_azimuth_slider, 1, 1)
+        self.light_azimuth_label = QLabel("315°")
+        options.addWidget(self.light_azimuth_label, 1, 2)
+
+        options.addWidget(QLabel("Light elevation:"), 2, 0)
+        self.light_elevation_slider = QSlider(Qt.Horizontal)
+        self.light_elevation_slider.setRange(-90, 90)
+        self.light_elevation_slider.setValue(30)
+        self.light_elevation_slider.setToolTip(
+            "Tilt the light above or below the horizon (degrees)."
+        )
+        self.light_elevation_slider.valueChanged.connect(self._on_light_elevation_change)
+        options.addWidget(self.light_elevation_slider, 2, 1)
+        self.light_elevation_label = QLabel("30°")
+        options.addWidget(self.light_elevation_label, 2, 2)
+
+        options.addWidget(QLabel("Light intensity:"), 3, 0)
+        self.light_intensity_slider = QSlider(Qt.Horizontal)
+        self.light_intensity_slider.setRange(0, 200)
+        self.light_intensity_slider.setValue(120)
+        self.light_intensity_slider.setToolTip(
+            "Strength of the directional light applied to the mesh."
+        )
+        self.light_intensity_slider.valueChanged.connect(self._on_light_intensity_change)
+        options.addWidget(self.light_intensity_slider, 3, 1)
+        self.light_intensity_label = QLabel("1.20×")
+        options.addWidget(self.light_intensity_label, 3, 2)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
+        self._on_color_intensity_change(self.color_intensity_slider.value())
+        self._on_light_azimuth_change(self.light_azimuth_slider.value())
+        self._on_light_elevation_change(self.light_elevation_slider.value())
+        self._on_light_intensity_change(self.light_intensity_slider.value())
+        self._initialising = False
         self._update_plot()
 
     def _map_colors(self, values: np.ndarray, cmap_name: str, alpha: float) -> np.ndarray:
         cmap = plt.get_cmap(cmap_name)
         # ``values`` are pre-normalised to [0, 1] so we can reuse matplotlib
         # colour maps and simply blend in the requested opacity.
-        colours = np.asarray(cmap(values), dtype=np.float32)
+        colours = np.asarray(cmap(np.clip(values, 0.0, 1.0)), dtype=np.float32)
+        colours[:, :3] = np.clip(colours[:, :3] * float(self._color_intensity), 0.0, 1.0)
         colours[:, 3] *= alpha
         return colours
 
@@ -4626,9 +4840,13 @@ class Surface3DDialog(QDialog):
     ) -> None:
         fig = self._colorbar_canvas.figure
         fig.clf()
-        ax = fig.add_axes([0.35, 0.05, 0.3, 0.9])
-        norm = plt.Normalize(vmin, vmax)
-        mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap_name)
+        ax = fig.add_axes([0.25, 0.08, 0.5, 0.84])
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+        base_cmap = plt.get_cmap(cmap_name)
+        samples = base_cmap(np.linspace(0.0, 1.0, 256))
+        samples[:, :3] = np.clip(samples[:, :3] * float(self._color_intensity), 0.0, 1.0)
+        adjusted_cmap = mcolors.ListedColormap(samples)
+        mappable = plt.cm.ScalarMappable(norm=norm, cmap=adjusted_cmap)
         fig.colorbar(mappable, cax=ax)
         ax.yaxis.set_ticks_position("right")
         ax.yaxis.set_label_position("right")
@@ -4640,14 +4858,52 @@ class Surface3DDialog(QDialog):
         fig.patch.set_facecolor(self._canvas_bg)
         self._colorbar_canvas.draw_idle()
 
+    def _light_direction(self) -> np.ndarray:
+        azimuth = math.radians(float(self.light_azimuth_slider.value()))
+        elevation = math.radians(float(self.light_elevation_slider.value()))
+        direction = np.array(
+            [
+                math.cos(elevation) * math.cos(azimuth),
+                math.cos(elevation) * math.sin(azimuth),
+                math.sin(elevation),
+            ],
+            dtype=np.float32,
+        )
+        length = float(np.linalg.norm(direction))
+        if length < 1e-6:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        return direction / length
+
+    def _shade_mesh_colors(
+        self, meshdata: gl.MeshData, colours: np.ndarray
+    ) -> np.ndarray:
+        try:
+            normals = meshdata.vertexNormals()
+        except Exception:
+            return colours
+        if normals is None or normals.shape[0] != colours.shape[0]:
+            return colours
+        light_vec = self._light_direction()
+        diffuse = np.clip(np.dot(normals, light_vec), 0.0, 1.0)
+        lighting = self._ambient_light + self._light_intensity * diffuse
+        colours[:, :3] = np.clip(colours[:, :3] * lighting[:, None], 0.0, 1.0)
+        return colours
+
     def _update_scene_bounds(self, mins: np.ndarray, maxs: np.ndarray) -> None:
         spans = np.maximum(maxs - mins, 1e-3)
         # Keep the camera centred on the mesh to avoid jarring jumps when users
         # switch between scalar fields or adjust opacity.
         center = (mins + maxs) / 2.0
         self._current_bounds = (mins, maxs)
+        current_angles = {
+            "azimuth": self.view.opts.get("azimuth", -60),
+            "elevation": self.view.opts.get("elevation", 20),
+            "roll": self.view.opts.get("roll", 0),
+        }
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
+        for key, value in current_angles.items():
+            self.view.opts[key] = value
         self._update_axis_item()
 
     def _update_axis_item(self) -> None:
@@ -4666,6 +4922,28 @@ class Surface3DDialog(QDialog):
 
     def _on_axes_toggle(self, _checked: bool) -> None:
         self._update_axis_item()
+
+    def _on_color_intensity_change(self, value: int) -> None:
+        self._color_intensity = max(0.1, value / 100.0)
+        self.color_intensity_label.setText(f"{self._color_intensity:.2f}×")
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_light_azimuth_change(self, value: int) -> None:
+        self.light_azimuth_label.setText(f"{value}°")
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_light_elevation_change(self, value: int) -> None:
+        self.light_elevation_label.setText(f"{value}°")
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_light_intensity_change(self, value: int) -> None:
+        self._light_intensity = max(0.0, value / 100.0)
+        self.light_intensity_label.setText(f"{self._light_intensity:.2f}×")
+        if not self._initialising:
+            self._update_plot()
 
     def _on_scalar_change(self, _index: int) -> None:
         self._update_plot()
@@ -4706,13 +4984,15 @@ class Surface3DDialog(QDialog):
                 norm = (values - vmin) / (vmax - vmin)
                 norm_values = np.clip(norm.astype(np.float32, copy=False), 0.0, 1.0)
             colours = self._map_colors(norm_values, cmap_name, alpha)
+            colours = self._shade_mesh_colors(meshdata, colours)
             meshdata.setVertexColors(colours)
             self._update_colorbar(cmap_name, vmin, vmax)
             summary += f"Scalar '{scalar_key}' range {vmin:.4g} – {vmax:.4g}. "
         else:
-            base_color = plt.get_cmap(cmap_name)(0.6)
-            colour = np.array([[base_color[0], base_color[1], base_color[2], base_color[3] * alpha]], dtype=np.float32)
-            meshdata.setVertexColors(np.repeat(colour, self._vertices.shape[0], axis=0))
+            base_values = np.full(self._vertices.shape[0], 0.6, dtype=np.float32)
+            colours = self._map_colors(base_values, cmap_name, alpha)
+            colours = self._shade_mesh_colors(meshdata, colours)
+            meshdata.setVertexColors(colours)
             summary += "Constant colouring applied. "
 
         if self._mesh_item is None:
