@@ -60,6 +60,7 @@ except ModuleNotFoundError as exc:
         import nibabel as nib
     else:  # pragma: no cover - unrelated import failure
         raise
+from nibabel.orientations import aff2axcodes
 from pathlib import Path
 from collections import defaultdict
 from typing import Any, Optional, Sequence
@@ -69,7 +70,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
-    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
+    QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox, QDoubleSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -129,6 +130,13 @@ except Exception:  # pragma: no cover - optional dependency
     gl = None
     gl_shaders = None
     HAS_PYQTGRAPH = False
+
+if HAS_PYQTGRAPH:
+    from OpenGL import GL as _GL
+    from pyqtgraph.opengl.items.GLTextItem import GLTextItem
+else:  # pragma: no cover - optional dependency not available
+    _GL = None
+    GLTextItem = None
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -203,6 +211,214 @@ def _create_directional_light_shader():
         },
     )
 
+
+_AXIS_OPPOSITES = {
+    "L": "R",
+    "R": "L",
+    "A": "P",
+    "P": "A",
+    "S": "I",
+    "I": "S",
+    "E": "W",
+    "W": "E",
+    "N": "S",
+    "U": "D",
+    "D": "U",
+}
+
+
+def _opposite_axis(code: str) -> str:
+    """Return the opposing anatomical label for ``code``.
+
+    Unknown labels fall back to a prefixed ``-`` variant to keep the direction
+    recognisable instead of dropping the information altogether.
+    """
+
+    cleaned = (code or "?").strip().upper()
+    if not cleaned:
+        return "?"
+    return _AXIS_OPPOSITES.get(cleaned, cleaned if cleaned == "?" else f"-{cleaned}")
+
+
+def _extract_axis_labels(meta: Optional[dict]) -> tuple[str, str, str]:
+    """Return canonical axis codes (X, Y, Z positive directions) from metadata."""
+
+    default = ("R", "A", "S")
+    if not meta:
+        return default
+
+    labels = meta.get("axis_labels") or meta.get("axis_codes")
+    if isinstance(labels, dict):
+        for key in ("labels", "positive", "axes"):
+            if key in labels:
+                labels = labels[key]
+                break
+
+    values: list[str] = []
+    if isinstance(labels, str):
+        values = [char.upper() for char in labels.strip() if char.strip()]
+    elif isinstance(labels, (list, tuple)):
+        values = [str(val).strip().upper() for val in labels if str(val).strip()]
+
+    if not values:
+        return default
+
+    result = []
+    for idx in range(3):
+        result.append(values[idx] if idx < len(values) else default[idx])
+    return tuple(result[:3])
+
+
+def _build_translucent_options(alpha: float) -> dict:
+    """Return OpenGL state flags for translucent rendering with depth sorting."""
+
+    if not HAS_PYQTGRAPH:
+        return {}
+    opts = dict(gl.GLGraphicsItem.GLOptions.get("translucent", {}))
+    # Disabling depth writes prevents stale fragments from darkening the mesh
+    # while still allowing depth testing so nearer geometry occludes the far
+    # side of translucent surfaces correctly.
+    opts["glDepthMask"] = (False,)
+    return opts
+
+
+def _apply_alpha_gl_options(item, alpha: float) -> None:
+    """Update ``item`` blending state based on the global opacity slider."""
+
+    if not HAS_PYQTGRAPH or item is None:
+        return
+    if alpha >= 0.999:
+        item.setGLOptions("opaque")
+        # Re-enable depth writes so fully opaque renders behave like solids.
+        if hasattr(item, "updateGLOptions"):
+            item.updateGLOptions({"glDepthMask": (True,)})
+    else:
+        opts = _build_translucent_options(alpha)
+        if opts:
+            item.setGLOptions(opts)
+
+
+if HAS_PYQTGRAPH:
+
+    class _BidirectionalAxes(gl.GLGraphicsItem.GLGraphicsItem):
+        """Coordinate axes that include directional labels and adjustable width."""
+
+        def __init__(self, text_color: QColor, line_width: float = 2.0) -> None:
+            super().__init__()
+            self._origin = np.zeros(3, dtype=np.float32)
+            self._half_lengths = np.ones(3, dtype=np.float32)
+            self._line_width = max(0.5, float(line_width))
+            self._axis_labels: tuple[str, str, str] = ("R", "A", "S")
+            self._text_color = QColor(text_color)
+            self._label_items: list[GLTextItem] = []
+            if GLTextItem is not None:
+                for _ in range(6):
+                    item = GLTextItem(parentItem=self)
+                    item.setData(color=self._text_color, text="", pos=(0.0, 0.0, 0.0))
+                    self._label_items.append(item)
+            opts = _build_translucent_options(alpha=0.8)
+            if opts:
+                self.setGLOptions(opts)
+
+        def set_line_width(self, width: float) -> None:
+            self._line_width = max(0.5, float(width))
+            self.update()
+
+        def set_axis_labels(self, labels: Sequence[str]) -> None:
+            cleaned = [str(label).strip().upper() for label in labels][:3]
+            while len(cleaned) < 3:
+                cleaned.append("?")
+            self._axis_labels = tuple(cleaned[:3])  # type: ignore[assignment]
+            self._update_label_text()
+
+        def update_geometry(self, mins: np.ndarray, maxs: np.ndarray) -> None:
+            mins = np.asarray(mins, dtype=np.float32)
+            maxs = np.asarray(maxs, dtype=np.float32)
+            spans = np.maximum(maxs - mins, 1e-3)
+            self._origin = (maxs + mins) / 2.0
+            self._half_lengths = spans / 2.0
+            self._update_label_positions()
+            self.update()
+
+        def set_text_color(self, colour: QColor) -> None:
+            qcol = QColor(colour)
+            self._text_color = qcol
+            for item in self._label_items:
+                item.setData(color=qcol)
+
+        def _update_label_text(self) -> None:
+            if not self._label_items:
+                return
+            positive = list(self._axis_labels)
+            negative = [_opposite_axis(code) for code in positive]
+            texts = [
+                negative[0],
+                positive[0],
+                negative[1],
+                positive[1],
+                negative[2],
+                positive[2],
+            ]
+            for item, text in zip(self._label_items, texts):
+                item.setData(text=text, color=self._text_color)
+            self._update_label_positions()
+
+        def _update_label_positions(self) -> None:
+            if not self._label_items:
+                return
+            offsets = (
+                (-self._half_lengths[0] * 1.05, 0.0, 0.0),
+                (self._half_lengths[0] * 1.05, 0.0, 0.0),
+                (0.0, -self._half_lengths[1] * 1.05, 0.0),
+                (0.0, self._half_lengths[1] * 1.05, 0.0),
+                (0.0, 0.0, -self._half_lengths[2] * 1.05),
+                (0.0, 0.0, self._half_lengths[2] * 1.05),
+            )
+            for item, offset in zip(self._label_items, offsets):
+                pos = (
+                    float(self._origin[0] + offset[0]),
+                    float(self._origin[1] + offset[1]),
+                    float(self._origin[2] + offset[2]),
+                )
+                item.setData(pos=pos)
+
+        def paint(self) -> None:  # pragma: no cover - requires OpenGL context
+            if _GL is None:
+                return
+            self.setupGLState()
+            origin = self._origin
+            half = self._half_lengths
+            _GL.glLineWidth(self._line_width)
+            try:
+                _GL.glEnable(_GL.GL_LINE_SMOOTH)
+                _GL.glHint(_GL.GL_LINE_SMOOTH_HINT, _GL.GL_NICEST)
+                _GL.glBegin(_GL.GL_LINES)
+
+                # X axis (left/right)
+                _GL.glColor4f(0.0, 0.0, 1.0, 0.75)
+                _GL.glVertex3f(origin[0] - half[0], origin[1], origin[2])
+                _GL.glVertex3f(origin[0] + half[0], origin[1], origin[2])
+
+                # Y axis (posterior/anterior)
+                _GL.glColor4f(1.0, 1.0, 0.0, 0.75)
+                _GL.glVertex3f(origin[0], origin[1] - half[1], origin[2])
+                _GL.glVertex3f(origin[0], origin[1] + half[1], origin[2])
+
+                # Z axis (inferior/superior)
+                _GL.glColor4f(0.0, 1.0, 0.0, 0.75)
+                _GL.glVertex3f(origin[0], origin[1], origin[2] - half[2])
+                _GL.glVertex3f(origin[0], origin[1], origin[2] + half[2])
+
+                _GL.glEnd()
+            finally:
+                _GL.glDisable(_GL.GL_LINE_SMOOTH)
+                _GL.glLineWidth(1.0)
+
+else:  # pragma: no cover - OpenGL widgets disabled
+
+    class _BidirectionalAxes:  # type: ignore[too-many-ancestors]
+        def __init__(self, *args, **kwargs) -> None:
+            raise RuntimeError("OpenGL components are unavailable on this system")
 
 class _AutoUpdateLabel(QLabel):
     """QLabel that triggers a callback whenever it is resized."""
@@ -3897,10 +4113,16 @@ class Volume3DDialog(QDialog):
         self._scalar_hist_cumulative: Optional[np.ndarray] = None
         self._scatter_item: Optional[gl.GLScatterPlotItem] = None
         self._mesh_item: Optional[gl.GLMeshItem] = None
-        self._axis_item: Optional[gl.GLAxisItem] = None
+        self._axis_item: Optional[_BidirectionalAxes] = None
         self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._colormap_cache: dict[tuple[str, float], mcolors.Colormap] = {}
         self._light_shader = _create_directional_light_shader()
+        self._axis_codes = _extract_axis_labels(self._meta)
+        self._axis_line_width = 2.0
+        self._volume_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._slice_items: dict[int, Optional[gl.GLImageItem]] = {0: None, 1: None, 2: None}
+        self._slice_positions: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.5}
+        self._slice_controls: dict[int, tuple[QCheckBox, QSlider]] = {}
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -3922,8 +4144,8 @@ class Volume3DDialog(QDialog):
 
         # A dedicated matplotlib canvas is reused for colour bars so we can keep
         # the interactive OpenGL viewport focused solely on geometry updates.
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.2, 4.0)))
-        self._colorbar_canvas.setFixedWidth(150)
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.6, 4.2)))
+        self._colorbar_canvas.setFixedWidth(190)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         display_layout.addWidget(self._colorbar_canvas)
 
@@ -4061,6 +4283,58 @@ class Volume3DDialog(QDialog):
         self.axes_checkbox.setChecked(False)
         options.addWidget(self.axes_checkbox, row, 0, 1, 2)
 
+        row += 1
+        options.addWidget(QLabel("Axis thickness (px):"), row, 0)
+        self.axis_width_spin = QDoubleSpinBox()
+        self.axis_width_spin.setRange(0.5, 10.0)
+        self.axis_width_spin.setSingleStep(0.5)
+        self.axis_width_spin.setDecimals(1)
+        self.axis_width_spin.setValue(self._axis_line_width)
+        self.axis_width_spin.setToolTip("Adjust the rendered width of the orientation axes.")
+        self.axis_width_spin.setEnabled(False)
+        options.addWidget(self.axis_width_spin, row, 1)
+
+        slice_group = QGroupBox("Slice planes")
+        layout.addWidget(slice_group)
+        slice_layout = QGridLayout(slice_group)
+        slice_specs = [
+            (
+                0,
+                "Sagittal (X)",
+                "Toggle a slice perpendicular to the left/right axis.",
+            ),
+            (
+                1,
+                "Coronal (Y)",
+                "Toggle a slice perpendicular to the anterior/posterior axis.",
+            ),
+            (
+                2,
+                "Axial (Z)",
+                "Toggle a slice perpendicular to the inferior/superior axis.",
+            ),
+        ]
+        for row, (axis_idx, label, tip) in enumerate(slice_specs):
+            checkbox = QCheckBox(label)
+            checkbox.setToolTip(tip)
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(50)
+            slider.setEnabled(False)
+            slider.setToolTip(
+                "Normalised slice position along the corresponding anatomical axis."
+            )
+            checkbox.toggled.connect(
+                lambda checked, axis=axis_idx: self._on_slice_toggle(axis, checked)
+            )
+            slider.valueChanged.connect(
+                lambda value, axis=axis_idx: self._on_slice_position_change(axis, value)
+            )
+            slice_layout.addWidget(checkbox, row, 0)
+            slice_layout.addWidget(slider, row, 1)
+            self._slice_controls[axis_idx] = (checkbox, slider)
+        slice_layout.setColumnStretch(1, 1)
+
         self.lighting_group = QGroupBox("Lighting")
         layout.addWidget(self.lighting_group)
         light_layout = QGridLayout(self.lighting_group)
@@ -4126,6 +4400,7 @@ class Volume3DDialog(QDialog):
         self.downsample_spin.valueChanged.connect(self._on_downsample_change)
         self.surface_step_spin.valueChanged.connect(self._on_surface_step_change)
         self.axes_checkbox.toggled.connect(self._on_axes_toggle)
+        self.axis_width_spin.valueChanged.connect(self._on_axis_width_change)
         self.light_azimuth_slider.valueChanged.connect(self._on_light_setting_change)
         self.light_elevation_slider.valueChanged.connect(self._on_light_setting_change)
         self.light_intensity_slider.valueChanged.connect(self._on_light_setting_change)
@@ -4198,6 +4473,7 @@ class Volume3DDialog(QDialog):
                 norm = (scalar - min_val) / (max_val - min_val)
                 self._normalised_volume = norm.astype(np.float32, copy=False)
         self._build_scalar_histogram()
+        self._update_volume_bounds()
         self._prepare_downsampled()
 
     def _build_scalar_histogram(self) -> None:
@@ -4259,6 +4535,19 @@ class Volume3DDialog(QDialog):
         order = np.argsort(flat, kind="mergesort")
         self._point_sorted_indices = order.astype(np.int64, copy=False)
         self._point_sorted_values = flat.take(order)
+
+    def _update_volume_bounds(self) -> None:
+        volume = self._normalised_volume
+        if volume is None or volume.ndim < 3:
+            self._volume_bounds = None
+            return
+        shape = np.asarray(volume.shape[:3], dtype=np.float32)
+        spans = np.maximum((shape - 1.0) * self._voxel_sizes_vec, 1e-3)
+        mins = np.zeros(3, dtype=np.float32)
+        maxs = mins + spans
+        self._volume_bounds = (mins, maxs)
+        if self.axes_checkbox.isChecked():
+            self._update_axis_item(self._volume_bounds)
 
     def _indices_to_world(
         self, indices: np.ndarray, shape: tuple[int, int, int], scale: np.ndarray
@@ -4376,14 +4665,14 @@ class Volume3DDialog(QDialog):
         fig.clf()
         # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
         # persistent reference for the current normalisation range.
-        ax = fig.add_axes([0.24, 0.08, 0.6, 0.84])
+        ax = fig.add_axes([0.32, 0.08, 0.5, 0.84])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         fig.colorbar(mappable, cax=ax)
         ax.yaxis.set_ticks_position("right")
         ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color)
-        ax.tick_params(colors=self._fg_color, which="both")
+        ax.set_ylabel(label, color=self._fg_color, labelpad=18)
+        ax.tick_params(colors=self._fg_color, which="both", labelsize=9)
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
         ax.set_facecolor(self._canvas_bg)
@@ -4398,24 +4687,153 @@ class Volume3DDialog(QDialog):
         self._current_bounds = (mins, maxs)
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
-        self._update_axis_item()
+        self._update_axis_item((mins, maxs))
 
-    def _update_axis_item(self) -> None:
-        if self._axis_item is not None:
-            self.view.removeItem(self._axis_item)
-            self._axis_item = None
-        if not self.axes_checkbox.isChecked() or self._current_bounds is None:
+    def _update_axis_item(
+        self, bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+    ) -> None:
+        if not HAS_PYQTGRAPH:
             return
-        mins, maxs = self._current_bounds
-        spans = np.maximum(maxs - mins, 1e-3)
-        axis = gl.GLAxisItem()
-        axis.setSize(spans[0], spans[1], spans[2])
-        axis.translate(float(mins[0]), float(mins[1]), float(mins[2]))
-        self.view.addItem(axis)
-        self._axis_item = axis
 
-    def _on_axes_toggle(self, _checked: bool) -> None:
+        if not self.axes_checkbox.isChecked():
+            if self._axis_item is not None:
+                self.view.removeItem(self._axis_item)
+                self._axis_item = None
+            return
+
+        if bounds is None:
+            bounds = self._current_bounds or self._volume_bounds
+        if bounds is None:
+            return
+
+        mins, maxs = bounds
+        if self._axis_item is None:
+            axis = _BidirectionalAxes(QColor(self._fg_color), line_width=self._axis_line_width)
+            axis.set_axis_labels(self._axis_codes)
+            axis.update_geometry(mins, maxs)
+            self.view.addItem(axis)
+            self._axis_item = axis
+        else:
+            self._axis_item.set_text_color(QColor(self._fg_color))
+            self._axis_item.set_axis_labels(self._axis_codes)
+            self._axis_item.set_line_width(self._axis_line_width)
+            self._axis_item.update_geometry(mins, maxs)
+
+    def _on_axes_toggle(self, checked: bool) -> None:
+        self.axis_width_spin.setEnabled(checked)
         self._update_axis_item()
+
+    def _on_axis_width_change(self, value: float) -> None:
+        self._axis_line_width = float(value)
+        if self._axis_item is not None:
+            self._axis_item.set_line_width(self._axis_line_width)
+            self.view.update()
+
+    def _on_slice_toggle(self, axis: int, checked: bool) -> None:
+        controls = self._slice_controls.get(axis)
+        if not controls:
+            return
+        _, slider = controls
+        slider.setEnabled(checked)
+        item = self._slice_items.get(axis)
+        if not checked:
+            if item is not None:
+                item.hide()
+            return
+        self._ensure_slice_item(axis)
+        self._refresh_slice_items(self.opacity_slider.value() / 100.0)
+        if self._current_bounds is None and self._volume_bounds is not None:
+            self._update_scene_bounds(*self._volume_bounds)
+
+    def _on_slice_position_change(self, axis: int, value: int) -> None:
+        self._slice_positions[axis] = max(0.0, min(1.0, value / 100.0))
+        controls = self._slice_controls.get(axis)
+        if not controls or not controls[0].isChecked():
+            return
+        self._ensure_slice_item(axis)
+        item = self._slice_items.get(axis)
+        if item is not None:
+            self._update_slice_item(axis, item)
+
+    def _ensure_slice_item(self, axis: int) -> None:
+        if self._normalised_volume is None:
+            return
+        item = self._slice_items.get(axis)
+        if item is None:
+            rgba = self._make_slice_rgba(axis, self._slice_index(axis), self.opacity_slider.value() / 100.0)
+            if rgba is None:
+                return
+            item = gl.GLImageItem(rgba, smooth=True)
+            self.view.addItem(item)
+            self._slice_items[axis] = item
+        item.show()
+        self._update_slice_item(axis, item)
+
+    def _update_slice_item(self, axis: int, item: gl.GLImageItem) -> None:
+        if self._normalised_volume is None:
+            return
+        index = self._slice_index(axis)
+        alpha = self.opacity_slider.value() / 100.0
+        rgba = self._make_slice_rgba(axis, index, alpha)
+        if rgba is None:
+            return
+        item.setData(rgba)
+        item.resetTransform()
+        if axis == 0:
+            item.scale(self._voxel_sizes[2], self._voxel_sizes[1], 1.0)
+            item.rotate(-90.0, 0.0, 1.0, 0.0)
+            item.translate(index * self._voxel_sizes[0], 0.0, 0.0)
+        elif axis == 1:
+            item.scale(self._voxel_sizes[0], self._voxel_sizes[2], 1.0)
+            item.rotate(90.0, 1.0, 0.0, 0.0)
+            item.translate(0.0, index * self._voxel_sizes[1], 0.0)
+        else:
+            item.scale(self._voxel_sizes[0], self._voxel_sizes[1], 1.0)
+            item.translate(0.0, 0.0, index * self._voxel_sizes[2])
+        _apply_alpha_gl_options(item, alpha)
+
+    def _refresh_slice_items(self, alpha: float) -> None:
+        any_visible = False
+        for axis, item in self._slice_items.items():
+            controls = self._slice_controls.get(axis)
+            if not controls or not controls[0].isChecked() or item is None:
+                continue
+            self._update_slice_item(axis, item)
+            any_visible = True
+        if any_visible and self._current_bounds is None and self._volume_bounds is not None:
+            self._update_scene_bounds(*self._volume_bounds)
+
+    def _slice_index(self, axis: int) -> int:
+        volume = self._normalised_volume
+        if volume is None or axis not in (0, 1, 2):
+            return 0
+        size = volume.shape[axis]
+        if size <= 1:
+            return 0
+        pos = self._slice_positions.get(axis, 0.5)
+        pos = max(0.0, min(1.0, float(pos)))
+        return int(round(pos * (size - 1)))
+
+    def _make_slice_rgba(self, axis: int, index: int, alpha: float) -> Optional[np.ndarray]:
+        volume = self._normalised_volume
+        if volume is None:
+            return None
+        axis = int(axis)
+        if axis == 0:
+            index = int(np.clip(index, 0, volume.shape[0] - 1))
+            slice_data = volume[index, :, :]
+            slice_data = np.transpose(slice_data, (1, 0))
+        elif axis == 1:
+            index = int(np.clip(index, 0, volume.shape[1] - 1))
+            slice_data = volume[:, index, :]
+        else:
+            index = int(np.clip(index, 0, volume.shape[2] - 1))
+            slice_data = volume[:, :, index]
+        cmap_name = self.colormap_combo.currentText() or "viridis"
+        cmap = self._get_adjusted_colormap(cmap_name)
+        rgba = np.asarray(cmap(np.clip(slice_data, 0.0, 1.0)), dtype=np.float32)
+        rgba[..., 3] = np.clip(rgba[..., 3] * alpha, 0.0, 1.0)
+        return np.ascontiguousarray((rgba * 255.0).astype(np.uint8))
 
     def _update_plot(self):
         if self._downsampled is None or self._normalised_volume is None:
@@ -4433,14 +4851,18 @@ class Volume3DDialog(QDialog):
             self._draw_surface_mesh(thr, cmap, alpha)
         else:
             self._draw_point_cloud(thr, cmap, alpha)
+        self._refresh_slice_items(alpha)
 
     def _handle_empty_point_cloud(self, shape: Sequence[int], scale: np.ndarray, thr: float) -> None:
         if self._scatter_item is not None:
             self.view.removeItem(self._scatter_item)
             self._scatter_item = None
-        mins = np.zeros(3, dtype=np.float32)
-        spans = np.maximum((np.asarray(shape, dtype=np.float32) - 1.0) * scale, 1e-3)
-        maxs = mins + spans
+        if self._volume_bounds is not None:
+            mins, maxs = self._volume_bounds
+        else:
+            mins = np.zeros(3, dtype=np.float32)
+            spans = np.maximum((np.asarray(shape, dtype=np.float32) - 1.0) * scale, 1e-3)
+            maxs = mins + spans
         self._update_scene_bounds(mins, maxs)
         self._clear_colorbar()
         self.status_label.setText(
@@ -4523,7 +4945,7 @@ class Volume3DDialog(QDialog):
             self._scatter_item = gl.GLScatterPlotItem(pxMode=True)
             self.view.addItem(self._scatter_item)
         self._scatter_item.setData(pos=coords_mm, color=colors, size=float(self.point_slider.value()))
-        self._scatter_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_alpha_gl_options(self._scatter_item, alpha)
 
         mins = coords_mm.min(axis=0)
         maxs = coords_mm.max(axis=0)
@@ -4642,7 +5064,7 @@ class Volume3DDialog(QDialog):
                 self._mesh_item.setShader("shaded")
 
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_alpha_gl_options(self._mesh_item, alpha)
 
         mins = np.min(verts, axis=0)
         maxs = np.max(verts, axis=0)
@@ -4758,10 +5180,12 @@ class Surface3DDialog(QDialog):
                 self._scalar_fields[safe_name] = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
         self._mesh_item: Optional[gl.GLMeshItem] = None
-        self._axis_item: Optional[gl.GLAxisItem] = None
+        self._axis_item: Optional[_BidirectionalAxes] = None
         self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._colormap_cache: dict[tuple[str, float], mcolors.Colormap] = {}
         self._light_shader = _create_directional_light_shader()
+        self._axis_codes = _extract_axis_labels(self._meta)
+        self._axis_line_width = 2.0
 
         layout = QVBoxLayout(self)
 
@@ -4776,8 +5200,8 @@ class Surface3DDialog(QDialog):
         self.view.opts["azimuth"] = -60
         display_layout.addWidget(self.view, stretch=1)
 
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.2, 4.0)))
-        self._colorbar_canvas.setFixedWidth(150)
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.6, 4.2)))
+        self._colorbar_canvas.setFixedWidth(190)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         display_layout.addWidget(self._colorbar_canvas)
 
@@ -4842,6 +5266,17 @@ class Surface3DDialog(QDialog):
         self.axes_checkbox.setChecked(False)
         self.axes_checkbox.toggled.connect(self._on_axes_toggle)
         controls.addWidget(self.axes_checkbox)
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("Axis thickness (px):"))
+        self.axis_width_spin = QDoubleSpinBox()
+        self.axis_width_spin.setRange(0.5, 10.0)
+        self.axis_width_spin.setSingleStep(0.5)
+        self.axis_width_spin.setDecimals(1)
+        self.axis_width_spin.setValue(self._axis_line_width)
+        self.axis_width_spin.setToolTip("Adjust the rendered width of the orientation axes.")
+        self.axis_width_spin.setEnabled(False)
+        self.axis_width_spin.valueChanged.connect(self._on_axis_width_change)
+        controls.addWidget(self.axis_width_spin)
         controls.addStretch()
 
         self.lighting_group = QGroupBox("Lighting")
@@ -4936,14 +5371,14 @@ class Surface3DDialog(QDialog):
     ) -> None:
         fig = self._colorbar_canvas.figure
         fig.clf()
-        ax = fig.add_axes([0.24, 0.08, 0.6, 0.84])
+        ax = fig.add_axes([0.32, 0.08, 0.5, 0.84])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         fig.colorbar(mappable, cax=ax)
         ax.yaxis.set_ticks_position("right")
         ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color)
-        ax.tick_params(colors=self._fg_color, which="both")
+        ax.set_ylabel(label, color=self._fg_color, labelpad=18)
+        ax.tick_params(colors=self._fg_color, which="both", labelsize=9)
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
         ax.set_facecolor(self._canvas_bg)
@@ -4999,24 +5434,47 @@ class Surface3DDialog(QDialog):
         self._current_bounds = (mins, maxs)
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
-        self._update_axis_item()
+        self._update_axis_item((mins, maxs))
 
-    def _update_axis_item(self) -> None:
-        if self._axis_item is not None:
-            self.view.removeItem(self._axis_item)
-            self._axis_item = None
-        if not self.axes_checkbox.isChecked() or self._current_bounds is None:
+    def _update_axis_item(
+        self, bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+    ) -> None:
+        if not HAS_PYQTGRAPH:
             return
-        mins, maxs = self._current_bounds
-        spans = np.maximum(maxs - mins, 1e-3)
-        axis = gl.GLAxisItem()
-        axis.setSize(spans[0], spans[1], spans[2])
-        axis.translate(float(mins[0]), float(mins[1]), float(mins[2]))
-        self.view.addItem(axis)
-        self._axis_item = axis
 
-    def _on_axes_toggle(self, _checked: bool) -> None:
+        if not self.axes_checkbox.isChecked():
+            if self._axis_item is not None:
+                self.view.removeItem(self._axis_item)
+                self._axis_item = None
+            return
+
+        if bounds is None:
+            bounds = self._current_bounds
+        if bounds is None:
+            return
+
+        mins, maxs = bounds
+        if self._axis_item is None:
+            axis = _BidirectionalAxes(QColor(self._fg_color), line_width=self._axis_line_width)
+            axis.set_axis_labels(self._axis_codes)
+            axis.update_geometry(mins, maxs)
+            self.view.addItem(axis)
+            self._axis_item = axis
+        else:
+            self._axis_item.set_text_color(QColor(self._fg_color))
+            self._axis_item.set_axis_labels(self._axis_codes)
+            self._axis_item.set_line_width(self._axis_line_width)
+            self._axis_item.update_geometry(mins, maxs)
+
+    def _on_axes_toggle(self, checked: bool) -> None:
+        self.axis_width_spin.setEnabled(checked)
         self._update_axis_item()
+
+    def _on_axis_width_change(self, value: float) -> None:
+        self._axis_line_width = float(value)
+        if self._axis_item is not None:
+            self._axis_item.set_line_width(self._axis_line_width)
+            self.view.update()
 
     def _on_scalar_change(self, _index: int) -> None:
         self._update_plot()
@@ -5087,7 +5545,7 @@ class Surface3DDialog(QDialog):
             else:
                 self._mesh_item.setShader("shaded")
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_alpha_gl_options(self._mesh_item, alpha)
 
         mins = np.min(self._vertices, axis=0)
         maxs = np.max(self._vertices, axis=0)
@@ -5215,10 +5673,22 @@ class MetadataViewer(QWidget):
         vector axis so the rest of the viewer can render it correctly.
         """
 
+        base_meta: dict[str, Any] = {}
+        try:
+            codes = aff2axcodes(img.affine)
+        except Exception:  # pragma: no cover - defensive fallback for bad affines
+            codes = None
+        if codes:
+            cleaned = [str(code).strip().upper() for code in codes[:3] if code]
+            if cleaned:
+                while len(cleaned) < 3:
+                    cleaned.append(cleaned[-1])
+                base_meta["axis_labels"] = tuple(cleaned[:3])
+
         dtype_exc = None
         try:
             data = img.get_fdata()
-            return data, {}
+            return data, base_meta
         except Exception as exc:
             # Only handle the structured-dtype failure; re-raise other errors so
             # they surface during debugging instead of being silently masked.
@@ -5261,6 +5731,7 @@ class MetadataViewer(QWidget):
             "is_rgb": vector_length in (3, 4)
             and unstructured.ndim == dataobj.ndim + 1,
         }
+        meta.update(base_meta)
         # ``structured_to_unstructured`` already yields a float array when the
         # original data was floating point.  Cast explicitly to float32 so we do
         # not unnecessarily inflate the array when the original values were
