@@ -2867,19 +2867,8 @@ class BIDSManager(QMainWindow):
         p = Path(self.model.filePath(idx))
         self.selected = p
         ext = _get_ext(p)
-        lower_name = p.name.lower()
-        gifti_candidate = any(lower_name.endswith(suffix) for suffix in GIFTI_SURFACE_SUFFIXES)
-        freesurfer_candidate = any(
-            lower_name.endswith(suffix) for suffix in FREESURFER_SURFACE_SUFFIXES
-        )
-        # ``is_dicom_file`` also checks for files without an extension.
-        dicom_like = is_dicom_file(str(p))
-        if (
-            ext in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm']
-            or dicom_like
-            or gifti_candidate
-            or freesurfer_candidate
-        ):
+        # ``is_dicom_file`` also checks for files without an extension
+        if ext in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm'] or is_dicom_file(str(p)):
             self.viewer.load_file(p)
 
     def updateStats(self):
@@ -3809,17 +3798,6 @@ class Volume3DDialog(QDialog):
         self._initialising = True
         self._scalar_min = 0.0
         self._scalar_max = 0.0
-        # Sorted voxel caches are built lazily for the point-cloud renderer so
-        # slider interactions can reuse thresholded subsets without scanning the
-        # entire volume on every frame.
-        self._point_sorted_values: Optional[np.ndarray] = None
-        self._point_sorted_indices: Optional[np.ndarray] = None
-        self._point_shape: Optional[tuple[int, int, int]] = None
-        # Histogram data summarises the full-resolution scalar volume, allowing
-        # us to estimate voxel populations above a threshold without repeatedly
-        # walking through the whole array.
-        self._scalar_hist_upper_edges: Optional[np.ndarray] = None
-        self._scalar_hist_cumulative: Optional[np.ndarray] = None
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -4076,32 +4054,7 @@ class Volume3DDialog(QDialog):
             else:
                 norm = (scalar - min_val) / (max_val - min_val)
                 self._normalised_volume = norm.astype(np.float32, copy=False)
-        self._build_scalar_histogram()
         self._prepare_downsampled()
-
-    def _build_scalar_histogram(self) -> None:
-        """Summarise the normalised volume with a compact histogram cache."""
-
-        self._scalar_hist_upper_edges = None
-        self._scalar_hist_cumulative = None
-        volume = self._normalised_volume
-        if volume is None:
-            return
-
-        flattened = np.asarray(volume, dtype=np.float32).ravel()
-        if flattened.size == 0:
-            self._scalar_hist_upper_edges = np.empty(0, dtype=np.float32)
-            self._scalar_hist_cumulative = np.empty(0, dtype=np.int64)
-            return
-
-        # ``numpy.histogram`` is considerably faster than repeatedly counting
-        # voxels above a threshold in the full array. 512 bins strike a balance
-        # between resolution and cache size.
-        edges = np.linspace(0.0, 1.0, 513, dtype=np.float32)
-        counts, _ = np.histogram(flattened, bins=edges)
-        cumulative = np.cumsum(counts[::-1], dtype=np.int64)[::-1]
-        self._scalar_hist_upper_edges = edges[1:]
-        self._scalar_hist_cumulative = cumulative
 
     def _prepare_downsampled(self) -> None:
         vol = self._normalised_volume
@@ -4123,89 +4076,6 @@ class Volume3DDialog(QDialog):
         slices = tuple(slice(None, None, step) for _ in range(3))
         self._downsampled = vol[slices]
         self._downsample_step = step
-        self._rebuild_point_cache()
-
-    def _rebuild_point_cache(self) -> None:
-        """Pre-compute sorted voxel intensities for rapid thresholding."""
-
-        self._point_sorted_values = None
-        self._point_sorted_indices = None
-        self._point_shape = None
-        downsampled = self._downsampled
-        if downsampled is None:
-            return
-
-        flat = np.asarray(downsampled, dtype=np.float32).ravel()
-        self._point_shape = downsampled.shape
-        if flat.size == 0:
-            self._point_sorted_values = np.empty(0, dtype=np.float32)
-            self._point_sorted_indices = np.empty(0, dtype=np.int64)
-            return
-
-        order = np.argsort(flat, kind="mergesort")
-        self._point_sorted_indices = order.astype(np.int64, copy=False)
-        self._point_sorted_values = flat.take(order)
-
-    def _indices_to_world(
-        self, indices: np.ndarray, shape: tuple[int, int, int], scale: np.ndarray
-    ) -> np.ndarray:
-        """Convert flattened indices into XYZ millimetre coordinates."""
-
-        coords_mm = np.empty((indices.size, 3), dtype=np.float32)
-        if indices.size == 0:
-            return coords_mm
-
-        plane = int(shape[1]) * int(shape[2])
-        axis0 = indices // plane
-        remainder = indices - axis0 * plane
-        axis1 = remainder // int(shape[2])
-        axis2 = remainder - axis1 * int(shape[2])
-
-        coords_mm[:, 0] = axis0.astype(np.float32, copy=False)
-        coords_mm[:, 1] = axis1.astype(np.float32, copy=False)
-        coords_mm[:, 2] = axis2.astype(np.float32, copy=False)
-        coords_mm *= scale
-        return coords_mm
-
-    def _estimate_voxels_above_threshold(self, thr: float) -> int:
-        """Return an approximate count of voxels ≥ ``thr`` using the histogram."""
-
-        if self._scalar_hist_upper_edges is None or self._scalar_hist_cumulative is None:
-            if self._normalised_volume is None:
-                return 0
-            return int(np.count_nonzero(self._normalised_volume >= thr))
-
-        idx = int(np.searchsorted(self._scalar_hist_upper_edges, thr, side="left"))
-        if idx >= self._scalar_hist_cumulative.size:
-            return 0
-        return int(self._scalar_hist_cumulative[idx])
-
-    def _handle_empty_point_cloud(
-        self, shape: Sequence[int], scale: np.ndarray, thr: float
-    ) -> None:
-        """Update the axes and status message when no voxels survive a threshold."""
-
-        spans = np.maximum((np.asarray(shape, dtype=np.float32) - 1.0) * scale, 1e-3)
-        self.ax.text(
-            0.5,
-            0.5,
-            0.5,
-            "No voxels above threshold",
-            transform=self.ax.transAxes,
-            ha="center",
-            va="center",
-            color=self._fg_color,
-        )
-        self.ax.set_xlim(0.0, spans[0])
-        self.ax.set_ylim(0.0, spans[1])
-        self.ax.set_zlim(0.0, spans[2])
-        self.ax.set_box_aspect(spans)
-        self.ax.set_xlabel("Left–Right (mm)")
-        self.ax.set_ylabel("Posterior–Anterior (mm)")
-        self.ax.set_zlabel("Inferior–Superior (mm)")
-        self.status_label.setText(
-            f"No voxels above threshold {thr:.2f}. Lower the threshold to reveal data."
-        )
 
     def _update_plot(self):
         if self._downsampled is None or self._normalised_volume is None:
@@ -4244,59 +4114,42 @@ class Volume3DDialog(QDialog):
 
         step = self._downsample_step
         scale = self._voxel_sizes_vec * float(step)
-        shape = self._point_shape or downsampled.shape
-        sorted_values = self._point_sorted_values
-        sorted_indices = self._point_sorted_indices
+        mask = downsampled >= thr
+        coords = np.argwhere(mask)
+        shape = downsampled.shape
 
-        coords_mm: Optional[np.ndarray]
-        values: Optional[np.ndarray]
-        coords_mm = None
-        values = None
+        if coords.size == 0:
+            spans = np.maximum((np.asarray(shape, dtype=np.float32) - 1.0) * scale, 1e-3)
+            self.ax.text(
+                0.5,
+                0.5,
+                0.5,
+                "No voxels above threshold",
+                transform=self.ax.transAxes,
+                ha="center",
+                va="center",
+                color=self._fg_color,
+            )
+            self.ax.set_xlim(0.0, spans[0])
+            self.ax.set_ylim(0.0, spans[1])
+            self.ax.set_zlim(0.0, spans[2])
+            self.ax.set_box_aspect(spans)
+            self.ax.set_xlabel("Left–Right (mm)")
+            self.ax.set_ylabel("Posterior–Anterior (mm)")
+            self.ax.set_zlabel("Inferior–Superior (mm)")
+            self.status_label.setText(
+                f"No voxels above threshold {thr:.2f}. Lower the threshold to reveal data."
+            )
+            return
 
-        if (
-            sorted_values is None
-            or sorted_indices is None
-            or self._point_shape is None
-            or sorted_values.size == 0
-        ):
-            mask = downsampled >= thr
-            coords = np.argwhere(mask)
-            if coords.size == 0:
-                self._handle_empty_point_cloud(shape, scale, thr)
-                return
-            coords_mm = coords.astype(np.float32, copy=False)
-            coords_mm *= scale
-            values = downsampled[mask].astype(np.float32, copy=False)
-        else:
-            start = int(np.searchsorted(sorted_values, thr, side="left"))
-            if start >= sorted_values.size:
-                self._handle_empty_point_cloud(shape, scale, thr)
-                return
-
-            selected_indices = sorted_indices[start:]
-            selected_values = sorted_values[start:]
-            if selected_indices.size > self._max_points:
-                # Evenly sample from the sorted subset to respect the display cap
-                # without biasing towards any specific region.
-                sample_idx = np.linspace(
-                    0, selected_indices.size - 1, self._max_points, dtype=np.int64
-                )
-                selected_indices = selected_indices[sample_idx]
-                selected_values = selected_values[sample_idx]
-
-            if selected_indices.size == 0:
-                self._handle_empty_point_cloud(shape, scale, thr)
-                return
-
-            if selected_indices.size > 1:
-                # Re-establish spatial ordering so the scatter uses consistent
-                # axis-aligned strides independent of intensity ordering.
-                order = np.argsort(selected_indices, kind="mergesort")
-                selected_indices = selected_indices[order]
-                selected_values = selected_values[order]
-
-            coords_mm = self._indices_to_world(selected_indices, shape, scale)
-            values = selected_values.astype(np.float32, copy=False)
+        coords_mm = coords.astype(np.float32, copy=False)
+        coords_mm *= scale
+        values = downsampled[mask].astype(np.float32, copy=False)
+        displayed = coords_mm.shape[0]
+        if displayed > self._max_points:
+            idx = np.linspace(0, displayed - 1, self._max_points, dtype=np.int64)
+            coords_mm = coords_mm[idx]
+            values = values[idx]
 
         norm = plt.Normalize(0.0, 1.0)
         sc = self.ax.scatter(
@@ -4323,7 +4176,7 @@ class Volume3DDialog(QDialog):
         self._create_colorbar(sc)
         self._apply_colorbar_theme()
 
-        total_voxels = self._estimate_voxels_above_threshold(thr)
+        total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
         spin = getattr(self, "downsample_spin", None)
         downsample_source = "manual" if spin and spin.value() > 0 else "auto"
         self.status_label.setText(
@@ -4331,7 +4184,7 @@ class Volume3DDialog(QDialog):
             f"{coords_mm.shape[0]:,} voxels (threshold {thr:.2f}, opacity {alpha:.2f}, "
             f"point size {self.point_slider.value()}). "
             f"Downsample step {step} ({downsample_source}); "
-            f"≈ total voxels ≥ threshold {total_voxels:,}."
+            f"total voxels ≥ threshold {total_voxels:,}."
         )
 
     def _draw_surface_mesh(self, thr: float, cmap_name: str, alpha: float) -> None:
