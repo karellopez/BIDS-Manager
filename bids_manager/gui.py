@@ -3970,7 +3970,6 @@ class Volume3DDialog(QDialog):
         self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._colormap_cache: dict[tuple[str, float], mcolors.Colormap] = {}
         self._light_shader = _create_directional_light_shader()
-        self._lighting_enabled = self._light_shader is not None
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -4787,7 +4786,7 @@ class Volume3DDialog(QDialog):
 
     def _update_light_shader(self) -> None:
         shader = self._light_shader
-        if shader is None or not getattr(self, "_lighting_enabled", False):
+        if shader is None:
             return
         azimuth = math.radians(self.light_azimuth_slider.value())
         elevation = math.radians(self.light_elevation_slider.value())
@@ -5335,7 +5334,6 @@ class Surface3DDialog(QDialog):
         self._axis_label_items: list[gl.GLTextItem] = []
         self._data_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._slice_controls: dict[str, _SliceControl] = {}
-        self._layout_mode: str = "bottom"
 
         self._scalar_fields: dict[str, np.ndarray] = {}
         if scalars:
@@ -5359,20 +5357,15 @@ class Surface3DDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # ``QSplitter`` lets the settings pane collapse or relocate without
-        # rebuilding the OpenGL viewport.  The pane can be docked below, left of
-        # or right of the renderer depending on user preference.
-        self._splitter = QSplitter(Qt.Vertical)
-        self._splitter.setChildrenCollapsible(False)
-        self._splitter.setHandleWidth(12)
-        layout.addWidget(self._splitter)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(12)
+        layout.addWidget(splitter)
 
-        # Wrap the view in a container so it can be re-parented when the
-        # splitter orientation changes.
-        self._view_container = QWidget()
-        view_layout = QVBoxLayout(self._view_container)
-        view_layout.setContentsMargins(0, 0, 0, 0)
-        view_layout.setSpacing(0)
+        display_container = QWidget()
+        display_layout = QHBoxLayout(display_container)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.setSpacing(8)
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the mesh when interacting with the viewport.
@@ -5382,44 +5375,21 @@ class Surface3DDialog(QDialog):
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
         self.view.opts["azimuth"] = -60
-        view_layout.addWidget(self.view)
-        self._splitter.addWidget(self._view_container)
+        display_layout.addWidget(self.view, stretch=1)
+
+        # A dedicated matplotlib canvas is reused for colour bars so we can keep
+        # the interactive OpenGL viewport focused solely on geometry updates.
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.6, 4.2)))
+        self._colorbar_canvas.setFixedWidth(190)
+        self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
+        display_layout.addWidget(self._colorbar_canvas)
+
+        splitter.addWidget(display_container)
 
         settings_container = QWidget()
         settings_layout = QVBoxLayout(settings_container)
         settings_layout.setContentsMargins(6, 6, 6, 6)
         settings_layout.setSpacing(10)
-
-        # Users can reposition the combined parameter/colour-bar pane without
-        # recreating widgets.  The row is wrapped in a widget so subclasses can
-        # easily hide the controls when a simpler layout is desired.
-        self.panel_layout_widget = QWidget()
-        panel_layout = QHBoxLayout(self.panel_layout_widget)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(8)
-        panel_layout.addWidget(QLabel("Panel position:"))
-        self.panel_position_combo = QComboBox()
-        self.panel_position_combo.addItem("Bottom", userData="bottom")
-        self.panel_position_combo.addItem("Left", userData="left")
-        self.panel_position_combo.addItem("Right", userData="right")
-        panel_layout.addWidget(self.panel_position_combo, 1)
-        panel_layout.addStretch()
-        settings_layout.addWidget(self.panel_layout_widget)
-
-        # A dedicated matplotlib canvas is reused for colour bars so we can keep
-        # the interactive OpenGL viewport focused solely on geometry updates.
-        colour_group = QGroupBox("Colour bar")
-        colour_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        colour_layout = QVBoxLayout(colour_group)
-        colour_layout.setContentsMargins(8, 6, 8, 6)
-        colour_layout.setSpacing(6)
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.6, 2.4)))
-        self._colorbar_canvas.setMinimumHeight(170)
-        self._colorbar_canvas.setMaximumHeight(260)
-        self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
-        colour_layout.addWidget(self._colorbar_canvas)
-        settings_layout.addWidget(colour_group)
 
         scalar_row = QHBoxLayout()
         scalar_row.setContentsMargins(0, 0, 0, 0)
@@ -5515,8 +5485,8 @@ class Surface3DDialog(QDialog):
         axes_layout.addWidget(self.axis_labels_checkbox, row, 0, 1, 3)
         settings_layout.addWidget(axes_group)
 
-        self.slice_group = QGroupBox("Slice planes")
-        slice_layout = QVBoxLayout(self.slice_group)
+        slice_group = QGroupBox("Slice planes")
+        slice_layout = QVBoxLayout(slice_group)
         slice_layout.setContentsMargins(8, 4, 8, 4)
         slice_layout.setSpacing(6)
         self._slice_controls.clear()
@@ -5565,16 +5535,11 @@ class Surface3DDialog(QDialog):
                 lambda value, name=key: self._on_slice_slider_change(name, "max", value)
             )
         slice_layout.addStretch()
-        settings_layout.addWidget(self.slice_group)
+        settings_layout.addWidget(slice_group)
 
         self.lighting_group = QGroupBox("Lighting")
         light_layout = QGridLayout(self.lighting_group)
         light_row = 0
-        self._lighting_enabled = self._light_shader is not None
-        self.light_enabled_checkbox = QCheckBox("Enable directional light")
-        self.light_enabled_checkbox.setChecked(self._lighting_enabled)
-        light_layout.addWidget(self.light_enabled_checkbox, light_row, 0, 1, 3)
-        light_row += 1
         light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
         self.light_azimuth_slider = QSlider(Qt.Horizontal)
         self.light_azimuth_slider.setRange(-180, 180)
@@ -5610,13 +5575,7 @@ class Surface3DDialog(QDialog):
         self.light_intensity_label = QLabel("1.30×")
         light_layout.addWidget(self.light_intensity_label, light_row, 2)
         if self._light_shader is None:
-            self.light_enabled_checkbox.setEnabled(False)
-            self.light_azimuth_slider.setEnabled(False)
-            self.light_elevation_slider.setEnabled(False)
-            self.light_intensity_slider.setEnabled(False)
-            self.lighting_group.setToolTip(
-                "Directional lighting requires the optional shader support in PyQtGraph."
-            )
+            self.lighting_group.setEnabled(False)
         settings_layout.addWidget(self.lighting_group)
 
         self.status_label = QLabel("")
@@ -5624,12 +5583,13 @@ class Surface3DDialog(QDialog):
         settings_layout.addWidget(self.status_label)
         settings_layout.addStretch()
 
-        self._settings_scroll = QScrollArea()
-        self._settings_scroll.setWidget(settings_container)
-        self._settings_scroll.setWidgetResizable(True)
-        self._settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._splitter.addWidget(self._settings_scroll)
-        self._apply_layout_mode(self._layout_mode)
+        scroll = QScrollArea()
+        scroll.setWidget(settings_container)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        splitter.addWidget(scroll)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 1)
 
         self.scalar_combo.currentIndexChanged.connect(self._on_scalar_change)
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_change)
@@ -5638,13 +5598,10 @@ class Surface3DDialog(QDialog):
         self.axes_checkbox.toggled.connect(self._on_axes_toggle)
         self.axis_thickness_slider.valueChanged.connect(self._on_axis_thickness_change)
         self.axis_labels_checkbox.toggled.connect(self._on_axis_labels_toggle)
-        self.panel_position_combo.currentIndexChanged.connect(self._on_panel_position_change)
-        self.light_enabled_checkbox.toggled.connect(self._on_light_enabled_toggle)
         self.light_azimuth_slider.valueChanged.connect(self._on_light_setting_change)
         self.light_elevation_slider.valueChanged.connect(self._on_light_setting_change)
         self.light_intensity_slider.valueChanged.connect(self._on_light_setting_change)
 
-        self._on_light_enabled_toggle(self.light_enabled_checkbox.isChecked())
         # Prepare labels and shader uniforms before the first draw call.
         self._on_axis_thickness_change(self.axis_thickness_slider.value())
         self._update_slice_labels()
@@ -5849,7 +5806,7 @@ class Surface3DDialog(QDialog):
     ) -> None:
         fig = self._colorbar_canvas.figure
         fig.clf()
-        ax = fig.add_axes([0.32, 0.12, 0.5, 0.78])
+        ax = fig.add_axes([0.28, 0.1, 0.58, 0.82])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         fig.colorbar(mappable, cax=ax)
@@ -5898,30 +5855,11 @@ class Surface3DDialog(QDialog):
     def _on_light_setting_change(self, _value: int) -> None:
         self._update_light_labels()
         self._update_light_shader()
-        if self._initialising or not getattr(self, "_lighting_enabled", False):
+        if self._initialising:
             return
         if self._mesh_item is not None:
             self._mesh_item.update()
             self.view.update()
-
-    def _on_light_enabled_toggle(self, checked: bool) -> None:
-        has_shader = self._light_shader is not None
-        enabled = bool(checked and has_shader)
-        self._lighting_enabled = enabled
-        for slider in (
-            self.light_azimuth_slider,
-            self.light_elevation_slider,
-            self.light_intensity_slider,
-        ):
-            slider.setEnabled(enabled)
-        if self._mesh_item is not None:
-            if enabled and has_shader:
-                self._mesh_item.setShader(self._light_shader)
-                self._update_light_shader()
-            else:
-                self._mesh_item.setShader("shaded")
-            if not self._initialising:
-                self.view.update()
 
     def _update_scene_bounds(self, mins: np.ndarray, maxs: np.ndarray) -> None:
         spans = np.maximum(maxs - mins, 1e-3)
@@ -5932,152 +5870,6 @@ class Surface3DDialog(QDialog):
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
         self._update_axis_item()
-
-    def _on_panel_position_change(self, index: int) -> None:
-        mode = self.panel_position_combo.itemData(index)
-        if not mode:
-            return
-        self._apply_layout_mode(str(mode))
-
-    def _apply_layout_mode(self, mode: str) -> None:
-        if not hasattr(self, "_splitter"):
-            return
-        if mode == "left":
-            orientation = Qt.Horizontal
-            order = (self._settings_scroll, self._view_container)
-            stretches = (1, 4)
-        elif mode == "right":
-            orientation = Qt.Horizontal
-            order = (self._view_container, self._settings_scroll)
-            stretches = (4, 1)
-        else:
-            mode = "bottom"
-            orientation = Qt.Vertical
-            order = (self._view_container, self._settings_scroll)
-            stretches = (4, 1)
-
-        self._splitter.blockSignals(True)
-        for widget in (self._view_container, self._settings_scroll):
-            idx = self._splitter.indexOf(widget)
-            if idx != -1:
-                self._splitter.widget(idx).setParent(None)
-        self._splitter.setOrientation(orientation)
-        for widget in order:
-            self._splitter.addWidget(widget)
-        self._splitter.setStretchFactor(0, stretches[0])
-        self._splitter.setStretchFactor(1, stretches[1])
-        self._splitter.blockSignals(False)
-        self._layout_mode = mode
-
-    def _remove_axis_labels(self) -> None:
-        if not self._axis_label_items:
-            return
-        for item in self._axis_label_items:
-            try:
-                self.view.removeItem(item)
-            except Exception:  # pragma: no cover - defensive cleanup
-                continue
-        self._axis_label_items.clear()
-
-    def _update_axis_labels(self) -> None:
-        self._remove_axis_labels()
-        if (
-            getattr(self, "axis_labels_checkbox", None) is None
-            or not self.axes_checkbox.isChecked()
-            or not self.axis_labels_checkbox.isChecked()
-            or self._current_bounds is None
-        ):
-            return
-        mins, maxs = self._current_bounds
-        spans = np.maximum(maxs - mins, 1e-6)
-        safe_spans = np.where(spans > 0, spans, 1.0)
-        centre = (mins + maxs) / 2.0
-        offsets = safe_spans * 0.05
-        colour = QColor(self._fg_color)
-        font = QFont("Helvetica", 13)
-
-        for _name, axis_idx, neg_name, pos_name in _SLICE_ORIENTATIONS:
-            if axis_idx == 0:
-                neg_pos = [
-                    float(mins[0] - offsets[0]),
-                    float(centre[1]),
-                    float(centre[2]),
-                ]
-                pos_pos = [
-                    float(maxs[0] + offsets[0]),
-                    float(centre[1]),
-                    float(centre[2]),
-                ]
-            elif axis_idx == 1:
-                neg_pos = [
-                    float(centre[0]),
-                    float(mins[1] - offsets[1]),
-                    float(centre[2]),
-                ]
-                pos_pos = [
-                    float(centre[0]),
-                    float(maxs[1] + offsets[1]),
-                    float(centre[2]),
-                ]
-            else:
-                neg_pos = [
-                    float(centre[0]),
-                    float(centre[1]),
-                    float(mins[2] - offsets[2]),
-                ]
-                pos_pos = [
-                    float(centre[0]),
-                    float(centre[1]),
-                    float(maxs[2] + offsets[2]),
-                ]
-            for text, position in ((neg_name, neg_pos), (pos_name, pos_pos)):
-                label = gl.GLTextItem()
-                label.setData(text=text, pos=position, color=colour, font=font)
-                self.view.addItem(label)
-                self._axis_label_items.append(label)
-
-    def _update_axis_item(self) -> None:
-        if self._axis_item is not None:
-            self.view.removeItem(self._axis_item)
-            self._axis_item = None
-        if not self.axes_checkbox.isChecked() or self._current_bounds is None:
-            self._remove_axis_labels()
-            return
-        mins, maxs = self._current_bounds
-        spans = np.maximum(maxs - mins, 1e-3)
-        axis = _AdjustableAxisItem() if "_AdjustableAxisItem" in globals() else gl.GLAxisItem()
-        axis.setSize(spans[0], spans[1], spans[2])
-        axis.translate(float(mins[0]), float(mins[1]), float(mins[2]))
-        thickness = getattr(self, "axis_thickness_slider", None)
-        if thickness is not None and hasattr(axis, "setLineWidth"):
-            axis.setLineWidth(float(thickness.value()))
-        self.view.addItem(axis)
-        self._axis_item = axis
-        self._update_axis_labels()
-
-    def _on_axes_toggle(self, checked: bool) -> None:
-        slider = getattr(self, "axis_thickness_slider", None)
-        if slider is not None:
-            slider.setEnabled(checked)
-        label_cb = getattr(self, "axis_labels_checkbox", None)
-        if label_cb is not None:
-            label_cb.setEnabled(checked)
-            if not checked:
-                self._remove_axis_labels()
-        self._update_axis_item()
-
-    def _on_axis_thickness_change(self, value: int) -> None:
-        if hasattr(self, "axis_thickness_value"):
-            self.axis_thickness_value.setText(f"{value} px")
-        if self._axis_item is not None and hasattr(self._axis_item, "setLineWidth"):
-            self._axis_item.setLineWidth(float(value))
-            self.view.update()
-
-    def _on_axis_labels_toggle(self, checked: bool) -> None:
-        if not checked:
-            self._remove_axis_labels()
-        else:
-            self._update_axis_labels()
 
     def _on_scalar_change(self, _index: int) -> None:
         self._update_plot()
@@ -6162,8 +5954,7 @@ class Surface3DDialog(QDialog):
             summary += "Constant colouring applied. "
 
         if self._mesh_item is None:
-            use_shader = self._lighting_enabled and self._light_shader is not None
-            shader = self._light_shader if use_shader else "shaded"
+            shader = self._light_shader if self._light_shader is not None else "shaded"
             self._mesh_item = gl.GLMeshItem(
                 meshdata=meshdata,
                 smooth=False,
@@ -6173,7 +5964,7 @@ class Surface3DDialog(QDialog):
             self.view.addItem(self._mesh_item)
         else:
             self._mesh_item.setMeshData(meshdata=meshdata)
-            if self._lighting_enabled and self._light_shader is not None:
+            if self._light_shader is not None:
                 self._mesh_item.setShader(self._light_shader)
             else:
                 self._mesh_item.setShader("shaded")
@@ -6189,54 +5980,6 @@ class Surface3DDialog(QDialog):
             summary += " Select a scalar field to colour the surface."
         summary += self._slice_status_suffix()
         self.status_label.setText(summary)
-
-
-class FreeSurferSurfaceDialog(Surface3DDialog):
-    """Simplified surface renderer tailored to FreeSurfer meshes."""
-
-    def __init__(
-        self,
-        parent,
-        vertices: np.ndarray,
-        faces: np.ndarray,
-        scalars: Optional[dict[str, np.ndarray]] = None,
-        meta: Optional[dict[str, Any]] = None,
-        title: Optional[str] = None,
-        dark_theme: bool = False,
-    ) -> None:
-        super().__init__(
-            parent,
-            vertices,
-            faces,
-            scalars=scalars,
-            meta=meta,
-            title=title,
-            dark_theme=dark_theme,
-        )
-
-        # FreeSurfer surfaces rarely benefit from slice planes, so collapse the
-        # slicer controls and clear any associated state for a cleaner UI.
-        if hasattr(self, "slice_group"):
-            self.slice_group.hide()
-        self._slice_controls.clear()
-
-        # Keep the control pane on the right to resemble the legacy viewer and
-        # hide layout selectors that are not needed in this streamlined mode.
-        if hasattr(self, "panel_layout_widget"):
-            self.panel_layout_widget.hide()
-        if hasattr(self, "panel_position_combo"):
-            idx = self.panel_position_combo.findData("right")
-            if idx >= 0:
-                self.panel_position_combo.blockSignals(True)
-                self.panel_position_combo.setCurrentIndex(idx)
-                self.panel_position_combo.blockSignals(False)
-            self.panel_position_combo.setEnabled(False)
-        self._apply_layout_mode("right")
-
-        # FreeSurfer meshes load quickly, so a smaller default window keeps the
-        # presentation compact while still allowing manual resizing.
-        self.setMinimumSize(720, 520)
-        self.resize(1000, 720)
 
 
 class MetadataViewer(QWidget):
@@ -6855,15 +6598,8 @@ class MetadataViewer(QWidget):
             else "Surface Viewer"
         )
 
-        surface_type = (self.surface_data or {}).get('type')
-        dialog_cls = (
-            FreeSurferSurfaceDialog
-            if surface_type == 'freesurfer'
-            else Surface3DDialog
-        )
-
         try:
-            dialog = dialog_cls(
+            dialog = Surface3DDialog(
                 self,
                 self.surface_data.get('vertices'),
                 self.surface_data.get('faces'),
