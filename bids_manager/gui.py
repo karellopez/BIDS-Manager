@@ -74,7 +74,8 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget,
+    QScrollArea,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
@@ -4165,10 +4166,16 @@ class Volume3DDialog(QDialog):
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+
+        content_layout = QHBoxLayout()
+        outer_layout.addLayout(content_layout, stretch=1)
+
+        view_column = QVBoxLayout()
+        content_layout.addLayout(view_column, stretch=1)
 
         display_layout = QHBoxLayout()
-        layout.addLayout(display_layout, stretch=1)
+        view_column.addLayout(display_layout, stretch=1)
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
@@ -4185,13 +4192,33 @@ class Volume3DDialog(QDialog):
 
         # A dedicated matplotlib canvas is reused for colour bars so we can keep
         # the interactive OpenGL viewport focused solely on geometry updates.
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.8, 4.2)))
-        self._colorbar_canvas.setFixedWidth(210)
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.2, 4.2)))
+        self._colorbar_canvas.setMinimumWidth(230)
+        self._colorbar_canvas.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         display_layout.addWidget(self._colorbar_canvas)
 
-        controls = QHBoxLayout()
-        layout.addLayout(controls)
+        # House the numerous configuration widgets in a scroll area so the OpenGL
+        # viewport can keep most of the dialog height while still exposing every
+        # control on smaller displays.
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        settings_scroll.setMinimumWidth(330)
+        content_layout.addWidget(settings_scroll)
+
+        settings_container = QWidget()
+        settings_scroll.setWidget(settings_container)
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(12)
+
+        controls_widget = QWidget()
+        controls = QHBoxLayout(controls_widget)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+        settings_layout.addWidget(controls_widget)
         agg_label = QLabel("Aggregation:")
         controls.addWidget(agg_label)
         self.agg_combo = QComboBox()
@@ -4220,8 +4247,10 @@ class Volume3DDialog(QDialog):
             "Minimum normalised intensity included in the rendering."
         )
         self.thresh_slider.valueChanged.connect(self._update_plot)
-        controls.addWidget(self.thresh_slider)
+        controls.addWidget(self.thresh_slider, stretch=1)
         self.thresh_label = QLabel("0.60")
+        self.thresh_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.thresh_label.setMinimumWidth(60)
         controls.addWidget(self.thresh_label)
         controls.addSpacing(12)
 
@@ -4233,10 +4262,10 @@ class Volume3DDialog(QDialog):
         self.point_slider.setToolTip("Marker diameter for point-cloud rendering.")
         self.point_slider.valueChanged.connect(self._update_plot)
         controls.addWidget(self.point_slider)
-        controls.addStretch()
+        controls.addStretch(1)
 
         options_group = QGroupBox("Rendering options")
-        layout.addWidget(options_group)
+        settings_layout.addWidget(options_group)
         options = QGridLayout(options_group)
 
         row = 0
@@ -4273,6 +4302,8 @@ class Volume3DDialog(QDialog):
         )
         options.addWidget(self.opacity_slider, row, 1)
         self.opacity_label = QLabel("0.80")
+        self.opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.opacity_label.setMinimumWidth(60)
         options.addWidget(self.opacity_label, row, 2)
 
         row += 1
@@ -4285,6 +4316,8 @@ class Volume3DDialog(QDialog):
         )
         options.addWidget(self.intensity_slider, row, 1)
         self.intensity_label = QLabel("1.00×")
+        self.intensity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.intensity_label.setMinimumWidth(60)
         options.addWidget(self.intensity_label, row, 2)
 
         row += 1
@@ -4335,10 +4368,12 @@ class Volume3DDialog(QDialog):
         )
         options.addWidget(self.axis_thickness_slider, row, 1)
         self.axis_thickness_label = QLabel("3 px")
+        self.axis_thickness_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.axis_thickness_label.setMinimumWidth(60)
         options.addWidget(self.axis_thickness_label, row, 2)
 
         self.slice_group = QGroupBox("Clipping planes")
-        layout.addWidget(self.slice_group)
+        settings_layout.addWidget(self.slice_group)
         slice_layout = QGridLayout(self.slice_group)
         slice_layout.setColumnStretch(1, 1)
         slice_hint = QLabel(
@@ -4375,7 +4410,7 @@ class Volume3DDialog(QDialog):
             self._update_slice_label(axis_idx, 0)
 
         self.lighting_group = QGroupBox("Lighting")
-        layout.addWidget(self.lighting_group)
+        settings_layout.addWidget(self.lighting_group)
         light_layout = QGridLayout(self.lighting_group)
         light_row = 0
         light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
@@ -4415,9 +4450,11 @@ class Volume3DDialog(QDialog):
         if self._light_shader is None:
             self.lighting_group.setEnabled(False)
 
+        settings_layout.addStretch(1)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        view_column.addWidget(self.status_label)
 
         default_name = None
         if default_mode and default_mode in self._aggregators:
@@ -4691,13 +4728,13 @@ class Volume3DDialog(QDialog):
         fig.clf()
         # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
         # persistent reference for the current normalisation range.
-        ax = fig.add_axes([0.30, 0.05, 0.6, 0.9])
+        ax = fig.add_axes([0.24, 0.08, 0.64, 0.84])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         fig.colorbar(mappable, cax=ax)
         ax.yaxis.set_ticks_position("right")
         ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color, labelpad=14)
+        ax.set_ylabel(label, color=self._fg_color, labelpad=18)
         ax.tick_params(colors=self._fg_color, which="both", pad=6)
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
@@ -5351,10 +5388,16 @@ class Surface3DDialog(QDialog):
         self._colormap_cache: dict[tuple[str, float], mcolors.Colormap] = {}
         self._light_shader = _create_directional_light_shader()
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+
+        content_layout = QHBoxLayout()
+        outer_layout.addLayout(content_layout, stretch=1)
+
+        view_column = QVBoxLayout()
+        content_layout.addLayout(view_column, stretch=1)
 
         display_layout = QHBoxLayout()
-        layout.addLayout(display_layout, stretch=1)
+        view_column.addLayout(display_layout, stretch=1)
 
         self.view = gl.GLViewWidget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -5364,13 +5407,33 @@ class Surface3DDialog(QDialog):
         self.view.opts["azimuth"] = -60
         display_layout.addWidget(self.view, stretch=1)
 
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(1.8, 4.2)))
-        self._colorbar_canvas.setFixedWidth(210)
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.2, 4.2)))
+        self._colorbar_canvas.setMinimumWidth(230)
+        self._colorbar_canvas.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         display_layout.addWidget(self._colorbar_canvas)
 
-        controls = QHBoxLayout()
-        layout.addLayout(controls)
+        # Mirror the volume viewer by placing the surface controls in a
+        # scrollable panel, freeing as much horizontal space as possible for the
+        # interactive renderer.
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        settings_scroll.setMinimumWidth(330)
+        content_layout.addWidget(settings_scroll)
+
+        settings_container = QWidget()
+        settings_scroll.setWidget(settings_container)
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(12)
+
+        controls_widget = QWidget()
+        controls = QHBoxLayout(controls_widget)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+        settings_layout.addWidget(controls_widget)
 
         controls.addWidget(QLabel("Scalar:"))
         self.scalar_combo = QComboBox()
@@ -5410,6 +5473,8 @@ class Surface3DDialog(QDialog):
         self.opacity_slider.valueChanged.connect(self._on_opacity_change)
         controls.addWidget(self.opacity_slider)
         self.opacity_label = QLabel("0.80")
+        self.opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.opacity_label.setMinimumWidth(60)
         controls.addWidget(self.opacity_label)
         controls.addSpacing(12)
 
@@ -5423,6 +5488,8 @@ class Surface3DDialog(QDialog):
         self.color_intensity_slider.valueChanged.connect(self._on_color_intensity_change)
         controls.addWidget(self.color_intensity_slider)
         self.color_intensity_label = QLabel("1.00×")
+        self.color_intensity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.color_intensity_label.setMinimumWidth(60)
         controls.addWidget(self.color_intensity_label)
         controls.addSpacing(12)
 
@@ -5436,15 +5503,57 @@ class Surface3DDialog(QDialog):
         self.axis_thickness_slider.setRange(1, 10)
         self.axis_thickness_slider.setValue(3)
         self.axis_thickness_slider.setEnabled(False)
-        self.axis_thickness_slider.setFixedWidth(120)
+        self.axis_thickness_slider.setFixedWidth(140)
         controls.addWidget(self.axis_thickness_slider)
         self.axis_thickness_label = QLabel("3 px")
+        self.axis_thickness_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.axis_thickness_label.setMinimumWidth(60)
         controls.addWidget(self.axis_thickness_label)
         self.axis_thickness_slider.valueChanged.connect(self._on_axis_thickness_change)
-        controls.addStretch()
+        controls.addStretch(1)
+
+        self.slice_group = QGroupBox("Clipping planes")
+        settings_layout.addWidget(self.slice_group)
+        slice_layout = QGridLayout(self.slice_group)
+        slice_layout.setColumnStretch(1, 1)
+        slice_hint = QLabel(
+            "Expose the surface interior by clipping geometry along anatomical axes."
+        )
+        slice_hint.setWordWrap(True)
+        slice_layout.addWidget(slice_hint, 0, 0, 1, 3)
+
+        self._slice_controls: list[tuple[QCheckBox, QSlider, QLabel]] = []
+        plane_rows = [
+            ("Sagittal (L/R)", 0),
+            ("Coronal (P/A)", 1),
+            ("Axial (I/S)", 2),
+        ]
+        for row, (title, axis_idx) in enumerate(plane_rows, start=1):
+            checkbox = QCheckBox(f"{title} clip")
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(-100, 100)
+            slider.setValue(0)
+            slider.setEnabled(False)
+            slider.setToolTip(
+                "Negative values remove the first label; positive values remove the second."
+            )
+            label = QLabel("Disabled")
+            label.setMinimumWidth(120)
+            slice_layout.addWidget(checkbox, row, 0)
+            slice_layout.addWidget(slider, row, 1)
+            slice_layout.addWidget(label, row, 2)
+            self._slice_controls.append((checkbox, slider, label))
+            checkbox.toggled.connect(
+                functools.partial(self._on_slice_toggle, axis_idx)
+            )
+            slider.valueChanged.connect(
+                functools.partial(self._on_slice_slider_change, axis_idx)
+            )
+        for axis_idx in range(len(self._slice_controls)):
+            self._update_slice_label(axis_idx, 0)
 
         self.lighting_group = QGroupBox("Lighting")
-        layout.addWidget(self.lighting_group)
+        settings_layout.addWidget(self.lighting_group)
         light_layout = QGridLayout(self.lighting_group)
         light_row = 0
         light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
@@ -5487,9 +5596,11 @@ class Surface3DDialog(QDialog):
         if self._light_shader is None:
             self.lighting_group.setEnabled(False)
 
+        settings_layout.addStretch(1)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        view_column.addWidget(self.status_label)
 
         # Prepare labels and shader uniforms before the first draw call.
         self._on_color_intensity_change(self.color_intensity_slider.value())
@@ -5660,6 +5771,122 @@ class Surface3DDialog(QDialog):
         if not self._initialising and self.axes_checkbox.isChecked():
             self._update_axis_item()
 
+    def _update_slice_label(self, axis: int, value: int) -> None:
+        checkbox, _slider, label = self._slice_controls[axis]
+        if not checkbox.isChecked():
+            label.setText("Disabled")
+            return
+        neg_label, pos_label = self._axis_label_pairs[axis]
+        magnitude = abs(int(value))
+        if value == 0:
+            label.setText("0% (center)")
+        elif value < 0:
+            label.setText(f"{magnitude}% from {neg_label}")
+        else:
+            label.setText(f"{magnitude}% from {pos_label}")
+
+    def _on_slice_toggle(self, axis: int, checked: bool) -> None:
+        checkbox, slider, _label = self._slice_controls[axis]
+        slider.setEnabled(checked)
+        if not checked:
+            slider.blockSignals(True)
+            slider.setValue(0)
+            slider.blockSignals(False)
+        self._update_slice_label(axis, slider.value())
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_slice_slider_change(self, axis: int, value: int) -> None:
+        self._update_slice_label(axis, value)
+        if not self._initialising:
+            self._update_plot()
+
+    def _slicing_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        mins = self._base_mins.copy()
+        maxs = self._base_maxs.copy()
+        for axis, (checkbox, slider, _label) in enumerate(self._slice_controls):
+            if not checkbox.isChecked():
+                continue
+            value = slider.value()
+            if value == 0:
+                continue
+            span = maxs[axis] - mins[axis]
+            if span <= 0:
+                continue
+            fraction = min(abs(value) / 100.0, 0.999)
+            delta = span * fraction
+            if value < 0:
+                mins[axis] += delta
+            else:
+                maxs[axis] -= delta
+        for axis in range(3):
+            if maxs[axis] - mins[axis] < 1e-3:
+                mid = (maxs[axis] + mins[axis]) / 2.0
+                mins[axis] = mid - 5e-4
+                maxs[axis] = mid + 5e-4
+        return mins, maxs
+
+    def _apply_mesh_slicing(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray]]:
+        """Return a geometry subset that honours the active clipping planes."""
+        if not self._slice_controls:
+            bounds = (self._base_mins.copy(), self._base_maxs.copy())
+            return (
+                self._vertices,
+                self._faces,
+                np.arange(self._vertices.shape[0], dtype=np.int64),
+                bounds,
+            )
+
+        bounds = self._slicing_bounds()
+        if self._faces.size == 0 or self._vertices.size == 0:
+            empty = np.empty(0, dtype=np.float32)
+            return (
+                empty.reshape(0, 3),
+                np.empty(0, dtype=np.int32).reshape(0, 3),
+                np.empty(0, dtype=np.int64),
+                bounds,
+            )
+
+        mins, maxs = bounds
+        tris = self._vertices[self._faces]
+        keep = np.ones(self._faces.shape[0], dtype=bool)
+        for axis in range(3):
+            axis_min = tris[:, :, axis].min(axis=1)
+            axis_max = tris[:, :, axis].max(axis=1)
+            keep &= axis_max >= mins[axis]
+            keep &= axis_min <= maxs[axis]
+
+        if keep.all():
+            return (
+                self._vertices,
+                self._faces,
+                np.arange(self._vertices.shape[0], dtype=np.int64),
+                bounds,
+            )
+
+        faces = self._faces[keep]
+        if faces.size == 0:
+            empty = np.empty(0, dtype=np.float32)
+            return (
+                empty.reshape(0, 3),
+                np.empty(0, dtype=np.int32).reshape(0, 3),
+                np.empty(0, dtype=np.int64),
+                bounds,
+            )
+
+        used_mask = np.zeros(self._vertices.shape[0], dtype=bool)
+        used_mask[faces.ravel()] = True
+        index_map = -np.ones(self._vertices.shape[0], dtype=np.int64)
+        # Compress the vertex array so ``MeshData`` and colour lookups can work on
+        # a tightly-packed representation without leaving dangling indices.
+        index_map[used_mask] = np.arange(int(used_mask.sum()), dtype=np.int64)
+        reduced_vertices = self._vertices[used_mask]
+        remapped_faces = index_map[faces]
+        used_indices = np.nonzero(used_mask)[0]
+        return reduced_vertices, remapped_faces, used_indices, bounds
+
     def _on_scalar_change(self, _index: int) -> None:
         self._update_plot()
 
@@ -5684,13 +5911,33 @@ class Surface3DDialog(QDialog):
         scalar_key = self.scalar_combo.currentData()
         cmap = self._get_adjusted_colormap(cmap_name)
 
-        meshdata = gl.MeshData(vertexes=self._vertices, faces=self._faces)
+        vertices, faces, used_indices, slice_bounds = self._apply_mesh_slicing()
+        if faces.size == 0 or vertices.size == 0:
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            mins, maxs = slice_bounds
+            self._update_scene_bounds(mins, maxs)
+            self.status_label.setText(
+                "Clipping removed the entire mesh; adjust the slicers to reveal geometry."
+            )
+            return
+
+        meshdata = gl.MeshData(vertexes=vertices, faces=faces)
         summary = (
-            f"Surface mesh: {self._vertices.shape[0]:,} vertices / {self._faces.shape[0]:,} faces. "
+            f"Surface mesh: {vertices.shape[0]:,} vertices / {faces.shape[0]:,} faces. "
         )
+        if faces.shape[0] != self._faces.shape[0]:
+            summary += (
+                f"(Clipped from {self._faces.shape[0]:,} faces.) "
+            )
 
         if scalar_key and scalar_key in self._scalar_fields:
-            values = self._scalar_fields[scalar_key]
+            source_values = self._scalar_fields[scalar_key]
+            if used_indices.size:
+                values = source_values[used_indices]
+            else:
+                values = np.empty(0, dtype=np.float32)
             vmin = float(np.min(values))
             vmax = float(np.max(values))
             if math.isclose(vmin, vmax):
@@ -5709,7 +5956,7 @@ class Surface3DDialog(QDialog):
                 [[base_color[0], base_color[1], base_color[2], base_color[3] * alpha]],
                 dtype=np.float32,
             )
-            meshdata.setVertexColors(np.repeat(colour, self._vertices.shape[0], axis=0))
+            meshdata.setVertexColors(np.repeat(colour, vertices.shape[0], axis=0))
             self._update_colorbar(cmap, 0.0, 1.0, label="Colormap preview")
             summary += "Constant colouring applied. "
 
@@ -5735,8 +5982,11 @@ class Surface3DDialog(QDialog):
             self._mesh_item.setGLOptions("opaque")
         self._mesh_item.enable_transparency_sort(alpha < 0.999)
 
-        mins = np.min(self._vertices, axis=0)
-        maxs = np.max(self._vertices, axis=0)
+        bounds_mins, bounds_maxs = slice_bounds
+        vert_mins = np.min(vertices, axis=0)
+        vert_maxs = np.max(vertices, axis=0)
+        mins = np.maximum(bounds_mins, vert_mins)
+        maxs = np.minimum(bounds_maxs, vert_maxs)
         self._update_scene_bounds(mins, maxs)
 
         summary += f"Opacity {alpha:.2f}."
