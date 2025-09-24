@@ -11,9 +11,12 @@ from pathlib import Path
 import importlib.util
 import subprocess
 import os
+from types import ModuleType, SimpleNamespace
 from typing import Dict, List, Optional
 import pandas as pd
 import re
+
+from bidsphysio import dcm2bidsphysio
 
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
@@ -37,14 +40,136 @@ def is_dicom_file(path: str) -> bool:
         return False
 
 # ────────────────── helpers ──────────────────
+def load_heuristic_module(heur: Path) -> ModuleType:
+    """Return the imported heuristic module located at ``heur``."""
+
+    spec = importlib.util.spec_from_file_location("heuristic", heur)
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    assert spec.loader
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
 def load_sid_map(heur: Path) -> Dict[str, str]:
     """Load the ``SID_MAP`` dictionary from a heuristic file."""
 
-    spec = importlib.util.spec_from_file_location("heuristic", heur)
-    module = importlib.util.module_from_spec(spec)         # type: ignore
-    assert spec.loader
-    spec.loader.exec_module(module)                        # type: ignore
-    return module.SID_MAP                                  # type: ignore
+    module = load_heuristic_module(heur)
+    return module.SID_MAP  # type: ignore[attr-defined]
+
+
+def _is_included(value: object) -> bool:
+    """Return ``True`` when the *include* column represents a truthy value."""
+
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text not in {"", "0", "false", "no"}
+
+
+def _map_physio_templates(module: ModuleType, df: pd.DataFrame) -> Dict[int, str]:
+    """Return mapping of DataFrame index → BIDS template for physio rows."""
+
+    info_func = getattr(module, "infotodict", None)
+    if info_func is None:
+        return {}
+
+    seqinfo = []
+    id_to_idx: Dict[str, int] = {}
+    counter = 0
+    for idx, row in df.iterrows():
+        folder = Path(str(row.get("source_folder", "") or ".")).name
+        sequence = str(row.get("sequence", ""))
+        uid_field = str(row.get("series_uid", ""))
+        uids = [u for u in uid_field.split("|") if u] or [""]
+        for uid in uids:
+            sid = f"physio{counter}"
+            counter += 1
+            seqinfo.append(
+                SimpleNamespace(
+                    series_description=sequence,
+                    dcm_dir_name=folder,
+                    series_uid=uid,
+                    series_id=sid,
+                )
+            )
+            id_to_idx[sid] = idx
+
+    if not seqinfo:
+        return {}
+
+    mapping: Dict[int, str] = {}
+    info = info_func(seqinfo)
+    for key, ids in info.items():
+        if not isinstance(key, tuple) or not key:
+            continue
+        template = key[0]
+        if not isinstance(template, str):
+            continue
+        for sid in ids:
+            idx = id_to_idx.get(sid)
+            if idx is not None and idx not in mapping:
+                mapping[idx] = template
+    return mapping
+
+
+def convert_physio_series(raw_root: Path,
+                          bids_out: Path,
+                          module: ModuleType,
+                          df: pd.DataFrame) -> None:
+    """Convert physiological DICOM series described in ``df`` using bidsphysio."""
+
+    if df.empty:
+        return
+
+    if "modality" not in df.columns:
+        return
+
+    physio_df = df[df["modality"].astype(str).str.lower() == "physio"].copy()
+    if physio_df.empty:
+        return
+
+    if "include" not in physio_df.columns:
+        return
+
+    physio_df = physio_df[physio_df["include"].apply(_is_included)]
+    if physio_df.empty:
+        return
+
+    template_map = _map_physio_templates(module, physio_df)
+    if not template_map:
+        print("No physio entries found in heuristic; skipping physiology conversion.")
+        return
+
+    converted: set[str] = set()
+    for idx, row in physio_df.iterrows():
+        template = template_map.get(idx)
+        if not template:
+            print(f"Skipping physio series '{row.get('sequence', '')}': no heuristic template match.")
+            continue
+
+        source_folder = str(row.get("source_folder", ""))
+        dicom_dir = raw_root / source_folder if source_folder else raw_root
+        if not dicom_dir.exists():
+            print(f"Physio source folder missing: {dicom_dir}")
+            continue
+
+        dicom_files = sorted(
+            f for f in dicom_dir.iterdir()
+            if f.is_file() and is_dicom_file(str(f))
+        )
+        if not dicom_files:
+            print(f"No DICOM physiolog files found in {dicom_dir}; skipping.")
+            continue
+
+        prefix_path = bids_out / template
+        prefix_path.parent.mkdir(parents=True, exist_ok=True)
+        prefix_str = str(prefix_path)
+        if prefix_str in converted:
+            continue
+
+        print(f"Converting physio {dicom_files[0]} → {prefix_path}")
+        dcm2bidsphysio.dcm2bids(str(dicom_files[0]), prefix_str)
+        converted.add(prefix_str)
 
 
 def clean_name(raw: str) -> str:
@@ -181,7 +306,8 @@ def run_heudiconv(raw_root: Path,
                   mapping_df: Optional[pd.DataFrame] = None) -> None:
     """Run HeuDiConv using ``heuristic`` and write output to ``bids_out``."""
 
-    sid_map          = load_sid_map(heuristic)          # cleaned → sub-XXX
+    heur_module      = load_heuristic_module(heuristic)
+    sid_map          = heur_module.SID_MAP              # type: ignore[attr-defined]
     clean2phys       = physical_by_clean(raw_root)
     cleaned_ids      = sorted(sid_map.keys())
     phys_folders     = [clean2phys[c] for c in cleaned_ids]
@@ -209,10 +335,12 @@ def run_heudiconv(raw_root: Path,
         subprocess.run(cmd, check=True)
 
     summary_path = bids_out / ".bids_manager" / "subject_summary.tsv"
+    physio_rows = pd.DataFrame()
     if mapping_df is not None:
         dataset = bids_out.name
         mdir = bids_out / ".bids_manager"
-        sub_df = mapping_df[mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset]
+        study_mask = mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset
+        sub_df = mapping_df[study_mask]
         if not sub_df.empty:
             mdir.mkdir(exist_ok=True)
             mapping_path = mdir / "subject_mapping.tsv"
@@ -225,12 +353,23 @@ def run_heudiconv(raw_root: Path,
                 combined = sub_df
             combined.to_csv(summary_path, sep="\t", index=False)
 
+            physio_rows = sub_df
+
             new_map = sub_df[["GivenName", "BIDS_name"]].drop_duplicates()
             if mapping_path.exists():
                 old_map = pd.read_csv(mapping_path, sep="\t", keep_default_na=False)
                 new_map = pd.concat([old_map, new_map], ignore_index=True)
                 new_map.drop_duplicates(subset=["GivenName", "BIDS_name"], inplace=True)
             new_map.to_csv(mapping_path, sep="\t", index=False)
+
+    if physio_rows.empty and summary_path.exists():
+        try:
+            physio_rows = pd.read_csv(summary_path, sep="\t", keep_default_na=False)
+        except Exception as exc:
+            print(f"Could not load summary for physio conversion: {exc}")
+            physio_rows = pd.DataFrame()
+
+    convert_physio_series(raw_root, bids_out, heur_module, physio_rows)
 
     # Always refresh participants.tsv from the accumulated summary
     write_participants(summary_path, bids_out)
