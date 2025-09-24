@@ -238,6 +238,31 @@ def _create_flat_color_shader():
     return shader_mod.ShaderProgram(None, [vertex, fragment], uniforms={})
 
 
+def _configure_translucent_mode(
+    item: "gl.GLGraphicsItem | None", alpha: float
+) -> None:
+    """Update the OpenGL blend/depth configuration for semi-transparent items.
+
+    ``pyqtgraph`` exposes a convenience preset named ``"translucent"`` which
+    enables alpha blending.  However, the preset leaves depth writes enabled,
+    meaning the first fragment that reaches the depth buffer prevents anything
+    behind it from contributing to the final colour.  When the camera rotates
+    this results in view-dependent dark patches that appear as if opacity were
+    suddenly increased.  Disabling depth writes while the item is translucent
+    allows all fragments to blend regardless of the viewing direction, removing
+    the artefact without affecting fully opaque rendering.
+    """
+
+    if item is None:
+        return
+
+    is_translucent = alpha < 0.999
+    item.setGLOptions("translucent" if is_translucent else "opaque")
+    depth_mask = (False,) if is_translucent else (True,)
+    # ``glDepthMask`` accepts a GLboolean so passing Python booleans is safe.
+    item.updateGLOptions({"glDepthMask": depth_mask})
+
+
 _SLICE_ORIENTATIONS = (
     ("sagittal", 0, "Left", "Right"),
     ("coronal", 1, "Posterior", "Anterior"),
@@ -5277,7 +5302,7 @@ class Volume3DDialog(QDialog):
             self._scatter_item = gl.GLScatterPlotItem(pxMode=True)
             self.view.addItem(self._scatter_item)
         self._scatter_item.setData(pos=coords_mm, color=colors, size=float(self.point_slider.value()))
-        self._scatter_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _configure_translucent_mode(self._scatter_item, alpha)
 
         mins = coords_mm.min(axis=0)
         maxs = coords_mm.max(axis=0)
@@ -5413,7 +5438,7 @@ class Volume3DDialog(QDialog):
             self._mesh_item.setMeshData(meshdata=meshdata)
 
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _configure_translucent_mode(self._mesh_item, alpha)
 
         mins = np.min(verts, axis=0)
         maxs = np.max(verts, axis=0)
@@ -6262,7 +6287,7 @@ class Surface3DDialog(QDialog):
         else:
             self._mesh_item.setMeshData(meshdata=meshdata)
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _configure_translucent_mode(self._mesh_item, alpha)
 
         mins = np.min(clipped_verts, axis=0)
         maxs = np.max(clipped_verts, axis=0)
@@ -6435,7 +6460,7 @@ class FreeSurferSurfaceDialog(QDialog):
 
         self._apply_mesh_shader()
         alpha = self.opacity_slider.value() / 100.0
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _configure_translucent_mode(self._mesh_item, alpha)
         if not self._initialising:
             self.view.update()
 
