@@ -238,6 +238,86 @@ def _create_flat_color_shader():
     return shader_mod.ShaderProgram(None, [vertex, fragment], uniforms={})
 
 
+# ``GLScatterPlotItem`` and ``GLMeshItem`` both write to the depth buffer by
+# default. This keeps opaque geometry crisp but prevents semi-transparent
+# volumes from accumulating colour correctly when viewed from different angles.
+# The lightweight subclasses below temporarily disable depth-buffer writes
+# while the item is drawn so alpha blending behaves naturally.
+_GL_MODULE = None
+_DepthAwareScatterItem = None
+_DepthAwareMeshItem = None
+
+if HAS_PYQTGRAPH and gl is not None:
+    try:  # Import lazily so headless test environments continue to work.
+        from OpenGL import GL as _GL_MODULE  # type: ignore
+    except Exception:  # pragma: no cover - OpenGL is optional at runtime
+        _GL_MODULE = None
+
+    class _DepthAwareScatterItem(gl.GLScatterPlotItem):
+        """Scatter plot item that can toggle depth writes for transparency."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._depth_writes_enabled = True
+
+        def setDepthWritesEnabled(self, enabled: bool) -> None:
+            """Enable or disable depth-buffer writes for this scatter item."""
+
+            enabled = bool(enabled)
+            if enabled == self._depth_writes_enabled:
+                return
+            self._depth_writes_enabled = enabled
+            self.update()
+
+        def paint(self):  # pragma: no cover - requires an OpenGL context
+            if _GL_MODULE is None or self._depth_writes_enabled:
+                super().paint()
+                return
+            _GL_MODULE.glDepthMask(_GL_MODULE.GL_FALSE)
+            try:
+                super().paint()
+            finally:
+                _GL_MODULE.glDepthMask(_GL_MODULE.GL_TRUE)
+
+    class _DepthAwareMeshItem(gl.GLMeshItem):
+        """Mesh item that cooperatively manages depth-buffer writes."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._depth_writes_enabled = True
+
+        def setDepthWritesEnabled(self, enabled: bool) -> None:
+            """Toggle depth writes so translucent meshes stay transparent."""
+
+            enabled = bool(enabled)
+            if enabled == self._depth_writes_enabled:
+                return
+            self._depth_writes_enabled = enabled
+            self.update()
+
+        def paint(self):  # pragma: no cover - requires an OpenGL context
+            if _GL_MODULE is None or self._depth_writes_enabled:
+                super().paint()
+                return
+            _GL_MODULE.glDepthMask(_GL_MODULE.GL_FALSE)
+            try:
+                super().paint()
+            finally:
+                _GL_MODULE.glDepthMask(_GL_MODULE.GL_TRUE)
+
+
+def _apply_gl_translucency(item: Any, alpha: float) -> None:
+    """Configure OpenGL state for an item based on the requested opacity."""
+
+    if not HAS_PYQTGRAPH or gl is None or item is None:
+        return
+    translucent = alpha < 0.999
+    item.setGLOptions("translucent" if translucent else "opaque")
+    toggle = getattr(item, "setDepthWritesEnabled", None)
+    if callable(toggle):
+        toggle(not translucent)
+
+
 _SLICE_ORIENTATIONS = (
     ("sagittal", 0, "Left", "Right"),
     ("coronal", 1, "Posterior", "Anterior"),
@@ -5274,10 +5354,15 @@ class Volume3DDialog(QDialog):
         if self._scatter_item is None:
             # ``pxMode`` keeps the slider-controlled marker size in screen
             # pixels, mirroring the behaviour of the original matplotlib view.
-            self._scatter_item = gl.GLScatterPlotItem(pxMode=True)
+            scatter_cls = _DepthAwareScatterItem or gl.GLScatterPlotItem
+            self._scatter_item = scatter_cls(pxMode=True)
             self.view.addItem(self._scatter_item)
-        self._scatter_item.setData(pos=coords_mm, color=colors, size=float(self.point_slider.value()))
-        self._scatter_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        self._scatter_item.setData(
+            pos=coords_mm,
+            color=colors,
+            size=float(self.point_slider.value()),
+        )
+        _apply_gl_translucency(self._scatter_item, alpha)
 
         mins = coords_mm.min(axis=0)
         maxs = coords_mm.max(axis=0)
@@ -5402,7 +5487,8 @@ class Volume3DDialog(QDialog):
         if self._mesh_item is None:
             # ``GLMeshItem`` retains the uploaded vertex buffers so subsequent
             # slider tweaks only update colours instead of reallocating the mesh.
-            self._mesh_item = gl.GLMeshItem(
+            mesh_cls = _DepthAwareMeshItem or gl.GLMeshItem
+            self._mesh_item = mesh_cls(
                 meshdata=meshdata,
                 smooth=False,
                 shader="shaded",
@@ -5413,7 +5499,7 @@ class Volume3DDialog(QDialog):
             self._mesh_item.setMeshData(meshdata=meshdata)
 
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_gl_translucency(self._mesh_item, alpha)
 
         mins = np.min(verts, axis=0)
         maxs = np.max(verts, axis=0)
@@ -6252,7 +6338,8 @@ class Surface3DDialog(QDialog):
             summary += "Constant colouring applied. "
 
         if self._mesh_item is None:
-            self._mesh_item = gl.GLMeshItem(
+            mesh_cls = _DepthAwareMeshItem or gl.GLMeshItem
+            self._mesh_item = mesh_cls(
                 meshdata=meshdata,
                 smooth=False,
                 shader="shaded",
@@ -6262,7 +6349,7 @@ class Surface3DDialog(QDialog):
         else:
             self._mesh_item.setMeshData(meshdata=meshdata)
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_gl_translucency(self._mesh_item, alpha)
 
         mins = np.min(clipped_verts, axis=0)
         maxs = np.max(clipped_verts, axis=0)
@@ -6423,7 +6510,8 @@ class FreeSurferSurfaceDialog(QDialog):
         meshdata.setVertexColors(colours)
 
         if self._mesh_item is None:
-            self._mesh_item = gl.GLMeshItem(
+            mesh_cls = _DepthAwareMeshItem or gl.GLMeshItem
+            self._mesh_item = mesh_cls(
                 meshdata=meshdata,
                 smooth=False,
                 shader="shaded",
@@ -6435,7 +6523,7 @@ class FreeSurferSurfaceDialog(QDialog):
 
         self._apply_mesh_shader()
         alpha = self.opacity_slider.value() / 100.0
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_gl_translucency(self._mesh_item, alpha)
         if not self._initialising:
             self.view.update()
 
