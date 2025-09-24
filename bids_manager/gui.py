@@ -4049,34 +4049,48 @@ class Volume3DDialog(QDialog):
         placement_layout.addWidget(placement_label)
         self.panel_location_combo = QComboBox()
         self.panel_location_combo.addItems(["Bottom", "Left", "Right"])
+        # Default to a side-by-side layout so the viewport opens on the left.
+        self.panel_location_combo.setCurrentText("Right")
         placement_layout.addWidget(self.panel_location_combo)
         placement_layout.addStretch()
         settings_layout.addLayout(placement_layout)
 
         controls_widget = QWidget()
-        controls = QHBoxLayout(controls_widget)
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(8)
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
         agg_label = QLabel("Aggregation:")
-        controls.addWidget(agg_label)
+        header_row.addWidget(agg_label)
         self.agg_combo = QComboBox()
         self._aggregators = {}
         self._init_aggregator_options()
-        controls.addWidget(self.agg_combo)
-        controls.addSpacing(12)
+        header_row.addWidget(self.agg_combo)
+        header_row.addSpacing(12)
 
         render_label = QLabel("Render mode:")
-        controls.addWidget(render_label)
+        header_row.addWidget(render_label)
         self.render_mode_combo = QComboBox()
         self.render_mode_combo.addItems(["Point cloud", "Surface mesh"])
         self.render_mode_combo.setToolTip(
             "Switch between scattered voxels and iso-surface rendering.",
         )
-        controls.addWidget(self.render_mode_combo)
-        controls.addSpacing(12)
+        header_row.addWidget(self.render_mode_combo)
+        header_row.addStretch()
+        controls_layout.addLayout(header_row)
+
+        # Stack the render-mode sliders beneath the mode selector so they are
+        # visually associated with the chosen representation.
+        slider_grid = QGridLayout()
+        slider_grid.setContentsMargins(0, 0, 0, 0)
+        slider_grid.setHorizontalSpacing(8)
+        slider_grid.setVerticalSpacing(6)
+        slider_grid.setColumnStretch(1, 1)
 
         self.thresh_text = QLabel("Threshold:")
-        controls.addWidget(self.thresh_text)
+        slider_grid.addWidget(self.thresh_text, 0, 0)
         self.thresh_slider = QSlider(Qt.Horizontal)
         self.thresh_slider.setRange(0, 100)
         self.thresh_slider.setValue(60)
@@ -4085,20 +4099,21 @@ class Volume3DDialog(QDialog):
             "Minimum normalised intensity included in the rendering.",
         )
         self.thresh_slider.valueChanged.connect(self._update_plot)
-        controls.addWidget(self.thresh_slider)
+        slider_grid.addWidget(self.thresh_slider, 0, 1)
         self.thresh_label = QLabel("0.60")
-        controls.addWidget(self.thresh_label)
-        controls.addSpacing(12)
+        slider_grid.addWidget(self.thresh_label, 0, 2)
 
         self.point_label = QLabel("Point size:")
-        controls.addWidget(self.point_label)
+        slider_grid.addWidget(self.point_label, 1, 0)
         self.point_slider = QSlider(Qt.Horizontal)
         self.point_slider.setRange(1, 12)
         self.point_slider.setValue(4)
         self.point_slider.setToolTip("Marker diameter for point-cloud rendering.")
         self.point_slider.valueChanged.connect(self._update_plot)
-        controls.addWidget(self.point_slider)
-        controls.addStretch()
+        slider_grid.addWidget(self.point_slider, 1, 1)
+
+        controls_layout.addLayout(slider_grid)
+        controls_layout.addStretch()
         settings_layout.addWidget(controls_widget)
 
         options_group = QGroupBox("Rendering options")
@@ -4221,7 +4236,14 @@ class Volume3DDialog(QDialog):
         self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
-        settings_layout.addWidget(colorbar_group)
+
+        # Host the colour bar in its own lightweight container so it can share
+        # the retractable pane while remaining independent from the parameter list.
+        self._colorbar_panel = QWidget()
+        colorbar_panel_layout = QVBoxLayout(self._colorbar_panel)
+        colorbar_panel_layout.setContentsMargins(6, 6, 6, 6)
+        colorbar_panel_layout.setSpacing(6)
+        colorbar_panel_layout.addWidget(colorbar_group)
 
         slice_group = QGroupBox("Slice planes")
         slice_layout = QVBoxLayout(slice_group)
@@ -4325,9 +4347,23 @@ class Volume3DDialog(QDialog):
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
         self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._splitter.addWidget(self._panel_scroll)
-        self._splitter.setStretchFactor(0, 4)
-        self._splitter.setStretchFactor(1, 1)
+
+        # A nested splitter keeps the scrollable controls and the colour bar in
+        # separate panes so each can be resized without affecting the other.
+        self._panel_splitter = QSplitter(Qt.Vertical)
+        self._panel_splitter.setChildrenCollapsible(False)
+        self._panel_splitter.addWidget(self._panel_scroll)
+        self._panel_splitter.addWidget(self._colorbar_panel)
+        self._panel_splitter.setStretchFactor(0, 3)
+        self._panel_splitter.setStretchFactor(1, 1)
+
+        self._panel_container = QWidget()
+        panel_container_layout = QVBoxLayout(self._panel_container)
+        panel_container_layout.setContentsMargins(0, 0, 0, 0)
+        panel_container_layout.setSpacing(0)
+        panel_container_layout.addWidget(self._panel_splitter)
+
+        self._splitter.addWidget(self._panel_container)
 
         default_name = None
         if default_mode and default_mode in self._aggregators:
@@ -4383,27 +4419,44 @@ class Volume3DDialog(QDialog):
         if normalised not in {"bottom", "left", "right"}:
             normalised = "bottom"
 
+        orientation = Qt.Vertical if normalised == "bottom" else Qt.Horizontal
+        self._splitter.setOrientation(orientation)
+
         view_first = True
-        if normalised == "bottom":
-            self._splitter.setOrientation(Qt.Vertical)
-            view_first = True
-        else:
-            self._splitter.setOrientation(Qt.Horizontal)
+        if orientation == Qt.Horizontal:
             view_first = normalised != "left"
 
-        widgets = [self._view_container, self._panel_scroll]
-        if not view_first:
+        panel_widget = getattr(self, "_panel_container", None)
+        widgets = [self._view_container, panel_widget]
+        if panel_widget is None:
+            widgets = [self._view_container]
+        if not view_first and len(widgets) == 2:
             widgets.reverse()
         for index, widget in enumerate(widgets):
+            if widget is None:
+                continue
             if self._splitter.indexOf(widget) != index:
                 self._splitter.insertWidget(index, widget)
 
-        if view_first:
-            self._splitter.setStretchFactor(0, 4)
-            self._splitter.setStretchFactor(1, 1)
-        else:
-            self._splitter.setStretchFactor(0, 1)
-            self._splitter.setStretchFactor(1, 4)
+        # Bias the main splitter so the viewport consumes roughly three quarters
+        # of the available space in the default layout.
+        stretch = (3, 1) if view_first else (1, 3)
+        self._splitter.setStretchFactor(0, stretch[0])
+        if len(widgets) > 1:
+            self._splitter.setStretchFactor(1, stretch[1])
+            scale = 120
+            self._splitter.setSizes([stretch[0] * scale, stretch[1] * scale])
+
+        panel_splitter = getattr(self, "_panel_splitter", None)
+        if isinstance(panel_splitter, QSplitter):
+            # Rotate the internal splitter so the colour bar always occupies its
+            # own pane next to the parameter controls regardless of docking side.
+            if orientation == Qt.Vertical:
+                panel_splitter.setOrientation(Qt.Horizontal)
+                panel_splitter.setSizes([220, 160])
+            else:
+                panel_splitter.setOrientation(Qt.Vertical)
+                panel_splitter.setSizes([300, 160])
 
     def _on_panel_location_change(self, location: str) -> None:
         self._apply_panel_layout(location)
