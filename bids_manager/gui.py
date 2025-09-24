@@ -74,7 +74,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -130,122 +130,6 @@ except Exception:  # pragma: no cover - optional dependency
     gl = None
     gl_shaders = None
     HAS_PYQTGRAPH = False
-
-if HAS_PYQTGRAPH:
-
-    class _CameraAwareView(gl.GLViewWidget):
-        """``GLViewWidget`` variant that emits a signal whenever the camera moves."""
-
-        cameraChanged = pyqtSignal()
-
-        def orbit(self, *args, **kwargs):  # type: ignore[override]
-            super().orbit(*args, **kwargs)
-            self.cameraChanged.emit()
-
-        def pan(self, *args, **kwargs):  # type: ignore[override]
-            super().pan(*args, **kwargs)
-            self.cameraChanged.emit()
-
-        def wheelEvent(self, event):  # type: ignore[override]
-            super().wheelEvent(event)
-            self.cameraChanged.emit()
-
-        def setCameraPosition(self, *args, **kwargs):  # type: ignore[override]
-            super().setCameraPosition(*args, **kwargs)
-            self.cameraChanged.emit()
-
-        def setCameraParams(self, *args, **kwargs):  # type: ignore[override]
-            super().setCameraParams(*args, **kwargs)
-            self.cameraChanged.emit()
-
-        def reset(self):  # type: ignore[override]
-            super().reset()
-            self.cameraChanged.emit()
-
-
-def _qt_vector_to_numpy(vec: Any) -> np.ndarray:
-    """Convert a Qt/pyqtgraph vector-like object to a ``float32`` NumPy array."""
-
-    if hasattr(vec, "x") and callable(vec.x):
-        return np.array([float(vec.x()), float(vec.y()), float(vec.z())], dtype=np.float32)
-    if hasattr(vec, "x") and hasattr(vec, "y") and hasattr(vec, "z"):
-        return np.array([float(vec.x), float(vec.y), float(vec.z)], dtype=np.float32)
-    arr = np.asarray(vec, dtype=np.float32)
-    return arr.reshape(3)
-
-
-def _camera_vectors(view: Optional[gl.GLViewWidget]) -> Optional[tuple[np.ndarray, np.ndarray]]:
-    """Return the camera position and forward direction for ``view``.
-
-    The forward vector points from the camera towards the scene centre.  ``None`` is
-    returned if the view is unavailable or the direction cannot be determined.
-    """
-
-    if view is None:
-        return None
-    try:
-        cam_pos = _qt_vector_to_numpy(view.cameraPosition())
-        center = view.opts.get("center")
-        if center is None:
-            return None
-        center_vec = _qt_vector_to_numpy(center)
-    except Exception:
-        return None
-
-    forward = center_vec - cam_pos
-    norm = float(np.linalg.norm(forward))
-    if norm < 1e-6:
-        forward = np.array([0.0, 0.0, -1.0], dtype=np.float32)
-    else:
-        forward /= norm
-    return cam_pos, forward
-
-
-def _sort_points_for_camera(
-    positions: np.ndarray,
-    colours: Optional[np.ndarray],
-    view: Optional[gl.GLViewWidget],
-) -> tuple[np.ndarray, Optional[np.ndarray]]:
-    """Order point positions from farthest to nearest relative to the camera."""
-
-    if positions.size == 0:
-        return positions, colours
-    vectors = _camera_vectors(view)
-    if vectors is None:
-        return positions, colours
-    cam_pos, forward = vectors
-    depths = np.dot(positions - cam_pos, forward)
-    order = np.argsort(depths, kind="mergesort")[::-1]
-    if np.all(order == np.arange(order.size)):
-        return positions, colours
-    sorted_positions = positions[order]
-    sorted_colours: Optional[np.ndarray]
-    if colours is not None:
-        sorted_colours = colours[order]
-    else:
-        sorted_colours = None
-    return sorted_positions, sorted_colours
-
-
-def _sort_faces_for_camera(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    view: Optional[gl.GLViewWidget],
-) -> np.ndarray:
-    """Return ``faces`` ordered from back to front for consistent blending."""
-
-    if faces.size == 0:
-        return faces
-    vectors = _camera_vectors(view)
-    if vectors is None:
-        return faces
-    cam_pos, forward = vectors
-    centroids = vertices[faces].mean(axis=1)
-    depths = np.dot(centroids - cam_pos, forward)
-    order = np.argsort(depths, kind="mergesort")[::-1]
-    if np.all(order == np.arange(order.size)):
-        return faces
-    return faces[order]
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -4121,15 +4005,6 @@ class Volume3DDialog(QDialog):
         self._light_shader = _create_directional_light_shader()
         self._flat_shader = _create_flat_color_shader()
         self._lighting_enabled = True
-        self._cached_point_positions: Optional[np.ndarray] = None
-        self._cached_point_colors: Optional[np.ndarray] = None
-        self._cached_mesh_vertices: Optional[np.ndarray] = None
-        self._cached_mesh_faces: Optional[np.ndarray] = None
-        self._cached_mesh_vertex_colors: Optional[np.ndarray] = None
-
-        self._camera_resort_timer = QTimer(self)
-        self._camera_resort_timer.setSingleShot(True)
-        self._camera_resort_timer.timeout.connect(self._apply_camera_resort)
 
         self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
@@ -4151,14 +4026,12 @@ class Volume3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
-        self.view = _CameraAwareView() if HAS_PYQTGRAPH else gl.GLViewWidget()
+        self.view = gl.GLViewWidget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
         self.view.opts["azimuth"] = -60
-        if isinstance(self.view, _CameraAwareView):
-            self.view.cameraChanged.connect(self._schedule_camera_resort)
         view_layout.addWidget(self.view)
 
         self._splitter.addWidget(self._view_container)
@@ -5235,8 +5108,6 @@ class Volume3DDialog(QDialog):
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
         self._update_axis_item()
-        self._schedule_camera_resort()
-        self._schedule_camera_resort()
 
     def _update_axis_item(self) -> None:
         if self._axis_item is not None:
@@ -5302,7 +5173,6 @@ class Volume3DDialog(QDialog):
         if self._scatter_item is not None:
             self.view.removeItem(self._scatter_item)
             self._scatter_item = None
-        self._clear_point_cache()
         mins = np.zeros(3, dtype=np.float32)
         spans = np.maximum((np.asarray(shape, dtype=np.float32) - 1.0) * scale, 1e-3)
         maxs = mins + spans
@@ -5317,7 +5187,6 @@ class Volume3DDialog(QDialog):
         if downsampled is None:
             self.status_label.setText("No data available for point-cloud rendering.")
             self._clear_colorbar()
-            self._clear_point_cache()
             return
 
         if self._mesh_item is not None:
@@ -5325,7 +5194,6 @@ class Volume3DDialog(QDialog):
             # cached ``GLMeshItem`` so only the scatter is redrawn.
             self.view.removeItem(self._mesh_item)
             self._mesh_item = None
-            self._clear_mesh_cache()
 
         step = self._downsample_step
         scale = self._voxel_sizes_vec * float(step)
@@ -5387,7 +5255,6 @@ class Volume3DDialog(QDialog):
                 if self._scatter_item is not None:
                     self.view.removeItem(self._scatter_item)
                     self._scatter_item = None
-                self._clear_point_cache()
                 self._clear_colorbar()
                 mins, maxs = slice_bounds
                 self._update_scene_bounds(mins, maxs)
@@ -5403,12 +5270,6 @@ class Volume3DDialog(QDialog):
             values = np.empty(coords_mm.shape[0], dtype=np.float32)
         cmap = self._get_adjusted_colormap(cmap_name)
         colors = self._map_colors(values, cmap, alpha)
-
-        coords_mm = np.ascontiguousarray(coords_mm, dtype=np.float32)
-        colors = np.ascontiguousarray(colors, dtype=np.float32)
-        coords_mm, colors = _sort_points_for_camera(coords_mm, colors, self.view)
-        self._cached_point_positions = coords_mm
-        self._cached_point_colors = colors
 
         if self._scatter_item is None:
             # ``pxMode`` keeps the slider-controlled marker size in screen
@@ -5443,7 +5304,6 @@ class Volume3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self._clear_colorbar()
             self.status_label.setText(
                 "Surface rendering requires the optional 'scikit-image' dependency."
@@ -5459,7 +5319,6 @@ class Volume3DDialog(QDialog):
         if self._scatter_item is not None:
             self.view.removeItem(self._scatter_item)
             self._scatter_item = None
-        self._clear_point_cache()
 
         step = self._downsample_step
         slices = tuple(slice(None, None, step) for _ in range(3))
@@ -5469,7 +5328,6 @@ class Volume3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self._clear_colorbar()
             self.status_label.setText(
                 "Volume is too small after downsampling to compute a surface mesh."
@@ -5482,7 +5340,6 @@ class Volume3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self._clear_colorbar()
             self.status_label.setText(
                 f"Iso level {thr:.2f} is outside the volume range [{vol_min:.2f}, {vol_max:.2f}]."
@@ -5504,7 +5361,6 @@ class Volume3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self._clear_colorbar()
             self.status_label.setText(f"Marching cubes failed: {exc}")
             return
@@ -5518,7 +5374,6 @@ class Volume3DDialog(QDialog):
                 if self._mesh_item is not None:
                     self.view.removeItem(self._mesh_item)
                     self._mesh_item = None
-                self._clear_mesh_cache()
                 self._clear_colorbar()
                 mins, maxs = slice_bounds
                 self._update_scene_bounds(mins, maxs)
@@ -5530,7 +5385,6 @@ class Volume3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self._clear_colorbar()
             self.status_label.setText(
                 f"No closed surface found at iso level {thr:.2f}; adjust the slider."
@@ -5540,18 +5394,9 @@ class Volume3DDialog(QDialog):
         if vertex_values is None:
             vertex_values = np.zeros(verts.shape[0], dtype=np.float32)
 
-        verts = np.ascontiguousarray(verts, dtype=np.float32)
-        faces = np.ascontiguousarray(faces, dtype=np.int32)
-        cmap = self._get_adjusted_colormap(cmap_name)
-        vertex_colors = np.ascontiguousarray(
-            self._map_colors(vertex_values, cmap, alpha), dtype=np.float32
-        )
-        faces = _sort_faces_for_camera(verts, faces, self.view)
-        self._cached_mesh_vertices = verts
-        self._cached_mesh_faces = faces
-        self._cached_mesh_vertex_colors = vertex_colors
-
         meshdata = gl.MeshData(vertexes=verts, faces=faces)
+        cmap = self._get_adjusted_colormap(cmap_name)
+        vertex_colors = self._map_colors(vertex_values, cmap, alpha)
         meshdata.setVertexColors(vertex_colors)
 
         if self._mesh_item is None:
@@ -5588,82 +5433,6 @@ class Volume3DDialog(QDialog):
             f"marching step {self._surface_step}. Total voxels ≥ level {total_voxels:,}.{lighting_suffix}"
             f"{self._slice_status_suffix()}"
         )
-
-    def _clear_point_cache(self) -> None:
-        """Discard any cached point positions and colours."""
-
-        self._cached_point_positions = None
-        self._cached_point_colors = None
-
-    def _clear_mesh_cache(self) -> None:
-        """Discard cached mesh geometry used for resorting faces."""
-
-        self._cached_mesh_vertices = None
-        self._cached_mesh_faces = None
-        self._cached_mesh_vertex_colors = None
-
-    def _schedule_camera_resort(self) -> None:
-        """Queue a geometry reorder when the camera stops moving."""
-
-        has_points = self._cached_point_positions is not None and (
-            self._cached_point_positions.size > 0
-        )
-        has_mesh = self._cached_mesh_faces is not None and (
-            self._cached_mesh_faces.size > 0
-        )
-        if not (has_points or has_mesh):
-            return
-        # Restart the timer so rapid mouse movements collapse into a single
-        # resort operation once interaction settles.
-        self._camera_resort_timer.start(35)
-
-    def _apply_camera_resort(self) -> None:
-        """Reorder geometry to keep transparency stable after camera changes."""
-
-        self._resort_point_cloud()
-        self._resort_surface_mesh()
-
-    def _resort_point_cloud(self) -> None:
-        if self._scatter_item is None or self._cached_point_positions is None:
-            return
-        coords = self._cached_point_positions
-        if coords.size == 0:
-            return
-        colours = self._cached_point_colors
-        sorted_coords, sorted_colours = _sort_points_for_camera(coords, colours, self.view)
-        if sorted_coords is coords and sorted_colours is colours:
-            return
-        self._cached_point_positions = sorted_coords
-        self._cached_point_colors = sorted_colours
-        size = float(self.point_slider.value())
-        self._scatter_item.setData(pos=sorted_coords, color=sorted_colours, size=size)
-        if not self._initialising:
-            self.view.update()
-
-    def _resort_surface_mesh(self) -> None:
-        if (
-            self._mesh_item is None
-            or self._cached_mesh_vertices is None
-            or self._cached_mesh_faces is None
-            or self._cached_mesh_faces.size == 0
-        ):
-            return
-        sorted_faces = _sort_faces_for_camera(
-            self._cached_mesh_vertices, self._cached_mesh_faces, self.view
-        )
-        if sorted_faces is self._cached_mesh_faces:
-            return
-        self._cached_mesh_faces = sorted_faces
-        meshdata = gl.MeshData(
-            vertexes=self._cached_mesh_vertices,
-            faces=sorted_faces,
-        )
-        if self._cached_mesh_vertex_colors is not None:
-            meshdata.setVertexColors(self._cached_mesh_vertex_colors)
-        self._mesh_item.setMeshData(meshdata=meshdata)
-        self._update_light_shader()
-        if not self._initialising:
-            self.view.update()
 
     def _on_render_mode_change(self, _mode: str) -> None:
         if self._initialising:
@@ -5777,13 +5546,6 @@ class Surface3DDialog(QDialog):
         self._light_shader = _create_directional_light_shader()
         self._flat_shader = _create_flat_color_shader()
         self._lighting_enabled = True
-        self._cached_mesh_vertices: Optional[np.ndarray] = None
-        self._cached_mesh_faces: Optional[np.ndarray] = None
-        self._cached_mesh_vertex_colors: Optional[np.ndarray] = None
-
-        self._camera_resort_timer = QTimer(self)
-        self._camera_resort_timer.setSingleShot(True)
-        self._camera_resort_timer.timeout.connect(self._apply_camera_resort)
 
         if self._vertices.size:
             mins = np.min(self._vertices, axis=0).astype(np.float32, copy=False)
@@ -5804,13 +5566,12 @@ class Surface3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the mesh when interacting with the viewport.
-        self.view = _CameraAwareView()
+        self.view = gl.GLViewWidget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
         self.view.opts["azimuth"] = -60
-        self.view.cameraChanged.connect(self._schedule_camera_resort)
         view_layout.addWidget(self.view)
 
         self._splitter.addWidget(self._view_container)
@@ -6424,7 +6185,6 @@ class Surface3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self.status_label.setText("Surface mesh has no vertices or faces to render.")
             return
 
@@ -6460,7 +6220,6 @@ class Surface3DDialog(QDialog):
                 if self._mesh_item is not None:
                     self.view.removeItem(self._mesh_item)
                     self._mesh_item = None
-                self._clear_mesh_cache()
                 self._clear_colorbar()
                 mins, maxs = slice_bounds
                 self._update_scene_bounds(mins, maxs)
@@ -6472,40 +6231,25 @@ class Surface3DDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self.status_label.setText("Surface mesh has no vertices or faces to render.")
             return
 
-        clipped_verts = np.ascontiguousarray(clipped_verts, dtype=np.float32)
-        clipped_faces = np.ascontiguousarray(clipped_faces, dtype=np.int32)
-
+        meshdata = gl.MeshData(vertexes=clipped_verts, faces=clipped_faces)
         if clipped_values is not None and scalar_key and scalar_key in self._scalar_fields:
-            colours = np.ascontiguousarray(
-                self._map_colors(clipped_values, cmap, alpha), dtype=np.float32
-            )
+            colours = self._map_colors(clipped_values, cmap, alpha)
+            meshdata.setVertexColors(colours)
             assert vmin is not None and vmax is not None
             self._update_colorbar(cmap, vmin, vmax)
             summary += f"Scalar '{scalar_key}' range {vmin:.4g} – {vmax:.4g}. "
         else:
             base_color = cmap(0.6)
-            colours = np.ascontiguousarray(
-                np.repeat(
-                    [[base_color[0], base_color[1], base_color[2], base_color[3] * alpha]],
-                    clipped_verts.shape[0],
-                    axis=0,
-                ),
+            colour = np.array(
+                [[base_color[0], base_color[1], base_color[2], base_color[3] * alpha]],
                 dtype=np.float32,
             )
+            meshdata.setVertexColors(np.repeat(colour, clipped_verts.shape[0], axis=0))
             self._update_colorbar(cmap, 0.0, 1.0, label="Colormap preview")
             summary += "Constant colouring applied. "
-
-        faces_sorted = _sort_faces_for_camera(clipped_verts, clipped_faces, self.view)
-        self._cached_mesh_vertices = clipped_verts
-        self._cached_mesh_faces = faces_sorted
-        self._cached_mesh_vertex_colors = colours
-
-        meshdata = gl.MeshData(vertexes=clipped_verts, faces=faces_sorted)
-        meshdata.setVertexColors(colours)
 
         if self._mesh_item is None:
             self._mesh_item = gl.GLMeshItem(
@@ -6531,45 +6275,6 @@ class Surface3DDialog(QDialog):
             summary += " Select a scalar field to colour the surface."
         summary += self._slice_status_suffix()
         self.status_label.setText(summary)
-
-
-    def _clear_mesh_cache(self) -> None:
-        self._cached_mesh_vertices = None
-        self._cached_mesh_faces = None
-        self._cached_mesh_vertex_colors = None
-
-    def _schedule_camera_resort(self) -> None:
-        if self._cached_mesh_faces is None or self._cached_mesh_faces.size == 0:
-            return
-        self._camera_resort_timer.start(35)
-
-    def _apply_camera_resort(self) -> None:
-        self._resort_surface_mesh()
-
-    def _resort_surface_mesh(self) -> None:
-        if (
-            self._mesh_item is None
-            or self._cached_mesh_vertices is None
-            or self._cached_mesh_faces is None
-            or self._cached_mesh_faces.size == 0
-        ):
-            return
-        sorted_faces = _sort_faces_for_camera(
-            self._cached_mesh_vertices, self._cached_mesh_faces, self.view
-        )
-        if sorted_faces is self._cached_mesh_faces:
-            return
-        self._cached_mesh_faces = sorted_faces
-        meshdata = gl.MeshData(
-            vertexes=self._cached_mesh_vertices,
-            faces=sorted_faces,
-        )
-        if self._cached_mesh_vertex_colors is not None:
-            meshdata.setVertexColors(self._cached_mesh_vertex_colors)
-        self._mesh_item.setMeshData(meshdata=meshdata)
-        self._apply_mesh_shader()
-        if not self._initialising:
-            self.view.update()
 
 
 class FreeSurferSurfaceDialog(QDialog):
@@ -6614,22 +6319,14 @@ class FreeSurferSurfaceDialog(QDialog):
         self._light_shader = _create_directional_light_shader()
         self._flat_shader = _create_flat_color_shader()
         self._lighting_enabled = self._light_shader is not None
-        self._cached_mesh_vertices: Optional[np.ndarray] = None
-        self._cached_mesh_faces: Optional[np.ndarray] = None
-        self._cached_mesh_vertex_colors: Optional[np.ndarray] = None
-
-        self._camera_resort_timer = QTimer(self)
-        self._camera_resort_timer.setSingleShot(True)
-        self._camera_resort_timer.timeout.connect(self._apply_camera_resort)
 
         layout = QVBoxLayout(self)
 
-        self.view = _CameraAwareView()
+        self.view = gl.GLViewWidget()
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
         self.view.opts["azimuth"] = -60
-        self.view.cameraChanged.connect(self._schedule_camera_resort)
         layout.addWidget(self.view, 1)
 
         controls = QGroupBox("Display settings")
@@ -6718,19 +6415,11 @@ class FreeSurferSurfaceDialog(QDialog):
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
                 self._mesh_item = None
-            self._clear_mesh_cache()
             self.status_label.setText("Surface mesh has no vertices or faces to render.")
             return
 
-        verts = np.ascontiguousarray(self._vertices, dtype=np.float32)
-        faces = np.ascontiguousarray(self._faces, dtype=np.int32)
-        colours = np.ascontiguousarray(self._current_colour_rgba(), dtype=np.float32)
-        faces = _sort_faces_for_camera(verts, faces, self.view)
-        self._cached_mesh_vertices = verts
-        self._cached_mesh_faces = faces
-        self._cached_mesh_vertex_colors = colours
-
-        meshdata = gl.MeshData(vertexes=verts, faces=faces)
+        meshdata = gl.MeshData(vertexes=self._vertices, faces=self._faces)
+        colours = self._current_colour_rgba()
         meshdata.setVertexColors(colours)
 
         if self._mesh_item is None:
@@ -6747,41 +6436,6 @@ class FreeSurferSurfaceDialog(QDialog):
         self._apply_mesh_shader()
         alpha = self.opacity_slider.value() / 100.0
         self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
-        if not self._initialising:
-            self.view.update()
-
-    def _clear_mesh_cache(self) -> None:
-        self._cached_mesh_vertices = None
-        self._cached_mesh_faces = None
-        self._cached_mesh_vertex_colors = None
-
-    def _schedule_camera_resort(self) -> None:
-        if self._cached_mesh_faces is None or self._cached_mesh_faces.size == 0:
-            return
-        self._camera_resort_timer.start(35)
-
-    def _apply_camera_resort(self) -> None:
-        self._resort_surface_mesh()
-
-    def _resort_surface_mesh(self) -> None:
-        if (
-            self._mesh_item is None
-            or self._cached_mesh_vertices is None
-            or self._cached_mesh_faces is None
-            or self._cached_mesh_faces.size == 0
-        ):
-            return
-        sorted_faces = _sort_faces_for_camera(
-            self._cached_mesh_vertices, self._cached_mesh_faces, self.view
-        )
-        if sorted_faces is self._cached_mesh_faces:
-            return
-        self._cached_mesh_faces = sorted_faces
-        meshdata = gl.MeshData(vertexes=self._cached_mesh_vertices, faces=sorted_faces)
-        if self._cached_mesh_vertex_colors is not None:
-            meshdata.setVertexColors(self._cached_mesh_vertex_colors)
-        self._mesh_item.setMeshData(meshdata=meshdata)
-        self._update_light_shader()
         if not self._initialising:
             self.view.update()
 
@@ -6829,8 +6483,6 @@ class FreeSurferSurfaceDialog(QDialog):
         self._current_bounds = (mins, maxs)
         self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
         self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
-        self._schedule_camera_resort()
-        self._schedule_camera_resort()
 
     def _update_axis_item(self) -> None:
         if not self.axes_checkbox.isChecked():
