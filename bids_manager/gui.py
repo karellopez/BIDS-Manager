@@ -3971,7 +3971,7 @@ class Volume3DDialog(QDialog):
                 "3-D volume rendering requires the optional 'pyqtgraph' dependency."
             )
         self.setWindowTitle(title or "3D Volume Viewer")
-        self.resize(1200, 900)
+        self.resize(1800, 1000)
         self.setMinimumSize(780, 560)
         self.setSizeGripEnabled(True)
 
@@ -4171,7 +4171,7 @@ class Volume3DDialog(QDialog):
         row += 1
         options.addWidget(QLabel("Maximum points:"), row, 0)
         self.max_points_spin = QSpinBox()
-        self.max_points_spin.setRange(1_000, 500_000)
+        self.max_points_spin.setRange(1_000, 20_000_000)
         self.max_points_spin.setSingleStep(5_000)
         self.max_points_spin.setValue(self._max_points)
         self.max_points_spin.setToolTip(
