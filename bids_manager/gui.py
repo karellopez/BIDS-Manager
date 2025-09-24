@@ -4049,46 +4049,34 @@ class Volume3DDialog(QDialog):
         placement_layout.addWidget(placement_label)
         self.panel_location_combo = QComboBox()
         self.panel_location_combo.addItems(["Bottom", "Left", "Right"])
-        # Default to a right-hand panel so the OpenGL view remains dominant on
-        # launch while controls sit alongside it.
-        self.panel_location_combo.setCurrentText("Right")
         placement_layout.addWidget(self.panel_location_combo)
         placement_layout.addStretch()
         settings_layout.addLayout(placement_layout)
 
         controls_widget = QWidget()
-        controls = QVBoxLayout(controls_widget)
+        controls = QHBoxLayout(controls_widget)
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
-
-        agg_row = QHBoxLayout()
-        agg_row.setSpacing(8)
         agg_label = QLabel("Aggregation:")
-        agg_row.addWidget(agg_label)
+        controls.addWidget(agg_label)
         self.agg_combo = QComboBox()
         self._aggregators = {}
         self._init_aggregator_options()
-        agg_row.addWidget(self.agg_combo)
-        agg_row.addStretch()
-        controls.addLayout(agg_row)
+        controls.addWidget(self.agg_combo)
+        controls.addSpacing(12)
 
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
         render_label = QLabel("Render mode:")
-        mode_row.addWidget(render_label)
+        controls.addWidget(render_label)
         self.render_mode_combo = QComboBox()
         self.render_mode_combo.addItems(["Point cloud", "Surface mesh"])
         self.render_mode_combo.setToolTip(
             "Switch between scattered voxels and iso-surface rendering.",
         )
-        mode_row.addWidget(self.render_mode_combo, 1)
-        mode_row.addStretch()
-        controls.addLayout(mode_row)
+        controls.addWidget(self.render_mode_combo)
+        controls.addSpacing(12)
 
-        thresh_row = QHBoxLayout()
-        thresh_row.setSpacing(8)
         self.thresh_text = QLabel("Threshold:")
-        thresh_row.addWidget(self.thresh_text)
+        controls.addWidget(self.thresh_text)
         self.thresh_slider = QSlider(Qt.Horizontal)
         self.thresh_slider.setRange(0, 100)
         self.thresh_slider.setValue(60)
@@ -4097,22 +4085,19 @@ class Volume3DDialog(QDialog):
             "Minimum normalised intensity included in the rendering.",
         )
         self.thresh_slider.valueChanged.connect(self._update_plot)
-        thresh_row.addWidget(self.thresh_slider, 1)
+        controls.addWidget(self.thresh_slider)
         self.thresh_label = QLabel("0.60")
-        thresh_row.addWidget(self.thresh_label)
-        controls.addLayout(thresh_row)
+        controls.addWidget(self.thresh_label)
+        controls.addSpacing(12)
 
-        point_row = QHBoxLayout()
-        point_row.setSpacing(8)
         self.point_label = QLabel("Point size:")
-        point_row.addWidget(self.point_label)
+        controls.addWidget(self.point_label)
         self.point_slider = QSlider(Qt.Horizontal)
         self.point_slider.setRange(1, 12)
         self.point_slider.setValue(4)
         self.point_slider.setToolTip("Marker diameter for point-cloud rendering.")
         self.point_slider.valueChanged.connect(self._update_plot)
-        point_row.addWidget(self.point_slider, 1)
-        controls.addLayout(point_row)
+        controls.addWidget(self.point_slider)
         controls.addStretch()
         settings_layout.addWidget(controls_widget)
 
@@ -4225,10 +4210,10 @@ class Volume3DDialog(QDialog):
         self.axis_labels_checkbox.setEnabled(False)
         settings_layout.addWidget(options_group)
 
-        # Place the colour bar in its own panel so it can share the retractable
-        # window but stay visually separated from the parameter controls.
-        self._colorbar_group = QGroupBox("Colour bar")
-        colorbar_layout = QVBoxLayout(self._colorbar_group)
+        # Embed the colour bar alongside the rest of the controls so it folds
+        # away with the settings pane.
+        colorbar_group = QGroupBox("Colour bar")
+        colorbar_layout = QVBoxLayout(colorbar_group)
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
         self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
@@ -4236,6 +4221,7 @@ class Volume3DDialog(QDialog):
         self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
+        settings_layout.addWidget(colorbar_group)
 
         slice_group = QGroupBox("Slice planes")
         slice_layout = QVBoxLayout(slice_group)
@@ -4339,19 +4325,9 @@ class Volume3DDialog(QDialog):
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
         self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        # Stack the scrollable parameters above the colour bar so users can
-        # resize each section independently while they occupy the same docked
-        # panel.
-        self._panel_stack = QSplitter(Qt.Vertical)
-        self._panel_stack.setChildrenCollapsible(False)
-        self._panel_stack.setHandleWidth(8)
-        self._panel_stack.addWidget(self._panel_scroll)
-        self._panel_stack.addWidget(self._colorbar_group)
-        self._panel_stack.setStretchFactor(0, 3)
-        self._panel_stack.setStretchFactor(1, 1)
-
-        self._splitter.addWidget(self._panel_stack)
+        self._splitter.addWidget(self._panel_scroll)
+        self._splitter.setStretchFactor(0, 4)
+        self._splitter.setStretchFactor(1, 1)
 
         default_name = None
         if default_mode and default_mode in self._aggregators:
@@ -4403,9 +4379,9 @@ class Volume3DDialog(QDialog):
         if not hasattr(self, "_splitter"):
             return
 
-        normalised = (location or "right").strip().lower()
+        normalised = (location or "bottom").strip().lower()
         if normalised not in {"bottom", "left", "right"}:
-            normalised = "right"
+            normalised = "bottom"
 
         view_first = True
         if normalised == "bottom":
@@ -4415,7 +4391,7 @@ class Volume3DDialog(QDialog):
             self._splitter.setOrientation(Qt.Horizontal)
             view_first = normalised != "left"
 
-        widgets = [self._view_container, self._panel_stack]
+        widgets = [self._view_container, self._panel_scroll]
         if not view_first:
             widgets.reverse()
         for index, widget in enumerate(widgets):
@@ -4423,11 +4399,11 @@ class Volume3DDialog(QDialog):
                 self._splitter.insertWidget(index, widget)
 
         if view_first:
-            self._splitter.setStretchFactor(0, 3)
+            self._splitter.setStretchFactor(0, 4)
             self._splitter.setStretchFactor(1, 1)
         else:
             self._splitter.setStretchFactor(0, 1)
-            self._splitter.setStretchFactor(1, 3)
+            self._splitter.setStretchFactor(1, 4)
 
     def _on_panel_location_change(self, location: str) -> None:
         self._apply_panel_layout(location)
@@ -5557,9 +5533,6 @@ class Surface3DDialog(QDialog):
         placement_layout.addWidget(QLabel("Panel placement:"))
         self.panel_location_combo = QComboBox()
         self.panel_location_combo.addItems(["Bottom", "Left", "Right"])
-        # Start with the control pane on the right to mirror the 3-D volume
-        # viewer defaults.
-        self.panel_location_combo.setCurrentText("Right")
         placement_layout.addWidget(self.panel_location_combo)
         placement_layout.addStretch()
         settings_layout.addLayout(placement_layout)
@@ -5629,10 +5602,10 @@ class Surface3DDialog(QDialog):
         appearance_layout.addWidget(self.color_intensity_label, row, 2)
         settings_layout.addWidget(appearance_group)
 
-        # Place the colour bar into a dedicated sub-panel so it can share the
-        # retractable pane but retain its own resizable region.
-        self._colorbar_group = QGroupBox("Colour bar")
-        colorbar_layout = QVBoxLayout(self._colorbar_group)
+        # Keep the colour bar within the scroll area so it collapses together
+        # with the rest of the surface controls.
+        colorbar_group = QGroupBox("Colour bar")
+        colorbar_layout = QVBoxLayout(colorbar_group)
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
         self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
@@ -5640,6 +5613,7 @@ class Surface3DDialog(QDialog):
         self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
+        settings_layout.addWidget(colorbar_group)
 
         axes_group = QGroupBox("Axes")
         axes_layout = QGridLayout(axes_group)
@@ -5776,16 +5750,9 @@ class Surface3DDialog(QDialog):
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
         self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        self._panel_stack = QSplitter(Qt.Vertical)
-        self._panel_stack.setChildrenCollapsible(False)
-        self._panel_stack.setHandleWidth(8)
-        self._panel_stack.addWidget(self._panel_scroll)
-        self._panel_stack.addWidget(self._colorbar_group)
-        self._panel_stack.setStretchFactor(0, 3)
-        self._panel_stack.setStretchFactor(1, 1)
-
-        self._splitter.addWidget(self._panel_stack)
+        self._splitter.addWidget(self._panel_scroll)
+        self._splitter.setStretchFactor(0, 4)
+        self._splitter.setStretchFactor(1, 1)
 
         self.panel_location_combo.currentTextChanged.connect(self._on_panel_location_change)
         self.scalar_combo.currentIndexChanged.connect(self._on_scalar_change)
@@ -5819,9 +5786,9 @@ class Surface3DDialog(QDialog):
         if not hasattr(self, "_splitter"):
             return
 
-        normalised = (location or "right").strip().lower()
+        normalised = (location or "bottom").strip().lower()
         if normalised not in {"bottom", "left", "right"}:
-            normalised = "right"
+            normalised = "bottom"
 
         view_first = True
         if normalised == "bottom":
@@ -5831,7 +5798,7 @@ class Surface3DDialog(QDialog):
             self._splitter.setOrientation(Qt.Horizontal)
             view_first = normalised != "left"
 
-        widgets = [self._view_container, self._panel_stack]
+        widgets = [self._view_container, self._panel_scroll]
         if not view_first:
             widgets.reverse()
         for index, widget in enumerate(widgets):
@@ -5839,11 +5806,11 @@ class Surface3DDialog(QDialog):
                 self._splitter.insertWidget(index, widget)
 
         if view_first:
-            self._splitter.setStretchFactor(0, 3)
+            self._splitter.setStretchFactor(0, 4)
             self._splitter.setStretchFactor(1, 1)
         else:
             self._splitter.setStretchFactor(0, 1)
-            self._splitter.setStretchFactor(1, 3)
+            self._splitter.setStretchFactor(1, 4)
 
     def _on_panel_location_change(self, location: str) -> None:
         self._apply_panel_layout(location)
