@@ -5015,18 +5015,20 @@ class Volume3DDialog(QDialog):
         fig = self._colorbar_canvas.figure
         fig.clf()
         # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
-        # persistent reference for the current normalisation range.
-        ax = fig.add_axes([0.26, 0.15, 0.48, 0.7])
+        # persistent reference for the current normalisation range. We render it
+        # horizontally so it reads naturally underneath the legend label while
+        # leaving more vertical room for the surrounding controls.
+        ax = fig.add_axes([0.12, 0.35, 0.76, 0.32])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        fig.colorbar(mappable, cax=ax)
-        ax.yaxis.set_ticks_position("right")
-        ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color)
-        ax.tick_params(colors=self._fg_color, which="both")
-        for spine in ax.spines.values():
+        colorbar = fig.colorbar(mappable, cax=ax, orientation="horizontal")
+        colorbar.set_label(label, color=self._fg_color, labelpad=6)
+        colorbar.ax.xaxis.set_ticks_position("bottom")
+        colorbar.ax.xaxis.set_label_position("bottom")
+        colorbar.ax.tick_params(colors=self._fg_color, which="both")
+        for spine in colorbar.ax.spines.values():
             spine.set_color(self._fg_color)
-        ax.set_facecolor(self._canvas_bg)
+        colorbar.ax.set_facecolor(self._canvas_bg)
         fig.patch.set_facecolor(self._canvas_bg)
         self._colorbar_canvas.draw_idle()
 
@@ -6098,17 +6100,19 @@ class Surface3DDialog(QDialog):
     ) -> None:
         fig = self._colorbar_canvas.figure
         fig.clf()
-        ax = fig.add_axes([0.28, 0.1, 0.58, 0.82])
+        # Render the colour bar horizontally so it mirrors the slice legend above
+        # while preserving vertical space for the rest of the controls.
+        ax = fig.add_axes([0.12, 0.35, 0.76, 0.32])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        fig.colorbar(mappable, cax=ax)
-        ax.yaxis.set_ticks_position("right")
-        ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color)
-        ax.tick_params(colors=self._fg_color, which="both")
-        for spine in ax.spines.values():
+        colorbar = fig.colorbar(mappable, cax=ax, orientation="horizontal")
+        colorbar.set_label(label, color=self._fg_color, labelpad=6)
+        colorbar.ax.xaxis.set_ticks_position("bottom")
+        colorbar.ax.xaxis.set_label_position("bottom")
+        colorbar.ax.tick_params(colors=self._fg_color, which="both")
+        for spine in colorbar.ax.spines.values():
             spine.set_color(self._fg_color)
-        ax.set_facecolor(self._canvas_bg)
+        colorbar.ax.set_facecolor(self._canvas_bg)
         fig.patch.set_facecolor(self._canvas_bg)
         self._colorbar_canvas.draw_idle()
 
