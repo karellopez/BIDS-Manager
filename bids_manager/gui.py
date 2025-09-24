@@ -131,6 +131,17 @@ except Exception:  # pragma: no cover - optional dependency
     gl_shaders = None
     HAS_PYQTGRAPH = False
 
+# ``pyqtgraph`` relies on PyOpenGL for the raw GL bindings.  Importing it here
+# lets us tweak the depth-mask state for translucent meshes without pulling the
+# dependency when OpenGL support is unavailable on the system running the UI.
+if HAS_PYQTGRAPH:  # pragma: no branch - guarded by optional dependency
+    try:
+        from OpenGL import GL as gl_module
+    except Exception:  # pragma: no cover - optional dependency
+        gl_module = None
+else:  # pragma: no cover - optional dependency
+    gl_module = None
+
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
 ICON_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Icon.png"
@@ -236,6 +247,21 @@ def _create_flat_color_shader():
         return None
 
     return shader_mod.ShaderProgram(None, [vertex, fragment], uniforms={})
+
+
+def _sync_depth_mask_for_translucency(item: Any, translucent: bool) -> None:
+    """Toggle depth writes to make translucent meshes look consistent."""
+
+    if item is None or gl_module is None:
+        return
+    try:
+        mask = gl_module.GL_FALSE if translucent else gl_module.GL_TRUE
+        item.updateGLOptions({"glDepthMask": (mask,)})
+    except Exception:  # pragma: no cover - runtime safety net
+        # If ``item`` lacks ``updateGLOptions`` (unexpected for ``GLMeshItem``)
+        # or the OpenGL bindings are absent we silently fall back to the
+        # default behaviour rather than crash the viewer.
+        return
 
 
 _SLICE_ORIENTATIONS = (
@@ -4231,9 +4257,11 @@ class Volume3DDialog(QDialog):
         colorbar_layout = QVBoxLayout(colorbar_group)
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
+        # Render the colour bar in a wide, shallow canvas so the horizontal scale
+        # mirrors the slider orientation directly beneath the mode selector.
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(3.0, 1.2)))
         self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._colorbar_canvas.setFixedHeight(180)
+        self._colorbar_canvas.setFixedHeight(150)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
 
@@ -5016,14 +5044,14 @@ class Volume3DDialog(QDialog):
         fig.clf()
         # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
         # persistent reference for the current normalisation range.
-        ax = fig.add_axes([0.26, 0.15, 0.48, 0.7])
+        ax = fig.add_axes([0.12, 0.46, 0.76, 0.34])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        fig.colorbar(mappable, cax=ax)
-        ax.yaxis.set_ticks_position("right")
-        ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color)
-        ax.tick_params(colors=self._fg_color, which="both")
+        fig.colorbar(mappable, cax=ax, orientation="horizontal")
+        ax.set_xlabel(label, color=self._fg_color)
+        ax.xaxis.set_ticks_position("bottom")
+        ax.xaxis.set_label_position("bottom")
+        ax.tick_params(axis="x", colors=self._fg_color, which="both")
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
         ax.set_facecolor(self._canvas_bg)
@@ -5410,8 +5438,10 @@ class Volume3DDialog(QDialog):
         else:
             self._mesh_item.setMeshData(meshdata=meshdata)
 
+        translucent = alpha < 0.999
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        self._mesh_item.setGLOptions("translucent" if translucent else "opaque")
+        _sync_depth_mask_for_translucency(self._mesh_item, translucent)
 
         mins = np.min(verts, axis=0)
         maxs = np.max(verts, axis=0)
@@ -5661,9 +5691,11 @@ class Surface3DDialog(QDialog):
         colorbar_layout = QVBoxLayout(colorbar_group)
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
+        # Match the volume viewer by keeping the colour bar wide and shallow so
+        # the horizontal scale lines up with the render controls.
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(3.0, 1.2)))
         self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._colorbar_canvas.setFixedHeight(180)
+        self._colorbar_canvas.setFixedHeight(150)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
         settings_layout.addWidget(colorbar_group)
@@ -6098,14 +6130,14 @@ class Surface3DDialog(QDialog):
     ) -> None:
         fig = self._colorbar_canvas.figure
         fig.clf()
-        ax = fig.add_axes([0.28, 0.1, 0.58, 0.82])
+        ax = fig.add_axes([0.12, 0.46, 0.76, 0.34])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        fig.colorbar(mappable, cax=ax)
-        ax.yaxis.set_ticks_position("right")
-        ax.yaxis.set_label_position("right")
-        ax.set_ylabel(label, color=self._fg_color)
-        ax.tick_params(colors=self._fg_color, which="both")
+        fig.colorbar(mappable, cax=ax, orientation="horizontal")
+        ax.set_xlabel(label, color=self._fg_color)
+        ax.xaxis.set_ticks_position("bottom")
+        ax.xaxis.set_label_position("bottom")
+        ax.tick_params(axis="x", colors=self._fg_color, which="both")
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
         ax.set_facecolor(self._canvas_bg)
@@ -6257,8 +6289,10 @@ class Surface3DDialog(QDialog):
             self.view.addItem(self._mesh_item)
         else:
             self._mesh_item.setMeshData(meshdata=meshdata)
+        translucent = alpha < 0.999
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        self._mesh_item.setGLOptions("translucent" if translucent else "opaque")
+        _sync_depth_mask_for_translucency(self._mesh_item, translucent)
 
         mins = np.min(clipped_verts, axis=0)
         maxs = np.max(clipped_verts, axis=0)
@@ -6431,7 +6465,9 @@ class FreeSurferSurfaceDialog(QDialog):
 
         self._apply_mesh_shader()
         alpha = self.opacity_slider.value() / 100.0
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        translucent = alpha < 0.999
+        self._mesh_item.setGLOptions("translucent" if translucent else "opaque")
+        _sync_depth_mask_for_translucency(self._mesh_item, translucent)
         if not self._initialising:
             self.view.update()
 
