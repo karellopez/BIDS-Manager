@@ -62,7 +62,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Optional, Sequence, NamedTuple
+from typing import Any, Optional, Sequence
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
@@ -304,17 +304,6 @@ class _SliceControl:
     axis: int
     negative_name: str
     positive_name: str
-
-
-class _ClipPlaneParams(NamedTuple):
-    """Describes an active clip plane in world coordinates."""
-
-    normal: np.ndarray
-    lower: float
-    upper: Optional[float]
-    depth_mm: float
-    thickness_mm: float
-    span_mm: float
 
 
 class _AutoUpdateLabel(QLabel):
@@ -4021,7 +4010,6 @@ class Volume3DDialog(QDialog):
         self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
         self._axis_label_items: list[gl.GLTextItem] = []
         self._data_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
-        self._clip_corners: Optional[np.ndarray] = None
         self._slice_controls: dict[str, _SliceControl] = {}
 
         layout = QVBoxLayout(self)
@@ -4305,65 +4293,6 @@ class Volume3DDialog(QDialog):
         slice_layout.addStretch()
         settings_layout.addWidget(slice_group)
 
-        clip_group = QGroupBox("Clip plane")
-        clip_layout = QGridLayout(clip_group)
-        clip_layout.setColumnStretch(1, 1)
-
-        row = 0
-        self.clip_enable_checkbox = QCheckBox("Enable clip plane")
-        self.clip_enable_checkbox.setChecked(False)
-        clip_layout.addWidget(self.clip_enable_checkbox, row, 0, 1, 3)
-
-        row += 1
-        clip_layout.addWidget(QLabel("Depth:"), row, 0)
-        self.clip_depth_slider = QSlider(Qt.Horizontal)
-        self.clip_depth_slider.setRange(0, 1000)
-        self.clip_depth_slider.setValue(0)
-        self.clip_depth_slider.setToolTip(
-            "Offset of the clip plane measured from the near face of the volume."
-        )
-        clip_layout.addWidget(self.clip_depth_slider, row, 1)
-        self.clip_depth_label = QLabel("0.0 mm")
-        clip_layout.addWidget(self.clip_depth_label, row, 2)
-
-        row += 1
-        clip_layout.addWidget(QLabel("Azimuth:"), row, 0)
-        self.clip_azimuth_slider = QSlider(Qt.Horizontal)
-        self.clip_azimuth_slider.setRange(-180, 180)
-        self.clip_azimuth_slider.setValue(0)
-        self.clip_azimuth_slider.setToolTip(
-            "Rotation of the clip plane around the vertical axis (°)."
-        )
-        clip_layout.addWidget(self.clip_azimuth_slider, row, 1)
-        self.clip_azimuth_label = QLabel("0°")
-        clip_layout.addWidget(self.clip_azimuth_label, row, 2)
-
-        row += 1
-        clip_layout.addWidget(QLabel("Elevation:"), row, 0)
-        self.clip_elevation_slider = QSlider(Qt.Horizontal)
-        self.clip_elevation_slider.setRange(-90, 90)
-        self.clip_elevation_slider.setValue(0)
-        self.clip_elevation_slider.setToolTip(
-            "Tilt of the clip plane relative to the horizontal axis (°)."
-        )
-        clip_layout.addWidget(self.clip_elevation_slider, row, 1)
-        self.clip_elevation_label = QLabel("0°")
-        clip_layout.addWidget(self.clip_elevation_label, row, 2)
-
-        row += 1
-        clip_layout.addWidget(QLabel("Thickness:"), row, 0)
-        self.clip_thickness_slider = QSlider(Qt.Horizontal)
-        self.clip_thickness_slider.setRange(0, 1000)
-        self.clip_thickness_slider.setValue(1000)
-        self.clip_thickness_slider.setToolTip(
-            "Depth of the retained slab along the clip normal (0 = infinitely thin)."
-        )
-        clip_layout.addWidget(self.clip_thickness_slider, row, 1)
-        self.clip_thickness_label = QLabel("Full")
-        clip_layout.addWidget(self.clip_thickness_label, row, 2)
-
-        settings_layout.addWidget(clip_group)
-
         self.lighting_group = QGroupBox("Lighting")
         light_layout = QGridLayout(self.lighting_group)
         light_row = 0
@@ -4547,159 +4476,6 @@ class Volume3DDialog(QDialog):
         ):
             label.setEnabled(enabled)
 
-    def _update_clip_controls_enabled(self) -> None:
-        checkbox = getattr(self, "clip_enable_checkbox", None)
-        if checkbox is None:
-            return
-        has_data = self._data_bounds is not None
-        enabled = bool(checkbox.isChecked() and has_data)
-        depth_slider = getattr(self, "clip_depth_slider", None)
-        if depth_slider is not None:
-            depth_slider.setEnabled(enabled)
-        depth_active = bool(enabled and depth_slider is not None and depth_slider.value() > 0)
-        for widget in (
-            getattr(self, "clip_azimuth_slider", None),
-            getattr(self, "clip_elevation_slider", None),
-            getattr(self, "clip_thickness_slider", None),
-        ):
-            if widget is not None:
-                widget.setEnabled(depth_active)
-        for label, flag in (
-            (getattr(self, "clip_depth_label", None), enabled),
-            (getattr(self, "clip_azimuth_label", None), depth_active),
-            (getattr(self, "clip_elevation_label", None), depth_active),
-            (getattr(self, "clip_thickness_label", None), depth_active),
-        ):
-            if label is not None:
-                label.setEnabled(flag)
-
-    def _clip_plane_active(self) -> bool:
-        checkbox = getattr(self, "clip_enable_checkbox", None)
-        depth_slider = getattr(self, "clip_depth_slider", None)
-        if (
-            checkbox is None
-            or depth_slider is None
-            or not checkbox.isChecked()
-            or depth_slider.value() <= 0
-            or self._data_bounds is None
-        ):
-            return False
-        return True
-
-    def _clip_direction_vector(self) -> np.ndarray:
-        azimuth_slider = getattr(self, "clip_azimuth_slider", None)
-        elevation_slider = getattr(self, "clip_elevation_slider", None)
-        azimuth = math.radians(float(azimuth_slider.value() if azimuth_slider else 0))
-        elevation = math.radians(float(elevation_slider.value() if elevation_slider else 0))
-        cos_el = math.cos(elevation)
-        return np.array(
-            [
-                float(cos_el * math.cos(azimuth)),
-                float(cos_el * math.sin(azimuth)),
-                float(math.sin(elevation)),
-            ],
-            dtype=np.float32,
-        )
-
-    def _clip_metric_snapshot(
-        self,
-    ) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-        bounds = self._data_bounds
-        if bounds is None:
-            return None, None, None, None
-        mins, maxs = bounds
-        direction = self._clip_direction_vector()
-        norm = float(np.linalg.norm(direction))
-        if norm < 1e-6:
-            return 0.0, float(np.linalg.norm(maxs - mins)), float(0.0), float(np.linalg.norm(maxs - mins))
-        normal = direction / norm
-        corners = self._clip_corners_array()
-        if corners is None:
-            return None, None, None, None
-        projections = corners @ normal
-        near = float(projections.min())
-        far = float(projections.max())
-        span = max(0.0, far - near)
-        depth_slider = getattr(self, "clip_depth_slider", None)
-        thickness_slider = getattr(self, "clip_thickness_slider", None)
-        if depth_slider is None or depth_slider.maximum() <= 0:
-            depth_fraction = 0.0
-        else:
-            depth_fraction = float(depth_slider.value()) / float(max(1, depth_slider.maximum()))
-            depth_fraction = min(max(depth_fraction, 0.0), 1.0)
-        if thickness_slider is None or thickness_slider.maximum() <= 0:
-            thickness_fraction = 1.0
-        else:
-            thickness_fraction = float(thickness_slider.value()) / float(max(1, thickness_slider.maximum()))
-            thickness_fraction = min(max(thickness_fraction, 0.0), 1.0)
-        depth_mm = depth_fraction * span
-        diag = float(np.linalg.norm(maxs - mins))
-        thickness_mm = thickness_fraction * diag
-        return depth_mm, thickness_mm, span, diag
-
-    def _update_clip_labels(self) -> None:
-        if not hasattr(self, "clip_depth_label"):
-            return
-        depth_mm, thickness_mm, span_mm, diag_mm = self._clip_metric_snapshot()
-        if depth_mm is None:
-            depth_text = "–"
-        else:
-            depth_text = f"{depth_mm:.1f} mm"
-        if thickness_mm is None or diag_mm is None:
-            thickness_text = "–"
-        else:
-            if thickness_mm >= max(diag_mm - 1e-3, 0.0):
-                thickness_text = "Full"
-            elif thickness_mm <= 1e-3:
-                thickness_text = "0.0 mm"
-            else:
-                thickness_text = f"{thickness_mm:.1f} mm"
-        self.clip_depth_label.setText(depth_text)
-        self.clip_thickness_label.setText(thickness_text)
-        if hasattr(self, "clip_azimuth_label") and hasattr(self, "clip_azimuth_slider"):
-            self.clip_azimuth_label.setText(f"{self.clip_azimuth_slider.value()}°")
-        if hasattr(self, "clip_elevation_label") and hasattr(self, "clip_elevation_slider"):
-            self.clip_elevation_label.setText(f"{self.clip_elevation_slider.value()}°")
-
-    def _current_clip_plane(self) -> Optional[_ClipPlaneParams]:
-        if not self._clip_plane_active():
-            return None
-        bounds = self._data_bounds
-        if bounds is None:
-            return None
-        mins, maxs = bounds
-        direction = self._clip_direction_vector()
-        norm = float(np.linalg.norm(direction))
-        if norm < 1e-6:
-            return None
-        normal = direction / norm
-        corners = self._clip_corners_array()
-        if corners is None:
-            return None
-        projections = corners @ normal
-        near = float(projections.min())
-        far = float(projections.max())
-        span = max(0.0, far - near)
-        if span <= 1e-6:
-            return None
-        depth_slider = self.clip_depth_slider
-        depth_fraction = float(depth_slider.value()) / float(max(1, depth_slider.maximum()))
-        depth_fraction = min(max(depth_fraction, 0.0), 1.0)
-        lower = near + depth_fraction * span
-        thickness_slider = self.clip_thickness_slider
-        diag = float(np.linalg.norm(maxs - mins))
-        thickness_fraction = float(thickness_slider.value()) / float(max(1, thickness_slider.maximum()))
-        thickness_fraction = min(max(thickness_fraction, 0.0), 1.0)
-        thickness_mm = thickness_fraction * diag
-        if thickness_fraction >= 0.999 or thickness_mm >= span - 1e-6:
-            upper: Optional[float] = None
-            effective_thickness = span
-        else:
-            upper = min(far, lower + thickness_mm)
-            effective_thickness = max(0.0, upper - lower)
-        depth_mm = depth_fraction * span
-        return _ClipPlaneParams(normal, lower, upper, depth_mm, effective_thickness, span)
-
     def _apply_mesh_shader(self) -> None:
         if self._mesh_item is None:
             return
@@ -4799,42 +4575,12 @@ class Volume3DDialog(QDialog):
         self._scalar_hist_upper_edges = edges[1:]
         self._scalar_hist_cumulative = cumulative
 
-    def _update_clip_geometry_cache(self) -> None:
-        bounds = self._data_bounds
-        if bounds is None:
-            self._clip_corners = None
-            return
-        mins, maxs = bounds
-        self._clip_corners = np.array(
-            [
-                [mins[0], mins[1], mins[2]],
-                [mins[0], mins[1], maxs[2]],
-                [mins[0], maxs[1], mins[2]],
-                [mins[0], maxs[1], maxs[2]],
-                [maxs[0], mins[1], mins[2]],
-                [maxs[0], mins[1], maxs[2]],
-                [maxs[0], maxs[1], mins[2]],
-                [maxs[0], maxs[1], maxs[2]],
-            ],
-            dtype=np.float32,
-        )
-
-    def _clip_corners_array(self) -> Optional[np.ndarray]:
-        if self._data_bounds is None:
-            return None
-        if self._clip_corners is None:
-            self._update_clip_geometry_cache()
-        return self._clip_corners
-
     def _prepare_downsampled(self) -> None:
         vol = self._normalised_volume
         if vol is None:
             self._downsampled = None
             self._downsample_step = 1
             self._data_bounds = None
-            self._update_clip_geometry_cache()
-            self._update_clip_controls_enabled()
-            self._update_clip_labels()
             self._update_slice_labels()
             return
         manual_step = 0
@@ -4861,9 +4607,6 @@ class Volume3DDialog(QDialog):
             spans = np.maximum((ds_shape - 1.0) * scale, 0.0)
             mins = np.zeros(3, dtype=np.float32)
             self._data_bounds = (mins, mins + spans)
-        self._update_clip_geometry_cache()
-        self._update_clip_controls_enabled()
-        self._update_clip_labels()
         self._update_slice_labels()
         self._rebuild_point_cache()
 
@@ -5015,47 +4758,6 @@ class Volume3DDialog(QDialog):
             return ""
         return " Slice windows: " + ", ".join(parts) + "."
 
-    def _clip_status_suffix(self) -> str:
-        if not self._clip_plane_active():
-            return ""
-        depth_mm, thickness_mm, _, _ = self._clip_metric_snapshot()
-        azimuth = getattr(self, "clip_azimuth_slider", None)
-        elevation = getattr(self, "clip_elevation_slider", None)
-        az_val = int(azimuth.value()) if azimuth is not None else 0
-        el_val = int(elevation.value()) if elevation is not None else 0
-        parts = []
-        if depth_mm is not None:
-            parts.append(f"depth {depth_mm:.1f} mm")
-        else:
-            parts.append("depth –")
-        if thickness_mm is not None:
-            thickness_slider = getattr(self, "clip_thickness_slider", None)
-            if thickness_slider is not None and thickness_slider.value() >= thickness_slider.maximum():
-                parts.append("full thickness")
-            else:
-                parts.append(f"thickness {thickness_mm:.1f} mm")
-        parts.append(f"azimuth {az_val}°")
-        parts.append(f"elevation {el_val}°")
-        return " Clip plane: " + ", ".join(parts) + "."
-
-    def _active_filter_names(self) -> list[str]:
-        names: list[str] = []
-        if any(control.checkbox.isChecked() for control in self._slice_controls.values()):
-            names.append("Slice planes")
-        if self._clip_plane_active():
-            names.append("Clip plane")
-        return names
-
-    @staticmethod
-    def _format_filter_list(items: Sequence[str]) -> str:
-        if not items:
-            return ""
-        if len(items) == 1:
-            return items[0]
-        if len(items) == 2:
-            return f"{items[0]} and {items[1]}"
-        return ", ".join(items[:-1]) + f", and {items[-1]}"
-
     def _mask_coords(
         self, coords: np.ndarray, bounds: tuple[np.ndarray, np.ndarray]
     ) -> np.ndarray:
@@ -5067,101 +4769,20 @@ class Volume3DDialog(QDialog):
             mask &= (coords[:, axis] >= mins[axis]) & (coords[:, axis] <= maxs[axis])
         return mask
 
-    def _filter_points_by_clip_plane(
-        self,
-        coords: np.ndarray,
-        values: Optional[np.ndarray],
-        clip: _ClipPlaneParams,
-    ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[tuple[np.ndarray, np.ndarray]]]:
-        if coords.size == 0:
-            return coords, values, None
-        projections = coords @ clip.normal
-        lower = clip.lower
-        mask = projections >= (lower - 1e-6)
-        upper = clip.upper
-        if upper is not None:
-            mask &= projections <= (upper + 1e-6)
-        if not np.any(mask):
-            empty_coords = coords[:0].reshape(0, 3)
-            empty_vals = values[:0] if values is not None else None
-            return empty_coords, empty_vals, None
-        filtered_coords = coords[mask]
-        filtered_values = values[mask] if values is not None else None
-        mins = filtered_coords.min(axis=0)
-        maxs = filtered_coords.max(axis=0)
-        return filtered_coords, filtered_values, (mins, maxs)
-
-    def _filter_mesh_by_clip_plane(
-        self,
-        verts: np.ndarray,
-        faces: np.ndarray,
-        values: Optional[np.ndarray],
-        clip: _ClipPlaneParams,
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-        Optional[np.ndarray],
-        Optional[tuple[np.ndarray, np.ndarray]],
-    ]:
-        if verts.size == 0:
-            return verts, faces, values, None
-        projections = verts @ clip.normal
-        lower = clip.lower
-        mask = projections >= (lower - 1e-6)
-        upper = clip.upper
-        if upper is not None:
-            mask &= projections <= (upper + 1e-6)
-        selected = np.where(mask)[0]
-        if selected.size == 0:
-            empty_verts = verts[:0].reshape(0, 3)
-            empty_faces = faces[:0].reshape(0, 3)
-            empty_vals = values[:0] if values is not None else None
-            return empty_verts, empty_faces, empty_vals, None
-        index_map = -np.ones(mask.shape[0], dtype=np.int64)
-        index_map[selected] = np.arange(selected.size, dtype=np.int64)
-        mapped_faces = index_map[faces]
-        valid = (mapped_faces >= 0).all(axis=1)
-        mapped_faces = mapped_faces[valid]
-        if mapped_faces.size == 0:
-            empty_verts = verts[:0].reshape(0, 3)
-            empty_faces = faces[:0].reshape(0, 3)
-            empty_vals = values[:0] if values is not None else None
-            return empty_verts, empty_faces, empty_vals, None
-        new_verts = verts[selected]
-        new_values = values[selected] if values is not None else None
-        mins = new_verts.min(axis=0)
-        maxs = new_verts.max(axis=0)
-        return new_verts, mapped_faces.astype(np.int32, copy=False), new_values, (mins, maxs)
-
     def _apply_slice_to_points(
         self, coords: np.ndarray, values: Optional[np.ndarray]
     ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[tuple[np.ndarray, np.ndarray]]]:
-        if coords.size == 0:
-            return coords, values, None
         bounds = self._active_slice_bounds()
-        active_bounds = bounds
-        filtered_coords = coords
-        filtered_values = values
-        if bounds is not None:
-            mask = self._mask_coords(filtered_coords, bounds)
-            if not np.any(mask):
-                empty_coords = filtered_coords[:0].reshape(0, 3)
-                empty_vals = filtered_values[:0] if filtered_values is not None else None
-                return empty_coords, empty_vals, bounds
-            filtered_coords = filtered_coords[mask]
-            filtered_values = (
-                filtered_values[mask] if filtered_values is not None else None
-            )
-        clip = self._current_clip_plane()
-        if clip is not None:
-            filtered_coords, filtered_values, clip_bounds = self._filter_points_by_clip_plane(
-                filtered_coords, filtered_values, clip
-            )
-            if clip_bounds is not None:
-                active_bounds = clip_bounds
-            elif filtered_coords.size == 0 and bounds is not None:
-                active_bounds = bounds
-        return filtered_coords, filtered_values, active_bounds
+        if bounds is None or coords.size == 0:
+            return coords, values, None
+        mask = self._mask_coords(coords, bounds)
+        if not np.any(mask):
+            empty_coords = coords[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_coords, empty_vals, bounds
+        filtered_coords = coords[mask]
+        filtered_values = values[mask] if values is not None else None
+        return filtered_coords, filtered_values, bounds
 
     def _clip_mesh_to_slices(
         self,
@@ -5174,46 +4795,29 @@ class Volume3DDialog(QDialog):
         Optional[np.ndarray],
         Optional[tuple[np.ndarray, np.ndarray]],
     ]:
-        if verts.size == 0:
-            return verts, faces, values, None
         bounds = self._active_slice_bounds()
-        active_bounds = bounds
-        working_verts = verts
-        working_faces = faces
-        working_values = values
-        if bounds is not None:
-            mask = self._mask_coords(working_verts, bounds)
-            if not np.any(mask):
-                empty_verts = working_verts[:0].reshape(0, 3)
-                empty_faces = working_faces[:0].reshape(0, 3)
-                empty_vals = working_values[:0] if working_values is not None else None
-                return empty_verts, empty_faces, empty_vals, bounds
-            selected = np.where(mask)[0]
-            index_map = -np.ones(mask.shape[0], dtype=np.int64)
-            index_map[selected] = np.arange(selected.size, dtype=np.int64)
-            mapped_faces = index_map[working_faces]
-            valid = (mapped_faces >= 0).all(axis=1)
-            mapped_faces = mapped_faces[valid]
-            if mapped_faces.size == 0:
-                empty_verts = working_verts[:0].reshape(0, 3)
-                empty_faces = working_faces[:0].reshape(0, 3)
-                empty_vals = working_values[:0] if working_values is not None else None
-                return empty_verts, empty_faces, empty_vals, bounds
-            working_verts = working_verts[selected]
-            working_faces = mapped_faces.astype(np.int32, copy=False)
-            working_values = (
-                working_values[selected] if working_values is not None else None
-            )
-        clip = self._current_clip_plane()
-        if clip is not None:
-            working_verts, working_faces, working_values, clip_bounds = self._filter_mesh_by_clip_plane(
-                working_verts, working_faces, working_values, clip
-            )
-            if clip_bounds is not None:
-                active_bounds = clip_bounds
-            elif working_verts.size == 0 and bounds is not None:
-                active_bounds = bounds
-        return working_verts, working_faces, working_values, active_bounds
+        if bounds is None or verts.size == 0:
+            return verts, faces, values, None
+        mask = self._mask_coords(verts, bounds)
+        if not np.any(mask):
+            empty_verts = verts[:0].reshape(0, 3)
+            empty_faces = faces[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_verts, empty_faces, empty_vals, bounds
+        selected = np.where(mask)[0]
+        index_map = -np.ones(mask.shape[0], dtype=np.int64)
+        index_map[selected] = np.arange(selected.size, dtype=np.int64)
+        mapped_faces = index_map[faces]
+        valid = (mapped_faces >= 0).all(axis=1)
+        mapped_faces = mapped_faces[valid]
+        if mapped_faces.size == 0:
+            empty_verts = verts[:0].reshape(0, 3)
+            empty_faces = faces[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_verts, empty_faces, empty_vals, bounds
+        new_verts = verts[selected]
+        new_values = values[selected] if values is not None else None
+        return new_verts, mapped_faces.astype(np.int32, copy=False), new_values, bounds
 
     def _on_slice_toggle(self, name: str, _checked: bool) -> None:
         if name not in self._slice_controls:
@@ -5351,23 +4955,6 @@ class Volume3DDialog(QDialog):
             self._remove_axis_labels()
         else:
             self._update_axis_labels()
-
-    def _on_clip_enable_toggle(self, _checked: bool) -> None:
-        self._update_clip_controls_enabled()
-        self._update_clip_labels()
-        if not self._initialising:
-            self._update_plot()
-
-    def _on_clip_depth_change(self, _value: int) -> None:
-        self._update_clip_controls_enabled()
-        self._update_clip_labels()
-        if not self._initialising:
-            self._update_plot()
-
-    def _on_clip_setting_change(self, _value: int) -> None:
-        self._update_clip_labels()
-        if not self._initialising and self._clip_plane_active():
-            self._update_plot()
 
     def _on_intensity_change(self, value: int) -> None:
         self.intensity_label.setText(f"{value / 100.0:.2f}×")
@@ -5671,18 +5258,10 @@ class Volume3DDialog(QDialog):
                 self._clear_colorbar()
                 mins, maxs = slice_bounds
                 self._update_scene_bounds(mins, maxs)
-                filters = self._active_filter_names()
-                if filters:
-                    prefix = self._format_filter_list(filters)
-                    message = (
-                        f"{prefix} removed all voxels at threshold {thr:.2f}. "
-                        "Adjust the slice or clip controls or disable them."
-                    )
-                else:
-                    message = (
-                        f"No voxels above threshold {thr:.2f}. Lower the threshold to reveal data."
-                    )
-                self.status_label.setText(message)
+                self.status_label.setText(
+                    "Slice planes removed all voxels at threshold "
+                    f"{thr:.2f}. Adjust the slicer sliders or disable slicing."
+                )
                 return
             self._handle_empty_point_cloud(shape, scale, thr)
             return
@@ -5718,7 +5297,6 @@ class Volume3DDialog(QDialog):
             f"Downsample step {step} ({downsample_source}); "
             f"≈ total voxels ≥ threshold {total_voxels:,}.{lighting_suffix}"
             f"{self._slice_status_suffix()}"
-            f"{self._clip_status_suffix()}"
         )
 
     def _draw_surface_mesh(self, thr: float, cmap_name: str, alpha: float) -> None:
@@ -5799,18 +5377,10 @@ class Volume3DDialog(QDialog):
                 self._clear_colorbar()
                 mins, maxs = slice_bounds
                 self._update_scene_bounds(mins, maxs)
-                filters = self._active_filter_names()
-                if filters:
-                    prefix = self._format_filter_list(filters)
-                    message = (
-                        f"{prefix} removed all surface triangles at iso level {thr:.2f}. "
-                        "Adjust the slice or clip controls or disable them."
-                    )
-                else:
-                    message = (
-                        f"No surface remained at iso level {thr:.2f}. Adjust the threshold to recover geometry."
-                    )
-                self.status_label.setText(message)
+                self.status_label.setText(
+                    f"Slice planes removed all surface triangles at iso level {thr:.2f}. "
+                    "Adjust the slicer sliders or disable slicing."
+                )
                 return
             if self._mesh_item is not None:
                 self.view.removeItem(self._mesh_item)
