@@ -4231,11 +4231,9 @@ class Volume3DDialog(QDialog):
         colorbar_layout = QVBoxLayout(colorbar_group)
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
-        # Render the colour bar on a wide canvas so the horizontal gradient has
-        # enough room to display tick labels without wrapping.
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(3.2, 1.2)))
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
         self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._colorbar_canvas.setFixedHeight(140)
+        self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
 
@@ -4821,44 +4819,6 @@ class Volume3DDialog(QDialog):
         new_values = values[selected] if values is not None else None
         return new_verts, mapped_faces.astype(np.int32, copy=False), new_values, bounds
 
-    def _sort_faces_for_transparency(
-        self, verts: np.ndarray, faces: np.ndarray
-    ) -> np.ndarray:
-        """Return faces ordered back-to-front for stable alpha blending."""
-
-        if faces.size == 0:
-            return faces
-
-        view = getattr(self, "view", None)
-        if view is None or not hasattr(view, "cameraPosition"):
-            return faces
-
-        try:
-            camera_pos = view.cameraPosition()
-        except Exception:  # pragma: no cover - camera queries can fail during shutdown
-            return faces
-
-        center_vec = view.opts.get("center") if hasattr(view, "opts") else None
-        if center_vec is None:
-            return faces
-
-        cam = np.array([camera_pos.x(), camera_pos.y(), camera_pos.z()], dtype=np.float32)
-        centre = np.array([center_vec.x(), center_vec.y(), center_vec.z()], dtype=np.float32)
-        view_dir = centre - cam
-        magnitude = float(np.linalg.norm(view_dir))
-        if magnitude < 1e-6:
-            return faces
-        view_dir /= magnitude
-
-        # Project each face centroid onto the camera forward direction and sort
-        # from farthest to nearest so blending draws nearer faces last.  This
-        # avoids the "opaque when rotated" artefact caused by unsorted blended
-        # triangles.
-        centroids = verts[faces].mean(axis=1)
-        depths = np.dot(centroids - cam, view_dir)
-        order = np.argsort(depths)[::-1]
-        return faces[order]
-
     def _on_slice_toggle(self, name: str, _checked: bool) -> None:
         if name not in self._slice_controls:
             return
@@ -5055,17 +5015,15 @@ class Volume3DDialog(QDialog):
         fig = self._colorbar_canvas.figure
         fig.clf()
         # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
-        # persistent reference for the current normalisation range.  Render it
-        # horizontally so the scale mirrors the long edge of the docked panel.
-        ax = fig.add_axes([0.18, 0.45, 0.64, 0.28])
+        # persistent reference for the current normalisation range.
+        ax = fig.add_axes([0.26, 0.15, 0.48, 0.7])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        fig.colorbar(mappable, cax=ax, orientation="horizontal")
-        ax.xaxis.set_ticks_position("bottom")
-        ax.xaxis.set_label_position("top")
-        ax.set_xlabel(label, color=self._fg_color)
-        ax.tick_params(axis="x", colors=self._fg_color, which="both")
-        ax.yaxis.set_ticks([])
+        fig.colorbar(mappable, cax=ax)
+        ax.yaxis.set_ticks_position("right")
+        ax.yaxis.set_label_position("right")
+        ax.set_ylabel(label, color=self._fg_color)
+        ax.tick_params(colors=self._fg_color, which="both")
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
         ax.set_facecolor(self._canvas_bg)
@@ -5434,10 +5392,7 @@ class Volume3DDialog(QDialog):
         if vertex_values is None:
             vertex_values = np.zeros(verts.shape[0], dtype=np.float32)
 
-        faces_for_render = faces
-        if alpha < 0.999:
-            faces_for_render = self._sort_faces_for_transparency(verts, faces)
-        meshdata = gl.MeshData(vertexes=verts, faces=faces_for_render)
+        meshdata = gl.MeshData(vertexes=verts, faces=faces)
         cmap = self._get_adjusted_colormap(cmap_name)
         vertex_colors = self._map_colors(vertex_values, cmap, alpha)
         meshdata.setVertexColors(vertex_colors)
@@ -5706,11 +5661,9 @@ class Surface3DDialog(QDialog):
         colorbar_layout = QVBoxLayout(colorbar_group)
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
-        # Share the same horizontal layout as the docked colour bar in the
-        # full-featured viewer so previews look consistent.
-        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(3.2, 1.2)))
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
         self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._colorbar_canvas.setFixedHeight(140)
+        self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
         settings_layout.addWidget(colorbar_group)
@@ -6145,15 +6098,14 @@ class Surface3DDialog(QDialog):
     ) -> None:
         fig = self._colorbar_canvas.figure
         fig.clf()
-        ax = fig.add_axes([0.18, 0.45, 0.64, 0.28])
+        ax = fig.add_axes([0.28, 0.1, 0.58, 0.82])
         norm = plt.Normalize(vmin, vmax)
         mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        fig.colorbar(mappable, cax=ax, orientation="horizontal")
-        ax.xaxis.set_ticks_position("bottom")
-        ax.xaxis.set_label_position("top")
-        ax.set_xlabel(label, color=self._fg_color)
-        ax.tick_params(axis="x", colors=self._fg_color, which="both")
-        ax.yaxis.set_ticks([])
+        fig.colorbar(mappable, cax=ax)
+        ax.yaxis.set_ticks_position("right")
+        ax.yaxis.set_label_position("right")
+        ax.set_ylabel(label, color=self._fg_color)
+        ax.tick_params(colors=self._fg_color, which="both")
         for spine in ax.spines.values():
             spine.set_color(self._fg_color)
         ax.set_facecolor(self._canvas_bg)
