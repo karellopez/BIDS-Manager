@@ -12,11 +12,13 @@ import importlib.util
 import subprocess
 import os
 from types import ModuleType, SimpleNamespace
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 import pandas as pd
 import re
 
 from bidsphysio import dcm2bidsphysio
+from pydicom import dcmread
+from pydicom.dataset import Dataset
 
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
@@ -112,6 +114,131 @@ def _map_physio_templates(module: ModuleType, df: pd.DataFrame) -> Dict[int, str
     return mapping
 
 
+def _split_uid_field(uid_field: object) -> List[str]:
+    """Return list of SeriesInstanceUID values encoded in ``uid_field``."""
+
+    if isinstance(uid_field, (list, tuple, set)):
+        values = [str(v).strip() for v in uid_field]
+    else:
+        values = [s.strip() for s in str(uid_field or "").split("|")]
+    return [v for v in values if v]
+
+
+def _candidate_dicom_paths(dicom_dir: Path) -> List[Path]:
+    """Return sorted list of DICOM files contained in ``dicom_dir``."""
+
+    return sorted(
+        f for f in dicom_dir.iterdir()
+        if f.is_file() and is_dicom_file(str(f))
+    )
+
+
+def _resolve_direct_physio_path(raw_root: Path, dicom_dir: Path, row: pd.Series) -> Optional[Path]:
+    """Return direct physio DICOM path hinted in ``row`` if available."""
+
+    path_keys: Iterable[str] = ("dicom_path", "dicom_file", "physio_path", "file_path")
+    for key in path_keys:
+        value = row.get(key)
+        if not value:
+            continue
+        candidate = Path(str(value))
+        if not candidate.is_absolute():
+            # Try relative to the recorded folder first, then the root.
+            rel_candidate = dicom_dir / candidate
+            if rel_candidate.exists():
+                return rel_candidate
+            candidate = raw_root / candidate
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _looks_like_physio(dataset: Dataset, expected: str) -> bool:
+    """Return ``True`` when ``dataset`` metadata resembles a physio recording."""
+
+    def _to_text(value: object) -> str:
+        if isinstance(value, (list, tuple, set)):
+            return " ".join(str(v) for v in value)
+        return str(value)
+
+    expected = expected.strip().lower()
+    keywords = [
+        expected,
+        "physio",
+        "physiolog",
+        "physlog",
+        "pulse",
+        "resp",
+    ]
+
+    for attr in ("SeriesDescription", "ProtocolName", "SequenceName"):
+        text = _to_text(getattr(dataset, attr, "")).strip().lower()
+        if not text:
+            continue
+        if any(keyword and keyword in text for keyword in keywords):
+            return True
+
+    image_type = getattr(dataset, "ImageType", None)
+    if image_type:
+        text = " ".join(str(v).lower() for v in image_type if v)
+        if any(keyword and keyword in text for keyword in keywords):
+            return True
+
+    return False
+
+
+def _valid_physio_candidate(row: pd.Series, path: Path) -> bool:
+    """Return ``True`` when ``path`` points to the intended physio DICOM."""
+
+    try:
+        dataset = dcmread(str(path), stop_before_pixels=True, force=True)
+    except Exception as exc:
+        print(f"Failed to read physio DICOM {path}: {exc}")
+        return False
+
+    uid_values = set(_split_uid_field(row.get("series_uid", "")))
+    series_uid = str(getattr(dataset, "SeriesInstanceUID", "")).strip()
+    if uid_values:
+        if series_uid not in uid_values:
+            print(
+                "Skipping physio candidate",
+                path,
+                "because SeriesInstanceUID",
+                series_uid or "<missing>",
+                "does not match expected values",
+                ",".join(sorted(uid_values)) or "<missing>",
+            )
+            return False
+        return True
+
+    sequence = str(row.get("sequence", ""))
+    if _looks_like_physio(dataset, sequence):
+        return True
+
+    print(f"Skipping physio candidate {path}: metadata does not look like a physio recording.")
+    return False
+
+
+def _resolve_physio_dicom(raw_root: Path, dicom_dir: Path, row: pd.Series) -> Optional[Path]:
+    """Return the DICOM file corresponding to ``row`` if present."""
+
+    direct = _resolve_direct_physio_path(raw_root, dicom_dir, row)
+    if direct is not None:
+        if _valid_physio_candidate(row, direct):
+            return direct
+        return None
+
+    dicom_files = _candidate_dicom_paths(dicom_dir)
+    if not dicom_files:
+        return None
+
+    for path in dicom_files:
+        if _valid_physio_candidate(row, path):
+            return path
+
+    return None
+
+
 def convert_physio_series(raw_root: Path,
                           bids_out: Path,
                           module: ModuleType,
@@ -153,11 +280,8 @@ def convert_physio_series(raw_root: Path,
             print(f"Physio source folder missing: {dicom_dir}")
             continue
 
-        dicom_files = sorted(
-            f for f in dicom_dir.iterdir()
-            if f.is_file() and is_dicom_file(str(f))
-        )
-        if not dicom_files:
+        dicom_path = _resolve_physio_dicom(raw_root, dicom_dir, row)
+        if dicom_path is None:
             print(f"No DICOM physiolog files found in {dicom_dir}; skipping.")
             continue
 
@@ -167,8 +291,8 @@ def convert_physio_series(raw_root: Path,
         if prefix_str in converted:
             continue
 
-        print(f"Converting physio {dicom_files[0]} → {prefix_path}")
-        dcm2bidsphysio.dcm2bids(str(dicom_files[0]), prefix_str)
+        print(f"Converting physio {dicom_path} → {prefix_path}")
+        dcm2bidsphysio.dcm2bids(str(dicom_path), prefix_str)
         converted.add(prefix_str)
 
 
