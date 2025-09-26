@@ -67,14 +67,14 @@ from dataclasses import dataclass
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QTableWidget, QTableWidgetItem, QGroupBox, QGridLayout,
+    QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QGroupBox, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QPoint, pyqtSignal
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -94,6 +94,7 @@ import signal
 import random
 import string
 import math
+from decimal import Decimal, InvalidOperation
 from .schema_config import (
     DEFAULT_SCHEMA_DIR,
     ENABLE_SCHEMA_RENAMER,
@@ -518,6 +519,593 @@ class SubjectDelegate(QStyledItemDelegate):
     def setModelData(self, editor, model, index):  # noqa: D401 - Qt override
         model.setData(index, "sub-" + editor.text(), Qt.EditRole)
 
+
+def _clean_study_name(name: str) -> str:
+    """Return ``name`` with consecutive duplicate words collapsed."""
+
+    text = str(name or "").strip()
+    if not text:
+        return ""
+
+    # Break the string into alternating words and separators (spaces, underscores
+    # and dashes) so we can analyse repeating words without losing the original
+    # separators chosen by the operator.
+    parts = re.split(r'([_\s-]+)', text)
+    result: list[str] = []
+    pending_sep = ""
+    last_word: Optional[str] = None
+
+    for part in parts:
+        if not part:
+            continue
+        if re.fullmatch(r'[_\s-]+', part):
+            pending_sep = part
+            continue
+
+        word = part
+        if last_word is not None and word.lower() == last_word.lower():
+            pending_sep = ""
+            continue
+
+        if pending_sep:
+            result.append(pending_sep)
+            pending_sep = ""
+
+        result.append(word)
+        last_word = word
+
+    cleaned = "".join(result).strip()
+    if not cleaned:
+        cleaned = text
+
+    # Catch inputs without explicit separators (``studyStudyStudy`` or
+    # ``BIDSBIDS``) by collapsing the repeated alpha-numeric block.
+    repeated = re.fullmatch(r'(?i)([A-Za-z0-9]+)(\1)+', cleaned)
+    if repeated:
+        cleaned = repeated.group(1)
+
+    return cleaned
+
+
+def _infer_datetime_format(value: str) -> Optional[str]:
+    """Best-effort detection of the ``strftime`` format used by ``value``."""
+
+    # The patterns are intentionally conservative — we only return a format
+    # string when the value is unambiguous so that the autofill logic does not
+    # accidentally invent a layout that the user did not intend.
+    patterns = [
+        (r"^\d{4}-\d{2}-\d{2}$", "%Y-%m-%d"),
+        (r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", "%Y-%m-%d %H:%M"),
+        (r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "%Y-%m-%d %H:%M:%S"),
+        (r"^\d{8}$", "%Y%m%d"),
+        (r"^\d{12}$", "%Y%m%d%H%M"),
+        (r"^\d{14}$", "%Y%m%d%H%M%S"),
+        (r"^\d{2}/\d{2}/\d{4}$", "%m/%d/%Y"),
+        (r"^\d{2}-\d{2}-\d{4}$", "%m-%d-%Y"),
+        (r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$", "%m/%d/%Y %H:%M"),
+        (r"^\d{2}-\d{2}-\d{4} \d{2}:\d{2}$", "%m-%d-%Y %H:%M"),
+    ]
+    for pattern, fmt in patterns:
+        if re.fullmatch(pattern, value):
+            return fmt
+    return None
+
+
+def _analyse_autofill_series(values: Sequence[str]):
+    """Return a callable that yields sequence values for any integer index."""
+
+    # Normalise ``None`` values and trim whitespace so every branch deals with
+    # simple strings.  Keeping ``cleaned`` and ``stripped`` separately lets us
+    # honour the original spacing when repeating plain text values.
+    cleaned = ["" if v is None else str(v) for v in values]
+    stripped = [v.strip() for v in cleaned]
+    if not cleaned:
+        return lambda _idx: ""
+    if all(v == "" for v in cleaned):
+        return lambda _idx: ""
+
+    # --- Numeric integers -------------------------------------------------
+    # Detect integer progressions (1, 2, 3), respecting zero padding and sign
+    # prefixes.  When found we extrapolate the series using the detected step.
+    ints: list[int] = []
+    widths: list[int] = []
+    keep_plus = any(v.strip().startswith("+") for v in cleaned)
+    for value in stripped:
+        match = re.fullmatch(r'([+-]?)(\d+)', value)
+        if match is None:
+            ints = []
+            break
+        sign, digits = match.groups()
+        num = int(f"{sign}{digits}") if sign else int(digits)
+        ints.append(num)
+        widths.append(len(digits))
+
+    if ints:
+        step = 0
+        if len(ints) >= 2:
+            step = ints[1] - ints[0]
+            for idx in range(2, len(ints)):
+                if ints[idx] - ints[idx - 1] != step:
+                    ints = []
+                    break
+        if ints:
+            width = widths[0] if widths and all(w == widths[0] for w in widths) else 0
+
+            def int_value(index: int) -> str:
+                number = ints[0] + step * index
+                if width:
+                    digits = f"{abs(number):0{width}d}"
+                else:
+                    digits = str(abs(number))
+                if number < 0:
+                    return f"-{digits}"
+                if keep_plus and number >= 0:
+                    return f"+{digits}"
+                return digits
+
+            return int_value
+
+    # --- Decimal numbers --------------------------------------------------
+    # Reuse :class:`decimal.Decimal` so that we can maintain the precision the
+    # operator typed rather than relying on binary floating point.
+    decimals: list[Decimal] = []
+    decimal_places = 0
+    for value in stripped:
+        try:
+            dec = Decimal(value)
+        except InvalidOperation:
+            decimals = []
+            break
+        decimals.append(dec)
+        if "." in value:
+            frac = value.split(".", 1)[1]
+            decimal_places = max(decimal_places, len(frac))
+
+    if decimals:
+        step = Decimal(0)
+        if len(decimals) >= 2:
+            step = decimals[1] - decimals[0]
+            for idx in range(2, len(decimals)):
+                if decimals[idx] - decimals[idx - 1] != step:
+                    decimals = []
+                    break
+        if decimals:
+            def decimal_value(index: int) -> str:
+                value = decimals[0] + step * Decimal(index)
+                if decimal_places:
+                    quant = Decimal(1).scaleb(-decimal_places)
+                    try:
+                        value = value.quantize(quant)
+                    except InvalidOperation:
+                        pass
+                    return format(value, f".{decimal_places}f")
+                return format(value, "f").rstrip("0").rstrip(".") or "0"
+
+            return decimal_value
+
+    # --- Date/time values -------------------------------------------------
+    # Use pandas to parse timestamps because it already knows how to interpret
+    # many ISO-like formats and carries the time delta arithmetic for us.
+    try:
+        parsed = pd.to_datetime(stripped, errors="raise", infer_datetime_format=True)
+    except Exception:
+        parsed = None
+
+    if parsed is not None and len(parsed) > 0:
+        step = pd.Timedelta(0)
+        if len(parsed) >= 2:
+            step = parsed[1] - parsed[0]
+            for idx in range(2, len(parsed)):
+                if parsed[idx] - parsed[idx - 1] != step:
+                    parsed = None
+                    break
+        if parsed is not None:
+            fmt = _infer_datetime_format(stripped[0])
+
+            def datetime_value(index: int) -> str:
+                ts = parsed[0] + step * index
+                if fmt:
+                    return ts.strftime(fmt)
+                return str(ts)
+
+            return datetime_value
+
+    # --- Prefixed/suffixed numbers ----------------------------------------
+    # Handle text such as ``run01`` or ``Series-001`` by preserving the shared
+    # prefix/suffix and extrapolating the numeric portion.
+    components: list[tuple[str, str, str]] = []
+    for value in cleaned:
+        match = re.fullmatch(r'(.*?)(\d+)([^0-9]*)', value)
+        if match is None:
+            components = []
+            break
+        components.append(match.groups())
+
+    if components:
+        prefixes = {c[0] for c in components}
+        suffixes = {c[2] for c in components}
+        if len(prefixes) == 1 and len(suffixes) == 1:
+            numbers = [int(c[1]) for c in components]
+            width = len(components[0][1])
+            step = 0
+            if len(numbers) >= 2:
+                step = numbers[1] - numbers[0]
+                for idx in range(2, len(numbers)):
+                    if numbers[idx] - numbers[idx - 1] != step:
+                        step = 0
+                        break
+            prefix = components[0][0]
+            suffix = components[0][2]
+
+            def text_value(index: int) -> str:
+                number = numbers[0] + step * index
+                if width:
+                    return f"{prefix}{number:0{width}d}{suffix}"
+                return f"{prefix}{number}{suffix}"
+
+            return text_value
+
+    # --- Fallback ---------------------------------------------------------
+    # When no special pattern is recognised we simply repeat the original
+    # selection so dragging the handle still copies the chosen values.
+    length = len(cleaned)
+
+    def repeating_value(index: int) -> str:
+        if length == 0:
+            return ""
+        return cleaned[index % length]
+
+    return repeating_value
+
+
+def _generate_autofill_values(values: Sequence[str], steps: int, forward: bool = True) -> list[str]:
+    """Return ``steps`` new values continuing ``values`` in ``forward`` direction."""
+
+    if steps <= 0:
+        return []
+    # Create a series generator for the user-selected values and request the
+    # next/previous ``steps`` elements depending on the drag direction.
+    generator = _analyse_autofill_series(values)
+    if forward:
+        start = len(values)
+        return [generator(idx) for idx in range(start, start + steps)]
+    return [generator(idx) for idx in range(-steps, 0)]
+
+
+def _repeat_check_sequence(states: Sequence[Optional[int]], steps: int, forward: bool = True) -> list[Optional[int]]:
+    """Repeat checkbox ``states`` when autofilling selections."""
+
+    if steps <= 0:
+        return []
+    if not states or all(state is None for state in states):
+        return [None] * steps
+    # Checkbox states do not support arithmetic progression, so we simply loop
+    # through the captured states to mirror how spreadsheet tools clone mixed
+    # selections when extending them.
+    length = len(states)
+    result: list[Optional[int]] = []
+    if forward:
+        for idx in range(steps):
+            result.append(states[idx % length])
+    else:
+        for idx in range(steps):
+            result.append(states[(-steps + idx) % length])
+    return result
+
+
+
+class _AutoFillHandle(QWidget):
+    """Small draggable square displayed at the selection's bottom-right corner."""
+
+    def __init__(self, table: "AutoFillTableWidget"):
+        super().__init__(table.viewport())
+        self._table = table
+        self.setFixedSize(10, 10)
+        self.setCursor(Qt.CrossCursor)
+        self.hide()
+
+    def paintEvent(self, event):  # noqa: D401 - Qt override
+        # Colour the handle using the highlight colour so it matches the active
+        # selection across themes.
+        painter = QPainter(self)
+        color = self.palette().color(QPalette.Highlight)
+        painter.fillRect(self.rect(), color)
+
+    def mousePressEvent(self, event):  # noqa: D401 - Qt override
+        if event.button() == Qt.LeftButton:
+            # Capture the mouse so subsequent move/release events continue to
+            # reach the handle even if the cursor leaves its tiny rectangle.
+            self.grabMouse()
+            self._table._begin_autofill()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # noqa: D401 - Qt override
+        if event.buttons() & Qt.LeftButton:
+            pos = self.mapToParent(event.pos())
+            # Relay the viewport-relative position to the table to update the
+            # preview selection while the user drags the handle.
+            self._table._continue_autofill(pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: D401 - Qt override
+        if event.button() == Qt.LeftButton:
+            self.releaseMouse()
+            pos = self.mapToParent(event.pos())
+            # Finalise the autofill operation with the last drag position and
+            # emit the completion signal from the table widget.
+            self._table._end_autofill(pos)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class AutoFillTableWidget(QTableWidget):
+    """QTableWidget with an Excel-like autofill handle."""
+
+    # Emitted with the list of (row, column) pairs that changed as a result of
+    # an autofill operation.
+    autofillPerformed = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._handle = _AutoFillHandle(self)
+        self._dragging = False
+        self._source_range: Optional[QTableWidgetSelectionRange] = None
+        self._preview_range: Optional[QTableWidgetSelectionRange] = None
+        # Reposition the handle whenever the selection changes so the small
+        # square faithfully tracks the active cell block.
+        self.itemSelectionChanged.connect(self._update_handle_position)
+
+    def _current_selection_range(self) -> Optional[QTableWidgetSelectionRange]:
+        # ``QTableWidget`` allows multiple disjoint selections; the handle is
+        # only shown when exactly one contiguous block is active.
+        ranges = self.selectedRanges()
+        if len(ranges) != 1:
+            return None
+        rng = ranges[0]
+        if rng.rowCount() <= 0 or rng.columnCount() <= 0:
+            return None
+        return rng
+
+    def _update_handle_position(self) -> None:
+        if self._dragging:
+            self._handle.hide()
+            return
+        rng = self._current_selection_range()
+        if rng is None:
+            self._handle.hide()
+            return
+        # Anchor the handle to the bottom-right corner of the visible cell so it
+        # scrolls naturally with the table contents.
+        bottom_right = self.visualRect(self.model().index(rng.bottomRow(), rng.rightColumn()))
+        if not bottom_right.isValid():
+            self._handle.hide()
+            return
+        x = bottom_right.right() - self._handle.width() + 1
+        y = bottom_right.bottom() - self._handle.height() + 1
+        self._handle.move(x, y)
+        self._handle.show()
+        self._handle.raise_()
+
+    def resizeEvent(self, event):  # noqa: D401 - Qt override
+        super().resizeEvent(event)
+        # Keep the handle aligned if the table resizes while a selection exists.
+        self._update_handle_position()
+
+    def scrollContentsBy(self, dx, dy):  # noqa: D401 - Qt override
+        super().scrollContentsBy(dx, dy)
+        # ``visualRect`` changes when the user scrolls; reposition the handle
+        # so it follows the selection within the viewport.
+        self._update_handle_position()
+
+    def _begin_autofill(self) -> None:
+        rng = self._current_selection_range()
+        if rng is None:
+            return
+        # Remember the original selection so the drag operation knows what to
+        # copy even if the current selection changes as part of the preview.
+        self._dragging = True
+        self._source_range = rng
+        self._preview_range = rng
+        self._handle.hide()
+
+    def _continue_autofill(self, viewport_pos: QPoint) -> None:
+        if not self._dragging or self._source_range is None:
+            return
+        if self.rowCount() == 0 or self.columnCount() == 0:
+            return
+        # Translate the pointer position into table indices.  ``rowAt``/``columnAt``
+        # return ``-1`` when outside the viewport, so clamp to the nearest edge
+        # to allow dragging beyond the current table bounds.
+        row = self.rowAt(viewport_pos.y())
+        if row == -1:
+            row = 0 if viewport_pos.y() < 0 else self.rowCount() - 1
+        col = self.columnAt(viewport_pos.x())
+        if col == -1:
+            col = 0 if viewport_pos.x() < 0 else self.columnCount() - 1
+        new_range = self._selection_from_point(row, col)
+        if new_range is None:
+            return
+        self._preview_range = new_range
+        self.clearSelection()
+        self.setRangeSelected(new_range, True)
+
+    def _end_autofill(self, viewport_pos: QPoint) -> None:
+        if not self._dragging:
+            return
+        self._dragging = False
+        final_range = self._preview_range or self._source_range
+        if self._source_range is None or final_range is None:
+            self._update_handle_position()
+            return
+        if self._ranges_equal(self._source_range, final_range):
+            self.clearSelection()
+            self.setRangeSelected(self._source_range, True)
+            self._update_handle_position()
+            return
+        self.clearSelection()
+        self.setRangeSelected(final_range, True)
+        # The autofill helpers return a list of changed coordinates so the
+        # caller can synchronise auxiliary caches after the data update.
+        changed = self._apply_autofill(final_range)
+        if changed:
+            self.autofillPerformed.emit(changed)
+        self._update_handle_position()
+
+    def _selection_from_point(self, row: int, col: int) -> Optional[QTableWidgetSelectionRange]:
+        if self._source_range is None:
+            return None
+        # Build the smallest rectangle that covers both the original selection
+        # and the pointer-derived cell.
+        top = min(self._source_range.topRow(), row)
+        bottom = max(self._source_range.bottomRow(), row)
+        left = min(self._source_range.leftColumn(), col)
+        right = max(self._source_range.rightColumn(), col)
+        return QTableWidgetSelectionRange(top, left, bottom, right)
+
+    @staticmethod
+    def _ranges_equal(a: QTableWidgetSelectionRange, b: QTableWidgetSelectionRange) -> bool:
+        return (
+            a.topRow() == b.topRow()
+            and a.bottomRow() == b.bottomRow()
+            and a.leftColumn() == b.leftColumn()
+            and a.rightColumn() == b.rightColumn()
+        )
+
+    def _apply_autofill(self, target_range: QTableWidgetSelectionRange) -> list[tuple[int, int]]:
+        if self._source_range is None:
+            return []
+        sr = self._source_range
+        extend_top = sr.topRow() - target_range.topRow()
+        extend_bottom = target_range.bottomRow() - sr.bottomRow()
+        extend_left = sr.leftColumn() - target_range.leftColumn()
+        extend_right = target_range.rightColumn() - sr.rightColumn()
+        vertical = extend_top > 0 or extend_bottom > 0
+        horizontal = extend_left > 0 or extend_right > 0
+
+        # Determine the shape of the extension so we can re-use the appropriate
+        # helper.  Pure vertical or horizontal drags are treated as sequences,
+        # whereas diagonal drags tile the original selection.
+        if vertical and not horizontal:
+            if extend_bottom > 0:
+                rows = list(range(sr.bottomRow() + 1, target_range.bottomRow() + 1))
+                return self._autofill_vertical(rows, forward=True)
+            rows = list(range(target_range.topRow(), sr.topRow()))
+            return self._autofill_vertical(rows, forward=False)
+
+        if horizontal and not vertical:
+            if extend_right > 0:
+                cols = list(range(sr.rightColumn() + 1, target_range.rightColumn() + 1))
+                return self._autofill_horizontal(cols, forward=True)
+            cols = list(range(target_range.leftColumn(), sr.leftColumn()))
+            return self._autofill_horizontal(cols, forward=False)
+
+        return self._autofill_block(target_range)
+
+    def _autofill_vertical(self, rows: Sequence[int], forward: bool) -> list[tuple[int, int]]:
+        if self._source_range is None or not rows:
+            return []
+        sr = self._source_range
+        changed: list[tuple[int, int]] = []
+        self.blockSignals(True)
+        try:
+            for col in range(sr.leftColumn(), sr.rightColumn() + 1):
+                # Pull the text and checkbox states from the base column so we
+                # can extend them as a single sequence downwards/upwards.
+                base_values = [self._item_text(row, col) for row in range(sr.topRow(), sr.bottomRow() + 1)]
+                new_values = _generate_autofill_values(base_values, len(rows), forward=forward)
+                base_checks = [self._item_check_state(row, col) for row in range(sr.topRow(), sr.bottomRow() + 1)]
+                new_checks = _repeat_check_sequence(base_checks, len(rows), forward=forward)
+                for idx, row in enumerate(rows):
+                    if self._set_item_content(row, col, new_values[idx], new_checks[idx]):
+                        changed.append((row, col))
+        finally:
+            self.blockSignals(False)
+        return changed
+
+    def _autofill_horizontal(self, cols: Sequence[int], forward: bool) -> list[tuple[int, int]]:
+        if self._source_range is None or not cols:
+            return []
+        sr = self._source_range
+        changed: list[tuple[int, int]] = []
+        self.blockSignals(True)
+        try:
+            for row in range(sr.topRow(), sr.bottomRow() + 1):
+                # Mirror the vertical logic for rows: extend text and checkbox
+                # states horizontally following the drag direction.
+                base_values = [self._item_text(row, col) for col in range(sr.leftColumn(), sr.rightColumn() + 1)]
+                new_values = _generate_autofill_values(base_values, len(cols), forward=forward)
+                base_checks = [self._item_check_state(row, col) for col in range(sr.leftColumn(), sr.rightColumn() + 1)]
+                new_checks = _repeat_check_sequence(base_checks, len(cols), forward=forward)
+                for idx, col in enumerate(cols):
+                    if self._set_item_content(row, col, new_values[idx], new_checks[idx]):
+                        changed.append((row, col))
+        finally:
+            self.blockSignals(False)
+        return changed
+
+    def _autofill_block(self, target_range: QTableWidgetSelectionRange) -> list[tuple[int, int]]:
+        if self._source_range is None:
+            return []
+        sr = self._source_range
+        base_rows = sr.bottomRow() - sr.topRow() + 1
+        base_cols = sr.rightColumn() - sr.leftColumn() + 1
+        if base_rows <= 0 or base_cols <= 0:
+            return []
+        base_text = [
+            [self._item_text(sr.topRow() + r, sr.leftColumn() + c) for c in range(base_cols)]
+            for r in range(base_rows)
+        ]
+        base_checks = [
+            [self._item_check_state(sr.topRow() + r, sr.leftColumn() + c) for c in range(base_cols)]
+            for r in range(base_rows)
+        ]
+        changed: list[tuple[int, int]] = []
+        self.blockSignals(True)
+        try:
+            for row in range(target_range.topRow(), target_range.bottomRow() + 1):
+                for col in range(target_range.leftColumn(), target_range.rightColumn() + 1):
+                    if sr.topRow() <= row <= sr.bottomRow() and sr.leftColumn() <= col <= sr.rightColumn():
+                        continue
+                    # Tile the original selection over the expanded rectangle by
+                    # taking the modulus relative to the base selection size.
+                    src_row = (row - sr.topRow()) % base_rows
+                    src_col = (col - sr.leftColumn()) % base_cols
+                    if self._set_item_content(row, col, base_text[src_row][src_col], base_checks[src_row][src_col]):
+                        changed.append((row, col))
+        finally:
+            self.blockSignals(False)
+        return changed
+
+    def _item_text(self, row: int, col: int) -> str:
+        item = self.item(row, col)
+        return "" if item is None else item.text()
+
+    def _item_check_state(self, row: int, col: int) -> Optional[int]:
+        item = self.item(row, col)
+        if item is None or not (item.flags() & Qt.ItemIsUserCheckable):
+            return None
+        return int(item.checkState())
+
+    def _set_item_content(self, row: int, col: int, text: str, check_state: Optional[int]) -> bool:
+        item = self.item(row, col)
+        if item is None:
+            item = QTableWidgetItem()
+            self.setItem(row, col, item)
+        changed = False
+        if item.text() != text:
+            item.setText(text)
+            changed = True
+        if check_state is not None and (item.flags() & Qt.ItemIsUserCheckable):
+            if item.checkState() != check_state:
+                item.setCheckState(check_state)
+                changed = True
+        return changed
+
 class BIDSManager(QMainWindow):
     """
     Main GUI for BIDS Manager.
@@ -579,6 +1167,11 @@ class BIDSManager(QMainWindow):
         self.existing_maps = {}
         self.existing_used = {}
         self.use_bids_names = True
+        self._in_mapping_update = False
+        # Flags avoid scheduling duplicate refresh operations when multiple
+        # cells change in quick succession via editing or autofill.
+        self._tree_refresh_pending = False
+        self._naming_refresh_pending = False
 
         # Async process handles for inventory and conversion steps
         self.inventory_process = None  # QProcess for dicom_inventory
@@ -1114,7 +1707,10 @@ class BIDSManager(QMainWindow):
         # --- Scanned metadata tab ---
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
-        self.mapping_table = QTableWidget()
+        self.mapping_table = AutoFillTableWidget()
+        # Reuse the existing scanned-metadata grid but enhance it with direct
+        # editing support (including study names) and the Excel-like autofill
+        # handle exposed by ``AutoFillTableWidget``.
         # Expose immutable DICOM metadata (StudyDescription, FamilyName,
         # PatientID) alongside the editable identifiers so users can see the
         # original values while editing BIDS-specific fields.
@@ -1144,7 +1740,10 @@ class BIDSManager(QMainWindow):
         # Keep BIDS name edits constrained by the delegate despite the shifted
         # column indices introduced above.
         self.mapping_table.setItemDelegateForColumn(5, SubjectDelegate(self.mapping_table))
-        self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
+        # React to per-cell edits and autofill operations so caches and derived
+        # tables stay synchronised with the on-screen data.
+        self.mapping_table.itemChanged.connect(self._onMappingItemChanged)
+        self.mapping_table.autofillPerformed.connect(self._onAutofillPerformed)
         btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
@@ -1808,10 +2407,13 @@ class BIDSManager(QMainWindow):
         if df.shape[0] != self.mapping_table.rowCount():
             QMessageBox.warning(self, "Error", "Row count mismatch")
             return
+        # Mirror the visible table back into the DataFrame column-by-column so
+        # any manual edits (including study name changes) persist on disk.
         for i in range(self.mapping_table.rowCount()):
             df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
             df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
-            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 2).text()
+            study_val = _clean_study_name(self.mapping_table.item(i, 2).text())
+            df.at[i, "StudyDescription"] = study_val
             df.at[i, "FamilyName"] = self.mapping_table.item(i, 3).text()
             df.at[i, "PatientID"] = self.mapping_table.item(i, 4).text()
             df.at[i, "BIDS_name"] = self.mapping_table.item(i, 5).text()
@@ -1835,6 +2437,8 @@ class BIDSManager(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {exc}")
             return
+        # Reload through the standard pipeline so all caches, trees and previews
+        # reflect the saved values.
         self.loadMappingTable()
 
     def generateUniqueIDs(self):
@@ -1942,6 +2546,179 @@ class BIDSManager(QMainWindow):
         self.name_choice.setEnabled(has_data)
         if not has_data:
             self.last_rep_box.setChecked(False)
+
+    def _rebuild_naming_table_from_mapping(self) -> None:
+        """Recreate the naming table from the mapping grid."""
+        if not hasattr(self, "naming_table"):
+            return
+        rows: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for idx in range(self.mapping_table.rowCount()):
+            study_item = self.mapping_table.item(idx, 2)
+            given_item = self.mapping_table.item(idx, 7)
+            bids_item = self.mapping_table.item(idx, 5)
+            study = study_item.text().strip() if study_item else ""
+            given = given_item.text().strip() if given_item else ""
+            bids = bids_item.text().strip() if bids_item else ""
+            key = (study, bids)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((study, given, bids))
+        self.naming_table.blockSignals(True)
+        self.naming_table.setRowCount(0)
+        for study, given, bids in rows:
+            nr = self.naming_table.rowCount()
+            self.naming_table.insertRow(nr)
+            sitem = QTableWidgetItem(study)
+            sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 0, sitem)
+            gitem = QTableWidgetItem(given)
+            gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 1, gitem)
+            bitem = QTableWidgetItem(bids)
+            bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 2, bitem)
+        self.naming_table.blockSignals(False)
+        self._updateScanExistingEnabled()
+
+    def _schedule_naming_refresh(self) -> None:
+        """Refresh the naming table on the next event loop iteration."""
+        if self._naming_refresh_pending:
+            return
+        self._naming_refresh_pending = True
+
+        def _run():
+            self._naming_refresh_pending = False
+            self._rebuild_naming_table_from_mapping()
+
+        # ``singleShot`` avoids thrashing the naming table while a user is still
+        # editing cells, letting multiple quick edits coalesce into one refresh.
+        QTimer.singleShot(0, _run)
+
+    def _schedule_tree_refresh(self) -> None:
+        """Refresh modality trees and preview asynchronously."""
+        if self._tree_refresh_pending:
+            return
+        self._tree_refresh_pending = True
+
+        def _run():
+            self._tree_refresh_pending = False
+            self._rebuild_lookup_maps()
+            self.populateModalitiesTree()
+            self.populateSpecificTree()
+            self.generatePreview()
+
+        # As above, defer the heavy UI rebuild until Qt returns to the event
+        # loop, ensuring consistent updates without blocking interactive edits.
+        QTimer.singleShot(0, _run)
+
+    def _sync_row_cache_from_table(self, rows: Optional[Sequence[int]] = None) -> None:
+        """Update cached row information after direct table edits."""
+        if not hasattr(self, "row_info") or not self.row_info:
+            return
+        if rows is None:
+            indices = range(min(len(self.row_info), self.mapping_table.rowCount()))
+        else:
+            indices = [r for r in rows if 0 <= r < len(self.row_info)]
+        for idx in indices:
+            if idx >= len(self.row_info):
+                continue
+            info = self.row_info[idx]
+            # Pull the latest strings from the grid so tree previews and naming
+            # tables reflect edits performed directly in the scanned data view.
+            study_item = self.mapping_table.item(idx, 2)
+            bids_item = self.mapping_table.item(idx, 5)
+            given_item = self.mapping_table.item(idx, 7)
+            ses_item = self.mapping_table.item(idx, 8)
+            seq_item = self.mapping_table.item(idx, 9)
+            acq_item = self.mapping_table.item(idx, 12)
+            rep_item = self.mapping_table.item(idx, 13)
+            mod_item = self.mapping_table.item(idx, 14)
+            modb_item = self.mapping_table.item(idx, 15)
+            info['study'] = study_item.text().strip() if study_item else ''
+            info['bids'] = bids_item.text().strip() if bids_item else ''
+            info['given'] = given_item.text().strip() if given_item else ''
+            info['ses'] = ses_item.text().strip() if ses_item else ''
+            info['seq'] = seq_item.text().strip() if seq_item else ''
+            info['acq_time'] = acq_item.text().strip() if acq_item else info.get('acq_time', '')
+            info['rep'] = rep_item.text().strip() if rep_item else ''
+            info['mod'] = mod_item.text().strip() if mod_item else ''
+            info['modb'] = modb_item.text().strip() if modb_item else ''
+        # Keep ``study_set`` synchronised so downstream UI elements know which
+        # studies are present after inline edits.
+        self.study_set = {
+            self.mapping_table.item(i, 2).text().strip()
+            for i in range(self.mapping_table.rowCount())
+            if self.mapping_table.item(i, 2) and self.mapping_table.item(i, 2).text().strip()
+        }
+        # Rebuild the modality lookup lazily to keep the UI responsive when
+        # multiple cells change (for example during autofill).
+        self._schedule_tree_refresh()
+
+    def _onMappingItemChanged(self, item: QTableWidgetItem) -> None:
+        if item is None or self._in_mapping_update:
+            return
+        row = item.row()
+        column = item.column()
+        rows_to_sync: set[int] = set()
+        needs_naming = False
+        if column == 2:
+            # Normalise study names immediately so duplicate words are removed
+            # even when the user types them manually.
+            cleaned = _clean_study_name(item.text())
+            if cleaned != item.text():
+                self._in_mapping_update = True
+                try:
+                    item.setText(cleaned)
+                finally:
+                    self._in_mapping_update = False
+            rows_to_sync.add(row)
+            needs_naming = True
+        elif column in (5, 7, 8, 9, 12, 13, 14, 15):
+            rows_to_sync.add(row)
+            if column in (5, 7):
+                needs_naming = True
+        elif column == 0:
+            rows_to_sync.add(row)
+        if rows_to_sync:
+            # Update caches for the affected rows so previews, trees and naming
+            # tables remain consistent with the grid.
+            self._sync_row_cache_from_table(sorted(rows_to_sync))
+        if needs_naming:
+            self._schedule_naming_refresh()
+        self._updateDetectRepeatEnabled()
+
+    def _onAutofillPerformed(self, cells: list[tuple[int, int]]) -> None:
+        if not cells:
+            return
+        rows_to_sync: set[int] = set()
+        needs_naming = False
+        self._in_mapping_update = True
+        try:
+            for row, column in cells:
+                item = self.mapping_table.item(row, column)
+                if item is None:
+                    continue
+                if column == 2:
+                    # Apply the same study-name normalisation when values were
+                    # produced via the autofill handle.
+                    cleaned = _clean_study_name(item.text())
+                    if cleaned != item.text():
+                        item.setText(cleaned)
+                if column in (0, 2, 5, 7, 8, 9, 12, 13, 14, 15):
+                    rows_to_sync.add(row)
+                    if column in (2, 5, 7):
+                        needs_naming = True
+        finally:
+            self._in_mapping_update = False
+        if rows_to_sync:
+            # Rebuild derived state for all modified rows in one go to avoid
+            # redundant refreshes while the user drags the handle.
+            self._sync_row_cache_from_table(sorted(rows_to_sync))
+        if needs_naming:
+            self._schedule_naming_refresh()
+        self._updateDetectRepeatEnabled()
 
     def detectRepeatedSequences(self):
         """Detect repeated sequences within each subject and assign numbers."""
@@ -2059,6 +2836,11 @@ class BIDSManager(QMainWindow):
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+        # Normalise study names at load time so the grid, preview and TSV stay
+        # aligned even if the source file contained duplicate words.
+        df["StudyDescription"] = [
+            _clean_study_name(val) for val in df.get("StudyDescription", "").fillna("")
+        ]
         preview_map = _compute_bids_preview(df, self._schema)
         df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
         df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
@@ -2106,28 +2888,37 @@ class BIDSManager(QMainWindow):
         self.row_info = []
 
         # Populate table rows
-        self.mapping_table.setRowCount(0)
-        def _clean(val):
-            """Return string representation of val or empty string for NaN."""
-            return "" if pd.isna(val) else str(val)
+        self._in_mapping_update = True
+        # Temporarily silence signals while the table is reconstructed to avoid
+        # triggering edit handlers for programmatic updates.
+        self.mapping_table.blockSignals(True)
+        try:
+            self.mapping_table.setRowCount(0)
 
-        for _, row in df.iterrows():
-            r = self.mapping_table.rowCount()
-            self.mapping_table.insertRow(r)
-            include_item = QTableWidgetItem()
-            include_item.setFlags(include_item.flags() | Qt.ItemIsUserCheckable)
-            include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
-            self.mapping_table.setItem(r, 0, include_item)
+            def _clean(val):
+                """Return string representation of val or empty string for NaN."""
+                return "" if pd.isna(val) else str(val)
 
-            src_item = QTableWidgetItem(_clean(row.get('source_folder')))
-            src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 1, src_item)
+            for _, row in df.iterrows():
+                r = self.mapping_table.rowCount()
+                self.mapping_table.insertRow(r)
+                include_item = QTableWidgetItem()
+                include_item.setFlags(include_item.flags() | Qt.ItemIsUserCheckable)
+                include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
+                self.mapping_table.setItem(r, 0, include_item)
 
-            study = _clean(row.get('StudyDescription'))
+                src_item = QTableWidgetItem(_clean(row.get('source_folder')))
+                src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 1, src_item)
 
-            study_item = QTableWidgetItem(study)
-            study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 2, study_item)
+                # Clean the study description before displaying it so duplicate
+                # words (``study_study``) are collapsed consistently for all rows.
+                study = _clean_study_name(_clean(row.get('StudyDescription')))
+
+                study_item = QTableWidgetItem(study)
+                # Allow operators to correct the study name directly in the grid.
+                study_item.setFlags(study_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 2, study_item)
 
             family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
             family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
@@ -2207,6 +2998,9 @@ class BIDSManager(QMainWindow):
                 'n_files': _clean(row.get('n_files')),
                 'acq_time': _clean(row.get('acq_time')),
             })
+        finally:
+            self.mapping_table.blockSignals(False)
+            self._in_mapping_update = False
         self.log_text.append("Loaded TSV into mapping table.")
 
         # Apply always-exclude patterns before building lookup tables
