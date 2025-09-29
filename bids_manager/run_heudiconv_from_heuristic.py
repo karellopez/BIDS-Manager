@@ -301,9 +301,52 @@ def clean_name(raw: str) -> str:
 
     return "".join(ch for ch in raw if ch.isalnum())
 
+def _deduplicate_study_words(raw: str) -> str:
+    """Collapse immediately repeated words in *raw* study names.
+
+    This helper normalizes the incoming study description by removing
+    case-insensitive duplicate words that appear sequentially.  The clean-up is
+    intentionally conservative: it only alters runs of the exact same word (for
+    example ``"study_study"`` or ``"BIDS BIDS"``) while leaving legitimate
+    phrases untouched.  The resulting text is returned with single spaces between
+    the remaining words so that downstream sanitization keeps them distinct.
+    """
+
+    # Split the incoming study name into "words" while keeping only
+    # alphanumeric characters.  This mirrors the sanitization performed by
+    # ``safe_stem`` but allows us to reason about the structure before replacing
+    # characters with underscores.
+    tokens = re.split(r"[^0-9A-Za-z]+", str(raw))
+
+    # Iterate through the discovered words while skipping empty entries caused
+    # by consecutive separators (e.g., ``"study__study"``).  Whenever the
+    # lower-case representation of the current token matches the previous one we
+    # omit it, thereby collapsing any repeated sequence such as
+    # ``"Study_Study"`` → ``"Study"``.  This makes the check case-insensitive and
+    # resilient to arbitrarily long runs (``"BIDS_BIDS_BIDS"`` → ``"BIDS"``).
+    deduped: list[str] = []
+    previous_norm: str | None = None
+    for token in tokens:
+        if not token:
+            continue
+        norm = token.lower()
+        if norm == previous_norm:
+            continue
+        deduped.append(token)
+        previous_norm = norm
+
+    # Join the remaining words using single spaces.  ``safe_stem`` will later
+    # replace these separators with underscores while preserving the distinct
+    # tokens produced here.
+    return " ".join(deduped) if deduped else str(raw)
+
+
 def safe_stem(text: str) -> str:
     """Return filename-friendly version of *text* (used for study names)."""
-    return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
+
+    # Apply study-word deduplication only for conversion-time sanitization.
+    cleaned = _deduplicate_study_words(text.strip())
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", cleaned).strip("_")
 
 
 def physical_by_clean(raw_root: Path) -> Dict[str, str]:
