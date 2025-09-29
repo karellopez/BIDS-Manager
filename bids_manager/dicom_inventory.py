@@ -45,6 +45,8 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
+from ._study_utils import normalize_study_name
+
 # Preview name helpers – loaded lazily so ``scan_dicoms_long`` can store
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
 # inventory script functional even if the renamer dependencies are missing.
@@ -319,7 +321,8 @@ def scan_dicoms_long(
             or getattr(ds, "StudyName", None)
             or "n/a"
         )
-        study = str(study).strip()
+        # Normalize to remove repeated words (``study_study`` → ``study``).
+        study = normalize_study_name(study)
         subj_key = f"{subj}||{study}"
         rel = os.path.relpath(root, root_dir)
         folder = root_dir.name if rel == "." else rel

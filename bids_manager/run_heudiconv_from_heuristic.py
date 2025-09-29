@@ -20,6 +20,8 @@ from bidsphysio import dcm2bidsphysio
 from pydicom import dcmread
 from pydicom.dataset import Dataset
 
+from ._study_utils import normalize_study_name
+
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
 # extension check with a quick sniff of the header for the ``DICM`` tag.
@@ -302,8 +304,15 @@ def clean_name(raw: str) -> str:
     return "".join(ch for ch in raw if ch.isalnum())
 
 def safe_stem(text: str) -> str:
-    """Return filename-friendly version of *text* (used for study names)."""
-    return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
+    """Return filename-friendly version of *text* (used for study names).
+
+    Study identifiers are cleaned with :func:`normalize_study_name` first so we
+    collapse accidental repeats such as ``"study_study"`` into a single token
+    before substituting filesystem-friendly underscores.
+    """
+
+    cleaned = normalize_study_name(text)
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", cleaned).strip("_")
 
 
 def physical_by_clean(raw_root: Path) -> Dict[str, str]:
