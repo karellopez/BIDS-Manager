@@ -107,6 +107,7 @@ from .schema_renamer import (
     build_preview_names,
     apply_post_conversion_rename,
 )
+from ._study_utils import normalize_study_name
 try:
     import psutil
     HAS_PSUTIL = True
@@ -460,8 +461,10 @@ def _dedup_parts(*parts: str) -> str:
 
 
 def _safe_stem(text: str) -> str:
-    """Return filename-friendly version of ``text``."""
-    return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
+    """Return filename-friendly version of ``text`` used for study folders."""
+
+    cleaned = normalize_study_name(text)
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", cleaned).strip("_")
 
 
 def _format_subject_id(num: int) -> str:
@@ -2123,7 +2126,8 @@ class BIDSManager(QMainWindow):
             src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 1, src_item)
 
-            study = _clean(row.get('StudyDescription'))
+            study_raw = _clean(row.get('StudyDescription'))
+            study = normalize_study_name(study_raw)
 
             study_item = QTableWidgetItem(study)
             study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
