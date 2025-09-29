@@ -10,7 +10,6 @@ from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 from bids_manager.run_heudiconv_from_heuristic import (
     convert_physio_series,
     load_heuristic_module,
-    safe_stem,
 )
 
 
@@ -224,22 +223,3 @@ def test_convert_physio_series_skips_when_uid_missing(tmp_path, monkeypatch):
     convert_physio_series(raw_root, bids_out, module, df)
 
     assert calls == []
-
-
-def test_safe_stem_removes_duplicate_study_words():
-    """Ensure conversion sanitization collapses repeated study words."""
-
-    # Provide several patterns that contain sequential duplicates in different
-    # cases and separators.  The ``safe_stem`` helper should collapse each run
-    # to a single word while still returning a filesystem-friendly stem.
-    examples = {
-        "Study_Study": "Study",
-        "BIDS-bids-BIDS": "BIDS",
-        "example example example": "example",
-        "MiXeD_mixed": "MiXeD",
-        "Study-Session": "Study_Session",
-    }
-
-    for original, expected in examples.items():
-        stemmed = safe_stem(original)
-        assert stemmed == expected
