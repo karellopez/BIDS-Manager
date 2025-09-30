@@ -530,6 +530,73 @@ class AutoFillTableWidget(QTableWidget):
 
     # ------------------------------------------------------------------
     # Painting utilities
+    def _index_is_editable(self, row: int, column: int) -> bool:
+        """Return ``True`` when the ``(row, column)`` cell can be edited."""
+
+        model = self.model()
+        index = model.index(row, column)
+        if not index.isValid():
+            return False
+        flags = model.flags(index)
+        return bool(flags & Qt.ItemIsEditable)
+
+    def _range_is_editable(
+        self, rng: Optional[QTableWidgetSelectionRange]
+    ) -> bool:
+        """Return ``True`` when *all* cells in ``rng`` expose the edit flag."""
+
+        if rng is None:
+            return False
+        for row in range(rng.topRow(), rng.bottomRow() + 1):
+            for col in range(rng.leftColumn(), rng.rightColumn() + 1):
+                if not self._index_is_editable(row, col):
+                    return False
+        return True
+
+    def _clamp_to_editable(
+        self,
+        origin: QTableWidgetSelectionRange,
+        candidate: QTableWidgetSelectionRange,
+    ) -> QTableWidgetSelectionRange:
+        """Restrict ``candidate`` so autofill never crosses non-editable cells."""
+
+        # Limit horizontal growth by checking each additional column in order.
+        max_right = origin.rightColumn()
+        if candidate.rightColumn() > max_right:
+            for col in range(origin.rightColumn() + 1, candidate.rightColumn() + 1):
+                if all(
+                    self._index_is_editable(row, col)
+                    for row in range(origin.topRow(), origin.bottomRow() + 1)
+                ):
+                    max_right = col
+                else:
+                    break
+
+        # Limit vertical growth by checking each extra row with the approved columns.
+        max_bottom = origin.bottomRow()
+        if candidate.bottomRow() > max_bottom:
+            for row in range(origin.bottomRow() + 1, candidate.bottomRow() + 1):
+                if all(
+                    self._index_is_editable(row, col)
+                    for col in range(origin.leftColumn(), max_right + 1)
+                ):
+                    max_bottom = row
+                else:
+                    break
+
+        if (
+            max_right == origin.rightColumn()
+            and max_bottom == origin.bottomRow()
+        ):
+            return origin
+
+        return QTableWidgetSelectionRange(
+            origin.topRow(),
+            origin.leftColumn(),
+            max_bottom,
+            max_right,
+        )
+
     def _refresh_handle(self) -> None:
         """Trigger a repaint so the autofill handle reflects the selection."""
 
@@ -548,7 +615,7 @@ class AutoFillTableWidget(QTableWidget):
         super().paintEvent(event)
 
         rng = self._current_selection_range()
-        if rng is None:
+        if not self._range_is_editable(rng):
             self._handle_rect = QRect()
             return
 
@@ -648,12 +715,14 @@ class AutoFillTableWidget(QTableWidget):
         if row == origin.bottomRow() and col == origin.rightColumn():
             return origin
 
-        return QTableWidgetSelectionRange(
+        candidate = QTableWidgetSelectionRange(
             origin.topRow(),
             origin.leftColumn(),
             row,
             col,
         )
+
+        return self._clamp_to_editable(origin, candidate)
 
     # ------------------------------------------------------------------
     # Autofill logic
@@ -2588,7 +2657,9 @@ class BIDSManager(QMainWindow):
                 r = self.mapping_table.rowCount()
                 self.mapping_table.insertRow(r)
                 include_item = QTableWidgetItem()
-                include_item.setFlags(include_item.flags() | Qt.ItemIsUserCheckable)
+                include_item.setFlags(
+                    (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                )
                 include_item.setCheckState(
                     Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked
                 )
