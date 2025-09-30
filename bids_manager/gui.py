@@ -7,6 +7,7 @@ import re
 import shutil
 import pandas as pd
 import numpy as np
+from decimal import Decimal, InvalidOperation
 try:  # NumPy exposes structured-array helpers from ``numpy.lib``
     from numpy.lib import recfunctions as rfn
 except Exception:  # pragma: no cover - extremely old NumPy releases
@@ -63,18 +64,19 @@ except ModuleNotFoundError as exc:
 from pathlib import Path
 from collections import defaultdict
 from typing import Any, Optional, Sequence
+from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QTableWidget, QTableWidgetItem, QGroupBox, QGridLayout,
+    QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QGroupBox, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QRect, QPoint
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -504,6 +506,417 @@ def _next_numeric_id(used: set[str]) -> str:
         if candidate not in used:
             return candidate
         nxt += 1
+
+
+class AutoFillTableWidget(QTableWidget):
+    """``QTableWidget`` with an Excel-like autofill handle.
+
+    The widget exposes a small square in the bottom-right corner of the current
+    selection.  Dragging this handle extends the selection and automatically
+    fills the new cells either by cloning the original content or by continuing
+    simple sequences (numeric, datetime, or text with trailing digits).
+    """
+
+    HANDLE_SIZE = 8  # Square size in device pixels
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._handle_rect = QRect()
+        self._autofill_active = False
+        self._autofill_origin_range: Optional[QTableWidgetSelectionRange] = None
+        self._autofill_current_range: Optional[QTableWidgetSelectionRange] = None
+        # Whenever the selection changes we repaint so the handle follows it.
+        self.itemSelectionChanged.connect(self._refresh_handle)
+
+    # ------------------------------------------------------------------
+    # Painting utilities
+    def _refresh_handle(self) -> None:
+        """Trigger a repaint so the autofill handle reflects the selection."""
+
+        self._handle_rect = QRect()
+        self.viewport().update()
+
+    def _current_selection_range(self) -> Optional[QTableWidgetSelectionRange]:
+        """Return the single active selection range (if any)."""
+
+        ranges = self.selectedRanges()
+        if len(ranges) != 1:
+            return None
+        return ranges[0]
+
+    def paintEvent(self, event):  # noqa: D401 - Qt override
+        super().paintEvent(event)
+
+        rng = self._current_selection_range()
+        if rng is None:
+            self._handle_rect = QRect()
+            return
+
+        model_index = self.model().index(rng.bottomRow(), rng.rightColumn())
+        rect = self.visualRect(model_index)
+        if not rect.isValid():
+            self._handle_rect = QRect()
+            return
+
+        size = self.HANDLE_SIZE
+        self._handle_rect = QRect(
+            rect.right() - size + 1,
+            rect.bottom() - size + 1,
+            size,
+            size,
+        )
+
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.fillRect(self._handle_rect, self.palette().highlight())
+        border = QPen(self.palette().color(QPalette.Dark))
+        painter.setPen(border)
+        painter.drawRect(self._handle_rect)
+        painter.end()
+
+    # ------------------------------------------------------------------
+    # Mouse interaction handling
+    def mousePressEvent(self, event):  # noqa: D401 - Qt override
+        if (
+            event.button() == Qt.LeftButton
+            and self._handle_rect.contains(event.pos())
+            and self._current_selection_range() is not None
+        ):
+            self._autofill_active = True
+            self._autofill_origin_range = self._current_selection_range()
+            self._autofill_current_range = self._autofill_origin_range
+            self.viewport().setCursor(Qt.SizeAllCursor)
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # noqa: D401 - Qt override
+        if self._autofill_active:
+            new_range = self._compute_drag_range(event.pos())
+            if new_range is not None:
+                self._autofill_current_range = new_range
+                # Replace the selection with the preview range so the user sees
+                # the future extent of the autofill before releasing the mouse.
+                self.blockSignals(True)
+                self.clearSelection()
+                self.setRangeSelected(new_range, True)
+                self.blockSignals(False)
+                self.viewport().update()
+            event.accept()
+            return
+
+        if self._handle_rect.contains(event.pos()):
+            self.viewport().setCursor(Qt.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: D401 - Qt override
+        if self._autofill_active and event.button() == Qt.LeftButton:
+            try:
+                self._finish_autofill()
+            finally:
+                self._autofill_active = False
+                self.viewport().unsetCursor()
+                self._autofill_origin_range = None
+                self._autofill_current_range = None
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def _compute_drag_range(self, pos: QPoint) -> Optional[QTableWidgetSelectionRange]:
+        """Return the preview range while dragging the autofill handle."""
+
+        if self._autofill_origin_range is None:
+            return None
+
+        origin = self._autofill_origin_range
+        row = self.rowAt(pos.y())
+        col = self.columnAt(pos.x())
+        if row < 0 or col < 0:
+            return origin
+
+        # Only allow extending outward from the original bottom/right edge.
+        if row < origin.bottomRow():
+            row = origin.bottomRow()
+        if col < origin.rightColumn():
+            col = origin.rightColumn()
+
+        if row == origin.bottomRow() and col == origin.rightColumn():
+            return origin
+
+        return QTableWidgetSelectionRange(
+            origin.topRow(),
+            origin.leftColumn(),
+            row,
+            col,
+        )
+
+    # ------------------------------------------------------------------
+    # Autofill logic
+    def _finish_autofill(self) -> None:
+        """Apply the autofill operation once the user releases the mouse."""
+
+        if self._autofill_origin_range is None:
+            return
+
+        final_range = self._autofill_current_range or self._autofill_origin_range
+        origin = self._autofill_origin_range
+
+        if (
+            final_range.bottomRow() == origin.bottomRow()
+            and final_range.rightColumn() == origin.rightColumn()
+        ):
+            # Nothing changed; restore the original selection highlight.
+            self.blockSignals(True)
+            self.clearSelection()
+            self.setRangeSelected(origin, True)
+            self.blockSignals(False)
+            self.viewport().update()
+            return
+
+        self._apply_autofill(origin, final_range)
+
+        # Keep the extended range selected after the fill to match spreadsheet UX.
+        self.blockSignals(True)
+        self.clearSelection()
+        self.setRangeSelected(final_range, True)
+        self.blockSignals(False)
+        self.viewport().update()
+
+    def _apply_autofill(
+        self,
+        origin: QTableWidgetSelectionRange,
+        target: QTableWidgetSelectionRange,
+    ) -> None:
+        """Populate ``target`` based on ``origin`` and the autofill heuristics."""
+
+        extend_down = target.bottomRow() > origin.bottomRow()
+        extend_right = target.rightColumn() > origin.rightColumn()
+
+        if extend_right:
+            self._fill_right(origin, target.rightColumn())
+
+        if extend_down:
+            base_right = target.rightColumn() if extend_right else origin.rightColumn()
+            base_range = QTableWidgetSelectionRange(
+                origin.topRow(),
+                origin.leftColumn(),
+                origin.bottomRow(),
+                base_right,
+            )
+            self._fill_down(base_range, target.bottomRow())
+
+    def _fill_right(self, base: QTableWidgetSelectionRange, target_right: int) -> None:
+        """Extend ``base`` horizontally until ``target_right`` inclusive."""
+
+        extra = target_right - base.rightColumn()
+        if extra <= 0:
+            return
+
+        for row in range(base.topRow(), base.bottomRow() + 1):
+            values = [
+                self._get_item_text(row, col)
+                for col in range(base.leftColumn(), base.rightColumn() + 1)
+            ]
+            new_values = self._extend_series(values, extra)
+            for offset, value in enumerate(new_values, start=1):
+                self._set_item_text(row, base.rightColumn() + offset, value)
+
+    def _fill_down(self, base: QTableWidgetSelectionRange, target_bottom: int) -> None:
+        """Extend ``base`` vertically until ``target_bottom`` inclusive."""
+
+        extra = target_bottom - base.bottomRow()
+        if extra <= 0:
+            return
+
+        for col in range(base.leftColumn(), base.rightColumn() + 1):
+            values = [
+                self._get_item_text(row, col)
+                for row in range(base.topRow(), base.bottomRow() + 1)
+            ]
+            new_values = self._extend_series(values, extra)
+            for offset, value in enumerate(new_values, start=1):
+                self._set_item_text(base.bottomRow() + offset, col, value)
+
+    # ------------------------------------------------------------------
+    # Sequence helpers
+    def _extend_series(self, values: list[str], steps: int) -> list[str]:
+        """Return ``steps`` new values continuing ``values`` when possible."""
+
+        if steps <= 0 or not values:
+            return []
+
+        numeric = self._extend_numeric_series(values, steps)
+        if numeric is not None:
+            return numeric
+
+        datelike = self._extend_datetime_series(values, steps)
+        if datelike is not None:
+            return datelike
+
+        patterned = self._extend_text_pattern_series(values, steps)
+        if patterned is not None:
+            return patterned
+
+        # Fallback: repeat the original pattern cyclically.
+        repeated = []
+        for i in range(steps):
+            repeated.append(values[i % len(values)])
+        return repeated
+
+    def _extend_numeric_series(
+        self,
+        values: list[str],
+        steps: int,
+    ) -> Optional[list[str]]:
+        """Continue integer/decimal sequences when the pattern is consistent."""
+
+        stripped = [v.strip() for v in values]
+        if any(not s for s in stripped):
+            return None
+
+        # Try integer sequences first so "01", "02" keep their padding.
+        if all(re.fullmatch(r"[+-]?\d+", s) for s in stripped):
+            numbers = [int(s) for s in stripped]
+            diff = 0
+            if len(numbers) >= 2:
+                diffs = [numbers[i] - numbers[i - 1] for i in range(1, len(numbers))]
+                if all(d == diffs[0] for d in diffs):
+                    diff = diffs[0]
+            pad_width = len(stripped[-1].lstrip("+-"))
+            has_leading_zero = stripped[-1].lstrip("+-").startswith("0") and pad_width > 1
+            force_plus = stripped[-1].startswith("+")
+            current = numbers[-1]
+            generated: list[str] = []
+            for _ in range(steps):
+                current += diff
+                text = str(current)
+                if has_leading_zero and current >= 0:
+                    text = f"{current:0{pad_width}d}"
+                if force_plus and not text.startswith("-") and not text.startswith("+"):
+                    text = "+" + text
+                generated.append(text)
+            return generated
+
+        # Fall back to decimals when integers are not appropriate.
+        decimals: list[Decimal] = []
+        decimal_places = 0
+        for s in stripped:
+            try:
+                dec = Decimal(s)
+            except InvalidOperation:
+                return None
+            decimals.append(dec)
+            if "." in s:
+                decimal_places = max(decimal_places, len(s.split(".")[-1]))
+
+        diff = Decimal(0)
+        if len(decimals) >= 2:
+            diffs = [decimals[i] - decimals[i - 1] for i in range(1, len(decimals))]
+            if all(d == diffs[0] for d in diffs):
+                diff = diffs[0]
+        current = decimals[-1]
+        generated = []
+        for _ in range(steps):
+            current += diff
+            if decimal_places:
+                generated.append(f"{current:.{decimal_places}f}")
+            else:
+                generated.append(str(current))
+        return generated
+
+    def _extend_datetime_series(
+        self,
+        values: list[str],
+        steps: int,
+    ) -> Optional[list[str]]:
+        """Continue datetime-like strings when intervals are consistent."""
+
+        try:
+            parsed = pd.to_datetime(values, errors="raise", infer_datetime_format=True)
+        except Exception:
+            return None
+
+        if parsed.isna().any():
+            return None
+
+        delta = pd.Timedelta(0)
+        if len(parsed) >= 2:
+            diffs = parsed.diff().iloc[1:]
+            if not diffs.empty and all(d == diffs.iloc[0] for d in diffs):
+                delta = diffs.iloc[0]
+
+        last = parsed.iloc[-1]
+        template = values[-1]
+        fmt = guess_datetime_format(template)
+        generated = []
+        current = last
+        for _ in range(steps):
+            current = current + delta
+            if fmt:
+                generated.append(current.strftime(fmt))
+            else:
+                if "T" in template:
+                    generated.append(current.isoformat())
+                elif ":" in template:
+                    generated.append(current.strftime("%Y-%m-%d %H:%M:%S"))
+                else:
+                    generated.append(current.date().isoformat())
+        return generated
+
+    def _extend_text_pattern_series(
+        self,
+        values: list[str],
+        steps: int,
+    ) -> Optional[list[str]]:
+        """Continue strings ending with digits (e.g. "scan01")."""
+
+        matches = [re.match(r"^(.*?)(\d+)$", v.strip()) for v in values]
+        if any(m is None for m in matches):
+            return None
+
+        prefixes = [m.group(1) for m in matches if m is not None]
+        numbers = [int(m.group(2)) for m in matches if m is not None]
+        if not prefixes or not numbers:
+            return None
+        if any(p != prefixes[0] for p in prefixes):
+            return None
+
+        diff = 0
+        if len(numbers) >= 2:
+            diffs = [numbers[i] - numbers[i - 1] for i in range(1, len(numbers))]
+            if all(d == diffs[0] for d in diffs):
+                diff = diffs[0]
+        pad_width = len(matches[-1].group(2)) if matches[-1] is not None else 0
+        current = numbers[-1]
+        prefix = prefixes[-1]
+        generated = []
+        for _ in range(steps):
+            current += diff
+            text = f"{current:0{pad_width}d}" if pad_width else str(current)
+            generated.append(f"{prefix}{text}")
+        return generated
+
+    # ------------------------------------------------------------------
+    # Cell helpers
+    def _get_item_text(self, row: int, column: int) -> str:
+        """Return the text stored at ``(row, column)`` (empty if missing)."""
+
+        item = self.item(row, column)
+        return item.text() if item is not None else ""
+
+    def _set_item_text(self, row: int, column: int, value: str) -> None:
+        """Assign ``value`` to ``(row, column)``, creating an item if required."""
+
+        item = self.item(row, column)
+        if item is None:
+            item = QTableWidgetItem()
+            self.setItem(row, column, item)
+        item.setText(value)
 
 
 class SubjectDelegate(QStyledItemDelegate):
@@ -1123,7 +1536,7 @@ class BIDSManager(QMainWindow):
         # --- Scanned metadata tab ---
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
-        self.mapping_table = QTableWidget()
+        self.mapping_table = AutoFillTableWidget()
         # Expose immutable DICOM metadata (StudyDescription, FamilyName,
         # PatientID) alongside the editable identifiers so users can see the
         # original values while editing BIDS-specific fields.
