@@ -1098,6 +1098,19 @@ class BIDSManager(QMainWindow):
             pass
         self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
         self.theme_file = self.pref_dir / "theme.txt"
+        self.dpi_file = self.pref_dir / "dpi_scale.txt"
+        # Load any previously stored DPI preference so the UI scale persists
+        # across sessions.  Invalid or out-of-range values fall back to the
+        # default of 100%.
+        if self.dpi_file.exists():
+            try:
+                saved_dpi = int(self.dpi_file.read_text().strip())
+            except ValueError:
+                saved_dpi = None
+            except Exception:
+                saved_dpi = None
+            if saved_dpi is not None:
+                self.dpi_scale = max(50, min(200, saved_dpi))
         self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
 
         # Spinner for long-running tasks
@@ -1458,6 +1471,12 @@ class BIDSManager(QMainWindow):
             self.dpi_scale = dlg.spin.value()
             self.dpi_btn.setText(f"DPI: {self.dpi_scale}%")
             self._apply_font_scale()
+            # Persist the user-selected DPI so the preference is restored next
+            # time the application starts.
+            try:
+                self.dpi_file.write_text(str(self.dpi_scale))
+            except Exception:
+                pass
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
