@@ -76,7 +76,19 @@ from PyQt5.QtWidgets import (
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QRect, QPoint
+from PyQt5.QtCore import (
+    Qt,
+    QModelIndex,
+    QTimer,
+    QProcess,
+    QUrl,
+    QRect,
+    QPoint,
+    QObject,
+    QThread,
+    pyqtSignal,
+    pyqtSlot,
+)
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -333,6 +345,92 @@ class _ImageLabel(_AutoUpdateLabel):
         if callable(self._click_fn):
             self._click_fn(event)
         super().mousePressEvent(event)
+
+
+@dataclass
+class MappingLoadResult:
+    """Container holding the data needed to populate the mapping table."""
+
+    path: str
+    dataframe: pd.DataFrame
+    existing_maps: dict[str, dict[str, str]]
+    existing_used: dict[str, list[str]]
+
+
+class _MappingTableWorker(QObject):
+    """Background worker that prepares TSV data before it reaches the GUI."""
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, tsv_path: str, schema, bids_out_dir: str):
+        super().__init__()
+        self._tsv_path = tsv_path
+        self._schema = schema
+        self._bids_out_dir = bids_out_dir
+
+    @pyqtSlot()
+    def run(self) -> None:
+        """Load the TSV and compute expensive previews away from the UI thread."""
+
+        try:
+            df = pd.read_csv(self._tsv_path, sep="\t", keep_default_na=False)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+
+        try:
+            preview_map = _compute_bids_preview(df, self._schema)
+            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+
+            def _prop_path(r):
+                base = r.get("proposed_basename")
+                dt = r.get("proposed_datatype")
+                if not base:
+                    return ""
+                ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+                return f"{dt}/{base}{ext}"
+
+            df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
+
+            existing_maps: dict[str, dict[str, str]] = {}
+            existing_used: dict[str, list[str]] = {}
+            studies = df["StudyDescription"].fillna("").unique()
+            out_dir = Path(self._bids_out_dir or ".")
+            for study in studies:
+                mapping: dict[str, str] = {}
+                used: list[str] = []
+                safe = _safe_stem(str(study))
+                mpath = out_dir / safe / ".bids_manager" / "subject_mapping.tsv"
+                if mpath.exists():
+                    try:
+                        mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
+                        mapping = dict(
+                            zip(
+                                mdf["GivenName"].astype(str),
+                                mdf["BIDS_name"].astype(str),
+                            )
+                        )
+                        used = sorted({str(name) for name in mapping.values()})
+                    except Exception:
+                        # Ignore errors reading auxiliary mapping files; the GUI
+                        # can still operate with an empty mapping for that study.
+                        mapping = {}
+                        used = []
+                existing_maps[str(study)] = mapping
+                existing_used[str(study)] = used
+
+            result = MappingLoadResult(
+                path=self._tsv_path,
+                dataframe=df,
+                existing_maps=existing_maps,
+                existing_used=existing_used,
+            )
+        except Exception as exc:  # pragma: no cover - GUI runtime errors only
+            self.error.emit(str(exc))
+        else:
+            self.finished.emit(result)
 
 def _extract_subject(row) -> str:
     """Return subject identifier prioritising ``BIDS_name`` and stripping ``sub-``."""
@@ -1070,6 +1168,9 @@ class BIDSManager(QMainWindow):
         # signals even when values are assigned in code, so we guard callbacks
         # that rebuild caches with this boolean.
         self._loading_mapping_table = False
+        self._mapping_loader_thread: Optional[QThread] = None
+        self._mapping_loader_worker: Optional[_MappingTableWorker] = None
+        self._pending_mapping_load: Optional[str] = None
 
         # Async process handles for inventory and conversion steps
         self.inventory_process = None  # QProcess for dicom_inventory
@@ -2615,61 +2716,117 @@ class BIDSManager(QMainWindow):
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
 
+        if self._mapping_loader_thread is not None:
+            logging.info("loadMappingTable → Load already in progress; queuing request.")
+            self._pending_mapping_load = self.tsv_path
+            return
+
+        self._pending_mapping_load = None
         self._loading_mapping_table = True
+        worker = _MappingTableWorker(self.tsv_path, self._schema, self.bids_out_dir)
+        thread = QThread(self)
+        self._mapping_loader_thread = thread
+        self._mapping_loader_worker = worker
+
+        worker.moveToThread(thread)
+        worker.finished.connect(self._onMappingLoadFinished)
+        worker.error.connect(self._onMappingLoadError)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clearMappingLoaderThread)
+        thread.started.connect(worker.run)
+        thread.start()
+
+
+    def _clearMappingLoaderThread(self) -> None:
+        """Clear references to the background loader thread."""
+
+        self._mapping_loader_thread = None
+        self._mapping_loader_worker = None
+        if self._pending_mapping_load:
+            pending = self._pending_mapping_load
+            self._pending_mapping_load = None
+            logging.info(
+                "loadMappingTable → Restarting queued load for %s", pending
+            )
+            QTimer.singleShot(0, self.loadMappingTable)
+
+
+    def _onMappingLoadFinished(self, result_obj: object) -> None:
+        """Handle successful completion of the background TSV loader."""
+
+        if not isinstance(result_obj, MappingLoadResult):
+            logging.error(
+                "loadMappingTable → Unexpected result type %r", type(result_obj)
+            )
+            self._loading_mapping_table = False
+            return
+
+        if result_obj.path != self.tsv_path:
+            logging.info(
+                "loadMappingTable → Discarding stale result for %s (current %s).",
+                result_obj.path,
+                self.tsv_path,
+            )
+            self._loading_mapping_table = False
+            return
+
         try:
-            df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-            preview_map = _compute_bids_preview(df, self._schema)
-            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+            self._applyMappingDataToWidgets(result_obj)
+        except Exception as exc:  # pragma: no cover - GUI runtime errors only
+            logging.exception("loadMappingTable → Failed to populate table: %s", exc)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to populate mapping table: {exc}",
+            )
+            self._loading_mapping_table = False
 
-            def _prop_path(r):
-                base = r.get("proposed_basename")
-                dt = r.get("proposed_datatype")
-                if not base:
-                    return ""
-                ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
-                return f"{dt}/{base}{ext}"
 
-            df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
-            self.inventory_df = df
+    def _onMappingLoadError(self, message: str) -> None:
+        """Display an error message when TSV loading fails in the worker."""
 
-            # ----- load existing mappings without altering the TSV -----
-            self.existing_maps = {}
-            self.existing_used = {}
-            studies = df["StudyDescription"].fillna("").unique()
-            for study in studies:
-                safe = _safe_stem(str(study))
-                mpath = Path(self.bids_out_dir) / safe / ".bids_manager" / "subject_mapping.tsv"
-                mapping = {}
-                used = set()
-                if mpath.exists():
-                    try:
-                        mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
-                        mapping = dict(zip(mdf["GivenName"].astype(str), mdf["BIDS_name"].astype(str)))
-                        used = set(mapping.values())
-                    except Exception:
-                        pass
-                # Store mapping info so we can validate name edits later on
-                self.existing_maps[study] = mapping
-                self.existing_used[study] = used
+        logging.error("loadMappingTable → Failed to load TSV: %s", message)
+        self._loading_mapping_table = False
+        if hasattr(self, "log_text"):
+            self.log_text.append(f"Failed to load TSV: {message}")
+        QMessageBox.critical(self, "Error", f"Failed to load TSV: {message}")
 
-            self.study_set.clear()
-            self.modb_rows.clear()
-            self.mod_rows.clear()
-            self.seq_rows.clear()
-            self.study_rows.clear()
-            self.subject_rows.clear()
-            self.session_rows.clear()
-            self.spec_modb_rows.clear()
-            self.spec_mod_rows.clear()
-            self.spec_seq_rows.clear()
-            self.row_info = []
 
-            # Populate table rows
+    def _applyMappingDataToWidgets(self, result: MappingLoadResult) -> None:
+        """Populate GUI tables using the TSV data prepared in a worker thread."""
+
+        df = result.dataframe
+        self.inventory_df = df
+        self.existing_maps = {
+            study: dict(mapping) for study, mapping in result.existing_maps.items()
+        }
+        self.existing_used = {
+            study: set(values) for study, values in result.existing_used.items()
+        }
+
+        self.study_set.clear()
+        self.modb_rows.clear()
+        self.mod_rows.clear()
+        self.seq_rows.clear()
+        self.study_rows.clear()
+        self.subject_rows.clear()
+        self.session_rows.clear()
+        self.spec_modb_rows.clear()
+        self.spec_mod_rows.clear()
+        self.spec_seq_rows.clear()
+        self.row_info = []
+
+        self.mapping_table.blockSignals(True)
+        try:
             self.mapping_table.setRowCount(0)
 
             def _clean(val):
                 """Return string representation of val or empty string for NaN."""
+
                 return "" if pd.isna(val) else str(val)
 
             for _, row in df.iterrows():
@@ -2739,8 +2896,8 @@ class BIDSManager(QMainWindow):
                 acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 12, acq_item)
 
+                # Allow editing the repeat number directly in the table.
                 rep_item = QTableWidgetItem(_clean(row.get('rep')))
-                # Allow editing the repeat number directly in the table
                 rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 13, rep_item)
 
@@ -2773,12 +2930,11 @@ class BIDSManager(QMainWindow):
                     'n_files': _clean(row.get('n_files')),
                     'acq_time': _clean(row.get('acq_time')),
                 })
+
             self.log_text.append("Loaded TSV into mapping table.")
 
-            # Apply always-exclude patterns before building lookup tables
             self.applyExcludePatterns()
 
-            # Build modality/sequence lookup for tree interactions
             self._rebuild_lookup_maps()
 
             self.populateModalitiesTree()
@@ -2786,7 +2942,6 @@ class BIDSManager(QMainWindow):
             if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
                 self._onLastRepToggled(True)
 
-            # Populate naming table
             self.naming_table.blockSignals(True)
             self.naming_table.setRowCount(0)
             name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
@@ -2804,9 +2959,12 @@ class BIDSManager(QMainWindow):
                 bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
                 self.naming_table.setItem(nr, 2, bitem)
             self.naming_table.blockSignals(False)
+
             self._updateScanExistingEnabled()
+            self._updateDetectRepeatEnabled()
             self._updateMappingControlsEnabled()
         finally:
+            self.mapping_table.blockSignals(False)
             self._loading_mapping_table = False
 
 
