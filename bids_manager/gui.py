@@ -63,7 +63,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Set
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
@@ -76,7 +76,18 @@ from PyQt5.QtWidgets import (
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QRect, QPoint
+from PyQt5.QtCore import (
+    Qt,
+    QModelIndex,
+    QTimer,
+    QProcess,
+    QUrl,
+    QRect,
+    QPoint,
+    QThread,
+    QObject,
+    pyqtSignal,
+)
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -370,6 +381,94 @@ def _compute_bids_preview(df, schema):
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+
+@dataclass
+class MappingTableLoadResult:
+    """Container for expensive TSV computations performed off the GUI thread."""
+
+    dataframe: pd.DataFrame
+    existing_maps: Dict[str, Dict[str, str]]
+    existing_used: Dict[str, Set[str]]
+
+
+class _MappingTableLoader(QObject):
+    """Worker object that prepares TSV data without blocking the GUI."""
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, tsv_path: str, bids_out_dir: Optional[str], schema: Any):
+        super().__init__()
+        self._tsv_path = tsv_path
+        self._bids_out_dir = bids_out_dir
+        self._schema = schema
+
+    def _compute_existing_maps(self, df: pd.DataFrame) -> MappingTableLoadResult:
+        """Return mapping dictionaries mirroring the original synchronous logic."""
+
+        existing_maps: Dict[str, Dict[str, str]] = {}
+        existing_used: Dict[str, Set[str]] = {}
+        if not self._bids_out_dir:
+            return MappingTableLoadResult(df, existing_maps, existing_used)
+
+        bids_root = Path(self._bids_out_dir)
+        studies = df["StudyDescription"].fillna("").unique()
+        for study in studies:
+            safe = _safe_stem(str(study))
+            mpath = bids_root / safe / ".bids_manager" / "subject_mapping.tsv"
+            mapping: Dict[str, str] = {}
+            used: Set[str] = set()
+            if mpath.exists():
+                try:
+                    mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
+                    mapping = dict(
+                        zip(
+                            mdf["GivenName"].astype(str),
+                            mdf["BIDS_name"].astype(str),
+                        )
+                    )
+                    used = set(mapping.values())
+                except Exception:
+                    # Keep behaviour identical to the synchronous code: silently
+                    # ignore malformed mapping files and continue loading.
+                    pass
+            existing_maps[study] = mapping
+            existing_used[study] = used
+
+        return MappingTableLoadResult(df, existing_maps, existing_used)
+
+    def _enrich_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Augment the TSV dataframe with preview and proposed-name columns."""
+
+        preview_map = _compute_bids_preview(df, self._schema)
+        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+
+        def _prop_path(row: pd.Series) -> str:
+            base = row.get("proposed_basename")
+            dt = row.get("proposed_datatype")
+            if not base:
+                return ""
+            ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+            return f"{dt}/{base}{ext}"
+
+        df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
+        return df
+
+    def run(self) -> None:  # pragma: no cover - executed via worker thread
+        """Perform the costly TSV parsing work on a background thread."""
+
+        try:
+            df = pd.read_csv(self._tsv_path, sep="\t", keep_default_na=False)
+            df = self._enrich_dataframe(df)
+            result = self._compute_existing_maps(df)
+        except Exception as exc:  # pragma: no cover - runtime failures only
+            self.error.emit(str(exc))
+            return
+
+        self.finished.emit(result)
+
 
 def _terminate_process_tree(pid: int):
     """Terminate a process and all of its children without killing the GUI."""
@@ -2615,199 +2714,214 @@ class BIDSManager(QMainWindow):
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
 
+        thread = getattr(self, "_mapping_loader_thread", None)
+        if thread is not None and thread.isRunning():
+            logging.info("loadMappingTable → Previous load still running; ignoring request.")
+            return
+
         self._loading_mapping_table = True
+        worker = _MappingTableLoader(self.tsv_path, self.bids_out_dir, self._schema)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        self._mapping_loader_worker = worker
+        self._mapping_loader_thread = thread
+
+        worker.finished.connect(self._onMappingLoadFinished)
+        worker.error.connect(self._onMappingLoadError)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_mapping_loader)
+
+        thread.start()
+
+
+    def _cleanup_mapping_loader(self) -> None:
+        """Release worker references once the background thread finishes."""
+
+        self._mapping_loader_thread = None
+        self._mapping_loader_worker = None
+
+
+    def _onMappingLoadFinished(self, result: MappingTableLoadResult) -> None:
+        """Handle successful completion of the background TSV processing."""
+
         try:
-            df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-            preview_map = _compute_bids_preview(df, self._schema)
-            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-
-            def _prop_path(r):
-                base = r.get("proposed_basename")
-                dt = r.get("proposed_datatype")
-                if not base:
-                    return ""
-                ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
-                return f"{dt}/{base}{ext}"
-
-            df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
-            self.inventory_df = df
-
-            # ----- load existing mappings without altering the TSV -----
-            self.existing_maps = {}
-            self.existing_used = {}
-            studies = df["StudyDescription"].fillna("").unique()
-            for study in studies:
-                safe = _safe_stem(str(study))
-                mpath = Path(self.bids_out_dir) / safe / ".bids_manager" / "subject_mapping.tsv"
-                mapping = {}
-                used = set()
-                if mpath.exists():
-                    try:
-                        mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
-                        mapping = dict(zip(mdf["GivenName"].astype(str), mdf["BIDS_name"].astype(str)))
-                        used = set(mapping.values())
-                    except Exception:
-                        pass
-                # Store mapping info so we can validate name edits later on
-                self.existing_maps[study] = mapping
-                self.existing_used[study] = used
-
-            self.study_set.clear()
-            self.modb_rows.clear()
-            self.mod_rows.clear()
-            self.seq_rows.clear()
-            self.study_rows.clear()
-            self.subject_rows.clear()
-            self.session_rows.clear()
-            self.spec_modb_rows.clear()
-            self.spec_mod_rows.clear()
-            self.spec_seq_rows.clear()
-            self.row_info = []
-
-            # Populate table rows
-            self.mapping_table.setRowCount(0)
-
-            def _clean(val):
-                """Return string representation of val or empty string for NaN."""
-                return "" if pd.isna(val) else str(val)
-
-            for _, row in df.iterrows():
-                r = self.mapping_table.rowCount()
-                self.mapping_table.insertRow(r)
-                include_item = QTableWidgetItem()
-                include_item.setFlags(
-                    (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
-                )
-                include_item.setCheckState(
-                    Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked
-                )
-                self.mapping_table.setItem(r, 0, include_item)
-
-                src_item = QTableWidgetItem(_clean(row.get('source_folder')))
-                src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 1, src_item)
-
-                study_raw = _clean(row.get('StudyDescription'))
-                study = normalize_study_name(study_raw)
-
-                study_item = QTableWidgetItem(study)
-                study_item.setFlags(study_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 2, study_item)
-
-                family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
-                family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 3, family_item)
-
-                patient_item = QTableWidgetItem(_clean(row.get('PatientID')))
-                patient_item.setFlags(patient_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 4, patient_item)
-
-                bids_name = _clean(row.get('BIDS_name'))
-                bids_item = QTableWidgetItem(bids_name)
-                bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
-                bids_item.setData(Qt.UserRole, study)
-                self.study_set.add(study)
-                self.mapping_table.setItem(r, 5, bids_item)
-
-                subj_item = QTableWidgetItem(_clean(row.get('subject')))
-                subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 6, subj_item)
-
-                given_item = QTableWidgetItem(_clean(row.get('GivenName')))
-                given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 7, given_item)
-
-                session = _clean(row.get('session'))
-                ses_item = QTableWidgetItem(session)
-                ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 8, ses_item)
-
-                seq_item = QTableWidgetItem(_clean(row.get('sequence')))
-                seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 9, seq_item)
-
-                preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
-                preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 10, preview_item)
-
-                uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
-                uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 11, uid_item)
-
-                acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
-                acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 12, acq_item)
-
-                rep_item = QTableWidgetItem(_clean(row.get('rep')))
-                # Allow editing the repeat number directly in the table
-                rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 13, rep_item)
-
-                mod_item = QTableWidgetItem(_clean(row.get('modality')))
-                mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 14, mod_item)
-
-                modb = _clean(row.get('modality_bids'))
-                modb_item = QTableWidgetItem(modb)
-                modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-                self.mapping_table.setItem(r, 15, modb_item)
-
-                mod = _clean(row.get('modality'))
-                seq = _clean(row.get('sequence'))
-                run = _clean(row.get('rep'))
-                given = _clean(row.get('GivenName'))
-                prop_dt = _clean(row.get('proposed_datatype'))
-                prop_base = _clean(row.get('proposed_basename'))
-                self.row_info.append({
-                    'study': study,
-                    'bids': bids_name,
-                    'given': given,
-                    'ses': session,
-                    'modb': modb,
-                    'mod': mod,
-                    'seq': seq,
-                    'rep': run,
-                    'prop_dt': prop_dt,
-                    'prop_base': prop_base,
-                    'n_files': _clean(row.get('n_files')),
-                    'acq_time': _clean(row.get('acq_time')),
-                })
-            self.log_text.append("Loaded TSV into mapping table.")
-
-            # Apply always-exclude patterns before building lookup tables
-            self.applyExcludePatterns()
-
-            # Build modality/sequence lookup for tree interactions
-            self._rebuild_lookup_maps()
-
-            self.populateModalitiesTree()
-            self.populateSpecificTree()
-            if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
-                self._onLastRepToggled(True)
-
-            # Populate naming table
-            self.naming_table.blockSignals(True)
-            self.naming_table.setRowCount(0)
-            name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
-            name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
-            for _, row in name_df.iterrows():
-                nr = self.naming_table.rowCount()
-                self.naming_table.insertRow(nr)
-                sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
-                sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
-                self.naming_table.setItem(nr, 0, sitem)
-                gitem = QTableWidgetItem(_clean(row["GivenName"]))
-                gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
-                self.naming_table.setItem(nr, 1, gitem)
-                bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
-                bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
-                self.naming_table.setItem(nr, 2, bitem)
-            self.naming_table.blockSignals(False)
-            self._updateScanExistingEnabled()
-            self._updateMappingControlsEnabled()
+            self.inventory_df = result.dataframe
+            self.existing_maps = result.existing_maps
+            self.existing_used = result.existing_used
+            self._populate_mapping_tables(result.dataframe)
+        except Exception as exc:  # pragma: no cover - GUI-only error path
+            logging.exception("loadMappingTable → Failed to populate table")
+            QMessageBox.critical(self, "Failed to load TSV", str(exc))
         finally:
             self._loading_mapping_table = False
+
+
+    def _onMappingLoadError(self, message: str) -> None:
+        """Display background processing errors to the user."""
+
+        logging.error("loadMappingTable → Background load failed: %s", message)
+        QMessageBox.critical(self, "Failed to load TSV", message)
+        self._loading_mapping_table = False
+
+
+    def _populate_mapping_tables(self, df: pd.DataFrame) -> None:
+        """Populate table widgets now that the heavy dataframe work is done."""
+
+        self.study_set.clear()
+        self.modb_rows.clear()
+        self.mod_rows.clear()
+        self.seq_rows.clear()
+        self.study_rows.clear()
+        self.subject_rows.clear()
+        self.session_rows.clear()
+        self.spec_modb_rows.clear()
+        self.spec_mod_rows.clear()
+        self.spec_seq_rows.clear()
+        self.row_info = []
+
+        self.mapping_table.setRowCount(0)
+
+        def _clean(val: Any) -> str:
+            """Return string representation of ``val`` or an empty string for NaN."""
+
+            return "" if pd.isna(val) else str(val)
+
+        for _, row in df.iterrows():
+            r = self.mapping_table.rowCount()
+            self.mapping_table.insertRow(r)
+            include_item = QTableWidgetItem()
+            include_item.setFlags(
+                (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+            )
+            include_item.setCheckState(
+                Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked
+            )
+            self.mapping_table.setItem(r, 0, include_item)
+
+            src_item = QTableWidgetItem(_clean(row.get('source_folder')))
+            src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 1, src_item)
+
+            study_raw = _clean(row.get('StudyDescription'))
+            study = normalize_study_name(study_raw)
+
+            study_item = QTableWidgetItem(study)
+            study_item.setFlags(study_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 2, study_item)
+
+            family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
+            family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 3, family_item)
+
+            patient_item = QTableWidgetItem(_clean(row.get('PatientID')))
+            patient_item.setFlags(patient_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 4, patient_item)
+
+            bids_name = _clean(row.get('BIDS_name'))
+            bids_item = QTableWidgetItem(bids_name)
+            bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
+            bids_item.setData(Qt.UserRole, study)
+            self.study_set.add(study)
+            self.mapping_table.setItem(r, 5, bids_item)
+
+            subj_item = QTableWidgetItem(_clean(row.get('subject')))
+            subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 6, subj_item)
+
+            given_item = QTableWidgetItem(_clean(row.get('GivenName')))
+            given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 7, given_item)
+
+            session = _clean(row.get('session'))
+            ses_item = QTableWidgetItem(session)
+            ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 8, ses_item)
+
+            seq_item = QTableWidgetItem(_clean(row.get('sequence')))
+            seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 9, seq_item)
+
+            preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
+            preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 10, preview_item)
+
+            uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
+            uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 11, uid_item)
+
+            acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
+            acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 12, acq_item)
+
+            rep_item = QTableWidgetItem(_clean(row.get('rep')))
+            rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 13, rep_item)
+
+            mod_item = QTableWidgetItem(_clean(row.get('modality')))
+            mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 14, mod_item)
+
+            modb = _clean(row.get('modality_bids'))
+            modb_item = QTableWidgetItem(modb)
+            modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 15, modb_item)
+
+            mod = _clean(row.get('modality'))
+            seq = _clean(row.get('sequence'))
+            run = _clean(row.get('rep'))
+            given = _clean(row.get('GivenName'))
+            prop_dt = _clean(row.get('proposed_datatype'))
+            prop_base = _clean(row.get('proposed_basename'))
+            self.row_info.append({
+                'study': study,
+                'bids': bids_name,
+                'given': given,
+                'ses': session,
+                'modb': modb,
+                'mod': mod,
+                'seq': seq,
+                'rep': run,
+                'prop_dt': prop_dt,
+                'prop_base': prop_base,
+                'n_files': _clean(row.get('n_files')),
+                'acq_time': _clean(row.get('acq_time')),
+            })
+
+        self.log_text.append("Loaded TSV into mapping table.")
+
+        self.applyExcludePatterns()
+        self._rebuild_lookup_maps()
+        self.populateModalitiesTree()
+        self.populateSpecificTree()
+        if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
+            self._onLastRepToggled(True)
+
+        self.naming_table.blockSignals(True)
+        self.naming_table.setRowCount(0)
+        name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
+        name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
+        for _, row in name_df.iterrows():
+            nr = self.naming_table.rowCount()
+            self.naming_table.insertRow(nr)
+            sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
+            sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 0, sitem)
+            gitem = QTableWidgetItem(_clean(row["GivenName"]))
+            gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 1, gitem)
+            bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
+            bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
+            self.naming_table.setItem(nr, 2, bitem)
+        self.naming_table.blockSignals(False)
+
+        self._updateScanExistingEnabled()
+        self._updateMappingControlsEnabled()
+        self._updateDetectRepeatEnabled()
 
 
     def _build_series_list_from_df(self, df):
