@@ -63,7 +63,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
@@ -76,7 +76,19 @@ from PyQt5.QtWidgets import (
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl, QRect, QPoint
+from PyQt5.QtCore import (
+    Qt,
+    QModelIndex,
+    QTimer,
+    QProcess,
+    QUrl,
+    QRect,
+    QPoint,
+    QObject,
+    QThread,
+    pyqtSignal,
+    pyqtSlot,
+)
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -143,6 +155,31 @@ JOCHEM_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" /
 
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
+
+
+class _ConflictScannerWorker(QObject):
+    """Run the conflict detection scan in a background thread."""
+
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, root_dir: str, finder: Callable[[str], dict]):
+        super().__init__()
+        self._root_dir = root_dir
+        self._finder = finder
+
+    @pyqtSlot()
+    def run(self) -> None:
+        """Execute the slow directory walk outside the GUI thread."""
+
+        try:
+            conflicts = self._finder(self._root_dir)
+        except Exception as exc:  # pragma: no cover - runtime safety
+            # Forward the error message back to the GUI thread so the caller
+            # can decide how to handle it without freezing the interface.
+            self.failed.emit(str(exc))
+        else:
+            self.finished.emit(conflicts)
 
 
 def _create_directional_light_shader():
@@ -1076,6 +1113,9 @@ class BIDSManager(QMainWindow):
         self.conv_process = None       # QProcess for the conversion pipeline
         self.conv_stage = 0            # Tracks which step of the pipeline ran
         self.heurs_to_rename = []      # List of heuristics pending rename
+        # Background worker used to detect mixed StudyInstanceUID folders
+        self._conflict_thread: Optional[QThread] = None
+        self._conflict_worker: Optional[_ConflictScannerWorker] = None
 
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
@@ -2266,6 +2306,83 @@ class BIDSManager(QMainWindow):
                     f"Moved {len(files)} files with StudyInstanceUID {uid} to {new_dir}."
                 )
 
+    def _cleanup_conflict_worker(self) -> None:
+        """Release resources used by the background conflict scanner."""
+
+        if self._conflict_worker is not None:
+            self._conflict_worker.deleteLater()
+            self._conflict_worker = None
+        if self._conflict_thread is not None:
+            if self._conflict_thread.isRunning():
+                self._conflict_thread.quit()
+                self._conflict_thread.wait()
+            self._conflict_thread.deleteLater()
+            self._conflict_thread = None
+
+    def _start_conflict_scan(self) -> None:
+        """Check for mixed sessions without blocking the GUI thread."""
+
+        if not self.dicom_dir or not os.path.isdir(self.dicom_dir):
+            # Nothing to scan – proceed directly to loading the generated TSV.
+            self.log_text.append("TSV generation finished.")
+            self.loadMappingTable()
+            return
+
+        # Avoid launching multiple background scanners simultaneously.
+        if self._conflict_thread is not None:
+            if not self._conflict_thread.isRunning():
+                self._cleanup_conflict_worker()
+            else:
+                return
+
+        self._start_spinner("Checking sessions")
+        self.log_text.append("Checking for multiple sessions in scan folders…")
+
+        self._conflict_worker = _ConflictScannerWorker(self.dicom_dir, self._find_conflicting_studies)
+        self._conflict_thread = QThread(self)
+        self._conflict_worker.moveToThread(self._conflict_thread)
+        self._conflict_thread.started.connect(self._conflict_worker.run)
+        self._conflict_worker.finished.connect(self._on_conflict_scan_finished)
+        self._conflict_worker.failed.connect(self._on_conflict_scan_failed)
+        self._conflict_thread.start()
+
+    def _on_conflict_scan_finished(self, conflicts: dict) -> None:
+        """Handle successful completion of the background conflict scan."""
+
+        self._stop_spinner()
+        self._cleanup_conflict_worker()
+        if conflicts:
+            folders = "\n".join(conflicts.keys())
+            msg = (
+                "Multiple sessions were detected in the following folders:\n"
+                f"{folders}\n\n"
+                "Would you like to move each session into its own subfolder?"
+            )
+            resp = QMessageBox.question(
+                self,
+                "Multiple sessions detected",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if resp == QMessageBox.Yes:
+                self._reorganize_conflicting_sessions(conflicts)
+                # Re-run the inventory now that the folders have been separated.
+                self.runInventory()
+                return
+
+        self.log_text.append("TSV generation finished.")
+        self.loadMappingTable()
+
+    def _on_conflict_scan_failed(self, error_message: str) -> None:
+        """Fallback when conflict detection fails for any reason."""
+
+        self._stop_spinner()
+        self._cleanup_conflict_worker()
+        logging.error("Conflict detection failed: %s", error_message)
+        self.log_text.append("Failed to check for mixed sessions; continuing anyway.")
+        self.log_text.append("TSV generation finished.")
+        self.loadMappingTable()
+
     def _inventoryFinished(self):
         ok = self.inventory_process.exitCode() == 0 if self.inventory_process else False
         self.inventory_process = None
@@ -2273,27 +2390,7 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(False)
         self._stop_spinner()
         if ok:
-            conflicts = self._find_conflicting_studies(self.dicom_dir)
-            if conflicts:
-                folders = "\n".join(conflicts.keys())
-                msg = (
-                    "Multiple sessions were detected in the following folders:\n"
-                    f"{folders}\n\n"
-                    "Would you like to move each session into its own subfolder?"
-                )
-                resp = QMessageBox.question(
-                    self,
-                    "Multiple sessions detected",
-                    msg,
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if resp == QMessageBox.Yes:
-                    self._reorganize_conflicting_sessions(conflicts)
-                    # re-run inventory after reorganisation
-                    self.runInventory()
-                    return
-            self.log_text.append("TSV generation finished.")
-            self.loadMappingTable()
+            self._start_conflict_scan()
         else:
             self.log_text.append("TSV generation failed.")
 
