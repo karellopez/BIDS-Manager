@@ -2616,42 +2616,97 @@ class BIDSManager(QMainWindow):
             return
 
         self._loading_mapping_table = True
+        spinner_started = False
         try:
-            df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-            preview_map = _compute_bids_preview(df, self._schema)
-            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+            # Heavy TSV parsing and preview generation are performed in a
+            # background thread so the GUI remains responsive and the spinner
+            # continues to animate while the data is prepared.
+            self._start_spinner("Preparing table")
+            spinner_started = True
 
-            def _prop_path(r):
-                base = r.get("proposed_basename")
-                dt = r.get("proposed_datatype")
-                if not base:
-                    return ""
-                ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
-                return f"{dt}/{base}{ext}"
+            result: dict[str, Any] = {}
+            load_error: Optional[Exception] = None
 
-            df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
+            def worker() -> None:
+                """Load the TSV and compute preview data off the GUI thread."""
+
+                nonlocal load_error
+                try:
+                    df_local = pd.read_csv(
+                        self.tsv_path,
+                        sep="\t",
+                        keep_default_na=False,
+                    )
+                    preview_map = _compute_bids_preview(df_local, self._schema)
+                    df_local["proposed_datatype"] = [
+                        preview_map.get(i, ("", ""))[0]
+                        for i in df_local.index
+                    ]
+                    df_local["proposed_basename"] = [
+                        preview_map.get(i, ("", ""))[1]
+                        for i in df_local.index
+                    ]
+
+                    def _prop_path(row: pd.Series) -> str:
+                        base = row.get("proposed_basename")
+                        datatype = row.get("proposed_datatype")
+                        if not base:
+                            return ""
+                        ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+                        return f"{datatype}/{base}{ext}"
+
+                    df_local["Proposed BIDS name"] = df_local.apply(_prop_path, axis=1)
+
+                    existing_maps: dict[str, dict[str, str]] = {}
+                    existing_used: dict[str, set[str]] = {}
+                    studies = df_local["StudyDescription"].fillna("").unique()
+                    for study in studies:
+                        safe = _safe_stem(str(study))
+                        mpath = (
+                            Path(self.bids_out_dir)
+                            / safe
+                            / ".bids_manager"
+                            / "subject_mapping.tsv"
+                        )
+                        mapping: dict[str, str] = {}
+                        used: set[str] = set()
+                        if mpath.exists():
+                            try:
+                                mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
+                                mapping = dict(
+                                    zip(
+                                        mdf["GivenName"].astype(str),
+                                        mdf["BIDS_name"].astype(str),
+                                    )
+                                )
+                                used = set(mapping.values())
+                            except Exception:
+                                # Ignore mapping load errors, matching the
+                                # previous behaviour inside the GUI thread.
+                                pass
+                        existing_maps[study] = mapping
+                        existing_used[study] = used
+
+                    result["df"] = df_local
+                    result["existing_maps"] = existing_maps
+                    result["existing_used"] = existing_used
+                except Exception as exc:
+                    load_error = exc
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            while thread.is_alive():
+                QApplication.processEvents()
+                time.sleep(0.05)
+            thread.join()
+
+            if load_error is not None:
+                raise load_error
+
+            df = result["df"]
             self.inventory_df = df
-
-            # ----- load existing mappings without altering the TSV -----
-            self.existing_maps = {}
-            self.existing_used = {}
-            studies = df["StudyDescription"].fillna("").unique()
-            for study in studies:
-                safe = _safe_stem(str(study))
-                mpath = Path(self.bids_out_dir) / safe / ".bids_manager" / "subject_mapping.tsv"
-                mapping = {}
-                used = set()
-                if mpath.exists():
-                    try:
-                        mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
-                        mapping = dict(zip(mdf["GivenName"].astype(str), mdf["BIDS_name"].astype(str)))
-                        used = set(mapping.values())
-                    except Exception:
-                        pass
-                # Store mapping info so we can validate name edits later on
-                self.existing_maps[study] = mapping
-                self.existing_used[study] = used
+            self.existing_maps = result["existing_maps"]
+            self.existing_used = result["existing_used"]
 
             self.study_set.clear()
             self.modb_rows.clear()
@@ -2806,7 +2861,22 @@ class BIDSManager(QMainWindow):
             self.naming_table.blockSignals(False)
             self._updateScanExistingEnabled()
             self._updateMappingControlsEnabled()
+        except Exception as exc:
+            logging.exception("Failed to load mapping table")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to load TSV: {exc}",
+            )
+            self.inventory_df = None
+            self.existing_maps = {}
+            self.existing_used = {}
+            self.mapping_table.setRowCount(0)
+            if hasattr(self, "naming_table"):
+                self.naming_table.setRowCount(0)
         finally:
+            if spinner_started:
+                self._stop_spinner()
             self._loading_mapping_table = False
 
 
