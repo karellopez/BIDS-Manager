@@ -404,12 +404,33 @@ def _parse_age(value: str) -> str:
 
 
 def write_participants(summary_path: Path, bids_root: Path) -> None:
-    """Generate ``participants.tsv`` from ``subject_summary.tsv``."""
+    """Generate ``participants.tsv`` from ``subject_summary.tsv``.
+
+    The generated table always contains the legacy demographic columns and the
+    newly requested ``FamilyName`` and ``patientID`` columns (in that order) so
+    downstream tooling can rely on a stable layout regardless of the input
+    summary.
+    """
     if not summary_path.exists():
         return
     df = pd.read_csv(summary_path, sep="\t", keep_default_na=False)
+    # Ensure the demographics we expect are present even when reading a legacy
+    # ``subject_summary.tsv`` that predates the new columns.
+    for column in ("FamilyName", "PatientID"):
+        if column not in df.columns:
+            df[column] = ""
+
     part_df = (
-        df[["BIDS_name", "GivenName", "PatientSex", "PatientAge"]]
+        df[
+            [
+                "BIDS_name",
+                "GivenName",
+                "PatientSex",
+                "PatientAge",
+                "FamilyName",
+                "PatientID",
+            ]
+        ]
         .drop_duplicates(subset=["BIDS_name"])
         .copy()
     )
@@ -423,9 +444,22 @@ def write_participants(summary_path: Path, bids_root: Path) -> None:
             "GivenName": "given_name",
             "PatientSex": "sex",
             "PatientAge": "age",
+            "PatientID": "patientID",
         },
         inplace=True,
     )
+
+    # Write columns in a deterministic order so the new fields appear at the
+    # end of the table as requested.
+    column_order = [
+        "participant_id",
+        "given_name",
+        "sex",
+        "age",
+        "FamilyName",
+        "patientID",
+    ]
+    part_df = part_df[column_order]
 
     part_path = bids_root / "participants.tsv"
     part_df.to_csv(part_path, sep="\t", index=False)
@@ -473,7 +507,9 @@ def run_heudiconv(raw_root: Path,
         dataset = bids_out.name
         mdir = bids_out / ".bids_manager"
         study_mask = mapping_df["StudyDescription"].fillna("").apply(safe_stem) == dataset
-        sub_df = mapping_df[study_mask]
+        # Work on a copy so we can freely add fallback columns without
+        # affecting the cached mapping DataFrame passed by the caller.
+        sub_df = mapping_df[study_mask].copy()
         if not sub_df.empty:
             mdir.mkdir(exist_ok=True)
             mapping_path = mdir / "subject_mapping.tsv"
@@ -488,11 +524,30 @@ def run_heudiconv(raw_root: Path,
 
             physio_rows = sub_df
 
-            new_map = sub_df[["GivenName", "BIDS_name"]].drop_duplicates()
+            # Preserve the extended subject demographics so the mapping table
+            # exposes both the historical and the newly requested columns.
+            map_columns = ["GivenName", "BIDS_name", "FamilyName", "PatientID"]
+            for column in map_columns:
+                if column not in sub_df.columns:
+                    sub_df[column] = ""
+            new_map = sub_df[map_columns].drop_duplicates().copy()
+            new_map.rename(columns={"PatientID": "patientID"}, inplace=True)
+            new_map = new_map[["GivenName", "BIDS_name", "FamilyName", "patientID"]]
             if mapping_path.exists():
                 old_map = pd.read_csv(mapping_path, sep="\t", keep_default_na=False)
+                # Backfill missing columns from legacy mapping files before
+                # concatenating so we maintain a consistent schema.
+                if "PatientID" in old_map.columns and "patientID" not in old_map.columns:
+                    old_map.rename(columns={"PatientID": "patientID"}, inplace=True)
+                for column in ("FamilyName", "patientID"):
+                    if column not in old_map.columns:
+                        old_map[column] = ""
+                old_map = old_map[["GivenName", "BIDS_name", "FamilyName", "patientID"]]
                 new_map = pd.concat([old_map, new_map], ignore_index=True)
-                new_map.drop_duplicates(subset=["GivenName", "BIDS_name"], inplace=True)
+                new_map.drop_duplicates(
+                    subset=["GivenName", "BIDS_name", "FamilyName", "patientID"],
+                    inplace=True,
+                )
             new_map.to_csv(mapping_path, sep="\t", index=False)
 
     if physio_rows.empty and summary_path.exists():
