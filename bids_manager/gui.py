@@ -84,7 +84,6 @@ from PyQt5.QtCore import (
     QUrl,
     QRect,
     QPoint,
-    QSize,
     QObject,
     QThread,
     pyqtSignal,
@@ -565,20 +564,6 @@ class AutoFillTableWidget(QTableWidget):
         self._autofill_current_range: Optional[QTableWidgetSelectionRange] = None
         # Whenever the selection changes we repaint so the handle follows it.
         self.itemSelectionChanged.connect(self._refresh_handle)
-
-    # Provide compact size hints so splitters can shrink the table on laptops.
-    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
-        """Return a small vertical minimum so the parent splitter can collapse."""
-
-        hint = super().minimumSizeHint()
-        # Keep the width suggested by Qt but relax the height dramatically.
-        return QSize(hint.width(), min(hint.height(), 140))
-
-    def sizeHint(self) -> QSize:  # type: ignore[override]
-        """Limit the preferred height to avoid inflating the surrounding layout."""
-
-        hint = super().sizeHint()
-        return QSize(hint.width(), min(hint.height(), 360))
 
     # ------------------------------------------------------------------
     # Painting utilities
@@ -1596,16 +1581,6 @@ class BIDSManager(QMainWindow):
             pix = QPixmap.fromImage(img)
         self.logo_label.setPixmap(pix.scaledToHeight(120, Qt.SmoothTransformation))
 
-    @staticmethod
-    def _relax_panel(widget: QWidget) -> None:
-        """Allow splitter panels to shrink and rely on internal scroll bars."""
-
-        widget.setMinimumSize(0, 0)
-        policy = widget.sizePolicy()
-        if policy.verticalPolicy() < QSizePolicy.Expanding:
-            policy.setVerticalPolicy(QSizePolicy.Expanding)
-        widget.setSizePolicy(policy)
-
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
         # This tab guides the user through the DICOM → BIDS workflow.
@@ -1673,7 +1648,6 @@ class BIDSManager(QMainWindow):
         self.right_split = QSplitter(Qt.Vertical)
 
         self.tsv_group = QGroupBox("Scanned data viewer")
-        self._relax_panel(self.tsv_group)
         tsv_layout = QVBoxLayout(self.tsv_group)
         self.tsv_detach_button = QPushButton("»")
         self.tsv_detach_button.setFixedWidth(20)
@@ -1685,14 +1659,12 @@ class BIDSManager(QMainWindow):
         header_row_tsv.addWidget(self.tsv_detach_button)
         tsv_layout.addLayout(header_row_tsv)
         self.tsv_tabs = QTabWidget()
-        self._relax_panel(self.tsv_tabs)
         tsv_layout.addWidget(self.tsv_tabs)
 
         # --- Scanned metadata tab ---
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
         self.mapping_table = AutoFillTableWidget()
-        self._relax_panel(self.mapping_table)
         # Expose immutable DICOM metadata (StudyDescription, FamilyName,
         # PatientID) alongside the editable identifiers so users can see the
         # original values while editing BIDS-specific fields.
@@ -1759,14 +1731,11 @@ class BIDSManager(QMainWindow):
         self.left_split.addWidget(self.tsv_group)
 
         self.filter_group = QGroupBox("Filter")
-        self._relax_panel(self.filter_group)
         modal_layout = QVBoxLayout(self.filter_group)
         self.modal_tabs = QTabWidget()
-        self._relax_panel(self.modal_tabs)
         full_tab = QWidget()
         full_layout = QVBoxLayout(full_tab)
         self.full_tree = QTreeWidget()
-        self._relax_panel(self.full_tree)
         self.full_tree.setColumnCount(1)
         self.full_tree.setHeaderLabels(["BIDS Modality"])
         hdr = self.full_tree.header()
@@ -1780,7 +1749,6 @@ class BIDSManager(QMainWindow):
         specific_tab = QWidget()
         specific_layout = QVBoxLayout(specific_tab)
         self.specific_tree = QTreeWidget()
-        self._relax_panel(self.specific_tree)
         self.specific_tree.setColumnCount(3)
         self.specific_tree.setHeaderLabels(["Study/Subject", "Files", "Time"])
         s_hdr = self.specific_tree.header()
@@ -1798,7 +1766,6 @@ class BIDSManager(QMainWindow):
         naming_tab = QWidget()
         naming_layout = QVBoxLayout(naming_tab)
         self.naming_table = QTableWidget()
-        self._relax_panel(self.naming_table)
         self.naming_table.setColumnCount(3)
         self.naming_table.setHorizontalHeaderLabels(["Study", "Given name", "BIDS name"])
         n_hdr = self.naming_table.horizontalHeader()
@@ -1826,7 +1793,6 @@ class BIDSManager(QMainWindow):
         exclude_tab = QWidget()
         exclude_layout = QVBoxLayout(exclude_tab)
         self.exclude_table = QTableWidget()
-        self._relax_panel(self.exclude_table)
         self.exclude_table.setColumnCount(2)
         self.exclude_table.setHorizontalHeaderLabels(["Active", "Pattern"])
         ex_hdr = self.exclude_table.horizontalHeader()
@@ -1868,15 +1834,12 @@ class BIDSManager(QMainWindow):
         self.right_split.setStretchFactor(1, 1)
 
         self.preview_group = QGroupBox("Preview")
-        self._relax_panel(self.preview_group)
         preview_layout = QVBoxLayout(self.preview_group)
         self.preview_tabs = QTabWidget()
-        self._relax_panel(self.preview_tabs)
 
         text_tab = QWidget()
         text_lay = QVBoxLayout(text_tab)
         self.preview_text = QTreeWidget()
-        self._relax_panel(self.preview_text)
         self.preview_text.setColumnCount(2)
         self.preview_text.setHeaderLabels(["BIDS Path", "Original Sequence"])
         text_lay.addWidget(self.preview_text)
@@ -1885,7 +1848,6 @@ class BIDSManager(QMainWindow):
         tree_tab = QWidget()
         tree_lay = QVBoxLayout(tree_tab)
         self.preview_tree = QTreeWidget()
-        self._relax_panel(self.preview_tree)
         self.preview_tree.setColumnCount(2)
         self.preview_tree.setHeaderLabels(["BIDS Structure", "Original Sequence"])
         tree_lay.addWidget(self.preview_tree)
@@ -1924,10 +1886,8 @@ class BIDSManager(QMainWindow):
         pv_lay.setSpacing(6)
         pv_lay.addWidget(self.preview_group)
         pv_lay.addLayout(btn_row)
-        self._relax_panel(self.preview_container)
 
         log_group = QGroupBox("Log Output")
-        self._relax_panel(log_group)
         log_layout = QVBoxLayout(log_group)
         self.terminal_cb = QCheckBox("Show output in terminal")
         log_layout.addWidget(self.terminal_cb)
@@ -1936,7 +1896,6 @@ class BIDSManager(QMainWindow):
             self.terminal_cb.setChecked(True)
             self.terminal_cb.setVisible(False)
         self.log_text = QTextEdit()
-        self._relax_panel(self.log_text)
         self.log_text.setReadOnly(True)
         self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
