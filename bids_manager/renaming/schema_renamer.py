@@ -26,12 +26,34 @@ _BIDS_EXTS = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv")
 
 _SANITIZE_TOKEN = re.compile(r"[^a-zA-Z0-9]+")
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
+_ACQ_TOKEN = re.compile(r"(?:^|[_-])acq-([a-zA-Z0-9]+)", re.IGNORECASE)
 
 
 def _sanitize_token(x: Optional[str]) -> Optional[str]:
     if not x:
         return None
     return _SANITIZE_TOKEN.sub("", x).strip()
+
+
+def _extract_acq_token(sequence: Optional[str]) -> Optional[str]:
+    """Return the existing ``acq-`` label embedded in ``sequence`` if present.
+
+    The schema-driven proposer historically ignored BIDS-style ``acq-`` tokens
+    already present in :attr:`SeriesInfo.sequence`, which meant renaming would
+    drop valuable acquisition hints (e.g. ``acq-HighRes``).  The renamer now
+    prefers to keep that label verbatim so the preview table and post-conversion
+    rename produce filenames consistent with the original sequence text.
+    """
+
+    if not sequence:
+        return None
+    match = _ACQ_TOKEN.search(sequence)
+    if not match:
+        return None
+    # ``_sanitize_token`` preserves the original capitalisation while ensuring
+    # the label remains BIDS compliant (alphanumeric only).
+    acq = _sanitize_token(match.group(1))
+    return acq or None
 
 
 def _strip_run_tokens(sequence: str) -> str:
@@ -451,12 +473,13 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     # and suffix accordingly so Preview/Table point to the derivatives tree and
     # not raw dwi/.
     direction: Optional[str] = None
+    sequence_acq = _extract_acq_token(series.sequence)
     map_name = _detect_dwi_derivative(clean_sequence)
     if map_name:
         datatype = "derivatives"
         # Keep an acquisition discriminator for uniqueness between different
         # series descriptions.
-        acq_token = _sanitize_token(clean_sequence)[:32]
+        acq_token = sequence_acq or _sanitize_token(clean_sequence)[:32]
         if acq_token:
             parts.append(f"acq-{acq_token}")
         parts.append(f"desc-{map_name}")
@@ -469,8 +492,9 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         # fallback to guarantee uniqueness, which produced long
         # ``acq-<pattern>`` tokens. These were confusing and not BIDS
         # recommended, so we now omit ``acq`` unless the caller supplies it.
-        acq = series.extra.get("acq") if series.extra else None
+        explicit_acq = series.extra.get("acq") if series.extra else None
         direction = series.extra.get("dir") if series.extra else None
+        inf_acq: Optional[str] = None
 
         if suffix == "dwi":
             # Infer missing ``acq``/``dir`` tokens from the sequence itself so
@@ -479,13 +503,19 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
             inf_acq, inf_dir = _infer_dwi_acq_dir(clean_sequence)
             if not direction:
                 direction = inf_dir
-            if not acq:
-                acq = inf_acq
 
-        if acq:
-            acq = _sanitize_token(acq)
+        # Determine the final acquisition label prioritising explicit input,
+        # then the sequence token (to preserve existing ``acq-`` hints) and
+        # finally any heuristically inferred value for DWI series.
+        candidates = (
+            _sanitize_token(explicit_acq) if explicit_acq else None,
+            sequence_acq,
+            _sanitize_token(inf_acq) if inf_acq else None,
+        )
+        for acq in candidates:
             if acq:
                 parts.append(f"acq-{acq}")
+                break
 
     echo = series.extra.get("echo") if series.extra else None
     if echo:
