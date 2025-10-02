@@ -36,24 +36,34 @@ def _sanitize_token(x: Optional[str]) -> Optional[str]:
 
 
 def _extract_acq_token(sequence: Optional[str]) -> Optional[str]:
-    """Return the existing ``acq-`` label embedded in ``sequence`` if present.
+    """Return the most descriptive ``acq-`` label embedded in ``sequence``.
 
-    The schema-driven proposer historically ignored BIDS-style ``acq-`` tokens
-    already present in :attr:`SeriesInfo.sequence`, which meant renaming would
-    drop valuable acquisition hints (e.g. ``acq-HighRes``).  The renamer now
-    prefers to keep that label verbatim so the preview table and post-conversion
-    rename produce filenames consistent with the original sequence text.
+    Some scanners embed several ``acq-`` hints in the raw sequence text (for
+    example ``"acq-15_acq-15b0"``).  The historic implementation would return
+    the *first* match which often meant a richer discriminator was dropped.  To
+    preserve the most useful hint we inspect every match and keep the longest
+    sanitized label, breaking ties by favouring the right-most occurrence so the
+    selection remains deterministic.
     """
 
     if not sequence:
         return None
-    match = _ACQ_TOKEN.search(sequence)
-    if not match:
+
+    candidates = []
+    for match in _ACQ_TOKEN.finditer(sequence):
+        token = _sanitize_token(match.group(1))
+        if token:
+            candidates.append((token, match.start()))
+
+    if not candidates:
         return None
-    # ``_sanitize_token`` preserves the original capitalisation while ensuring
-    # the label remains BIDS compliant (alphanumeric only).
-    acq = _sanitize_token(match.group(1))
-    return acq or None
+
+    # ``max`` with a custom key favours the longer sanitized token which tends
+    # to carry the most context (e.g. ``acq-15b0`` vs ``acq-15``).  When two
+    # tokens share the same length we keep the right-most one so that repeated
+    # hints resolve to the most specific entry.
+    best_token, _ = max(candidates, key=lambda item: (len(item[0]), item[1]))
+    return best_token
 
 
 def _strip_run_tokens(sequence: str) -> str:

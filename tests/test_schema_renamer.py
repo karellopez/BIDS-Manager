@@ -175,6 +175,49 @@ def test_sequence_acq_token_preserved_during_rename(tmp_path):
     assert rename_map[nii] == target
 
 
+def test_sequence_multiple_acq_tokens_prefers_richest(tmp_path):
+    """When multiple ``acq-`` tokens exist keep the most descriptive one."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+
+    # Simulate a diffusion series where the scanner stored two acquisition
+    # hints.  The more specific ``acq-15b0`` should win over the generic
+    # ``acq-15`` in both preview and post-conversion rename steps.
+    sequence = "acq-15_acq-15b0 dir-ap dwi"
+    series = SeriesInfo("002", None, "dwi", sequence, None, {})
+
+    proposals = build_preview_names([series], schema)
+    assert proposals[0][2] == "sub-002_acq-15b0_dir-ap_dwi"
+
+    # Create fake heudiconv outputs using the verbose sequence name so the
+    # renamer must rely on the acquisition token extraction.
+    nii = tmp_path / "sub-002" / "dwi" / "sub-002_acq-15_acq-15b0_dir-ap_dwi.nii.gz"
+    json = tmp_path / "sub-002" / "dwi" / "sub-002_acq-15_acq-15b0_dir-ap_dwi.json"
+    bval = tmp_path / "sub-002" / "dwi" / "sub-002_acq-15_acq-15b0_dir-ap_dwi.bval"
+    bvec = tmp_path / "sub-002" / "dwi" / "sub-002_acq-15_acq-15b0_dir-ap_dwi.bvec"
+    for path in (nii, json, bval, bvec):
+        _touch(path)
+
+    series_with_current = SeriesInfo(
+        "002",
+        None,
+        "dwi",
+        sequence,
+        None,
+        {"current_bids": "sub-002_acq-15_acq-15b0_dir-ap_dwi"},
+    )
+
+    rename_map = apply_post_conversion_rename(tmp_path, build_preview_names([series_with_current], schema))
+
+    target = tmp_path / "sub-002" / "dwi" / "sub-002_acq-15b0_dir-ap_dwi.nii.gz"
+    assert target.exists()
+    assert (tmp_path / "sub-002" / "dwi" / "sub-002_acq-15b0_dir-ap_dwi.json").exists()
+    assert (tmp_path / "sub-002" / "dwi" / "sub-002_acq-15b0_dir-ap_dwi.bval").exists()
+    assert (tmp_path / "sub-002" / "dwi" / "sub-002_acq-15b0_dir-ap_dwi.bvec").exists()
+    assert nii in rename_map
+    assert rename_map[nii] == target
+
+
 def test_sbref_and_physio_detection():
     """SBRef and physio sequences should not be misclassified as bold."""
 
