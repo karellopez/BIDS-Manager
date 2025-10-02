@@ -133,6 +133,48 @@ def test_dwi_direction_and_acq_detection():
     ]
 
 
+def test_sequence_acq_token_preserved_in_preview():
+    """Existing ``acq-`` labels in the sequence should be preserved."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+    series = SeriesInfo("001", None, "T1w", "mprage_acq-HighRes_run-01", None, {})
+
+    proposals = build_preview_names([series], schema)
+
+    assert proposals[0][2] == "sub-001_acq-HighRes_run-01_T1w"
+
+
+def test_sequence_acq_token_preserved_during_rename(tmp_path):
+    """Post-conversion rename keeps the original ``acq-`` discriminator."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+    nii = tmp_path / "sub-001" / "anat" / "sub-001_mprage_acq-HighRes.nii.gz"
+    json = tmp_path / "sub-001" / "anat" / "sub-001_mprage_acq-HighRes.json"
+    _touch(nii)
+    _touch(json)
+
+    series = [
+        SeriesInfo(
+            "001",
+            None,
+            "T1w",
+            "mprage_acq-HighRes",
+            None,
+            {"current_bids": "sub-001_mprage_acq-HighRes"},
+        )
+    ]
+
+    proposals = build_preview_names(series, schema)
+    rename_map = apply_post_conversion_rename(tmp_path, proposals)
+
+    target = tmp_path / "sub-001" / "anat" / "sub-001_acq-HighRes_T1w.nii.gz"
+    assert target.exists()
+    assert (tmp_path / "sub-001" / "anat" / "sub-001_acq-HighRes_T1w.json").exists()
+    # Rename map should reflect the move for downstream updates.
+    assert nii in rename_map
+    assert rename_map[nii] == target
+
+
 def test_sbref_and_physio_detection():
     """SBRef and physio sequences should not be misclassified as bold."""
 
