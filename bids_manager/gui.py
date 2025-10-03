@@ -81,6 +81,7 @@ from PyQt5.QtCore import (
     QModelIndex,
     QTimer,
     QProcess,
+    QProcessEnvironment,
     QUrl,
     QRect,
     QPoint,
@@ -1139,6 +1140,7 @@ class BIDSManager(QMainWindow):
         self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
         self.theme_file = self.pref_dir / "theme.txt"
         self.dpi_file = self.pref_dir / "dpi_scale.txt"
+        self.settings_file = self.pref_dir / "settings.json"
         # Load any previously stored DPI preference so the UI scale persists
         # across sessions.  Invalid or out-of-range values fall back to the
         # default of 100%.
@@ -1151,6 +1153,7 @@ class BIDSManager(QMainWindow):
                 saved_dpi = None
             if saved_dpi is not None:
                 self.dpi_scale = max(50, min(200, saved_dpi))
+        self._load_settings()
         self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
 
         # Spinner for long-running tasks
@@ -1200,12 +1203,15 @@ class BIDSManager(QMainWindow):
         self.cpu_btn = QPushButton(f"CPU: {self.num_cpus}")
         self.cpu_btn.setFixedWidth(70)
         self.cpu_btn.clicked.connect(self.show_cpu_dialog)
-        self.authorship_btn = QPushButton("Authorship")
-        self.authorship_btn.setFixedWidth(90)
-        self.authorship_btn.clicked.connect(self.show_authorship_dialog)
         self.dpi_btn = QPushButton(f"DPI: {self.dpi_scale}%")
         self.dpi_btn.setFixedWidth(80)
         self.dpi_btn.clicked.connect(self.show_dpi_dialog)
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.setFixedWidth(90)
+        self.settings_btn.clicked.connect(self.show_settings_dialog)
+        self.authorship_btn = QPushButton("Authorship")
+        self.authorship_btn.setFixedWidth(90)
+        self.authorship_btn.clicked.connect(self.show_authorship_dialog)
         # Create a container widget with layout to adjust position
         container = QWidget()
         layout = QHBoxLayout()
@@ -1214,6 +1220,7 @@ class BIDSManager(QMainWindow):
         layout.addWidget(self.theme_btn)
         layout.addWidget(self.cpu_btn)
         layout.addWidget(self.dpi_btn)
+        layout.addWidget(self.settings_btn)
         layout.addWidget(self.authorship_btn)
         container.setLayout(layout)
         # Add the container to the status bar (left-aligned)
@@ -1237,6 +1244,7 @@ class BIDSManager(QMainWindow):
     def _build_theme_dict(self):
         """Return dictionary mapping theme names to QPalettes."""
         themes = {}
+
 
         dark_purple = QPalette()
         dark_purple.setColor(QPalette.Window, QColor(53, 53, 53))
@@ -1480,6 +1488,31 @@ class BIDSManager(QMainWindow):
 
         return themes
 
+    def _load_settings(self) -> None:
+        """Load persisted application settings."""
+
+        self.output_uncompressed_nifti = False
+        if not self.settings_file.exists():
+            return
+
+        try:
+            data = json.loads(self.settings_file.read_text())
+        except Exception:
+            return
+
+        self.output_uncompressed_nifti = bool(
+            data.get("output_uncompressed_nifti", False)
+        )
+
+    def _save_settings(self) -> None:
+        """Persist application settings to disk."""
+
+        payload = {"output_uncompressed_nifti": self.output_uncompressed_nifti}
+        try:
+            self.settings_file.write_text(json.dumps(payload, indent=2))
+        except Exception:
+            pass
+
     def apply_theme(self, name: str):
         """Apply palette chosen from the Theme menu."""
         app = QApplication.instance()
@@ -1517,6 +1550,26 @@ class BIDSManager(QMainWindow):
                 self.dpi_file.write_text(str(self.dpi_scale))
             except Exception:
                 pass
+
+    def show_settings_dialog(self) -> None:
+        """Display general application settings."""
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        layout = QVBoxLayout(dialog)
+
+        nifti_cb = QCheckBox("Save NIfTI files without gzip compression (.nii)")
+        nifti_cb.setChecked(self.output_uncompressed_nifti)
+        layout.addWidget(nifti_cb)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() == QDialog.Accepted:
+            self.output_uncompressed_nifti = nifti_cb.isChecked()
+            self._save_settings()
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
@@ -3613,6 +3666,12 @@ class BIDSManager(QMainWindow):
             self.conv_process.setStandardOutputFile(QProcess.nullDevice())
             self.conv_process.setStandardErrorFile(QProcess.nullDevice())
         self.conv_process.finished.connect(self._convStepFinished)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert(
+            "HEUDICONV_DCM2NIIX_ARGS",
+            "-z n" if self.output_uncompressed_nifti else "-z y",
+        )
+        self.conv_process.setProcessEnvironment(env)
         args = [self.build_script, self.tsv_for_conv, self.heuristic_dir]
         self.conv_process.start(sys.executable, args)
 
