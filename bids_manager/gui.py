@@ -63,6 +63,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
+from functools import cmp_to_key
 from typing import Any, Callable, Optional, Sequence
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
@@ -1025,6 +1026,109 @@ class AutoFillTableWidget(QTableWidget):
         item.setText(value)
 
 
+class MappingSortDialog(QDialog):
+    """Dialog used to configure multi-level sorting for the metadata table."""
+
+    def __init__(self, columns: list[str], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Sort scanned metadata")
+        self._columns = columns
+        self._level_rows: list[tuple[QComboBox, QComboBox, QWidget]] = []
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Select the columns to sort by in priority order. "
+            "Each level is applied sequentially, just like Excel's multi-column sort."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self._levels_layout = QVBoxLayout()
+        layout.addLayout(self._levels_layout)
+
+        controls_layout = QHBoxLayout()
+        self._add_level_btn = QPushButton("Add level")
+        self._add_level_btn.clicked.connect(self._add_level)
+        self._remove_level_btn = QPushButton("Remove level")
+        self._remove_level_btn.clicked.connect(self._remove_level)
+        controls_layout.addWidget(self._add_level_btn)
+        controls_layout.addWidget(self._remove_level_btn)
+        controls_layout.addStretch()
+        layout.addLayout(controls_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Always start with a single sorting level configured.
+        self._add_level()
+        self._update_button_state()
+
+    # ------------------------------------------------------------------
+    def _add_level(self) -> None:
+        """Append a new sorting level to the dialog."""
+
+        if len(self._level_rows) >= len(self._columns):
+            return
+
+        row_widget = QWidget(self)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+
+        column_combo = QComboBox(row_widget)
+        column_combo.addItems(self._columns)
+        # Try to pre-select the first column that is not already used.
+        used = {combo.currentText() for combo, _order, _widget in self._level_rows}
+        for idx, name in enumerate(self._columns):
+            if name not in used:
+                column_combo.setCurrentIndex(idx)
+                break
+
+        order_combo = QComboBox(row_widget)
+        order_combo.addItems(["Ascending", "Descending"])
+
+        row_layout.addWidget(QLabel(f"Level {len(self._level_rows) + 1}", row_widget))
+        row_layout.addWidget(column_combo)
+        row_layout.addWidget(order_combo)
+        row_layout.addStretch()
+
+        self._levels_layout.addWidget(row_widget)
+        self._level_rows.append((column_combo, order_combo, row_widget))
+        self._update_button_state()
+
+    def _remove_level(self) -> None:
+        """Remove the last configured sorting level."""
+
+        if not self._level_rows:
+            return
+        combo, order_combo, widget = self._level_rows.pop()
+        combo.deleteLater()
+        order_combo.deleteLater()
+        widget.deleteLater()
+        self._update_button_state()
+
+    def _update_button_state(self) -> None:
+        """Enable/disable controls based on the current dialog state."""
+
+        self._add_level_btn.setEnabled(len(self._level_rows) < len(self._columns))
+        self._remove_level_btn.setEnabled(len(self._level_rows) > 1)
+
+    def sort_instructions(self) -> list[tuple[str, bool]]:
+        """Return the configured sorting hierarchy as ``(column, ascending)``."""
+
+        instructions: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for column_combo, order_combo, _widget in self._level_rows:
+            column = column_combo.currentText()
+            if not column or column in seen:
+                continue
+            ascending = order_combo.currentText() == "Ascending"
+            instructions.append((column, ascending))
+            seen.add(column)
+        return instructions
+
+
 class SubjectDelegate(QStyledItemDelegate):
     """Delegate to edit BIDS subject IDs without altering the 'sub-' prefix."""
 
@@ -1664,6 +1768,14 @@ class BIDSManager(QMainWindow):
         # --- Scanned metadata tab ---
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
+        metadata_toolbar = QHBoxLayout()
+        self.tsv_sort_button = QPushButton("Sort")
+        self.tsv_sort_button.setEnabled(False)
+        self.tsv_sort_button.setToolTip("Sort the scanned metadata table")
+        self.tsv_sort_button.clicked.connect(self._open_sort_dialog)
+        metadata_toolbar.addWidget(self.tsv_sort_button)
+        metadata_toolbar.addStretch()
+        metadata_layout.addLayout(metadata_toolbar)
         self.mapping_table = AutoFillTableWidget()
         # Expose immutable DICOM metadata (StudyDescription, FamilyName,
         # PatientID) alongside the editable identifiers so users can see the
@@ -2128,6 +2240,150 @@ class BIDSManager(QMainWindow):
             self.tsv_name_edit.setText(os.path.basename(path))
             self.loadMappingTable()
 
+    def _open_sort_dialog(self) -> None:
+        """Display a dialog allowing the user to configure a multi-level sort."""
+
+        if self.mapping_table.rowCount() <= 1:
+            QMessageBox.information(self, "Nothing to sort", "Load multiple rows before sorting.")
+            return
+
+        headers = []
+        for col in range(self.mapping_table.columnCount()):
+            header_item = self.mapping_table.horizontalHeaderItem(col)
+            if header_item is not None:
+                headers.append(header_item.text())
+
+        dialog = MappingSortDialog(headers, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        instructions = dialog.sort_instructions()
+        if not instructions:
+            QMessageBox.information(self, "No columns selected", "Select at least one column to sort by.")
+            return
+
+        self._apply_mapping_sort(instructions)
+
+    def _apply_mapping_sort(self, instructions: list[tuple[str, bool]]) -> None:
+        """Reorder the mapping table using ``instructions`` as sort keys."""
+
+        column_lookup: dict[str, int] = {}
+        for idx in range(self.mapping_table.columnCount()):
+            header_item = self.mapping_table.horizontalHeaderItem(idx)
+            if header_item is not None:
+                column_lookup[header_item.text()] = idx
+
+        # Translate column names back into indices, ignoring stale entries.
+        order = [(column_lookup.get(name), asc) for name, asc in instructions if name in column_lookup]
+        order = [(idx, asc) for idx, asc in order if idx is not None]
+        if not order:
+            return
+
+        row_count = self.mapping_table.rowCount()
+        col_count = self.mapping_table.columnCount()
+        rows: list[dict[str, Any]] = []
+        for row in range(row_count):
+            row_items: list[QTableWidgetItem] = []
+            sort_values: list[tuple[Any, ...]] = []
+            for col in range(col_count):
+                item = self.mapping_table.item(row, col)
+                if item is not None:
+                    cloned = item.clone()
+                else:
+                    cloned = QTableWidgetItem()
+                if col == 0:
+                    # Preserve checkbox behaviour in the include column.
+                    cloned.setFlags((cloned.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
+                    state = item.checkState() if item is not None else Qt.Unchecked
+                    cloned.setCheckState(state)
+                    sort_value = (0, 1 if state == Qt.Checked else 0)
+                else:
+                    text = item.text() if item is not None else ""
+                    sort_value = self._coerce_sort_value(text)
+                row_items.append(cloned)
+                sort_values.append(sort_value)
+            info = self.row_info[row] if row < len(self.row_info) else {}
+            rows.append(
+                {
+                    "items": row_items,
+                    "sort_values": sort_values,
+                    "row_info": info,
+                    "original_index": row,
+                }
+            )
+
+        def _compare(left: dict[str, Any], right: dict[str, Any]) -> int:
+            for col_idx, ascending in order:
+                l_val = left["sort_values"][col_idx]
+                r_val = right["sort_values"][col_idx]
+                if l_val == r_val:
+                    continue
+                if l_val < r_val:
+                    return -1 if ascending else 1
+                return 1 if ascending else -1
+            return 0
+
+        sorted_rows = sorted(rows, key=cmp_to_key(_compare))
+        new_order = [row["original_index"] for row in sorted_rows]
+        if new_order == list(range(len(sorted_rows))):
+            return  # Already sorted
+
+        previous_loading = self._loading_mapping_table
+        self._loading_mapping_table = True
+        self.mapping_table.blockSignals(True)
+        self.mapping_table.setRowCount(0)
+        for row_data in sorted_rows:
+            idx = self.mapping_table.rowCount()
+            self.mapping_table.insertRow(idx)
+            for col_idx, item in enumerate(row_data["items"]):
+                self.mapping_table.setItem(idx, col_idx, item)
+        self.mapping_table.blockSignals(False)
+        self._loading_mapping_table = previous_loading
+
+        # Keep auxiliary structures synchronised with the new row order.
+        self.row_info = [row["row_info"] for row in sorted_rows]
+        if self.inventory_df is not None:
+            try:
+                self.inventory_df = self.inventory_df.iloc[new_order].reset_index(drop=True)
+            except Exception:
+                pass
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        self._updateMappingControlsEnabled()
+
+        if hasattr(self, "log_text"):
+            summary = ", ".join(
+                f"{name} ({'Ascending' if asc else 'Descending'})" for name, asc in instructions
+            )
+            self.log_text.append(f"Sorted metadata table by {summary}.")
+
+    @staticmethod
+    def _coerce_sort_value(value: str) -> tuple[Any, ...]:
+        """Return a comparable tuple for ``value`` suitable for sorting."""
+
+        text = value.strip()
+        if not text:
+            return (5, "")
+
+        try:
+            numeric = Decimal(text)
+            return (1, numeric)
+        except (InvalidOperation, ValueError):
+            pass
+
+        fmt = guess_datetime_format(text)
+        if fmt:
+            try:
+                dt_value = pd.to_datetime(text, errors="raise")
+                return (2, dt_value.to_pydatetime())
+            except Exception:
+                pass
+
+        lowered = text.lower()
+        return (3, lowered, text)
+
     def detachTSVWindow(self):
         """Detach the scanned data viewer into a separate window."""
         if getattr(self, "tsv_dialog", None):
@@ -2548,6 +2804,8 @@ class BIDSManager(QMainWindow):
             return
         has_data = self.mapping_table.rowCount() > 0
         self.tsv_generate_ids_button.setEnabled(has_data)
+        if hasattr(self, "tsv_sort_button"):
+            self.tsv_sort_button.setEnabled(has_data)
         self.last_rep_box.setEnabled(has_data)
         self.name_choice.setEnabled(has_data)
         if not has_data:
