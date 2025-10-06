@@ -63,7 +63,7 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
@@ -1040,6 +1040,124 @@ class SubjectDelegate(QStyledItemDelegate):
     def setModelData(self, editor, model, index):  # noqa: D401 - Qt override
         model.setData(index, "sub-" + editor.text(), Qt.EditRole)
 
+
+@dataclass
+class _SortLevelRow:
+    """Container used by :class:`MappingSortDialog` to track one sort level."""
+
+    container: QWidget
+    column_combo: QComboBox
+    order_combo: QComboBox
+    remove_button: QPushButton
+
+
+class MappingSortDialog(QDialog):
+    """Dialog that lets the user build a hierarchy of sort keys."""
+
+    def __init__(self, parent: QWidget, headers: Sequence[str]):
+        super().__init__(parent)
+        self.setWindowTitle("Sort scanned metadata")
+        self._headers = list(headers)
+        self._levels: List[_SortLevelRow] = []
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "Select the columns to sort by in priority order. "
+                "Rows are ordered by the first column and ties are broken "
+                "using the subsequent levels."
+            )
+        )
+
+        self._levels_container = QVBoxLayout()
+        self._levels_container.setSpacing(6)
+        layout.addLayout(self._levels_container)
+
+        controls_row = QHBoxLayout()
+        controls_row.addStretch()
+        self._add_level_button = QPushButton("Add level")
+        self._add_level_button.clicked.connect(self._add_level)
+        controls_row.addWidget(self._add_level_button)
+        layout.addLayout(controls_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Always expose at least one sort level.
+        self._add_level()
+
+    # ------------------------------------------------------------------
+    # Public API
+    def specifications(self) -> List[Tuple[int, bool]]:
+        """Return the selected sort levels as ``(column, ascending)`` tuples."""
+
+        specs: List[Tuple[int, bool]] = []
+        for level in self._levels:
+            column_index = level.column_combo.currentIndex()
+            if column_index < 0:
+                continue
+            ascending = level.order_combo.currentIndex() == 0
+            specs.append((column_index, ascending))
+        return specs
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    def _add_level(self) -> None:
+        """Append a new row containing column/order selectors."""
+
+        row_widget = QWidget(self)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        column_combo = QComboBox(row_widget)
+        column_combo.addItems(self._headers)
+        row_layout.addWidget(QLabel("Column:", row_widget))
+        row_layout.addWidget(column_combo)
+
+        order_combo = QComboBox(row_widget)
+        order_combo.addItems(["Ascending", "Descending"])
+        row_layout.addWidget(QLabel("Order:", row_widget))
+        row_layout.addWidget(order_combo)
+
+        remove_button = QPushButton("Remove", row_widget)
+        remove_button.clicked.connect(lambda _: self._remove_level(row_widget))
+        row_layout.addWidget(remove_button)
+
+        level = _SortLevelRow(
+            container=row_widget,
+            column_combo=column_combo,
+            order_combo=order_combo,
+            remove_button=remove_button,
+        )
+        self._levels.append(level)
+        self._levels_container.addWidget(row_widget)
+        self._update_remove_buttons()
+
+    def _remove_level(self, widget: QWidget) -> None:
+        """Remove the selected level when more than one is present."""
+
+        if len(self._levels) <= 1:
+            return
+
+        for idx, level in enumerate(self._levels):
+            if level.container is widget:
+                self._levels.pop(idx)
+                level.container.setParent(None)
+                level.container.deleteLater()
+                break
+
+        self._update_remove_buttons()
+
+    def _update_remove_buttons(self) -> None:
+        """Disable the remove buttons when only one level is available."""
+
+        allow_remove = len(self._levels) > 1
+        for level in self._levels:
+            level.remove_button.setEnabled(allow_remove)
+
 class BIDSManager(QMainWindow):
     """
     Main GUI for BIDS Manager.
@@ -1696,6 +1814,15 @@ class BIDSManager(QMainWindow):
         self.mapping_table.setItemDelegateForColumn(5, SubjectDelegate(self.mapping_table))
         self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
         self.mapping_table.itemChanged.connect(self._onMappingItemChanged)
+        sort_controls = QHBoxLayout()
+        self.mapping_sort_button = QPushButton("Sort")
+        self.mapping_sort_button.setToolTip(
+            "Sort the scanned metadata using one or more columns."
+        )
+        self.mapping_sort_button.clicked.connect(self._openMappingSortDialog)
+        sort_controls.addWidget(self.mapping_sort_button)
+        sort_controls.addStretch()
+        metadata_layout.addLayout(sort_controls)
         btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
@@ -2128,6 +2255,148 @@ class BIDSManager(QMainWindow):
             self.tsv_name_edit.setText(os.path.basename(path))
             self.loadMappingTable()
 
+    def _openMappingSortDialog(self) -> None:
+        """Show the sort hierarchy dialog for the scanned metadata table."""
+
+        if self.mapping_table.rowCount() == 0:
+            QMessageBox.information(
+                self,
+                "Nothing to sort",
+                "Load scanned metadata before using the sort feature.",
+            )
+            return
+
+        headers: List[str] = []
+        for idx in range(self.mapping_table.columnCount()):
+            header_item = self.mapping_table.horizontalHeaderItem(idx)
+            if header_item is not None:
+                headers.append(header_item.text())
+            else:
+                headers.append(f"Column {idx + 1}")
+
+        dialog = MappingSortDialog(self, headers)
+        if dialog.exec_() == QDialog.Accepted:
+            specs = dialog.specifications()
+            if specs:
+                self._applyMappingSort(specs)
+
+    def _applyMappingSort(self, specs: Sequence[Tuple[int, bool]]) -> None:
+        """Reorder ``mapping_table`` rows according to ``specs``."""
+
+        row_count = self.mapping_table.rowCount()
+        if row_count <= 1:
+            return
+
+        if self.row_info and len(self.row_info) != row_count:
+            logging.warning(
+                "Cannot sort scanned metadata because row_info has %s entries but the table "
+                "contains %s rows.",
+                len(self.row_info),
+                row_count,
+            )
+            return
+
+        column_count = self.mapping_table.columnCount()
+        normalized_specs = [
+            (column, ascending)
+            for column, ascending in specs
+            if 0 <= column < column_count
+        ]
+        if not normalized_specs:
+            return
+
+        # Extract every row into ``payload`` so we can reorder them without
+        # triggering ``itemChanged`` signals on each move.
+        payload: List[Tuple[List[Optional[QTableWidgetItem]], Optional[int]]] = []
+        current_info = list(self.row_info)
+        previous_loading = self._loading_mapping_table
+        self._loading_mapping_table = True
+        self.mapping_table.blockSignals(True)
+        lookup_dirty = False
+        missing_info = False
+        try:
+            for row in range(row_count):
+                row_items: List[Optional[QTableWidgetItem]] = []
+                for col in range(column_count):
+                    row_items.append(self.mapping_table.takeItem(row, col))
+                payload.append((row_items, row if row < len(current_info) else None))
+
+            self.mapping_table.setRowCount(0)
+
+            # Perform a stable sort for each level starting from the lowest
+            # priority so that earlier columns take precedence, mirroring the
+            # behaviour of spreadsheet applications.
+            for column, ascending in reversed(normalized_specs):
+                payload.sort(
+                    key=lambda entry, col=column: self._build_sort_value(entry[0][col]),
+                    reverse=not ascending,
+                )
+
+            for row_items, _ in payload:
+                new_row = self.mapping_table.rowCount()
+                self.mapping_table.insertRow(new_row)
+                for col_index, item in enumerate(row_items):
+                    if item is not None:
+                        self.mapping_table.setItem(new_row, col_index, item)
+
+            if current_info:
+                new_info: List[dict] = []
+                for _, original_index in payload:
+                    if original_index is None:
+                        missing_info = True
+                        break
+                    new_info.append(current_info[original_index])
+                if missing_info:
+                    logging.warning(
+                        "Unable to update row_info during sorting because some rows lacked metadata."
+                    )
+                else:
+                    self.row_info = new_info
+            lookup_dirty = True
+        finally:
+            self.mapping_table.blockSignals(False)
+            self._loading_mapping_table = previous_loading
+
+        if not lookup_dirty or missing_info:
+            return
+
+        # Refresh dependent widgets now that the row order changed.
+        self._rebuild_lookup_maps()
+        self.populateModalitiesTree()
+        self.populateSpecificTree()
+        if getattr(self, "last_rep_box", None) is not None and self.last_rep_box.isChecked():
+            self._onLastRepToggled(True)
+        if hasattr(self, "log_text"):
+            self.log_text.append("Sorted scanned metadata table.")
+        self.mapping_table.viewport().update()
+        self.mapping_table.setCurrentCell(0, 0)
+        self.mapping_table.scrollToTop()
+
+    def _build_sort_value(
+        self, item: Optional[QTableWidgetItem]
+    ) -> Tuple[int, object, object]:
+        """Return a comparable tuple used to order table cells consistently."""
+
+        if item is None:
+            return (3, "", "")
+        if item.flags() & Qt.ItemIsUserCheckable:
+            # Checkboxes sort by their boolean state while keeping a stable
+            # fallback value so Python can compare tuples across types.
+            return (0, 1 if item.checkState() == Qt.Checked else 0, "")
+
+        text = item.text().strip()
+        if not text:
+            return (3, "", "")
+
+        try:
+            numeric = Decimal(text)
+        except (InvalidOperation, ValueError):
+            lower = text.lower()
+            # When the value is not numeric we fall back to case-insensitive
+            # string comparison but preserve the original text as a tie breaker.
+            return (2, lower, text)
+        return (1, numeric, text)
+
     def detachTSVWindow(self):
         """Detach the scanned data viewer into a separate window."""
         if getattr(self, "tsv_dialog", None):
@@ -2550,6 +2819,8 @@ class BIDSManager(QMainWindow):
         self.tsv_generate_ids_button.setEnabled(has_data)
         self.last_rep_box.setEnabled(has_data)
         self.name_choice.setEnabled(has_data)
+        if hasattr(self, "mapping_sort_button"):
+            self.mapping_sort_button.setEnabled(has_data)
         if not has_data:
             self.last_rep_box.setChecked(False)
 
