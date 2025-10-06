@@ -367,87 +367,42 @@ class SeriesInfo:
     extra: Dict[str, str]
 
 
-def _normalize_suffix(modality: str, schema: Optional[SchemaInfo] = None) -> str:
+def _normalize_suffix(modality: str) -> str:
     """Return a canonical BIDS suffix for a given modality string.
 
-    Parameters
-    ----------
-    modality : str
-        Raw modality label captured from the DICOM ``SeriesDescription`` or the
-        user edited column in the GUI/TSV.  These labels can appear in arbitrary
-        casing (``FIELDmap``) or use legacy terms (``DTI``) which need to be
-        translated to official BIDS suffixes.
-    schema : SchemaInfo, optional
-        When available we consult the schema to locate a canonical suffix using
-        a case insensitive comparison.  This keeps the preview logic, the schema
-        renamer, and the heuristic builder perfectly aligned even when users
-        enter uncommon capitalisation patterns.
+    The DICOM ``SeriesDescription`` or user‑supplied modality labels can use a
+    wide range of capitalisation patterns or legacy terms (e.g. ``DTI`` instead
+    of ``dwi``).  This helper performs a case‑insensitive normalisation so later
+    logic only needs to work with the official BIDS suffixes.
     """
 
-    modality_clean = modality.strip()
-    modality_lower = modality_clean.lower()
-
-    # Hard-coded aliases cover the handful of well-known legacy spellings that
-    # are not present in the schema (for example ``DTI`` → ``dwi``).  Explicitly
-    # returning the canonical form avoids downstream comparisons having to worry
-    # about every possible capitalisation variant.
+    m = modality.strip()
     alias = {
         "sbref": "sbref",
         "t2*": "T2star",
         "t2star": "T2star",
         "dti": "dwi",
     }
-    if modality_lower in alias:
-        return alias[modality_lower]
-
-    # Fall back to the schema for case-insensitive matching.  This handles
-    # values like ``FieldMap`` which should be treated as ``fieldmap`` and keeps
-    # the proposed datatype rooted in the correct folder (``fmap`` in this case).
-    if schema is not None:
-        for suffix in schema.suffix_to_datatypes:
-            if suffix.lower() == modality_lower:
-                return suffix
-
-    # If nothing matched we return the cleaned modality as-is so legacy
-    # behaviour is preserved for custom labels that are not part of the schema.
-    return modality_clean
+    return alias.get(m.lower(), m)
 
 
 def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
-    """Determine the BIDS datatype folder for a given suffix."""
-
-    # Handle DWI derivatives first – these are always stored in ``derivatives/``.
+    # Handle DWI derivatives first
     if suffix.lower() in ("adc", "fa", "tracew", "colfa", "expadc"):
         return "derivatives"
-
-    # Primary lookup using the canonical suffix key.
+    
     dts = schema.suffix_to_datatypes.get(suffix)
-
-    # Secondary lookup that is case-insensitive.  This is crucial for values
-    # such as ``FieldMap`` which should map to ``fmap`` instead of ``misc``.
-    if not dts:
-        suffix_lower = suffix.lower()
-        for key, value in schema.suffix_to_datatypes.items():
-            if key.lower() == suffix_lower:
-                dts = value
-                break
-
     if dts:
         pref = ("anat", "func", "dwi", "fmap", "perf", "pet", "meg", "eeg", "ieeg")
-        for preferred in pref:
-            if preferred in dts:
-                return preferred
+        for p in pref:
+            if p in dts:
+                return p
         return dts[0]
-
-    # Legacy fallback table retains support for suffixes missing from the schema.
-    fallback = {
+    return {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
         "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
-    }
-    if suffix in fallback:
-        return fallback[suffix]
-    return fallback.get(suffix.lower(), "misc")
+    }.get(suffix, "misc")
 
 
 def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, str]:
@@ -457,7 +412,7 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     identical BIDS names by using the full sanitized sequence as a fallback
     when no specific task hint is found.
     """
-    suffix = _normalize_suffix(series.modality, schema)
+    suffix = _normalize_suffix(series.modality)
     # Update the series object so any external tables reflect the normalized
     # modality used for the proposed BIDS name (prevents "bold" vs "func" mismatches
     # in the GUI).
