@@ -342,7 +342,7 @@ def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func",
         "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
     }
     for sfx, dt in fallback_dt.items():
         suffix_to_datatypes.setdefault(sfx, set()).add(dt)
@@ -378,10 +378,36 @@ def _normalize_suffix(modality: str) -> str:
 
     m = modality.strip()
     alias = {
+        # Functional/structural shortcuts --------------------------------------------------
         "sbref": "sbref",
         "t2*": "T2star",
         "t2star": "T2star",
         "dti": "dwi",
+        # Fieldmap family ----------------------------------------------------------------
+        # ``SeriesDescription`` values frequently appear with inconsistent casing (e.g.
+        # ``FieldMap``/``PHASEDIFF``).  Mapping them explicitly keeps the preview logic
+        # aligned with the heuristic builder which already treats these scans as
+        # ``fmap`` files.  Normalising here ensures downstream datatype selection never
+        # falls back to ``misc`` for legitimate fieldmap series.
+        "fieldmap": "fieldmap",
+        "field_map": "fieldmap",
+        "field-map": "fieldmap",
+        "phasediff": "phasediff",
+        "phase_diff": "phasediff",
+        "phase-diff": "phasediff",
+        "phase1": "phase1",
+        "phase_1": "phase1",
+        "phase-1": "phase1",
+        "phase2": "phase2",
+        "phase_2": "phase2",
+        "phase-2": "phase2",
+        "magnitude": "magnitude",
+        "magnitude1": "magnitude1",
+        "magnitude_1": "magnitude1",
+        "magnitude-1": "magnitude1",
+        "magnitude2": "magnitude2",
+        "magnitude_2": "magnitude2",
+        "magnitude-2": "magnitude2",
     }
     return alias.get(m.lower(), m)
 
@@ -401,7 +427,7 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
     return {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
     }.get(suffix, "misc")
 
 
