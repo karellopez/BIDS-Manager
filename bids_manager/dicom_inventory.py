@@ -410,7 +410,7 @@ def scan_dicoms_long(
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
-                if fine_mod in {"scout", "report", "physio"} or "physlog" in series.lower():
+                if fine_mod in {"scout", "report"}:
                     include = 0
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
