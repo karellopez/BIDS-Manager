@@ -387,22 +387,47 @@ def _normalize_suffix(modality: str) -> str:
 
 
 def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
+    """Return the datatype folder for a given suffix.
+
+    The BIDS schema stores suffix keys using canonical capitalisation (for
+    instance ``T1w`` instead of ``t1w``).  External sources – especially the raw
+    DICOM metadata – frequently provide values with different casing such as
+    ``Fmap`` or ``T1W``.  Historically this caused fieldmaps to be categorised as
+    ``misc`` because the lookup against ``schema.suffix_to_datatypes`` failed.
+    To make the behaviour robust we now try multiple case-insensitive fallbacks
+    before using the hard-coded defaults.  This keeps backwards compatibility
+    while ensuring modalities like fieldmaps resolve to the correct ``fmap``
+    container regardless of the original letter case.
+    """
+
     # Handle DWI derivatives first
     if suffix.lower() in ("adc", "fa", "tracew", "colfa", "expadc"):
         return "derivatives"
-    
+
+    # Try to read the datatype directly from the schema.  If the exact key is
+    # missing (because of different casing), progressively try lowercase and a
+    # full case-insensitive scan.
     dts = schema.suffix_to_datatypes.get(suffix)
+    if not dts:
+        dts = schema.suffix_to_datatypes.get(suffix.lower())
+    if not dts:
+        lowered = suffix.lower()
+        for key, value in schema.suffix_to_datatypes.items():
+            if key.lower() == lowered:
+                dts = value
+                break
     if dts:
         pref = ("anat", "func", "dwi", "fmap", "perf", "pet", "meg", "eeg", "ieeg")
         for p in pref:
             if p in dts:
                 return p
         return dts[0]
-    return {
+    fallback = {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
         "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
-    }.get(suffix, "misc")
+    }
+    return fallback.get(suffix, fallback.get(suffix.lower(), "misc"))
 
 
 def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, str]:
