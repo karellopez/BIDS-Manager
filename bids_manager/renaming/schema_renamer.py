@@ -342,7 +342,7 @@ def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func",
         "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
     }
     for sfx, dt in fallback_dt.items():
         suffix_to_datatypes.setdefault(sfx, set()).add(dt)
@@ -401,7 +401,7 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
     return {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
     }.get(suffix, "misc")
 
 
