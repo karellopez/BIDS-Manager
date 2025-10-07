@@ -2463,8 +2463,6 @@ class BIDSManager(QMainWindow):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
-        # Reset the log panel so each scan starts with a clean slate.
-        self.log_text.clear()
         self.log_text.append("Starting TSV generation…")
         self.tsv_button.setEnabled(False)
         self.tsv_stop_button.setEnabled(True)
@@ -3067,12 +3065,7 @@ class BIDSManager(QMainWindow):
                 self.study_set.add(study)
                 self.mapping_table.setItem(r, 5, bids_item)
 
-                subject_value = _clean(row.get('subject'))
-                if not subject_value:
-                    # Legacy inventories only filled the first row; fall back to
-                    # the recorded given name so the column is complete.
-                    subject_value = _clean(row.get('GivenName'))
-                subj_item = QTableWidgetItem(subject_value)
+                subj_item = QTableWidgetItem(_clean(row.get('subject')))
                 subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 6, subj_item)
 
@@ -3135,39 +3128,39 @@ class BIDSManager(QMainWindow):
                     'n_files': _clean(row.get('n_files')),
                     'acq_time': _clean(row.get('acq_time')),
                 })
-        self.log_text.append("Loaded TSV into mapping table.")
+            self.log_text.append("Loaded TSV into mapping table.")
 
-        # Apply always-exclude patterns before building lookup tables
-        self.applyExcludePatterns()
+            # Apply always-exclude patterns before building lookup tables
+            self.applyExcludePatterns()
 
-        # Build modality/sequence lookup for tree interactions
-        self._rebuild_lookup_maps()
+            # Build modality/sequence lookup for tree interactions
+            self._rebuild_lookup_maps()
 
-        self.populateModalitiesTree()
-        self.populateSpecificTree()
-        if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
-            self._onLastRepToggled(True)
+            self.populateModalitiesTree()
+            self.populateSpecificTree()
+            if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
+                self._onLastRepToggled(True)
 
-        # Populate naming table
-        self.naming_table.blockSignals(True)
-        self.naming_table.setRowCount(0)
-        name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
-        name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
-        for _, row in name_df.iterrows():
-            nr = self.naming_table.rowCount()
-            self.naming_table.insertRow(nr)
-            sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
-            sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
-            self.naming_table.setItem(nr, 0, sitem)
-            gitem = QTableWidgetItem(_clean(row["GivenName"]))
-            gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
-            self.naming_table.setItem(nr, 1, gitem)
-            bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
-            bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
-            self.naming_table.setItem(nr, 2, bitem)
-        self.naming_table.blockSignals(False)
-        self._updateScanExistingEnabled()
-        self._updateMappingControlsEnabled()
+            # Populate naming table
+            self.naming_table.blockSignals(True)
+            self.naming_table.setRowCount(0)
+            name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
+            name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
+            for _, row in name_df.iterrows():
+                nr = self.naming_table.rowCount()
+                self.naming_table.insertRow(nr)
+                sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
+                sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
+                self.naming_table.setItem(nr, 0, sitem)
+                gitem = QTableWidgetItem(_clean(row["GivenName"]))
+                gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
+                self.naming_table.setItem(nr, 1, gitem)
+                bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
+                bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
+                self.naming_table.setItem(nr, 2, bitem)
+            self.naming_table.blockSignals(False)
+            self._updateScanExistingEnabled()
+            self._updateMappingControlsEnabled()
         finally:
             self._loading_mapping_table = False
 
