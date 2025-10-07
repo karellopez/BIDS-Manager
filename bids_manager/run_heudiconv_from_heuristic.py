@@ -241,6 +241,49 @@ def _resolve_physio_dicom(raw_root: Path, dicom_dir: Path, row: pd.Series) -> Op
     return None
 
 
+def _resolve_physio_source_folder(raw_root: Path, source_folder: str) -> Path:
+    """Return the folder containing the physio DICOM files.
+
+    The *source_folder* column in the heuristic table should contain a path
+    that is relative to ``raw_root``.  Some datasets, however, repeat the name
+    of ``raw_root`` as the first path component (for example ``OL_3844`` inside
+    ``.../OL_3844``).  This helper collapses those redundant segments so the
+    resulting path correctly resolves to the actual DICOM directory.
+    """
+
+    cleaned = str(source_folder or "").strip()
+    if not cleaned:
+        return raw_root
+
+    candidate_path = Path(cleaned)
+    if candidate_path.is_absolute():
+        # Absolute paths are returned as-is so existing behaviour is preserved.
+        return candidate_path
+
+    combined = raw_root / candidate_path
+    if combined.exists():
+        return combined
+
+    # Remove any duplicated occurrences of the raw folder name from the front
+    # of the candidate path (``OL_3844/OL_3844`` → ``OL_3844`` → ``.``).
+    parts = list(candidate_path.parts)
+    while parts and parts[0] == raw_root.name:
+        parts.pop(0)
+
+    if not parts:
+        # The path only repeated the raw folder name; fall back to raw_root.
+        return raw_root
+
+    trimmed = raw_root / Path(*parts)
+    if trimmed.exists():
+        return trimmed
+
+    # If the trimmed path still does not exist, preserve the previous
+    # behaviour and return the combined (non-existent) path so callers can
+    # emit the usual warning message.
+    return combined
+
+
 def convert_physio_series(raw_root: Path,
                           bids_out: Path,
                           module: ModuleType,
@@ -277,7 +320,7 @@ def convert_physio_series(raw_root: Path,
             continue
 
         source_folder = str(row.get("source_folder", ""))
-        dicom_dir = raw_root / source_folder if source_folder else raw_root
+        dicom_dir = _resolve_physio_source_folder(raw_root, source_folder)
         if not dicom_dir.exists():
             print(f"Physio source folder missing: {dicom_dir}")
             continue
