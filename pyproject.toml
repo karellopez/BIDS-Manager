@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "0.1.9"
+version = "0.2.0"
 description = "GUI application to manage BIDS datasets"
 readme = "README.md"
 license = "MIT"
