@@ -16,7 +16,8 @@ Why you want this
 
 Output columns (ordered as they appear)
 ---------------------------------------
-subject        – GivenName shown only on the first row of each subject block
+subject        – mirrors ``GivenName`` for every row so downstream tools can
+                 rely on a complete subject column
 BIDS_name      – auto-assigned `sub-001`, `sub-002`, … (same GivenName → same ID)
 session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
@@ -398,7 +399,7 @@ def scan_dicoms_long(
     # PASS 3: build DataFrame rows
     rows = []
     for subj_key in sorted(counts):
-        first_row = True
+        subj_name = demo[subj_key]["GivenName"]
         for folder in sorted(counts[subj_key]):
 
             # decide session label for this folder
@@ -416,7 +417,7 @@ def scan_dicoms_long(
                 rep_key = series if fine_mod == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
                 rows.append({
-                    "subject"       : demo[subj_key]["GivenName"] if first_row else "",
+                    "subject"       : subj_name,
                     "BIDS_name"     : bids_map[subj_key],
                     "session"       : session,
                     "source_folder" : folder,
@@ -431,7 +432,6 @@ def scan_dicoms_long(
                     "n_files"       : n_files,
                     **demo[subj_key],                                # demographics
                 })
-                first_row = False
 
     # Final column order
     columns = [
@@ -497,7 +497,20 @@ def scan_dicoms_long(
 
         df = pd.concat([df[~fmap_mask], fmap_df], ignore_index=True, sort=False)
 
-    df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
+    # ------------------------------------------------------------------
+    # Default ordering: keep related rows together for easier review.
+    # We rely on a stable sort so previously computed ordering (for example
+    # grouped fieldmaps) is preserved within each set of identical keys.
+    # ------------------------------------------------------------------
+    acq_sort_key = (
+        df["acq_time"]
+        .astype(str)
+        .str.replace(":", "", regex=False)
+    )
+    df["_acq_sort"] = pd.to_numeric(acq_sort_key, errors="coerce")
+    sort_columns = ["BIDS_name", "subject", "session", "_acq_sort", "acq_time"]
+    df.sort_values(sort_columns, inplace=True, kind="mergesort")
+    df.drop(columns="_acq_sort", inplace=True)
 
     # ------------------------------------------------------------------
     # Proposed BIDS names
