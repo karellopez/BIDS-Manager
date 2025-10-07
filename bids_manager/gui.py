@@ -2463,6 +2463,9 @@ class BIDSManager(QMainWindow):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
+        # Clear the log so each scan run starts with a fresh history for the
+        # user.
+        self.log_text.clear()
         self.log_text.append("Starting TSV generation…")
         self.tsv_button.setEnabled(False)
         self.tsv_stop_button.setEnabled(True)
