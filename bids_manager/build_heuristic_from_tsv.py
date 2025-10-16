@@ -18,26 +18,26 @@ import re
 
 # Import the same preview logic the GUI uses so heuristic names match preview
 try:
-    from bids_manager.renaming import schema_renamer as _schema_renamer
-    from bids_manager.schema_config import DEFAULT_SCHEMA_DIR
-    from bids_manager._study_utils import normalize_study_name
-
-    load_bids_schema = _schema_renamer.load_bids_schema
-    SeriesInfo = _schema_renamer.SeriesInfo
-    build_preview_names = _schema_renamer.build_preview_names
-    SKIP_MODALITIES = _schema_renamer.SKIP_MODALITIES
+    from bids_manager.schema_renamer import (
+        DEFAULT_SCHEMA_DIR,
+        SKIP_MODALITIES,
+        SeriesInfo,
+        build_preview_names,
+        load_bids_schema,
+        normalize_study_name,
+    )
 except Exception:
     # Fallback for direct script execution from a checkout. When the module is
     # invoked via ``python build_heuristic_from_tsv.py`` the parent package is
-    # not initialised, so we import from the sibling modules directly.
+    # not initialised, so import the helpers from the neighbouring modules.
     from schema_renamer import (  # type: ignore
-        load_bids_schema,
+        DEFAULT_SCHEMA_DIR,
+        SKIP_MODALITIES,
         SeriesInfo,
         build_preview_names,
-        SKIP_MODALITIES,
+        load_bids_schema,
+        normalize_study_name,
     )
-    from schema_config import DEFAULT_SCHEMA_DIR  # type: ignore
-    from _study_utils import normalize_study_name  # type: ignore
 
 # -----------------------------------------------------------------------------
 # Helper functions

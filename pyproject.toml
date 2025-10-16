@@ -57,8 +57,6 @@ include-package-data = true
 [tool.setuptools.package-data]
 "bids_manager" = [
     "miscellaneous/images/*",
-    "miscellaneous/schema/**/*",
-    "renaming/*.py",
 ]
 
 [tool.pytest.ini_options]

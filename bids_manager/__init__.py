@@ -2,23 +2,22 @@
 
 from importlib import metadata
 
-# The schema-driven renaming helpers live in the plain ``renaming`` folder
-# (without ``__init__``) and are exposed through the wrappers below.  Import
-# them here so callers can continue to access the functionality via the
-# canonical ``bids_manager`` module.
-from .schema_config import (
+# Expose the schema-driven renaming helpers at the package root for backwards
+# compatibility.  The implementation lives in ``bids_manager.schema_renamer``
+# but callers historically imported the public API straight from
+# :mod:`bids_manager`, so continue to re-export the key symbols here.
+from .schema_renamer import (
     DEFAULT_SCHEMA_DIR,
     DERIVATIVES_PIPELINE_NAME,
     ENABLE_DWI_DERIVATIVES_MOVE,
     ENABLE_FIELDMap_NORMALIZATION,
     ENABLE_SCHEMA_RENAMER,
-)
-from .schema_renamer import (
     SchemaInfo,
     SeriesInfo,
     apply_post_conversion_rename,
     build_preview_names,
     load_bids_schema,
+    normalize_study_name,
     propose_bids_basename,
 )
 
@@ -34,6 +33,7 @@ __all__ = [
     "apply_post_conversion_rename",
     "build_preview_names",
     "load_bids_schema",
+    "normalize_study_name",
     "propose_bids_basename",
 ]
 
