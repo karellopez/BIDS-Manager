@@ -37,7 +37,7 @@ GivenName … StudyDescription – demographics copied from the first header see
 import os
 import re
 from collections import defaultdict
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from pathlib import Path
 from joblib import Parallel, delayed
 
@@ -51,17 +51,41 @@ from ._study_utils import normalize_study_name
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
 # inventory script functional even if the renamer dependencies are missing.
 try:  # pragma: no cover - import errors simply disable preview generation
-    from .schema_renamer import (
-        load_bids_schema,
-        SeriesInfo,
-        build_preview_names,
-    )
+    from . import schema_renamer as _schema_renamer
     from .schema_config import DEFAULT_SCHEMA_DIR
+
+    load_bids_schema = _schema_renamer.load_bids_schema
+    SeriesInfo = _schema_renamer.SeriesInfo
+    build_preview_names = _schema_renamer.build_preview_names
+    guess_modality = _schema_renamer.guess_modality
+    modality_to_container = _schema_renamer.modality_to_container
+    get_sequence_hint_patterns = _schema_renamer.get_sequence_hint_patterns
+    set_sequence_hint_patterns = _schema_renamer.set_sequence_hint_patterns
+    restore_default_sequence_hints = _schema_renamer.restore_default_sequence_hints
+    SKIP_MODALITIES = _schema_renamer.SKIP_MODALITIES
 except Exception:  # pragma: no cover - best effort
+    _schema_renamer = None  # type: ignore
     load_bids_schema = None  # type: ignore
     SeriesInfo = None  # type: ignore
     build_preview_names = None  # type: ignore
     DEFAULT_SCHEMA_DIR = Path(".")  # type: ignore
+
+    def guess_modality(series: str) -> str:  # type: ignore
+        return "unknown"
+
+    def modality_to_container(mod: str) -> str:  # type: ignore
+        return ""
+
+    def get_sequence_hint_patterns() -> Dict[str, Tuple[str, ...]]:  # type: ignore
+        return {}
+
+    def set_sequence_hint_patterns(patterns):  # type: ignore
+        return None
+
+    def restore_default_sequence_hints() -> None:  # type: ignore
+        return None
+
+    SKIP_MODALITIES = {"scout", "report", "physio"}
 
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
@@ -95,67 +119,10 @@ def is_dicom_file(path: str) -> bool:
     except Exception:
         return False
 
-# ----------------------------------------------------------------------
-# 1.  Patterns: SeriesDescription → fine-grained modality label
-#    (order matters: first match wins)
-# ----------------------------------------------------------------------
-BIDS_PATTERNS = {
-    # anatomy
-    "T1w"    : (
-        "t1w",
-        "t1-weight",
-        "t1_",
-        "t1 ",
-        "mprage",
-        "tfl3d",
-        "fspgr",
-    ),
-    "T2w"    : ("t2w", "space", "tse"),
-    "FLAIR"  : ("flair",),
-    "MTw"    : ("gre-mt", "gre_mt", "mt"),
-    "PDw"    : ("gre-nm", "gre_nm"),
-    "scout"  : ("localizer", "scout"),
-    "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
-    # functional
-    # SBRef must precede bold to avoid misclassification when sequences
-    # contain both "sbref" and "bold" tokens.
-    "SBRef"  : (
-        "sbref",
-        "type-ref",
-        "reference",
-        "refscan",
-        " ref",
-        "_ref",
-        "ref",
-    ),
-    # Physiological recordings also tend to include "fmri" or "bold" in
-    # their sequence names.  List them before the generic bold patterns so
-    # they are detected correctly.
-    "physio" : ("physiolog", "physio", "pulse", "resp"),
-    "bold"   : ("fmri", "bold", "task-"),
-    # diffusion
-    "dwi"    : ("dti", "dwi", "diff"),
-    # field maps
-    "fmap"   : (
-        "gre_field",
-        "fieldmapping",
-        "_fmap",
-        "fmap",
-        "phase",
-        "magnitude",
-        "b0rf",
-        "b0_map",
-        "b0map",
-    ),
-}
-
-# Keep a pristine copy of the default patterns so the GUI can restore them
-DEFAULT_BIDS_PATTERNS = {m: tuple(pats) for m, pats in BIDS_PATTERNS.items()}
-
-
 def load_sequence_dictionary() -> None:
     """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
-    global BIDS_PATTERNS
+    if _schema_renamer is None:
+        return
     if not SEQ_DICT_FILE.exists():
         return
     try:
@@ -169,13 +136,14 @@ def load_sequence_dictionary() -> None:
         if mod and pat:
             patterns[mod].append(pat)
     if patterns:
-        BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+        set_sequence_hint_patterns({m: tuple(pats) for m, pats in patterns.items()})
 
 
 def restore_sequence_dictionary() -> None:
-    """Revert :data:`BIDS_PATTERNS` to the bundled defaults."""
-    global BIDS_PATTERNS
-    BIDS_PATTERNS = {m: tuple(pats) for m, pats in DEFAULT_BIDS_PATTERNS.items()}
+    """Revert sequence hint patterns to the bundled defaults."""
+    if _schema_renamer is None:
+        return
+    restore_default_sequence_hints()
     try:
         SEQ_DICT_FILE.unlink()
     except Exception:
@@ -183,32 +151,6 @@ def restore_sequence_dictionary() -> None:
 
 
 load_sequence_dictionary()
-
-def guess_modality(series: str) -> str:
-    """Return first matching fine-grained modality label or 'unknown'.
-
-    Important details:
-    - We classify common vendor DWI derivative maps (ADC/FA/TRACEW/ColFA/expADC)
-      before general DWI detection to keep them out of the raw `dwi/` tree.
-    - Matching is performed on the lower-cased SeriesDescription.
-    """
-    s = series.lower()
-
-    # Recognize common scanner-generated maps as derivatives
-    dwi_derivatives = [
-        "_adc", "_fa", "_tracew", "_colfa", "_expadc",
-        " adc", " fa", " tracew", " colfa", " expadc",
-        "adc", "fa", "tracew", "colfa", "expadc",
-    ]
-    for deriv in dwi_derivatives:
-        if deriv in s:
-            return "dwi_derivative"
-
-    for label, pats in BIDS_PATTERNS.items():
-        if any(p in s for p in pats):
-            return label
-
-    return "unknown"
 
 
 MAGNITUDE_IMGTYPE = ["ORIGINAL", "PRIMARY", "M", "ND", "NORM"]
@@ -238,22 +180,6 @@ def classify_fieldmap_type(img_list: list) -> str:
         return "P"
     return ""
 
-
-# ----------------------------------------------------------------------
-# 2.  Map fine label → top-level BIDS container (anat, func, …)
-# ----------------------------------------------------------------------
-BIDS_CONTAINER = {
-    "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
-    "MTw":"anat", "PDw":"anat",
-    "scout":"anat", "report":"anat",
-    "bold":"func", "SBRef":"func", "physio":"func",
-    "dwi":"dwi",
-    "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
-    "fmap":"fmap",
-}
-def modality_to_container(mod: str) -> str:
-    """Translate T1w → anat, bold → func, etc.; unknown → ''."""
-    return BIDS_CONTAINER.get(mod, "")
 
 # session detector (e.g. ses-pre, ses-01) -- case-insensitive
 SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
@@ -409,9 +335,10 @@ def scan_dicoms_long(
             for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
-                include = 1
-                if fine_mod in {"scout", "report"}:
-                    include = 0
+                series_lower = series.lower()
+                include = 0 if (
+                    fine_mod in SKIP_MODALITIES or "physlog" in series_lower
+                ) else 1
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
