@@ -3528,7 +3528,7 @@ class BIDSManager(QMainWindow):
         if not entries:
             from . import dicom_inventory
 
-            for mod, pats in dicom_inventory.get_sequence_hint_patterns().items():
+            for mod, pats in dicom_inventory.BIDS_PATTERNS.items():
                 entries[mod].extend(pats)
 
         for mod in sorted(entries.keys()):
@@ -3598,7 +3598,7 @@ class BIDSManager(QMainWindow):
                 pat = table.item(r, 0).text().strip().lower()
                 if pat:
                     patterns[mod].append(pat)
-        dicom_inventory.set_sequence_hint_patterns({m: tuple(pats) for m, pats in patterns.items()})
+        dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
         if self.mapping_table.rowCount() > 0:
             for i in range(self.mapping_table.rowCount()):
                 seq = self.mapping_table.item(i, 9).text()
