@@ -6,7 +6,7 @@ Simple heuristic that:
 1. **Keeps every sequence**, including SBRef.
 2. **Uses the raw SeriesDescription** (cleaned) as the filename stem – no
    added `rep-*`, task, or echo logic.
-3. Skips only modalities listed in `SKIP_MODALITIES`.
+3. Skips only modalities listed in `SKIP_BY_DEFAULT` (`report`).
 """
 
 from __future__ import annotations
@@ -18,14 +18,13 @@ import re
 
 # Import the same preview logic the GUI uses so heuristic names match preview
 try:
-    from bids_manager.renaming import schema_renamer as _schema_renamer
-    from bids_manager.schema_config import DEFAULT_SCHEMA_DIR
-    from bids_manager._study_utils import normalize_study_name
-
-    load_bids_schema = _schema_renamer.load_bids_schema
-    SeriesInfo = _schema_renamer.SeriesInfo
-    build_preview_names = _schema_renamer.build_preview_names
-    SKIP_MODALITIES = _schema_renamer.SKIP_MODALITIES
+    from .schema_renamer import (
+        load_bids_schema,
+        SeriesInfo,
+        build_preview_names,
+    )
+    from .schema_config import DEFAULT_SCHEMA_DIR
+    from ._study_utils import normalize_study_name
 except Exception:
     # Fallback for direct script execution from a checkout. When the module is
     # invoked via ``python build_heuristic_from_tsv.py`` the parent package is
@@ -34,10 +33,14 @@ except Exception:
         load_bids_schema,
         SeriesInfo,
         build_preview_names,
-        SKIP_MODALITIES,
     )
     from schema_config import DEFAULT_SCHEMA_DIR  # type: ignore
     from _study_utils import normalize_study_name  # type: ignore
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+SKIP_BY_DEFAULT = {"report"}
 
 # -----------------------------------------------------------------------------
 # Helper functions
@@ -163,6 +166,36 @@ def _strip_run_tokens(sequence: str) -> str:
     # Clean up multiple underscores
     sequence = re.sub(r"_+", "_", sequence).strip("_")
     return sequence
+
+
+def guess_task_from_sequence(sequence: str) -> str:
+    """Extract task name from sequence description.
+    
+    This function mirrors the logic in schema_renamer.py to ensure
+    consistent task detection between preview and heuristic generation.
+    """
+    if not sequence:
+        return "unknown"
+    
+    # First strip any run tokens that might interfere
+    seq_lower = sequence.lower()
+    
+    # Check for resting state patterns first
+    resting_patterns = ["rs", "_rs", "rs_", "rest", "resting"]
+    for pattern in resting_patterns:
+        if pattern in seq_lower:
+            return "rest"
+    
+    # Check for common task patterns
+    task_hints = ["exec", "paradigma", "paradigm", "task", "activation", "movie", "nback", 
+                  "flanker", "stroop", "motor", "checker", "checkerboard"]
+    for hint in task_hints:
+        if hint in seq_lower:
+            return clean(hint)
+    
+    # If no specific task hint found, use the full sanitized sequence 
+    # to ensure uniqueness (prevents different sequences from having same BIDS name)
+    return clean(sequence) or "unknown"
 
 
 def generate_bids_name(row, rep_num: int, rep_count: int, only_last_repeated: bool = False) -> str:
@@ -420,10 +453,10 @@ def generate(tsv: Path, out_dir: Path, only_last_repeated: bool = False) -> None
         df["StudyDescription"] = df["StudyDescription"].apply(normalize_study_name)
 
     # Drop rows with unwanted modalities
-    mask = df.modality.isin(SKIP_MODALITIES)
+    mask = df.modality.isin(SKIP_BY_DEFAULT)
     if mask.any():
         df.loc[mask, "include"] = 0
-        print(f"Auto‑skipped {mask.sum()} rows ({', '.join(sorted(SKIP_MODALITIES))})")
+        print(f"Auto‑skipped {mask.sum()} rows ({', '.join(SKIP_BY_DEFAULT)})")
 
     df = df[df.include == 1]
 
