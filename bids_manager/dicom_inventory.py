@@ -45,30 +45,32 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
-from bids_manager._study_utils import normalize_study_name
+try:  # pragma: no cover - keep inventory usable without optional renamer deps
+    from bids_manager.schema_renamer import normalize_study_name
+except Exception:  # pragma: no cover - fallback when renamer unavailable
+    from bids_manager._study_utils import normalize_study_name
 
 # Preview name helpers – loaded lazily so ``scan_dicoms_long`` can store
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
 # inventory script functional even if the renamer dependencies are missing.
 try:  # pragma: no cover - import errors simply disable preview generation
-    from bids_manager.renaming import schema_renamer as _schema_renamer
-    from bids_manager.schema_config import DEFAULT_SCHEMA_DIR
-
-    load_bids_schema = _schema_renamer.load_bids_schema
-    SeriesInfo = _schema_renamer.SeriesInfo
-    build_preview_names = _schema_renamer.build_preview_names
-    guess_modality = _schema_renamer.guess_modality
-    modality_to_container = _schema_renamer.modality_to_container
-    get_sequence_hint_patterns = _schema_renamer.get_sequence_hint_patterns
-    set_sequence_hint_patterns = _schema_renamer.set_sequence_hint_patterns
-    restore_default_sequence_hints = _schema_renamer.restore_default_sequence_hints
-    SKIP_MODALITIES = _schema_renamer.SKIP_MODALITIES
+    from bids_manager.schema_renamer import (
+        DEFAULT_SCHEMA_DIR,
+        SKIP_MODALITIES,
+        SeriesInfo,
+        build_preview_names,
+        get_sequence_hint_patterns,
+        guess_modality,
+        load_bids_schema,
+        modality_to_container,
+        restore_default_sequence_hints,
+        set_sequence_hint_patterns,
+    )
 except Exception:  # pragma: no cover - best effort
-    _schema_renamer = None  # type: ignore
-    load_bids_schema = None  # type: ignore
+    DEFAULT_SCHEMA_DIR = None  # type: ignore
     SeriesInfo = None  # type: ignore
     build_preview_names = None  # type: ignore
-    DEFAULT_SCHEMA_DIR = Path(".")  # type: ignore
+    load_bids_schema = None  # type: ignore
 
     def guess_modality(series: str) -> str:  # type: ignore
         return "unknown"
@@ -86,6 +88,9 @@ except Exception:  # pragma: no cover - best effort
         return None
 
     SKIP_MODALITIES = {"scout", "report"}
+
+
+RENAMER_AVAILABLE = build_preview_names is not None
 
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
@@ -145,7 +150,7 @@ def _write_enabled_flag(enabled: bool) -> None:
 
 
 def _apply_sequence_dictionary() -> None:
-    if _schema_renamer is None:
+    if not RENAMER_AVAILABLE:
         return
     if _CUSTOM_PATTERNS_ENABLED and _CUSTOM_PATTERNS:
         set_sequence_hint_patterns(_CUSTOM_PATTERNS)
@@ -157,7 +162,7 @@ def load_sequence_dictionary() -> None:
     """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
     global _CUSTOM_PATTERNS, _CUSTOM_PATTERNS_ENABLED
 
-    if _schema_renamer is None:
+    if not RENAMER_AVAILABLE:
         return
 
     patterns: Dict[str, list[str]] = defaultdict(list)
@@ -185,7 +190,7 @@ def set_sequence_dictionary_enabled(enabled: bool) -> None:
     """Persist the custom pattern toggle and apply the active source."""
 
     global _CUSTOM_PATTERNS_ENABLED
-    if _schema_renamer is None:
+    if not RENAMER_AVAILABLE:
         return
 
     _CUSTOM_PATTERNS_ENABLED = bool(enabled)
@@ -215,7 +220,7 @@ def restore_sequence_dictionary() -> None:
     """Revert sequence hint patterns to the bundled defaults."""
 
     global _CUSTOM_PATTERNS, _CUSTOM_PATTERNS_ENABLED
-    if _schema_renamer is None:
+    if not RENAMER_AVAILABLE:
         return
 
     _CUSTOM_PATTERNS = {}

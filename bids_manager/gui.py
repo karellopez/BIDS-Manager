@@ -110,20 +110,21 @@ import random
 import string
 import math
 from bids_manager import dicom_inventory
-from bids_manager.schema_config import (
+from bids_manager.schema_renamer import (
     DEFAULT_SCHEMA_DIR,
-    ENABLE_SCHEMA_RENAMER,
-    ENABLE_FIELDMap_NORMALIZATION,
-    ENABLE_DWI_DERIVATIVES_MOVE,
     DERIVATIVES_PIPELINE_NAME,
+    ENABLE_DWI_DERIVATIVES_MOVE,
+    ENABLE_FIELDMap_NORMALIZATION,
+    ENABLE_SCHEMA_RENAMER,
+    SeriesInfo,
+    apply_post_conversion_rename,
+    build_preview_names,
+    load_bids_schema,
 )
-from bids_manager.renaming import schema_renamer as _schema_renamer
-from bids_manager._study_utils import normalize_study_name
-
-load_bids_schema = _schema_renamer.load_bids_schema
-SeriesInfo = _schema_renamer.SeriesInfo
-build_preview_names = _schema_renamer.build_preview_names
-apply_post_conversion_rename = _schema_renamer.apply_post_conversion_rename
+try:  # pragma: no cover - GUI still launches without optional renamer deps
+    from bids_manager.schema_renamer import normalize_study_name
+except Exception:  # pragma: no cover - allow running with minimal functionality
+    from bids_manager._study_utils import normalize_study_name
 try:
     import psutil
     HAS_PSUTIL = True
