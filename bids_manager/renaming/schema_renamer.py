@@ -1,28 +1,279 @@
 from __future__ import annotations
 
-import json
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
-# ``PyYAML`` is a hard dependency for schema parsing.  Previous versions treated
-# it as optional which meant that users were silently running without any
-# schema-driven rules.  Raising an informative error keeps the behaviour
-# explicit and surfaces installation issues early.
-try:
-    import yaml  # type: ignore
-except ImportError as exc:  # pragma: no cover - import error depends on env
-    raise ImportError(
-        "PyYAML is required for BIDS schema parsing. Install bids-manager with"
-        " the bundled dependencies or add PyYAML to your environment."
-    ) from exc
+import ancpbids.model_v1_10_0 as ancp_schema  # noqa: F401 - imported for typing context
+from ancpbids.model_v1_10_0 import DatatypeEnum, EntityEnum, ModalityEnum, SuffixEnum
 
 
 # ----------------------------- Utilities -----------------------------
 
 _BIDS_EXTS = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv")
+
+# Canonical labels extracted from the official BIDS schema enumerations.  The
+# ``ancpbids`` package exposes the model for BIDS 1.10.0 in a machine-readable
+# form which we use to keep our internal hints aligned with the specification.
+ANAT_DT = DatatypeEnum.anat.value["value"]
+FUNC_DT = DatatypeEnum.func.value["value"]
+DWI_DT = DatatypeEnum.dwi.value["value"]
+FMAP_DT = DatatypeEnum.fmap.value["value"]
+
+SUBJECT_ENTITY = EntityEnum.subject.name
+TASK_ENTITY = EntityEnum.task.name
+
+# ``ModalityEnum`` is currently used for completeness to highlight that this
+# module focuses on MRI data. Keeping a reference here avoids the import being
+# stripped by static analysis tools and documents the modality domain we care
+# about. Additional modalities can be supported in the future by extending the
+# mappings below.
+MRI_MODALITY = ModalityEnum.mri.name
+
+@dataclass(frozen=True)
+class HintRule:
+    """Classification rule used to infer BIDS concepts from free text."""
+
+    alias: str
+    suffix: str
+    datatype: str
+    modality: str
+    entities: Tuple[str, ...]
+    patterns: Tuple[str, ...]
+    skip_by_default: bool = False
+
+
+_DEFAULT_HINT_RULES: Tuple[HintRule, ...] = (
+    HintRule(
+        alias="dwi_derivative",
+        suffix="dwi_derivative",
+        datatype="derivatives",
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=(
+            "_adc",
+            "_fa",
+            "_tracew",
+            "_colfa",
+            "_expadc",
+            " adc",
+            " fa",
+            " tracew",
+            " colfa",
+            " expadc",
+            "adc",
+            "fa",
+            "tracew",
+            "colfa",
+            "expadc",
+        ),
+    ),
+    HintRule(
+        alias="T1w",
+        suffix=SuffixEnum.T1w.value["value"],
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=(
+            "t1w",
+            "t1-weight",
+            "t1_",
+            "t1 ",
+            "mprage",
+            "tfl3d",
+            "fspgr",
+        ),
+    ),
+    HintRule(
+        alias="T2w",
+        suffix=SuffixEnum.T2w.value["value"],
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("t2w", "space", "tse"),
+    ),
+    HintRule(
+        alias="FLAIR",
+        suffix=SuffixEnum.FLAIR.value["value"],
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("flair",),
+    ),
+    HintRule(
+        alias="MTw",
+        suffix="MTw",
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("gre-mt", "gre_mt", "mt"),
+    ),
+    HintRule(
+        alias="PDw",
+        suffix=SuffixEnum.PDw.value["value"],
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("gre-nm", "gre_nm"),
+    ),
+    HintRule(
+        alias="scout",
+        suffix="scout",
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("localizer", "scout"),
+        skip_by_default=True,
+    ),
+    HintRule(
+        alias="report",
+        suffix="report",
+        datatype=ANAT_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("phoenixzipreport", "phoenix document", ".pdf", "report"),
+        skip_by_default=True,
+    ),
+    HintRule(
+        alias="SBRef",
+        suffix=SuffixEnum.sbref.value["value"],
+        datatype=FUNC_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY, TASK_ENTITY),
+        patterns=(
+            "sbref",
+            "type-ref",
+            "reference",
+            "refscan",
+            " ref",
+            "_ref",
+            "ref",
+        ),
+    ),
+    HintRule(
+        alias="physio",
+        suffix=SuffixEnum.physio.value["value"],
+        datatype=FUNC_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY, TASK_ENTITY),
+        patterns=("physiolog", "physio", "pulse", "resp"),
+        skip_by_default=True,
+    ),
+    HintRule(
+        alias="bold",
+        suffix=SuffixEnum.bold.value["value"],
+        datatype=FUNC_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY, TASK_ENTITY),
+        patterns=("fmri", "bold", "task-"),
+    ),
+    HintRule(
+        alias="dwi",
+        suffix=SuffixEnum.dwi.value["value"],
+        datatype=DWI_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=("dti", "dwi", "diff"),
+    ),
+    HintRule(
+        alias="fmap",
+        suffix="fmap",
+        datatype=FMAP_DT,
+        modality=MRI_MODALITY,
+        entities=(SUBJECT_ENTITY,),
+        patterns=(
+            "gre_field",
+            "fieldmapping",
+            "_fmap",
+            "fmap",
+            "phase",
+            "magnitude",
+            "b0rf",
+            "b0_map",
+            "b0map",
+        ),
+    ),
+)
+
+
+def _normalize_patterns(patterns: Iterable[str]) -> Tuple[str, ...]:
+    return tuple(str(p).lower() for p in patterns if str(p).strip())
+
+
+def _rebuild_hint_tables(rules: Iterable[HintRule]) -> None:
+    global BIDS_HINTS, DEFAULT_BIDS_HINTS, SKIP_MODALITIES, _HINTS_BY_SUFFIX
+
+    ordered_rules = tuple(rules)
+    BIDS_HINTS = {rule.alias: rule for rule in ordered_rules}
+    DEFAULT_BIDS_HINTS = {rule.alias: rule for rule in _DEFAULT_HINT_RULES}
+    _HINTS_BY_SUFFIX = {}
+    for rule in ordered_rules:
+        _HINTS_BY_SUFFIX.setdefault(rule.suffix, rule)
+    SKIP_MODALITIES = {rule.alias for rule in ordered_rules if rule.skip_by_default}
+
+
+def override_hint_patterns(overrides: Dict[str, Iterable[str]]) -> None:
+    """Override pattern lists for known hint rules."""
+
+    lowered = {k: _normalize_patterns(v) for k, v in overrides.items()}
+    updated_rules = []
+    for rule in _DEFAULT_HINT_RULES:
+        pats = lowered.get(rule.alias) or lowered.get(rule.suffix)
+        if pats:
+            updated_rules.append(replace(rule, patterns=pats))
+        else:
+            updated_rules.append(rule)
+    _rebuild_hint_tables(updated_rules)
+
+
+def restore_default_hint_patterns() -> None:
+    """Restore the built-in hint rules."""
+
+    _rebuild_hint_tables(_DEFAULT_HINT_RULES)
+
+
+# Initialize runtime tables using the defaults.
+DEFAULT_BIDS_HINTS: Dict[str, HintRule]
+BIDS_HINTS: Dict[str, HintRule]
+_HINTS_BY_SUFFIX: Dict[str, HintRule]
+SKIP_MODALITIES: Set[str]
+restore_default_hint_patterns()
+
+
+def guess_modality(series: str) -> str:
+    """Return the first matching modality hint for ``series``."""
+
+    s = (series or "").lower()
+
+    for rule in BIDS_HINTS.values():
+        if any(p in s for p in rule.patterns):
+            return rule.alias
+
+    return "unknown"
+
+
+def modality_to_container(mod: str) -> str:
+    """Translate fine modality labels into top-level BIDS folders."""
+
+    if not mod:
+        return ""
+
+    rule = BIDS_HINTS.get(mod)
+    if rule:
+        return rule.datatype
+
+    normalized = _HINTS_BY_SUFFIX.get(mod)
+    if normalized:
+        return normalized.datatype
+
+    lowered = mod.lower()
+    rule = _HINTS_BY_SUFFIX.get(lowered)
+    if rule:
+        return rule.datatype
+
+    return ""
 
 _SANITIZE_TOKEN = re.compile(r"[^a-zA-Z0-9]+")
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
@@ -240,14 +491,6 @@ def _replace_stem_keep_ext(src: Path, new_basename: str) -> Path:
     return src.with_name(f"{new_basename}{ext}")
 
 
-def _iter_schema_files(schema_dir: Path) -> Iterable[Path]:
-    """Yield schema definition files shipped with the BIDS specification."""
-
-    for p in schema_dir.rglob("*"):
-        if p.suffix.lower() in (".json", ".yaml", ".yml") and p.is_file():
-            yield p
-
-
 # --------------------------- Schema parsing ---------------------------
 
 @dataclass
@@ -256,98 +499,50 @@ class SchemaInfo:
     suffix_to_datatypes: Dict[str, List[str]]
 
 
-def _load_json_or_yaml(p: Path) -> Optional[dict]:
-    """Return the parsed representation of a JSON or YAML document."""
+def load_bids_schema(schema_dir: Union[str, Path, None] = None) -> SchemaInfo:
+    """Return schema hints derived from the bundled ``ancpbids`` model.
 
-    try:
-        if p.suffix.lower() == ".json":
-            return json.loads(p.read_text(encoding="utf-8"))
-        return yaml.safe_load(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _harvest_suffix_rules(obj: Union[dict, list], current_datatype: Optional[str], out_req: Dict[str, set],
-                          out_dt: Dict[str, set]) -> None:
-    if isinstance(obj, dict):
-        if "datatype" in obj and isinstance(obj["datatype"], str):
-            current_datatype = obj["datatype"]
-
-        suffix = obj.get("suffix")
-        if isinstance(suffix, str):
-            sfx = suffix.strip()
-            required = set()
-            for key in ("required", "required_entities", "entities_required"):
-                v = obj.get(key)
-                if isinstance(v, list):
-                    for e in v:
-                        if isinstance(e, str):
-                            required.add(e.strip("<>"))
-                        elif isinstance(e, dict) and "name" in e:
-                            required.add(str(e["name"]).strip("<>"))
-            ents = obj.get("entities")
-            if isinstance(ents, list):
-                for e in ents:
-                    if isinstance(e, dict) and e.get("required") is True and "name" in e:
-                        required.add(str(e["name"]).strip("<>"))
-
-            if required:
-                out_req.setdefault(sfx, set()).update(required)
-
-            if current_datatype:
-                out_dt.setdefault(sfx, set()).add(current_datatype)
-
-        for v in obj.values():
-            _harvest_suffix_rules(v, current_datatype, out_req, out_dt)
-
-    elif isinstance(obj, list):
-        for it in obj:
-            _harvest_suffix_rules(it, current_datatype, out_req, out_dt)
-
-
-def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
-    """Load and aggregate the BIDS schema shipped with the package.
-
-    Parameters
-    ----------
-    schema_dir:
-        Directory containing the ``objects``/``rules`` folders from the official
-        BIDS schema distribution.
+    The previous implementation parsed the YAML documents shipped with
+    ``bids-manager``.  Now that ``ancpbids`` exposes the same information as a
+    Python module we no longer need to ship or read those files at runtime.  The
+    *schema_dir* argument is accepted for backwards compatibility but ignored.
     """
 
-    schema_dir = Path(schema_dir)
-    if not schema_dir.exists():
-        raise FileNotFoundError(
-            f"BIDS schema directory '{schema_dir}' does not exist."
-        )
+    suffix_to_datatypes: Dict[str, Set[str]] = {}
+    suffix_requirements: Dict[str, Set[str]] = {}
 
-    suffix_requirements: Dict[str, set] = {}
-    suffix_to_datatypes: Dict[str, set] = {}
-    processed_any = False
+    def _register(suffix: str, datatype: str) -> None:
+        if not suffix or not datatype:
+            return
+        suffix_to_datatypes.setdefault(suffix, set()).add(datatype)
 
-    for p in _iter_schema_files(schema_dir):
-        data = _load_json_or_yaml(p)
-        if not isinstance(data, (dict, list)):
-            continue
-        _harvest_suffix_rules(data, current_datatype=None,
-                              out_req=suffix_requirements, out_dt=suffix_to_datatypes)
-        processed_any = True
+    for rule in BIDS_HINTS.values():
+        suffix = _normalize_suffix(rule.suffix)
+        _register(suffix, rule.datatype)
+        for entity in rule.entities:
+            suffix_requirements.setdefault(suffix, set()).add(entity)
 
-    if not processed_any:
-        raise RuntimeError(
-            "No schema files could be parsed. Ensure the packaged schema is intact."
-        )
-
-    fallback_dt = {
-        "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
-        "bold": "func", "sbref": "func",
-        "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
+    additional_suffixes = {
+        "T2star": ANAT_DT,
+        "PD": ANAT_DT,
+        "phasediff": FMAP_DT,
+        "magnitude1": FMAP_DT,
+        "magnitude2": FMAP_DT,
+        "fieldmap": FMAP_DT,
+        "epi": FMAP_DT,
     }
-    for sfx, dt in fallback_dt.items():
-        suffix_to_datatypes.setdefault(sfx, set()).add(dt)
-    for sfx in set(suffix_to_datatypes.keys()) | set(suffix_requirements.keys()):
-        suffix_requirements.setdefault(sfx, set()).add("subject")
+    for suffix, datatype in additional_suffixes.items():
+        _register(suffix, datatype)
+
+    known_suffixes = {member.value["value"] for member in SuffixEnum}
+    known_suffixes.update(suffix_to_datatypes.keys())
+
+    for suffix in known_suffixes:
+        suffix_requirements.setdefault(suffix, set()).add(SUBJECT_ENTITY)
+
+    for suffix in ("bold", "sbref", "physio"):
+        if suffix in known_suffixes:
+            suffix_requirements.setdefault(suffix, set()).add(TASK_ENTITY)
 
     return SchemaInfo(
         suffix_requirements={k: sorted(v) for k, v in suffix_requirements.items()},
@@ -832,10 +1027,18 @@ def apply_post_conversion_rename(
 
 
 __all__ = [
+    "HintRule",
+    "BIDS_HINTS",
+    "DEFAULT_BIDS_HINTS",
+    "SKIP_MODALITIES",
+    "override_hint_patterns",
+    "restore_default_hint_patterns",
     "SchemaInfo",
     "SeriesInfo",
     "load_bids_schema",
     "build_preview_names",
     "propose_bids_basename",
     "apply_post_conversion_rename",
+    "guess_modality",
+    "modality_to_container",
 ]
