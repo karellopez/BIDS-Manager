@@ -109,21 +109,20 @@ import signal
 import random
 import string
 import math
-from bids_manager import dicom_inventory
-from bids_manager.schema_config import (
+from .schema_config import (
     DEFAULT_SCHEMA_DIR,
     ENABLE_SCHEMA_RENAMER,
     ENABLE_FIELDMap_NORMALIZATION,
     ENABLE_DWI_DERIVATIVES_MOVE,
     DERIVATIVES_PIPELINE_NAME,
 )
-from bids_manager.renaming import schema_renamer as _schema_renamer
-from bids_manager._study_utils import normalize_study_name
-
-load_bids_schema = _schema_renamer.load_bids_schema
-SeriesInfo = _schema_renamer.SeriesInfo
-build_preview_names = _schema_renamer.build_preview_names
-apply_post_conversion_rename = _schema_renamer.apply_post_conversion_rename
+from .schema_renamer import (
+    load_bids_schema,
+    SeriesInfo,
+    build_preview_names,
+    apply_post_conversion_rename,
+)
+from ._study_utils import normalize_study_name
 try:
     import psutil
     HAS_PSUTIL = True
@@ -1256,7 +1255,7 @@ class BIDSManager(QMainWindow):
                 saved_dpi = None
             if saved_dpi is not None:
                 self.dpi_scale = max(50, min(200, saved_dpi))
-        self.seq_dict_file = dicom_inventory.SEQ_DICT_FILE
+        self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -1830,33 +1829,16 @@ class BIDSManager(QMainWindow):
 
         self.tsv_tabs.addTab(metadata_tab, "Scanned metadata")
 
-        # --- Suffix dictionary tab ---
+        # --- Sequence dictionary tab ---
         dict_tab = QWidget()
         dict_layout = QVBoxLayout(dict_tab)
-        toggle_row = QHBoxLayout()
-        self.use_custom_patterns_box = QCheckBox("Use custom suffix patterns")
-        self.use_custom_patterns_box.toggled.connect(self._on_custom_toggle)
-        toggle_row.addWidget(self.use_custom_patterns_box)
-        toggle_row.addStretch()
-        dict_layout.addLayout(toggle_row)
-
         self.seq_tabs_widget = QTabWidget()
         dict_layout.addWidget(self.seq_tabs_widget)
-        dict_btn_row = QHBoxLayout()
-        dict_btn_row.addStretch()
-        self.seq_apply_button = QPushButton("Apply")
-        self.seq_apply_button.clicked.connect(self.applySequenceDictionary)
-        dict_btn_row.addWidget(self.seq_apply_button)
-        self.seq_save_button = QPushButton("Save")
-        self.seq_save_button.clicked.connect(self.saveSequenceDictionary)
-        dict_btn_row.addWidget(self.seq_save_button)
         restore_btn = QPushButton("Restore defaults")
         restore_btn.clicked.connect(self.restoreSequenceDefaults)
-        dict_btn_row.addWidget(restore_btn)
-        dict_btn_row.addStretch()
-        dict_layout.addLayout(dict_btn_row)
+        dict_layout.addWidget(restore_btn, alignment=Qt.AlignRight)
 
-        self.tsv_tabs.addTab(dict_tab, "Suffix dictionary")
+        self.tsv_tabs.addTab(dict_tab, "Sequence dictionary")
         self.loadSequenceDictionary()
         self.left_split.addWidget(self.tsv_group)
 
@@ -3504,186 +3486,119 @@ class BIDSManager(QMainWindow):
             if any(p in seq for p in patterns):
                 self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
 
-    # ----- suffix dictionary helpers -----
-    def _custom_add(self, suffix: str) -> None:
-        table = self.custom_tables.get(suffix)
-        edit = self.custom_inputs.get(suffix)
-        if table is None or edit is None:
+    # ----- sequence dictionary helpers -----
+    def _seq_add(self, mod: str) -> None:
+        if mod not in self.seq_inputs or mod not in self.seq_lists:
             return
-        pat = edit.text().strip()
+        pat = self.seq_inputs[mod].text().strip()
         if not pat:
             return
-        row = table.rowCount()
-        table.insertRow(row)
-        table.setItem(row, 0, QTableWidgetItem(pat))
-        edit.clear()
+        table = self.seq_lists[mod]
+        r = table.rowCount()
+        table.insertRow(r)
+        table.setItem(r, 0, QTableWidgetItem(pat))
+        self.seq_inputs[mod].clear()
 
-    def _custom_remove(self, suffix: str) -> None:
-        table = self.custom_tables.get(suffix)
-        if table is None:
+    def _seq_remove(self, mod: str) -> None:
+        if mod not in self.seq_lists:
             return
+        table = self.seq_lists[mod]
         rows = sorted({item.row() for item in table.selectedItems()}, reverse=True)
         for r in rows:
             table.removeRow(r)
-
-    def _collect_custom_patterns(self) -> Dict[str, Tuple[str, ...]]:
-        patterns: Dict[str, Tuple[str, ...]] = {}
-        for suffix, table in self.custom_tables.items():
-            entries: list[str] = []
-            for r in range(table.rowCount()):
-                item = table.item(r, 0)
-                if item is None:
-                    continue
-                text = item.text().strip()
-                if text:
-                    entries.append(text)
-            if entries:
-                patterns[suffix] = tuple(entries)
-        return patterns
-
-    def _set_custom_pattern_enabled(self, enabled: bool) -> None:
-        for table in self.custom_tables.values():
-            table.setEnabled(enabled)
-        for edit in self.custom_inputs.values():
-            edit.setEnabled(enabled)
-        for button in self.custom_add_buttons.values():
-            button.setEnabled(enabled)
-        for button in self.custom_remove_buttons.values():
-            button.setEnabled(enabled)
-        if hasattr(self, "seq_apply_button"):
-            self.seq_apply_button.setEnabled(enabled)
-        if hasattr(self, "seq_save_button"):
-            self.seq_save_button.setEnabled(enabled)
-
-    def _refresh_suffix_dictionary(self) -> None:
-        active = dicom_inventory.get_sequence_hint_patterns()
-        custom = dicom_inventory.get_custom_sequence_dictionary()
-        use_custom = dicom_inventory.is_sequence_dictionary_enabled()
-        for suffix, label in self.active_labels.items():
-            active_list = active.get(suffix, ())
-            source = "Custom" if use_custom and custom.get(suffix) else "Default"
-            label.setText(f"Active source: {source} ({len(active_list)} patterns)")
-
-    def _on_custom_toggle(self, enabled: bool) -> None:
-        dicom_inventory.set_sequence_dictionary_enabled(enabled)
-        self._set_custom_pattern_enabled(enabled)
-        self._refresh_suffix_dictionary()
-        self.applySequenceDictionary()
 
     def loadSequenceDictionary(self) -> None:
         if not hasattr(self, "seq_tabs_widget"):
             return
 
-        default_patterns = dicom_inventory.get_sequence_hint_patterns(source="default")
-        custom_patterns = dicom_inventory.get_custom_sequence_dictionary()
-        suffixes = sorted(set(default_patterns) | set(custom_patterns))
-        use_custom = dicom_inventory.is_sequence_dictionary_enabled()
-
         self.seq_tabs_widget.clear()
-        self.default_pattern_lists = {}
-        self.custom_tables = {}
-        self.custom_inputs = {}
-        self.custom_add_buttons = {}
-        self.custom_remove_buttons = {}
-        self.active_labels = {}
+        self.seq_lists = {}
+        self.seq_inputs = {}
+        entries: defaultdict[str, list[str]] = defaultdict(list)
+        if self.seq_dict_file.exists():
+            try:
+                df = pd.read_csv(self.seq_dict_file, sep="\t", keep_default_na=False)
+                for _, row in df.iterrows():
+                    pat = str(row.get("pattern", "")).strip()
+                    mod = str(row.get("modality", "")).strip()
+                    if pat and mod:
+                        entries[mod].append(pat)
+            except Exception:
+                pass
+        if not entries:
+            from . import dicom_inventory
 
-        for suffix in suffixes:
+            for mod, pats in dicom_inventory.BIDS_PATTERNS.items():
+                entries[mod].extend(pats)
+
+        for mod in sorted(entries.keys()):
             tab = QWidget()
-            layout = QVBoxLayout(tab)
-
-            active_label = QLabel()
-            self.active_labels[suffix] = active_label
-            layout.addWidget(active_label)
-
-            default_group = QGroupBox("Default patterns")
-            default_layout = QVBoxLayout(default_group)
-            default_list = QListWidget()
-            default_list.addItems(default_patterns.get(suffix, ()))
-            default_list.setEnabled(False)
-            self.default_pattern_lists[suffix] = default_list
-            default_layout.addWidget(default_list)
-            layout.addWidget(default_group)
-
-            custom_group = QGroupBox("Custom patterns")
-            custom_layout = QVBoxLayout(custom_group)
+            lay = QVBoxLayout(tab)
             table = QTableWidget()
             table.setColumnCount(1)
             table.setHorizontalHeaderLabels(["Pattern"])
             table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-            for pat in custom_patterns.get(suffix, ()):  # populate stored entries
-                row = table.rowCount()
-                table.insertRow(row)
-                table.setItem(row, 0, QTableWidgetItem(pat))
-            self.custom_tables[suffix] = table
-            custom_layout.addWidget(table)
+            for pat in entries[mod]:
+                r = table.rowCount()
+                table.insertRow(r)
+                table.setItem(r, 0, QTableWidgetItem(pat))
+            self.seq_lists[mod] = table
+            lay.addWidget(table)
 
-            controls = QHBoxLayout()
+            row = QHBoxLayout()
             edit = QLineEdit()
-            self.custom_inputs[suffix] = edit
-            controls.addWidget(edit)
+            self.seq_inputs[mod] = edit
+            row.addWidget(edit)
             add_btn = QPushButton("Add")
-            add_btn.clicked.connect(lambda _=False, s=suffix: self._custom_add(s))
-            self.custom_add_buttons[suffix] = add_btn
-            controls.addWidget(add_btn)
+            add_btn.clicked.connect(lambda _=False, m=mod: self._seq_add(m))
+            row.addWidget(add_btn)
             rm_btn = QPushButton("Remove")
-            rm_btn.clicked.connect(lambda _=False, s=suffix: self._custom_remove(s))
-            self.custom_remove_buttons[suffix] = rm_btn
-            controls.addWidget(rm_btn)
-            custom_layout.addLayout(controls)
-            layout.addWidget(custom_group)
+            rm_btn.clicked.connect(lambda _=False, m=mod: self._seq_remove(m))
+            row.addWidget(rm_btn)
+            lay.addLayout(row)
 
-            self.seq_tabs_widget.addTab(tab, suffix)
+            save_btn = QPushButton("Save")
+            save_btn.clicked.connect(self.saveSequenceDictionary)
+            lay.addWidget(save_btn, alignment=Qt.AlignRight)
 
-        self.use_custom_patterns_box.blockSignals(True)
-        self.use_custom_patterns_box.setChecked(use_custom)
-        self.use_custom_patterns_box.blockSignals(False)
-        self._set_custom_pattern_enabled(use_custom)
-        self._refresh_suffix_dictionary()
+            self.seq_tabs_widget.addTab(tab, mod)
+
         self.applySequenceDictionary()
 
     def saveSequenceDictionary(self) -> None:
-        patterns = self._collect_custom_patterns()
-        data = [
-            {"modality": suffix, "pattern": pat}
-            for suffix, pats in patterns.items()
-            for pat in pats
-        ]
-        if data:
-            self.seq_dict_file.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(data).to_csv(self.seq_dict_file, sep="\t", index=False)
-        else:
-            try:
-                self.seq_dict_file.unlink()
-            except Exception:
-                pass
-        dicom_inventory.update_sequence_dictionary(patterns)
-        dicom_inventory.set_sequence_dictionary_enabled(self.use_custom_patterns_box.isChecked())
-        QMessageBox.information(
-            self,
-            "Saved",
-            f"Updated suffix patterns in {self.seq_dict_file}",
-        )
-        self._refresh_suffix_dictionary()
+        if not hasattr(self, "seq_lists"):
+            return
+        self.seq_dict_file.parent.mkdir(exist_ok=True, parents=True)
+        rows = []
+        for mod, table in self.seq_lists.items():
+            for r in range(table.rowCount()):
+                pat = table.item(r, 0).text().strip()
+                if pat:
+                    rows.append({"modality": mod, "pattern": pat})
+        pd.DataFrame(rows).to_csv(self.seq_dict_file, sep="\t", index=False)
+        QMessageBox.information(self, "Saved", f"Updated {self.seq_dict_file}")
         self.applySequenceDictionary()
 
     def restoreSequenceDefaults(self) -> None:
+        """Restore the built-in sequence dictionary."""
+        from . import dicom_inventory
+
         dicom_inventory.restore_sequence_dictionary()
         self.loadSequenceDictionary()
-        QMessageBox.information(
-            self,
-            "Restored",
-            "Default suffix dictionary restored",
-        )
+        QMessageBox.information(self, "Restored", "Default sequence dictionary restored")
 
     def applySequenceDictionary(self) -> None:
-        if not hasattr(self, "custom_tables"):
+        if not hasattr(self, "seq_lists"):
             return
+        from . import dicom_inventory
 
-        patterns = self._collect_custom_patterns()
-        dicom_inventory.update_sequence_dictionary(patterns)
-        dicom_inventory.set_sequence_dictionary_enabled(self.use_custom_patterns_box.isChecked())
-        self._refresh_suffix_dictionary()
-
+        patterns = defaultdict(list)
+        for mod, table in self.seq_lists.items():
+            for r in range(table.rowCount()):
+                pat = table.item(r, 0).text().strip().lower()
+                if pat:
+                    patterns[mod].append(pat)
+        dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
         if self.mapping_table.rowCount() > 0:
             for i in range(self.mapping_table.rowCount()):
                 seq = self.mapping_table.item(i, 9).text()

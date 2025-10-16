@@ -1,409 +1,30 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
-from collections import OrderedDict
-from dataclasses import dataclass, replace
-from enum import Enum
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple, Union, Set
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-import ancpbids.model_v1_10_0 as ancp_schema  # noqa: F401 - imported for typing context
-from ancpbids.model_v1_10_0 import DatatypeEnum, EntityEnum, ModalityEnum, SuffixEnum
+# ``PyYAML`` is a hard dependency for schema parsing.  Previous versions treated
+# it as optional which meant that users were silently running without any
+# schema-driven rules.  Raising an informative error keeps the behaviour
+# explicit and surfaces installation issues early.
+try:
+    import yaml  # type: ignore
+except ImportError as exc:  # pragma: no cover - import error depends on env
+    raise ImportError(
+        "PyYAML is required for BIDS schema parsing. Install bids-manager with"
+        " the bundled dependencies or add PyYAML to your environment."
+    ) from exc
 
 
 # ----------------------------- Utilities -----------------------------
 
 _BIDS_EXTS = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv")
 
-# Canonical labels extracted from the official BIDS schema enumerations.  The
-# ``ancpbids`` package exposes the model for BIDS 1.10.0 in a machine-readable
-# form which we use to keep our internal hints aligned with the specification.
-SUBJECT_ENTITY = EntityEnum.subject
-TASK_ENTITY = EntityEnum.task
-
-
-def _enum_lookup(enum_cls: type[Enum], target: str) -> Optional[Enum]:
-    """Return the enum member that best matches ``target`` (case insensitive)."""
-
-    if not target:
-        return None
-    target_lower = target.lower()
-    for member in enum_cls:  # type: ignore[assignment]
-        if member.name.lower() == target_lower:
-            return member
-        value = getattr(member, "value", None)
-        if isinstance(value, dict):
-            alias = value.get("value")
-            if isinstance(alias, str) and alias.lower() == target_lower:
-                return member
-        elif isinstance(value, str) and value.lower() == target_lower:
-            return member
-    return None
-
-
-def _enum_to_name(member: Optional[Enum]) -> str:
-    """Return the canonical string representation for ``member``."""
-
-    if member is None:
-        return ""
-    value = getattr(member, "value", None)
-    if isinstance(value, dict):
-        alias = value.get("value")
-        if isinstance(alias, str):
-            return alias
-    if isinstance(value, str):
-        return value
-    return member.name
-
-
-@dataclass
-class SequenceHint:
-    """Describe how to classify a raw sequence into BIDS terms."""
-
-    label: str
-    suffix: Optional[SuffixEnum]
-    datatype: Optional[DatatypeEnum]
-    modality: Optional[ModalityEnum]
-    required_entities: Tuple[EntityEnum, ...]
-    default_patterns: Tuple[str, ...]
-    custom_patterns: Tuple[str, ...] = ()
-    container_override: Optional[str] = None
-
-    def copy(self) -> "SequenceHint":
-        return replace(self)
-
-    def get_patterns(self, source: str = "active") -> Tuple[str, ...]:
-        """Return pattern hints for the requested ``source``."""
-
-        if source == "default":
-            return self.default_patterns
-        if source == "custom":
-            return self.custom_patterns
-        return self.custom_patterns or self.default_patterns
-
-    @property
-    def patterns(self) -> Tuple[str, ...]:
-        """Expose the currently active pattern hints."""
-
-        return self.get_patterns("active")
-
-
-def _build_default_sequence_hints() -> "OrderedDict[str, SequenceHint]":
-    """Return the built-in sequence hint configuration."""
-
-    mri_modality = _enum_lookup(ModalityEnum, "mri")
-    subject_entity = _enum_lookup(EntityEnum, "subject") or SUBJECT_ENTITY
-    task_entity = _enum_lookup(EntityEnum, "task") or TASK_ENTITY
-    anat_dt = _enum_lookup(DatatypeEnum, "anat")
-    func_dt = _enum_lookup(DatatypeEnum, "func")
-    dwi_dt = _enum_lookup(DatatypeEnum, "dwi")
-    fmap_dt = _enum_lookup(DatatypeEnum, "fmap")
-
-    hints: "OrderedDict[str, SequenceHint]" = OrderedDict()
-
-    hints["dwi_derivative"] = SequenceHint(
-        label="dwi_derivative",
-        suffix=None,
-        datatype=dwi_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=(
-            "_adc",
-            "_fa",
-            "_tracew",
-            "_colfa",
-            "_expadc",
-            " adc",
-            " fa",
-            " tracew",
-            " colfa",
-            " expadc",
-            "adc_",
-            "adc ",
-            "trace",
-        ),
-        container_override="derivatives",
-    )
-
-    hints["T1w"] = SequenceHint(
-        label="T1w",
-        suffix=_enum_lookup(SuffixEnum, "T1w"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=(
-            "t1w",
-            "t1-weight",
-            "t1_",
-            "t1 ",
-            "mprage",
-            "tfl3d",
-            "fspgr",
-        ),
-    )
-
-    hints["T2w"] = SequenceHint(
-        label="T2w",
-        suffix=_enum_lookup(SuffixEnum, "T2w"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("t2w", "space", "tse"),
-    )
-
-    hints["FLAIR"] = SequenceHint(
-        label="FLAIR",
-        suffix=_enum_lookup(SuffixEnum, "FLAIR"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("flair",),
-    )
-
-    hints["MTw"] = SequenceHint(
-        label="MTw",
-        suffix=_enum_lookup(SuffixEnum, "MTw"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("gre-mt", "gre_mt", "mt"),
-    )
-
-    hints["PDw"] = SequenceHint(
-        label="PDw",
-        suffix=_enum_lookup(SuffixEnum, "PDw"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("gre-nm", "gre_nm"),
-    )
-
-    hints["scout"] = SequenceHint(
-        label="scout",
-        suffix=_enum_lookup(SuffixEnum, "localizer"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("localizer", "scout"),
-    )
-
-    hints["report"] = SequenceHint(
-        label="report",
-        suffix=_enum_lookup(SuffixEnum, "reports"),
-        datatype=anat_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("phoenixzipreport", "phoenix document", ".pdf", "report"),
-    )
-
-    hints["SBRef"] = SequenceHint(
-        label="SBRef",
-        suffix=_enum_lookup(SuffixEnum, "sbref"),
-        datatype=func_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity, task_entity),
-        default_patterns=(
-            "sbref",
-            "type-ref",
-            "reference",
-            "refscan",
-            " ref",
-            "_ref",
-        ),
-    )
-
-    hints["physio"] = SequenceHint(
-        label="physio",
-        suffix=_enum_lookup(SuffixEnum, "physio"),
-        datatype=func_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity, task_entity),
-        default_patterns=("physiolog", "physio", "pulse", "resp"),
-    )
-
-    hints["bold"] = SequenceHint(
-        label="bold",
-        suffix=_enum_lookup(SuffixEnum, "bold"),
-        datatype=func_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity, task_entity),
-        default_patterns=("fmri", "bold", "task-"),
-    )
-
-    hints["dwi"] = SequenceHint(
-        label="dwi",
-        suffix=_enum_lookup(SuffixEnum, "dwi"),
-        datatype=dwi_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=("dti", "dwi", "diff"),
-    )
-
-    hints["fmap"] = SequenceHint(
-        label="fmap",
-        suffix=_enum_lookup(SuffixEnum, "phasediff"),
-        datatype=fmap_dt,
-        modality=mri_modality,
-        required_entities=(subject_entity,),
-        default_patterns=(
-            "gre_field",
-            "fieldmapping",
-            "_fmap",
-            "fmap",
-            "phase",
-            "magnitude",
-            "b0rf",
-            "b0_map",
-            "b0map",
-        ),
-    )
-
-    return hints
-
-
-DEFAULT_SEQUENCE_HINTS: "OrderedDict[str, SequenceHint]" = _build_default_sequence_hints()
-
-SEQUENCE_HINTS: "OrderedDict[str, SequenceHint]" = OrderedDict(
-    (label, hint.copy()) for label, hint in DEFAULT_SEQUENCE_HINTS.items()
-)
-
-
-def get_sequence_hint_patterns(source: str = "active") -> Dict[str, Tuple[str, ...]]:
-    """Return the mapping of labels to pattern hints from ``source``."""
-
-    return {label: hint.get_patterns(source) for label, hint in SEQUENCE_HINTS.items()}
-
-
-def set_sequence_hint_patterns(patterns: Mapping[str, Iterable[str]]) -> None:
-    """Override the substring hints used to classify raw sequences."""
-
-    for label, pats in patterns.items():
-        seen: Set[str] = set()
-        cleaned: list[str] = []
-        for pat in pats:
-            text = str(pat).strip()
-            if not text:
-                continue
-            lowered = text.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            cleaned.append(text)
-
-        normalized = tuple(cleaned)
-        hint = SEQUENCE_HINTS.get(label)
-        if hint is None:
-            SEQUENCE_HINTS[label] = SequenceHint(
-                label=label,
-                suffix=_enum_lookup(SuffixEnum, label),
-                datatype=_enum_lookup(DatatypeEnum, label),
-                modality=_enum_lookup(ModalityEnum, "mri"),
-                required_entities=(SUBJECT_ENTITY,),
-                default_patterns=(),
-                custom_patterns=normalized,
-            )
-        else:
-            hint.custom_patterns = normalized
-
-
-def restore_default_sequence_hints() -> None:
-    """Reset :data:`SEQUENCE_HINTS` to the built-in configuration."""
-
-    SEQUENCE_HINTS.clear()
-    for label, hint in DEFAULT_SEQUENCE_HINTS.items():
-        clone = hint.copy()
-        clone.custom_patterns = ()
-        SEQUENCE_HINTS[label] = clone
-
-
-# Modalities that should be skipped by default when auto-populating TSVs or
-# heuristics.  Scouts remain separate so the GUI can keep listing them while
-# marking them as excluded.
-SKIP_MODALITIES: Set[str] = {"scout", "report"}
-
-
 _SANITIZE_TOKEN = re.compile(r"[^a-zA-Z0-9]+")
-
-
-@dataclass(frozen=True)
-class _NormalizedSeries:
-    """Lower-cased representation of a sequence name with token metadata."""
-
-    raw: str
-    lower: str
-    tokens: Tuple[str, ...]
-    token_set: Set[str]
-
-
-def _normalize_series(text: Optional[str]) -> _NormalizedSeries:
-    raw = text or ""
-    lower = raw.lower()
-    tokenized = _SANITIZE_TOKEN.sub(" ", lower)
-    tokens = tuple(filter(None, tokenized.split()))
-    return _NormalizedSeries(raw=raw, lower=lower, tokens=tokens, token_set=set(tokens))
-
-
-def _score_patterns(patterns: Tuple[str, ...], normalized: _NormalizedSeries) -> Optional[Tuple[int, int]]:
-    """Return a ranking describing how well ``patterns`` match ``normalized``."""
-
-    best: Optional[Tuple[int, int]] = None
-    for pat in patterns:
-        pat_lower = pat.lower()
-        if not pat_lower:
-            continue
-
-        token_candidate = _SANITIZE_TOKEN.sub("", pat_lower)
-        score: Optional[Tuple[int, int]] = None
-        if token_candidate and token_candidate in normalized.token_set:
-            score = (3, len(token_candidate))
-        elif (
-            token_candidate
-            and len(token_candidate) >= 3
-            and any(tok.startswith(token_candidate) for tok in normalized.tokens)
-        ):
-            score = (2, len(token_candidate))
-        elif pat_lower in normalized.lower:
-            score = (1, len(pat_lower))
-
-        if score and (best is None or score > best):
-            best = score
-
-    return best
-
-
-def guess_modality(series: str) -> str:
-    """Return the modality label whose patterns best describe ``series``."""
-
-    normalized = _normalize_series(series)
-    best_label = "unknown"
-    best_score: Optional[Tuple[int, int, int]] = None
-
-    for idx, (label, hint) in enumerate(SEQUENCE_HINTS.items()):
-        patterns = hint.patterns
-        if not patterns:
-            continue
-        score = _score_patterns(patterns, normalized)
-        if score is None:
-            continue
-        ranked = (score[0], score[1], -idx)
-        if best_score is None or ranked > best_score:
-            best_label = label
-            best_score = ranked
-
-    return best_label
-
-
-def modality_to_container(mod: str) -> str:
-    """Translate fine modality labels into top-level BIDS folders."""
-
-    hint = SEQUENCE_HINTS.get(mod)
-    if hint is None:
-        return ""
-    if hint.container_override:
-        return hint.container_override
-    return _enum_to_name(hint.datatype)
-
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
 _ACQ_TOKEN = re.compile(r"(?:^|[_-])acq-([a-zA-Z0-9]+)", re.IGNORECASE)
 
@@ -619,6 +240,14 @@ def _replace_stem_keep_ext(src: Path, new_basename: str) -> Path:
     return src.with_name(f"{new_basename}{ext}")
 
 
+def _iter_schema_files(schema_dir: Path) -> Iterable[Path]:
+    """Yield schema definition files shipped with the BIDS specification."""
+
+    for p in schema_dir.rglob("*"):
+        if p.suffix.lower() in (".json", ".yaml", ".yml") and p.is_file():
+            yield p
+
+
 # --------------------------- Schema parsing ---------------------------
 
 @dataclass
@@ -627,63 +256,98 @@ class SchemaInfo:
     suffix_to_datatypes: Dict[str, List[str]]
 
 
-def load_bids_schema(schema_dir: Union[str, Path, None] = None) -> SchemaInfo:
-    """Return schema hints derived from the bundled ``ancpbids`` model.
+def _load_json_or_yaml(p: Path) -> Optional[dict]:
+    """Return the parsed representation of a JSON or YAML document."""
 
-    The previous implementation parsed the YAML documents shipped with
-    ``bids-manager``.  Now that ``ancpbids`` exposes the same information as a
-    Python module we no longer need to ship or read those files at runtime.  The
-    *schema_dir* argument is accepted for backwards compatibility but ignored.
+    try:
+        if p.suffix.lower() == ".json":
+            return json.loads(p.read_text(encoding="utf-8"))
+        return yaml.safe_load(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _harvest_suffix_rules(obj: Union[dict, list], current_datatype: Optional[str], out_req: Dict[str, set],
+                          out_dt: Dict[str, set]) -> None:
+    if isinstance(obj, dict):
+        if "datatype" in obj and isinstance(obj["datatype"], str):
+            current_datatype = obj["datatype"]
+
+        suffix = obj.get("suffix")
+        if isinstance(suffix, str):
+            sfx = suffix.strip()
+            required = set()
+            for key in ("required", "required_entities", "entities_required"):
+                v = obj.get(key)
+                if isinstance(v, list):
+                    for e in v:
+                        if isinstance(e, str):
+                            required.add(e.strip("<>"))
+                        elif isinstance(e, dict) and "name" in e:
+                            required.add(str(e["name"]).strip("<>"))
+            ents = obj.get("entities")
+            if isinstance(ents, list):
+                for e in ents:
+                    if isinstance(e, dict) and e.get("required") is True and "name" in e:
+                        required.add(str(e["name"]).strip("<>"))
+
+            if required:
+                out_req.setdefault(sfx, set()).update(required)
+
+            if current_datatype:
+                out_dt.setdefault(sfx, set()).add(current_datatype)
+
+        for v in obj.values():
+            _harvest_suffix_rules(v, current_datatype, out_req, out_dt)
+
+    elif isinstance(obj, list):
+        for it in obj:
+            _harvest_suffix_rules(it, current_datatype, out_req, out_dt)
+
+
+def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
+    """Load and aggregate the BIDS schema shipped with the package.
+
+    Parameters
+    ----------
+    schema_dir:
+        Directory containing the ``objects``/``rules`` folders from the official
+        BIDS schema distribution.
     """
 
-    suffix_to_datatypes: Dict[str, Set[str]] = {}
-    suffix_requirements: Dict[str, Set[str]] = {}
+    schema_dir = Path(schema_dir)
+    if not schema_dir.exists():
+        raise FileNotFoundError(
+            f"BIDS schema directory '{schema_dir}' does not exist."
+        )
 
-    def _register(suffix: str, datatype: str) -> None:
-        if not suffix or not datatype:
-            return
-        suffix_to_datatypes.setdefault(suffix, set()).add(datatype)
+    suffix_requirements: Dict[str, set] = {}
+    suffix_to_datatypes: Dict[str, set] = {}
+    processed_any = False
 
-    for hint in SEQUENCE_HINTS.values():
-        suffix = _enum_to_name(hint.suffix)
-        datatype = _enum_to_name(hint.datatype)
-        _register(suffix, datatype)
-        if suffix:
-            requirements = suffix_requirements.setdefault(suffix, set())
-            for entity in hint.required_entities:
-                requirements.add(_enum_to_name(entity))
+    for p in _iter_schema_files(schema_dir):
+        data = _load_json_or_yaml(p)
+        if not isinstance(data, (dict, list)):
+            continue
+        _harvest_suffix_rules(data, current_datatype=None,
+                              out_req=suffix_requirements, out_dt=suffix_to_datatypes)
+        processed_any = True
 
-    anat_name = _enum_to_name(_enum_lookup(DatatypeEnum, "anat"))
-    fmap_name = _enum_to_name(_enum_lookup(DatatypeEnum, "fmap"))
+    if not processed_any:
+        raise RuntimeError(
+            "No schema files could be parsed. Ensure the packaged schema is intact."
+        )
 
-    additional_suffixes = {
-        "T2star": anat_name,
-        "PD": anat_name,
-        "phasediff": fmap_name,
-        "magnitude1": fmap_name,
-        "magnitude2": fmap_name,
-        "magnitude": fmap_name,
-        "phase1": fmap_name,
-        "phase2": fmap_name,
-        "fieldmap": fmap_name,
-        "epi": fmap_name,
+    fallback_dt = {
+        "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
+        "bold": "func", "sbref": "func",
+        "dwi": "dwi",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
     }
-    for suffix, datatype in additional_suffixes.items():
-        _register(suffix, datatype)
-        suffix_requirements.setdefault(suffix, set()).add(_enum_to_name(SUBJECT_ENTITY))
-
-    known_suffixes = {member.value["value"] for member in SuffixEnum}
-    known_suffixes.update(suffix_to_datatypes.keys())
-
-    subject_name = _enum_to_name(SUBJECT_ENTITY)
-    task_name = _enum_to_name(TASK_ENTITY)
-
-    for suffix in known_suffixes:
-        suffix_requirements.setdefault(suffix, set()).add(subject_name)
-
-    for suffix in ("bold", "sbref", "physio"):
-        if suffix in known_suffixes:
-            suffix_requirements.setdefault(suffix, set()).add(task_name)
+    for sfx, dt in fallback_dt.items():
+        suffix_to_datatypes.setdefault(sfx, set()).add(dt)
+    for sfx in set(suffix_to_datatypes.keys()) | set(suffix_requirements.keys()):
+        suffix_requirements.setdefault(sfx, set()).add("subject")
 
     return SchemaInfo(
         suffix_requirements={k: sorted(v) for k, v in suffix_requirements.items()},
@@ -737,14 +401,7 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
     return {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
-        "phasediff": "fmap",
-        "fieldmap": "fmap",
-        "magnitude": "fmap",
-        "magnitude1": "fmap",
-        "magnitude2": "fmap",
-        "phase1": "fmap",
-        "phase2": "fmap",
-        "fmap": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
     }.get(suffix, "misc")
 
 
@@ -1175,19 +832,10 @@ def apply_post_conversion_rename(
 
 
 __all__ = [
-    "SequenceHint",
-    "DEFAULT_SEQUENCE_HINTS",
-    "SEQUENCE_HINTS",
-    "SKIP_MODALITIES",
     "SchemaInfo",
     "SeriesInfo",
     "load_bids_schema",
     "build_preview_names",
     "propose_bids_basename",
     "apply_post_conversion_rename",
-    "guess_modality",
-    "modality_to_container",
-    "get_sequence_hint_patterns",
-    "set_sequence_hint_patterns",
-    "restore_default_sequence_hints",
 ]
