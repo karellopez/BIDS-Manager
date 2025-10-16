@@ -20,10 +20,7 @@ from bidsphysio import dcm2bidsphysio
 from pydicom import dcmread
 from pydicom.dataset import Dataset
 
-try:  # pragma: no cover - heuristic runner works without renamer dependencies
-    from bids_manager.schema_renamer import normalize_study_name
-except Exception:  # pragma: no cover - degrade gracefully when unavailable
-    from bids_manager._study_utils import normalize_study_name
+from bids_manager.schema_renamer import normalize_study_name
 
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
