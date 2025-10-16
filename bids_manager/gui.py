@@ -121,10 +121,7 @@ from bids_manager.schema_renamer import (
     build_preview_names,
     load_bids_schema,
 )
-try:  # pragma: no cover - GUI still launches without optional renamer deps
-    from bids_manager.schema_renamer import normalize_study_name
-except Exception:  # pragma: no cover - allow running with minimal functionality
-    from bids_manager._study_utils import normalize_study_name
+from bids_manager.schema_renamer import normalize_study_name
 try:
     import psutil
     HAS_PSUTIL = True

@@ -45,10 +45,7 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
-try:  # pragma: no cover - keep inventory usable without optional renamer deps
-    from bids_manager.schema_renamer import normalize_study_name
-except Exception:  # pragma: no cover - fallback when renamer unavailable
-    from bids_manager._study_utils import normalize_study_name
+from bids_manager.schema_renamer import normalize_study_name
 
 # Preview name helpers – loaded lazily so ``scan_dicoms_long`` can store
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
