@@ -22,7 +22,7 @@ dependencies = [
     "pandas==2.3.1",
     "PyQt5==5.15.11",
     "PyQtWebEngine==5.15.7",
-    "PyYAML>=6.0",
+    "ancpbids>=0.3.1",
     "heudiconv-ancp",
     "dcm2niix==1.0.20250506",
     "bidsphysio==3.0",
@@ -35,9 +35,6 @@ dependencies = [
     "pyqtgraph==0.13.7",
     "PyOpenGL==3.1.7",
 ]
-
-[project.optional-dependencies]
-schema = ["PyYAML>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
