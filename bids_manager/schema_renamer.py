@@ -727,6 +727,23 @@ class SeriesInfo:
     extra: Dict[str, str]
 
 
+def _normalize_session_label(session: Optional[str]) -> Optional[str]:
+    """Return a sanitised session label compatible with ``ses-<label>``."""
+
+    if not session:
+        return None
+
+    raw = str(session)
+    cleaned = _sanitize_token(raw)
+    if not cleaned:
+        return None
+
+    if raw.lower().startswith(("ses-", "ses_")) and cleaned.lower().startswith("ses"):
+        cleaned = cleaned[3:]
+
+    return cleaned or None
+
+
 def _normalize_suffix(modality: str) -> str:
     """Return a canonical BIDS suffix for a given modality string.
 
@@ -793,14 +810,7 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         raise ValueError("SeriesInfo.subject is required and must be alphanumeric")
     parts.append(f"sub-{sub}")
 
-    ses_raw = series.session or ""
-    ses = _sanitize_token(ses_raw)
-    # Users sometimes supply session strings already prefixed with ``ses-``.
-    # After sanitization this would yield ``ses<suffix>`` which in turn produces
-    # names like ``ses-sesspre``.  Strip a leading ``ses`` token if present so the
-    # final name always follows ``ses-<label>``.
-    if ses_raw.lower().startswith(("ses-", "ses_")) and ses.lower().startswith("ses"):
-        ses = ses[3:]
+    ses = _normalize_session_label(series.session) or ""
     if ses:
         parts.append(f"ses-{ses}")
 
@@ -968,64 +978,6 @@ def _glob_candidates(dt_dir: Path, subject: str, original_seq: str) -> List[Path
     return out
 
 
-def _rename_file_set(old: Path, new_basename: str, rename_map: Dict[Path, Path]) -> None:
-    newp = _replace_stem_keep_ext(old, new_basename)
-    if newp == old:
-        return
-    newp.parent.mkdir(parents=True, exist_ok=True)
-    rename_map[old] = newp
-
-
-def _process_series_in_dir(dt_dir: Path, series: "SeriesInfo", new_base: str, rename_map: Dict[Path, Path], 
-                          bids_root: Path, derivatives_pipeline_name: str, is_derivative: bool) -> None:
-    """Process a series in a specific directory, finding and renaming files."""
-    candidates: List[Path] = []
-    
-    # First try to find files using the original sequence name (heudiconv naming)
-    candidates = _glob_candidates(dt_dir, series.subject, series.sequence)
-    
-    # If no files found with sequence matching, try the current_bids field as fallback
-    if not candidates:
-        current = series.extra.get("current_bids") if series.extra else None
-        if current:
-            for ext in _BIDS_EXTS:
-                p = dt_dir / f"{current}{ext}"
-                if p.exists():
-                    candidates.append(p)
-    
-    # Debug: print what we found (only if no candidates found)
-    if not candidates:
-        print(f"No candidates found for {series.sequence} in {dt_dir}")
-        # List all files in the directory for debugging
-        all_files = list(dt_dir.glob("*"))
-        if all_files:
-            print(f"  Available files in {dt_dir}:")
-            for f in all_files:
-                print(f"    - {f.name}")
-        else:
-            print(f"  Directory {dt_dir} is empty or doesn't exist")
-    
-    for p in candidates:
-        if not any(p.name.endswith(ext) for ext in _BIDS_EXTS):
-            continue
-        
-        if is_derivative:
-            # For derivatives, move to proper derivatives folder
-            deriv_dir = bids_root / "derivatives" / derivatives_pipeline_name
-            sub_name = f"sub-{_sanitize_token(series.subject)}"
-            final_dir = deriv_dir / sub_name
-            if series.session:
-                final_dir = final_dir / f"ses-{_sanitize_token(series.session)}"
-            final_dir = final_dir / "dwi"
-            final_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create new path in derivatives
-            new_file = final_dir / _replace_stem_keep_ext(p, new_base).name
-            rename_map[p] = new_file
-        else:
-            _rename_file_set(p, new_base, rename_map)
-
-
 def _normalize_fieldmaps(dt_dir: Path, rename_map: Dict[Path, Path]) -> None:
     for p in dt_dir.glob("*_echo-1.*"):
         newb = p.name.replace("_echo-1", "_magnitude1")
@@ -1074,6 +1026,160 @@ def _move_dwi_derivatives(bids_root: Path, pipeline_name: str, rename_map: Dict[
                     break
 
 
+@dataclass(frozen=True)
+class _SeriesPaths:
+    """Pre-computed filesystem locations for a :class:`SeriesInfo`."""
+
+    bids_root: Path
+    subject_label: str
+    session_label: Optional[str]
+
+    @classmethod
+    def from_series(cls, bids_root: Path, series: SeriesInfo) -> "_SeriesPaths":
+        subject = _sanitize_token(series.subject)
+        if not subject:
+            raise ValueError("SeriesInfo.subject must contain an alphanumeric label")
+        return cls(
+            bids_root=bids_root,
+            subject_label=subject,
+            session_label=_normalize_session_label(series.session),
+        )
+
+    @property
+    def subject_dir(self) -> Path:
+        base = self.bids_root / f"sub-{self.subject_label}"
+        if self.session_label:
+            base = base / f"ses-{self.session_label}"
+        return base
+
+    def datatype_dir(self, datatype: str) -> Path:
+        return self.subject_dir / datatype
+
+    def derivatives_dir(self, pipeline_name: str, datatype: str = "dwi") -> Path:
+        base = self.bids_root / "derivatives" / pipeline_name / f"sub-{self.subject_label}"
+        if self.session_label:
+            base = base / f"ses-{self.session_label}"
+        return base / datatype
+
+    def candidate_directories(
+        self, datatype: str, pipeline_name: str, is_derivative: bool
+    ) -> List[Path]:
+        dirs: List[Path] = []
+        if is_derivative:
+            dirs.extend([self.datatype_dir("dwi"), self.datatype_dir("misc")])
+            dirs.append(self.derivatives_dir(pipeline_name, "dwi"))
+        else:
+            dirs.append(self.datatype_dir(datatype))
+
+        seen: Set[Path] = set()
+        ordered: List[Path] = []
+        for path in dirs:
+            if path in seen:
+                continue
+            seen.add(path)
+            ordered.append(path)
+        return ordered
+
+
+def _is_supported_bids_file(path: Path) -> bool:
+    return any(path.name.endswith(ext) for ext in _BIDS_EXTS)
+
+
+def _discover_series_files(series: SeriesInfo, directories: Iterable[Path]) -> List[Path]:
+    """Return files associated with ``series`` found under ``directories``."""
+
+    found: List[Path] = []
+    seen: Set[Path] = set()
+
+    for dt_dir in directories:
+        if not dt_dir.exists():
+            continue
+        for candidate in _glob_candidates(dt_dir, series.subject, series.sequence):
+            if not candidate.is_file() or candidate in seen:
+                continue
+            seen.add(candidate)
+            found.append(candidate)
+
+    if found:
+        return found
+
+    extra = series.extra or {}
+    current = extra.get("current_bids")
+    if not current:
+        return found
+
+    for dt_dir in directories:
+        if not dt_dir.exists():
+            continue
+        for ext in _BIDS_EXTS:
+            candidate = dt_dir / f"{current}{ext}"
+            if candidate.exists() and candidate.is_file() and candidate not in seen:
+                seen.add(candidate)
+                found.append(candidate)
+
+    return found
+
+
+def _log_missing_candidates(series: SeriesInfo, directories: Iterable[Path]) -> None:
+    dirs = list(directories)
+    if not dirs:
+        return
+
+    print(f"No candidates found for '{series.sequence}'")
+    for directory in dirs:
+        if not directory.exists():
+            print(f"  - {directory} (missing)")
+            continue
+
+        print(f"  - {directory}")
+        try:
+            entries = sorted(directory.iterdir(), key=lambda p: p.name)
+        except Exception:
+            entries = []
+
+        preview = entries[:5]
+        for entry in preview:
+            print(f"      * {entry.name}")
+        if len(entries) > len(preview):
+            print("      …")
+
+
+def _determine_destination(
+    paths: _SeriesPaths,
+    source: Path,
+    new_base: str,
+    pipeline_name: str,
+    is_derivative: bool,
+) -> Path:
+    if is_derivative:
+        dest_dir = paths.derivatives_dir(pipeline_name, "dwi")
+        new_name = _replace_stem_keep_ext(source, new_base).name
+        return dest_dir / new_name
+    return _replace_stem_keep_ext(source, new_base)
+
+
+def _finalize_rename_operations(rename_map: Dict[Path, Path]) -> Dict[Path, Path]:
+    for old, new in sorted(rename_map.items(), key=lambda kv: len(str(kv[0])), reverse=True):
+        if new.exists():
+            if old.resolve() == new.resolve():
+                continue
+            stem, ext = new.stem, new.suffix
+            if new.name.endswith(".nii.gz"):
+                stem = new.name[:-7]
+                ext = ".nii.gz"
+            k = 2
+            cand = new
+            while cand.exists():
+                cand = new.with_name(f"{stem}({k}){ext}")
+                k += 1
+            rename_map[old] = cand
+            new = cand
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old), str(new))
+
+    return rename_map
+
+
 def build_preview_names(
     inventory_rows: Iterable[SeriesInfo], schema: SchemaInfo
 ) -> List[Tuple[SeriesInfo, str, str]]:
@@ -1118,49 +1224,34 @@ def apply_post_conversion_rename(
     bids_root = Path(bids_root)
     rename_map: Dict[Path, Path] = {}
 
+    proposals = list(proposals)
+
     # main renaming based on proposals
     print(f"Processing {len(proposals)} proposals for renaming:")
-    for i, (series, datatype, new_base) in enumerate(proposals):
-        print(f"  {i+1}. {series.sequence} -> {datatype}/{new_base}")
-    
+    for idx, (series, datatype, new_base) in enumerate(proposals, start=1):
+        print(f"  {idx}. {series.sequence} -> {datatype}/{new_base}")
+
     for series, datatype, new_base in proposals:
-        # Handle derivatives specially - they need special path handling
-        if datatype == "derivatives":
-            # For derivatives, search in both dwi and misc folders
-            search_dirs = []
-            base_dir = bids_root / f"sub-{_sanitize_token(series.subject)}"
-            if series.session:
-                base_dir = base_dir / f"ses-{_sanitize_token(series.session)}"
-            
-            # Check dwi folder first (most likely location for DWI derivatives)
-            dwi_dir = base_dir / "dwi"
-            if dwi_dir.exists():
-                search_dirs.append(dwi_dir)
-            
-            # Check misc folder
-            misc_dir = base_dir / "misc"
-            if misc_dir.exists():
-                search_dirs.append(misc_dir)
-            
-            # Also check if they're already in derivatives
-            deriv_dir = bids_root / "derivatives" / derivatives_pipeline_name / f"sub-{_sanitize_token(series.subject)}"
-            if series.session:
-                deriv_dir = deriv_dir / f"ses-{_sanitize_token(series.session)}"
-            deriv_dir = deriv_dir / "dwi"
-            if deriv_dir.exists():
-                search_dirs.append(deriv_dir)
-                
-            # Process all search directories
-            for dt_dir in search_dirs:
-                _process_series_in_dir(dt_dir, series, new_base, rename_map, bids_root, derivatives_pipeline_name, True)
-        else:
-            dt_dir = bids_root / f"sub-{_sanitize_token(series.subject)}"
-            if series.session:
-                dt_dir = dt_dir / f"ses-{_sanitize_token(series.session)}"
-            dt_dir = dt_dir / datatype
-            if not dt_dir.exists():
+        try:
+            paths = _SeriesPaths.from_series(bids_root, series)
+        except ValueError as exc:
+            print(f"  ! Skipping series {series.sequence!r}: {exc}")
+            continue
+
+        is_derivative = datatype == "derivatives"
+        candidate_dirs = paths.candidate_directories(datatype, derivatives_pipeline_name, is_derivative)
+        files = _discover_series_files(series, candidate_dirs)
+        if not files:
+            _log_missing_candidates(series, candidate_dirs)
+            continue
+
+        for src in files:
+            if not _is_supported_bids_file(src):
                 continue
-            _process_series_in_dir(dt_dir, series, new_base, rename_map, bids_root, derivatives_pipeline_name, False)
+            dest = _determine_destination(paths, src, new_base, derivatives_pipeline_name, is_derivative)
+            if dest == src:
+                continue
+            rename_map[src] = dest
 
     # fieldmaps normalization
     if also_normalize_fieldmaps:
@@ -1177,25 +1268,7 @@ def apply_post_conversion_rename(
         _move_dwi_derivatives(bids_root, derivatives_pipeline_name, rename_map)
 
     # Execute rename ops
-    for old, new in sorted(rename_map.items(), key=lambda kv: len(str(kv[0])), reverse=True):
-        if new.exists():
-            if old.resolve() == new.resolve():
-                continue
-            stem, ext = new.stem, new.suffix
-            if new.name.endswith(".nii.gz"):
-                stem = new.name[:-7]
-                ext = ".nii.gz"
-            k = 2
-            cand = new
-            while cand.exists():
-                cand = new.with_name(f"{stem}({k}){ext}")
-                k += 1
-            new = cand
-            rename_map[old] = new
-        new.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(old), str(new))
-
-    return rename_map
+    return _finalize_rename_operations(rename_map)
 
 
 def normalize_study_name(raw: str) -> str:
