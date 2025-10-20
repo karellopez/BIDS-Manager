@@ -64,7 +64,8 @@ except ModuleNotFoundError as exc:
 from pathlib import Path
 from collections import defaultdict
 from functools import cmp_to_key
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from joblib import Parallel, delayed
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
@@ -163,17 +164,20 @@ class _ConflictScannerWorker(QObject):
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, root_dir: str, finder: Callable[[str], dict]):
+    def __init__(self, root_dir: str, finder: Callable[[str, int], dict], n_jobs: int):
         super().__init__()
         self._root_dir = root_dir
         self._finder = finder
+        # ``n_jobs`` mirrors the CPU limit used for the main scanning step so we
+        # do not overwhelm the system when running both operations back-to-back.
+        self._n_jobs = max(1, n_jobs)
 
     @pyqtSlot()
     def run(self) -> None:
         """Execute the slow directory walk outside the GUI thread."""
 
         try:
-            conflicts = self._finder(self._root_dir)
+            conflicts = self._finder(self._root_dir, self._n_jobs)
         except Exception as exc:  # pragma: no cover - runtime safety
             # Forward the error message back to the GUI thread so the caller
             # can decide how to handle it without freezing the interface.
@@ -2509,7 +2513,7 @@ class BIDSManager(QMainWindow):
     # Helpers for detecting and reorganising multiple sessions in a
     # single folder
     # ------------------------------------------------------------------
-    def _find_conflicting_studies(self, root_dir: str) -> dict:
+    def _find_conflicting_studies(self, root_dir: str, n_jobs: int = 1) -> dict:
         """Return folders containing more than one StudyInstanceUID.
 
         Parameters
@@ -2525,22 +2529,55 @@ class BIDSManager(QMainWindow):
         """
 
         conflicts: dict[str, dict[str, list[str]]] = {}
+
+        # Gather the folders containing DICOM files so we can evaluate them in
+        # parallel without paying the scheduling cost for empty directories.
+        folders_to_scan: List[Tuple[str, List[str]]] = []
         for folder, _dirs, files in os.walk(root_dir):
-            study_map: dict[str, list[str]] = {}
+            dicom_files: List[str] = []
             for fname in files:
                 fpath = os.path.join(folder, fname)
-                if not is_dicom_file(fpath):
-                    continue
+                if is_dicom_file(fpath):
+                    dicom_files.append(fpath)
+            if dicom_files:
+                folders_to_scan.append((folder, dicom_files))
+
+        def _scan_folder(data: Tuple[str, List[str]]) -> Optional[Tuple[str, Dict[str, List[str]]]]:
+            folder, dicom_files = data
+            study_map: Dict[str, List[str]] = {}
+            for fpath in dicom_files:
                 try:
                     ds = pydicom.dcmread(
-                        fpath, stop_before_pixels=True, specific_tags=["StudyInstanceUID"]
+                        fpath,
+                        stop_before_pixels=True,
+                        specific_tags=["StudyInstanceUID"],
                     )
                     uid = str(getattr(ds, "StudyInstanceUID", "")).strip()
                 except Exception:
+                    # Maintain the previous best-effort behaviour: unreadable
+                    # files are skipped silently so the scan keeps running.
                     continue
                 study_map.setdefault(uid, []).append(fpath)
             if len(study_map) > 1:
-                conflicts[folder] = study_map
+                return folder, study_map
+            return None
+
+        workers = max(1, n_jobs)
+        if workers == 1:
+            results = (_scan_folder(entry) for entry in folders_to_scan)
+        else:
+            # ``Parallel`` confines the evaluation to the configured number of
+            # workers, matching the CPU limit used for the initial DICOM scan.
+            results = Parallel(n_jobs=workers)(
+                delayed(_scan_folder)(entry) for entry in folders_to_scan
+            )
+
+        for result in results:
+            if result is None:
+                continue
+            folder, study_map = result
+            conflicts[folder] = study_map
+
         return conflicts
 
     def _reorganize_conflicting_sessions(self, conflicts: dict) -> None:
@@ -2613,7 +2650,11 @@ class BIDSManager(QMainWindow):
         self._start_spinner("Checking sessions")
         self.log_text.append("Checking for multiple sessions in scan folders…")
 
-        self._conflict_worker = _ConflictScannerWorker(self.dicom_dir, self._find_conflicting_studies)
+        self._conflict_worker = _ConflictScannerWorker(
+            self.dicom_dir,
+            self._find_conflicting_studies,
+            self.num_cpus,
+        )
         self._conflict_thread = QThread(self)
         self._conflict_worker.moveToThread(self._conflict_thread)
         self._conflict_thread.started.connect(self._conflict_worker.run)
