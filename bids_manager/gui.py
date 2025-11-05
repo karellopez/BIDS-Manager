@@ -1860,7 +1860,16 @@ class BIDSManager(QMainWindow):
 
         self.tsv_tabs.addTab(dict_tab, "Suffix dictionary")
         self.loadSequenceDictionary()
-        self.left_split.addWidget(self.tsv_group)
+
+        self.tsv_scroll = QScrollArea()
+        self.tsv_scroll.setWidgetResizable(True)
+        self.tsv_scroll.setWidget(self.tsv_group)
+        self.tsv_container = QWidget()
+        tsv_container_layout = QVBoxLayout(self.tsv_container)
+        tsv_container_layout.setContentsMargins(0, 0, 0, 0)
+        tsv_container_layout.addWidget(self.tsv_scroll)
+
+        self.left_split.addWidget(self.tsv_container)
 
         self.filter_group = QGroupBox("Filter")
         modal_layout = QVBoxLayout(self.filter_group)
@@ -1959,7 +1968,15 @@ class BIDSManager(QMainWindow):
         modal_layout.addLayout(header_row_filter)
         modal_layout.addWidget(self.modal_tabs)
 
-        self.right_split.addWidget(self.filter_group)
+        self.filter_scroll = QScrollArea()
+        self.filter_scroll.setWidgetResizable(True)
+        self.filter_scroll.setWidget(self.filter_group)
+        self.filter_container = QWidget()
+        filter_container_layout = QVBoxLayout(self.filter_container)
+        filter_container_layout.setContentsMargins(0, 0, 0, 0)
+        filter_container_layout.addWidget(self.filter_scroll)
+
+        self.right_split.addWidget(self.filter_container)
         self.left_split.setStretchFactor(0, 1)
         self.left_split.setStretchFactor(1, 1)
         self.right_split.setStretchFactor(0, 1)
@@ -2016,7 +2033,10 @@ class BIDSManager(QMainWindow):
         pv_lay = QVBoxLayout(self.preview_container)
         pv_lay.setContentsMargins(0, 0, 0, 0)
         pv_lay.setSpacing(6)
-        pv_lay.addWidget(self.preview_group)
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setWidget(self.preview_group)
+        pv_lay.addWidget(self.preview_scroll)
         pv_lay.addLayout(btn_row)
 
         log_group = QGroupBox("Log Output")
@@ -2412,14 +2432,14 @@ class BIDSManager(QMainWindow):
         self.tsv_dialog = QDialog(self, flags=Qt.Window)
         self.tsv_dialog.setWindowTitle("Scanned data viewer")
         lay = QVBoxLayout(self.tsv_dialog)
-        self.tsv_group.setParent(None)
-        lay.addWidget(self.tsv_group)
+        self.tsv_container.setParent(None)
+        lay.addWidget(self.tsv_container)
         self.tsv_dialog.finished.connect(self._reattachTSVWindow)
         self.tsv_dialog.showMaximized()
 
     def _reattachTSVWindow(self, *args):
-        self.tsv_group.setParent(None)
-        self.left_split.insertWidget(0, self.tsv_group)
+        self.tsv_container.setParent(None)
+        self.left_split.insertWidget(0, self.tsv_container)
         self.tsv_dialog = None
 
     def detachFilterWindow(self):
@@ -2430,15 +2450,15 @@ class BIDSManager(QMainWindow):
         self.filter_dialog = QDialog(self, flags=Qt.Window)
         self.filter_dialog.setWindowTitle("Filter")
         lay = QVBoxLayout(self.filter_dialog)
-        self.filter_group.setParent(None)
-        lay.addWidget(self.filter_group)
+        self.filter_container.setParent(None)
+        lay.addWidget(self.filter_container)
         self.filter_dialog.finished.connect(self._reattachFilterWindow)
         self.filter_dialog.showMaximized()
 
     def _reattachFilterWindow(self, *args):
-        self.filter_group.setParent(None)
-        # Insert after tsv_group but before preview_container
-        self.right_split.insertWidget(0, self.filter_group)
+        self.filter_container.setParent(None)
+        # Insert after the TSV panel but before preview_container
+        self.right_split.insertWidget(0, self.filter_container)
         self.filter_dialog = None
 
     def detachPreviewWindow(self):
@@ -2456,7 +2476,7 @@ class BIDSManager(QMainWindow):
 
     def _reattachPreviewWindow(self, *args):
         self.preview_container.setParent(None)
-        if self.left_split.indexOf(self.tsv_group) == -1:
+        if self.left_split.indexOf(self.tsv_container) == -1:
             self.left_split.addWidget(self.preview_container)
         else:
             self.left_split.insertWidget(1, self.preview_container)
