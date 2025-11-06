@@ -22,9 +22,7 @@ Usage in PyCharm:
 
 No CLI arguments required.
 """
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 import json
 import re
 import sys
@@ -52,206 +50,6 @@ def _move_rep_suffix(name: str) -> str:
     name = re.sub(r"(_rep-\d+)(_magnitude[12])", r"\2\1", name)
     name = re.sub(r"(_rep-\d+)(_phasediff)", r"\2\1", name)
     return name
-
-
-def _parse_time_value(value: Any) -> Optional[float]:
-    """Convert a DICOM/BIDS acquisition time representation into seconds.
-
-    ``AcquisitionTime`` can appear in several formats (``HH:MM:SS.sss``,
-    ``HHMMSS.sss``, ISO date strings, or even raw seconds). Normalising the
-    representation here makes downstream chronological sorting reliable.
-    """
-
-    if value is None:
-        return None
-
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    # ``HH:MM:SS(.ffffff)``
-    match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2})(\.\d+)?", text)
-    if match:
-        hours = int(match.group(1))
-        minutes = int(match.group(2))
-        seconds = int(match.group(3))
-        frac = float(match.group(4)) if match.group(4) else 0.0
-        return hours * 3600 + minutes * 60 + seconds + frac
-
-    # ``HHMMSS(.ffffff)``
-    match = re.fullmatch(r"(\d{2})(\d{2})(\d{2})(\.\d+)?", text)
-    if match:
-        hours = int(match.group(1))
-        minutes = int(match.group(2))
-        seconds = int(match.group(3))
-        frac = float(match.group(4)) if match.group(4) else 0.0
-        return hours * 3600 + minutes * 60 + seconds + frac
-
-    # ISO 8601 date time (``YYYY-MM-DDTHH:MM:SS(.ffffff)``)
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            dt = datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-        return dt.hour * 3600 + dt.minute * 60 + dt.second + dt.microsecond / 1_000_000
-
-    # Fallback: treat as seconds if it can be interpreted as a float
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _extract_acquisition_time(meta: Dict[str, Any]) -> Optional[float]:
-    """Return the acquisition time (in seconds) from a sidecar metadata dict."""
-
-    for key in ("AcquisitionTime", "AcqTime", "SeriesTime", "AcquisitionDateTime"):
-        if key in meta:
-            parsed = _parse_time_value(meta.get(key))
-            if parsed is not None:
-                return parsed
-    return None
-
-
-def _fieldmap_group_key(json_path: Path) -> str:
-    """Return a stable grouping key shared by the JSONs of a single fieldmap."""
-
-    stem = json_path.stem
-    # Remove common fmap suffixes so magnitude/phase share the same key.
-    for suffix in ("_magnitude1", "_magnitude2", "_phasediff", "_phase1", "_phase2", "_fieldmap"):
-        if stem.endswith(suffix):
-            return stem[: -len(suffix)]
-    return stem
-
-
-def _format_intended_path(root: Path, bids_root: Path, nifti_name: str) -> str:
-    """Create the ``bids::`` path expected in ``IntendedFor`` lists."""
-
-    relative_root = root.relative_to(bids_root).as_posix()
-    return f"bids::{relative_root}/{nifti_name}"
-
-
-def _gather_func_runs(func_dir: Path, root: Path, bids_root: Path) -> List[Dict[str, Any]]:
-    """Collect functional runs and their acquisition times."""
-
-    runs: List[Dict[str, Any]] = []
-    for nifti in sorted(func_dir.glob("*_bold.nii*")):
-        if "sbref" in nifti.name.lower():
-            # Reference images are not valid IntendedFor targets.
-            continue
-
-        json_path: Optional[Path]
-        if nifti.name.endswith(".nii.gz"):
-            json_path = nifti.with_name(nifti.name[:-7] + ".json")
-        elif nifti.suffix == ".nii":
-            json_path = nifti.with_suffix(".json")
-        else:
-            json_path = None
-
-        meta: Dict[str, Any] = {}
-        if json_path and json_path.exists():
-            with open(json_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-
-        runs.append(
-            {
-                "nifti_name": nifti.name,
-                "json_path": json_path,
-                "acq_time": _extract_acquisition_time(meta),
-                "intended_path": _format_intended_path(root, bids_root, nifti.name),
-            }
-        )
-
-    return runs
-
-
-def _gather_fieldmaps(fmap_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """Collect fieldmap JSONs grouped by magnitude/phase pairing."""
-
-    groups: Dict[str, Dict[str, Any]] = {}
-    for json_path in sorted(fmap_dir.glob("*.json")):
-        with open(json_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        key = _fieldmap_group_key(json_path)
-        info = groups.setdefault(
-            key,
-            {
-                "json_paths": [],
-                "acq_times": [],
-            },
-        )
-        info["json_paths"].append(json_path)
-
-        acq_time = _extract_acquisition_time(meta)
-        if acq_time is not None:
-            info["acq_times"].append(acq_time)
-
-    # Finalise the canonical acquisition time for each group using the earliest
-    # timestamp recorded across its magnitude/phase files.
-    for info in groups.values():
-        info["acq_time"] = min(info["acq_times"]) if info["acq_times"] else None
-
-    return groups
-
-
-def _assign_runs_to_fieldmaps(
-    fmap_groups: Dict[str, Dict[str, Any]],
-    func_runs: List[Dict[str, Any]],
-) -> Dict[str, List[str]]:
-    """Determine IntendedFor lists based on acquisition order.
-
-    The returned mapping contains the ``IntendedFor`` entries for every fieldmap
-    group. If the chronological data are incomplete, all fieldmaps receive the
-    full list of functional runs to preserve previous behaviour.
-    """
-
-    intended_all = [run["intended_path"] for run in func_runs]
-    if not fmap_groups:
-        return {}
-    if not func_runs:
-        return {key: [] for key in fmap_groups}
-
-    has_complete_fmap_times = all(group.get("acq_time") is not None for group in fmap_groups.values())
-    has_complete_run_times = all(run.get("acq_time") is not None for run in func_runs)
-
-    if not (has_complete_fmap_times and has_complete_run_times):
-        # Without a full timeline we cannot improve on the previous
-        # "all runs for all fieldmaps" strategy, so reuse it.
-        return {key: intended_all for key in fmap_groups}
-
-    sorted_fmaps: List[Tuple[str, Dict[str, Any]]] = sorted(
-        fmap_groups.items(), key=lambda item: item[1]["acq_time"]
-    )
-    sorted_runs = sorted(func_runs, key=lambda run: run["acq_time"])
-
-    assignments: Dict[str, List[str]] = {key: [] for key in fmap_groups}
-    run_index = 0
-    for idx, (key, info) in enumerate(sorted_fmaps):
-        start_time = info["acq_time"]
-        end_time = (
-            sorted_fmaps[idx + 1][1]["acq_time"]
-            if idx + 1 < len(sorted_fmaps)
-            else float("inf")
-        )
-
-        # Skip any functional runs that occurred before this fieldmap.
-        while run_index < len(sorted_runs) and sorted_runs[run_index]["acq_time"] < start_time:
-            run_index += 1
-
-        assign_index = run_index
-        assigned: List[str] = []
-        while assign_index < len(sorted_runs) and sorted_runs[assign_index]["acq_time"] < end_time:
-            assigned.append(sorted_runs[assign_index]["intended_path"])
-            assign_index += 1
-
-        assignments[key] = assigned
-        run_index = assign_index
-
-    return assignments
 
 # -----------------------------------------------------------------------------
 # Process a single fmap directory
@@ -318,31 +116,27 @@ def _update_intended_for(root: Path, bids_root: Path) -> None:
     if not (fmap_dir.is_dir() and func_dir.is_dir()):
         return
 
-    func_runs = _gather_func_runs(func_dir, root, bids_root)
-    if not func_runs:
+    # Collect paths of all functional images relative to the subject/session
+    # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
+    # Skip reference volumes (e.g. ``*_sbref``) as they should not appear in the
+    # ``IntendedFor`` lists.
+    func_files = [
+        f for f in sorted(func_dir.glob("*.nii*")) if "ref" not in f.name.lower()
+    ]
+    if not func_files:
         return
 
-    fmap_groups = _gather_fieldmaps(fmap_dir)
-    if not fmap_groups:
-        return
+    rel_paths = [f.relative_to(root).as_posix() for f in func_files]
 
-    assignments = _assign_runs_to_fieldmaps(fmap_groups, func_runs)
-
-    # Apply the computed IntendedFor lists to every JSON that belongs to the
-    # same physical fieldmap (magnitude1, magnitude2, phasediff, ...).
-    for key, info in fmap_groups.items():
-        intended_paths = assignments.get(key, [])
-        for js in info["json_paths"]:
-            with open(js, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-
-            meta["IntendedFor"] = intended_paths
-
-            with open(js, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=4)
-                f.write("\n")
-
-            print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
+    # Update each JSON sidecar under ``fmap`` with the collected paths.
+    for js in fmap_dir.glob("*.json"):
+        with open(js, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["IntendedFor"] = rel_paths
+        with open(js, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=4)
+            f.write("\n")
+        print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
 
 
 def add_intended_for(bids_root: Path) -> None:
