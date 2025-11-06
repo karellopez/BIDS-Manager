@@ -4083,6 +4083,8 @@ class BIDSManager(QMainWindow):
         bids_path = os.path.join(self.bids_out_dir, dataset)
         self.log_text.append(f"Renaming fieldmaps for {dataset}…")
         args = [self.rename_script, bids_path]
+        if self.tsv_path and os.path.isfile(self.tsv_path):
+            args.extend(["--summary-tsv", self.tsv_path])
         self.conv_process.start(sys.executable, args)
 
     def _store_heuristics(self):
