@@ -26,6 +26,7 @@ from pathlib import Path
 import json
 import re
 import sys
+from typing import Dict, List, Optional, Tuple
 
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
@@ -104,6 +105,76 @@ def post_fmap_rename(bids_root: Path) -> None:
     update_scans_tsv(bids_root)
 
 
+def _parse_acq_time(value: str) -> Optional[float]:
+    """Return a sortable representation of an ``acq_time`` string.
+
+    The GUI stores acquisition times in ``*_scans.tsv`` as strings such as
+    ``"12:34:56.789"``.  To keep the parsing lightweight we simply drop the
+    colons and let ``float`` handle the remaining numeric portion.  Invalid
+    values (including blanks or ``NaN``) fall back to ``None`` so that callers
+    can gracefully degrade to the legacy behaviour of assigning every run to
+    every fieldmap.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    # Remove ``:`` characters while keeping any fractional component.
+    numeric = text.replace(":", "")
+    try:
+        return float(numeric)
+    except ValueError:
+        return None
+
+
+def _load_acq_time_lookup(root: Path) -> Dict[str, Optional[float]]:
+    """Return a lookup from relative file paths to parsed ``acq_time`` values."""
+
+    lookup: Dict[str, Optional[float]] = {}
+    scan_tables = sorted(root.glob("*_scans.tsv"))
+    if not scan_tables:
+        return lookup
+
+    import pandas as pd  # Local import keeps optional dependency lightweight.
+
+    for table in scan_tables:
+        try:
+            df = pd.read_csv(table, sep="\t")
+        except Exception:  # pragma: no cover - defensive against malformed TSVs
+            continue
+
+        if "filename" not in df.columns:
+            continue
+
+        acq_series = df.get("acq_time")
+        for idx, filename in df["filename"].items():
+            rel_path = str(filename).strip()
+            if not rel_path:
+                continue
+            acq_value = None
+            if acq_series is not None:
+                acq_value = _parse_acq_time(acq_series.iloc[idx])
+            # Later tables overwrite earlier ones to match the GUI behaviour.
+            lookup[rel_path] = acq_value
+    return lookup
+
+
+def _relative_nifti_paths(json_path: Path, root: Path) -> List[str]:
+    """Return possible relative image paths for a JSON sidecar."""
+
+    rel = json_path.relative_to(root).as_posix()
+    base = rel[:-5]  # Strip the trailing ``.json``.
+    return [f"{base}.nii.gz", f"{base}.nii"]
+
+
+def _format_intended_entry(path: Path) -> str:
+    """Convert a functional run path to the ``bids::`` reference format."""
+
+    return f"bids::{path.name}"
+
+
 def _update_intended_for(root: Path, bids_root: Path) -> None:
     """Add ``IntendedFor`` entries to fieldmap JSONs under ``root``."""
     # ``root`` points to either ``sub-<id>`` or ``sub-<id>/ses-<id>``
@@ -116,27 +187,92 @@ def _update_intended_for(root: Path, bids_root: Path) -> None:
     if not (fmap_dir.is_dir() and func_dir.is_dir()):
         return
 
-    # Collect paths of all functional images relative to the subject/session
-    # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
-    # Skip reference volumes (e.g. ``*_sbref``) as they should not appear in the
-    # ``IntendedFor`` lists.
+    # Collect candidate functional images, skipping reference volumes (``*_sbref``)
+    # because they are not intended targets for fieldmap correction.
     func_files = [
         f for f in sorted(func_dir.glob("*.nii*")) if "ref" not in f.name.lower()
     ]
     if not func_files:
         return
 
-    rel_paths = [f.relative_to(root).as_posix() for f in func_files]
+    # Build a lookup of acquisition times from the ``*_scans.tsv`` table produced
+    # by the GUI.  The keys match the relative paths stored in the table.
+    acq_lookup = _load_acq_time_lookup(root)
 
-    # Update each JSON sidecar under ``fmap`` with the collected paths.
-    for js in fmap_dir.glob("*.json"):
+    fieldmaps: List[Tuple[Path, float]] = []
+    func_entries: List[Tuple[Path, float]] = []
+    missing_acq_time = False
+
+    # Collect acquisition times for each functional run so that we can order
+    # them chronologically.  Missing values trigger a graceful fallback later.
+    for func in func_files:
+        rel = func.relative_to(root).as_posix()
+        acq_time = acq_lookup.get(rel)
+        if acq_time is None:
+            missing_acq_time = True
+        else:
+            func_entries.append((func, acq_time))
+
+    # Sort functional runs once so that time-based grouping becomes trivial.
+    func_entries.sort(key=lambda item: item[1])
+
+    # Gather fieldmap sidecars and their acquisition times (via the matching
+    # image entry in the scans table).
+    for js in sorted(fmap_dir.glob("*.json")):
+        acq_time = None
+        for candidate in _relative_nifti_paths(js, root):
+            if candidate in acq_lookup and acq_lookup[candidate] is not None:
+                acq_time = acq_lookup[candidate]
+                break
+        if acq_time is None:
+            missing_acq_time = True
+        else:
+            fieldmaps.append((js, acq_time))
+
+    # If we could not obtain acquisition times, fall back to the historical
+    # behaviour (all runs assigned to every fieldmap) but still emit the new
+    # ``bids::``-style entries requested by the GUI.
+    if missing_acq_time or not fieldmaps or not func_entries:
+        rel_paths = [_format_intended_entry(f) for f in func_files]
+        for js in fmap_dir.glob("*.json"):
+            with open(js, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            meta["IntendedFor"] = rel_paths
+            with open(js, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=4)
+                f.write("\n")
+            print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
+        return
+
+    # Ensure fieldmaps follow chronological order so that each one claims the
+    # functional runs acquired after it and before the next fieldmap.
+    fieldmaps.sort(key=lambda item: item[1])
+
+    func_index = 0
+    func_count = len(func_entries)
+    for idx, (js, fm_time) in enumerate(fieldmaps):
+        next_time = fieldmaps[idx + 1][1] if idx + 1 < len(fieldmaps) else float("inf")
+
+        # Advance past runs that were acquired before the current fieldmap.
+        while func_index < func_count and func_entries[func_index][1] < fm_time:
+            func_index += 1
+
+        intended: List[str] = []
+        scan_idx = func_index
+        while scan_idx < func_count and func_entries[scan_idx][1] < next_time:
+            intended.append(_format_intended_entry(func_entries[scan_idx][0]))
+            scan_idx += 1
+
+        # Persist the updated IntendedFor metadata using the desired format.
         with open(js, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        meta["IntendedFor"] = rel_paths
+        meta["IntendedFor"] = intended
         with open(js, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=4)
             f.write("\n")
         print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
+
+        func_index = scan_idx
 
 
 def add_intended_for(bids_root: Path) -> None:
