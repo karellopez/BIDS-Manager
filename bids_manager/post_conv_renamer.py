@@ -23,6 +23,7 @@ Usage in PyCharm:
 No CLI arguments required.
 """
 from pathlib import Path
+from datetime import datetime
 import json
 import re
 import sys
@@ -104,6 +105,111 @@ def post_fmap_rename(bids_root: Path) -> None:
     update_scans_tsv(bids_root)
 
 
+def _parse_acquisition_time(value):
+    """Convert a raw ``AcquisitionTime`` value into seconds past midnight.
+
+    The GUI stores acquisition times in several possible string formats
+    (``HH:MM:SS``, ``HHMMSS``, or full ISO timestamps).  This helper normalises
+    them so that the chronological order of fieldmaps and functional runs can be
+    reconstructed reliably.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, (list, tuple)) and value:
+        value = value[0]
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # ``datetime.fromisoformat`` gracefully handles ``YYYY-mm-ddTHH:MM:SS``
+    # style strings.  The resulting ``datetime`` instance keeps fractional
+    # seconds, which is important when multiple runs happen during the same
+    # minute.
+    if "T" in text:
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            dt = None
+        if dt is not None:
+            return dt.hour * 3600 + dt.minute * 60 + dt.second + dt.microsecond / 1_000_000
+
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) == 3:
+            try:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                seconds = float(parts[2])
+            except ValueError:
+                pass
+            else:
+                return hours * 3600 + minutes * 60 + seconds
+
+    match = re.match(r"^(?P<h>\d{2})(?P<m>\d{2})(?P<s>\d{2})(?P<f>\.\d+)?$", text)
+    if match:
+        hours = int(match.group("h"))
+        minutes = int(match.group("m"))
+        seconds = int(match.group("s"))
+        fraction = float(match.group("f")) if match.group("f") else 0.0
+        return hours * 3600 + minutes * 60 + seconds + fraction
+
+    return None
+
+
+def _collect_functional_runs(func_dir: Path, root: Path):
+    """Gather functional runs alongside their acquisition times.
+
+    Only BOLD runs (``*_bold``) are considered for ``IntendedFor`` entries, and
+    reference volumes (``*_sbref``) are skipped.  Each record includes the
+    associated NIfTI file name, relative path, and parsed acquisition time.
+    """
+
+    runs = []
+    for js in sorted(func_dir.glob("*.json")):
+        name = js.name.lower()
+        if "_bold" not in name or "sbref" in name:
+            continue
+
+        with open(js, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+        acq_time = _parse_acquisition_time(meta.get("AcquisitionTime"))
+        nifti = js.with_suffix(".nii.gz")
+        if not nifti.exists():
+            nifti = js.with_suffix(".nii")
+        if not nifti.exists():
+            continue
+
+        runs.append(
+            {
+                "json": js,
+                "nifti": nifti,
+                "rel_path": nifti.relative_to(root).as_posix(),
+                "basename": nifti.name,
+                "acq_time": acq_time,
+            }
+        )
+    return runs
+
+
+def _collect_fieldmaps(fmap_dir: Path):
+    """Return fieldmap JSON metadata and acquisition times."""
+
+    fieldmaps = []
+    for js in sorted(fmap_dir.glob("*.json")):
+        with open(js, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        acq_time = _parse_acquisition_time(meta.get("AcquisitionTime"))
+        fieldmaps.append({"json": js, "meta": meta, "acq_time": acq_time})
+    return fieldmaps
+
+
 def _update_intended_for(root: Path, bids_root: Path) -> None:
     """Add ``IntendedFor`` entries to fieldmap JSONs under ``root``."""
     # ``root`` points to either ``sub-<id>`` or ``sub-<id>/ses-<id>``
@@ -116,27 +222,54 @@ def _update_intended_for(root: Path, bids_root: Path) -> None:
     if not (fmap_dir.is_dir() and func_dir.is_dir()):
         return
 
-    # Collect paths of all functional images relative to the subject/session
-    # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
-    # Skip reference volumes (e.g. ``*_sbref``) as they should not appear in the
-    # ``IntendedFor`` lists.
-    func_files = [
-        f for f in sorted(func_dir.glob("*.nii*")) if "ref" not in f.name.lower()
-    ]
-    if not func_files:
+    runs = _collect_functional_runs(func_dir, root)
+    if not runs:
         return
 
-    rel_paths = [f.relative_to(root).as_posix() for f in func_files]
+    fieldmaps = _collect_fieldmaps(fmap_dir)
+    if not fieldmaps:
+        return
 
-    # Update each JSON sidecar under ``fmap`` with the collected paths.
-    for js in fmap_dir.glob("*.json"):
-        with open(js, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        meta["IntendedFor"] = rel_paths
-        with open(js, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=4)
+    missing_times = any(run["acq_time"] is None for run in runs) or any(
+        fmap["acq_time"] is None for fmap in fieldmaps
+    )
+
+    # When acquisition times are unavailable for either side, retain the
+    # previous behaviour: associate every BOLD run with every fieldmap.  This
+    # guarantees backwards compatibility while still switching to the new
+    # ``bids::`` target syntax.
+    if missing_times:
+        intended_targets = [f"bids::{run['basename']}" for run in runs]
+        for fmap in fieldmaps:
+            fmap["meta"]["IntendedFor"] = intended_targets
+            with open(fmap["json"], "w", encoding="utf-8") as f:
+                json.dump(fmap["meta"], f, indent=4)
+                f.write("\n")
+            print(f"Updated IntendedFor in {fmap['json'].relative_to(bids_root)}")
+        return
+
+    runs.sort(key=lambda item: item["acq_time"])
+    fieldmaps.sort(key=lambda item: item["acq_time"])
+
+    for idx, fmap in enumerate(fieldmaps):
+        start_time = fmap["acq_time"]
+        end_time = fieldmaps[idx + 1]["acq_time"] if idx + 1 < len(fieldmaps) else None
+
+        # Select functional runs acquired after the current fieldmap and before
+        # the next one (if any).  ``>=`` ensures that runs captured at exactly
+        # the same timestamp as the fieldmap are still linked to it.
+        assigned_runs = [
+            run for run in runs if run["acq_time"] is not None and run["acq_time"] >= start_time
+            and (end_time is None or run["acq_time"] < end_time)
+        ]
+
+        fmap["meta"]["IntendedFor"] = [f"bids::{run['basename']}" for run in assigned_runs]
+
+        with open(fmap["json"], "w", encoding="utf-8") as f:
+            json.dump(fmap["meta"], f, indent=4)
             f.write("\n")
-        print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
+
+        print(f"Updated IntendedFor in {fmap['json'].relative_to(bids_root)}")
 
 
 def add_intended_for(bids_root: Path) -> None:
