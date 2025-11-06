@@ -26,6 +26,8 @@ from pathlib import Path
 import json
 import re
 import sys
+import csv
+from collections import defaultdict
 
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
@@ -104,54 +106,198 @@ def post_fmap_rename(bids_root: Path) -> None:
     update_scans_tsv(bids_root)
 
 
-def _update_intended_for(root: Path, bids_root: Path) -> None:
+def _build_summary_timeline(bids_root: Path) -> dict[tuple[str, str], list[dict[str, str]]]:
+    """Load ``subject_summary.tsv`` and collect acq_time ordered entries.
+
+    The summary contains the acquisition metadata gathered by the GUI.  We
+    extract only the rows relevant for BOLD runs and fieldmaps so we can later
+    associate each fieldmap with the functional runs acquired after it.
+    """
+
+    summary_path = bids_root / ".bids_manager" / "subject_summary.tsv"
+    if not summary_path.exists():
+        return {}
+
+    timeline: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+
+    try:
+        with open(summary_path, "r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            for row in reader:
+                bids = str(row.get("BIDS_name", "")).strip()
+                if not bids:
+                    continue
+                session = str(row.get("session", "")).strip()
+                key = (bids, session)
+                modality = str(row.get("modality", "")).strip().lower()
+                container = str(row.get("modality_bids", "")).strip().lower()
+                proposed = str(row.get("Proposed BIDS name", "")).strip()
+                if not proposed:
+                    continue
+                acq_time = str(row.get("acq_time", "")).strip()
+
+                entry_type = None
+                if modality == "bold" and proposed.endswith("_bold.nii.gz"):
+                    entry_type = "bold"
+                elif container == "fmap":
+                    entry_type = "fmap"
+
+                if entry_type is None:
+                    continue
+
+                timeline[key].append(
+                    {
+                        "type": entry_type,
+                        "acq_time": acq_time,
+                        "bids_path": proposed,
+                    }
+                )
+    except Exception as exc:
+        print(f"Warning: failed to load summary for IntendedFor ordering: {exc}")
+        return {}
+
+    for entries in timeline.values():
+        entries.sort(key=lambda item: (_acq_sort_key(item["acq_time"]), item["bids_path"]))
+
+    return timeline
+
+
+def _acq_sort_key(acq_time: str) -> tuple[int, str]:
+    """Return a numeric key for sorting acquisition times.
+
+    ``acq_time`` strings are typically formatted as ``HH:MM:SS[.ffffff]``.
+    Removing the punctuation yields a sortable integer.  Empty or malformed
+    values are pushed to the end so they do not disturb the intended order.
+    """
+
+    cleaned = re.sub(r"[^0-9]", "", acq_time or "")
+    if not cleaned:
+        return (sys.maxsize, acq_time)
+    try:
+        return (int(cleaned), acq_time)
+    except ValueError:
+        return (sys.maxsize, acq_time)
+
+
+def _json_candidates(js: Path, root: Path) -> list[str]:
+    """Return relative image paths that may correspond to ``js``.
+
+    HeuDiConv writes JSON sidecars next to NIfTI images with matching basenames.
+    We therefore try the ``.nii.gz`` and ``.nii`` variants.
+    """
+
+    rel_json = js.relative_to(root)
+    base = rel_json.as_posix()[:-5]  # strip trailing '.json'
+    return [f"{base}.nii.gz", f"{base}.nii"]
+
+
+def _format_intended(path: str) -> str:
+    """Convert a relative BIDS path into the required ``bids::`` format."""
+
+    return f"bids::{Path(path).name}"
+
+
+def _assign_intended_from_timeline(
+    root: Path,
+    timeline: list[dict[str, str]],
+) -> dict[str, list[str]]:
+    """Create a mapping from fieldmap image paths to BOLD targets.
+
+    Parameters
+    ----------
+    root:
+        Subject or session directory currently being processed.
+    timeline:
+        Acquisition-ordered entries for the matching subject/session.
+    """
+
+    assignments: dict[str, list[str]] = {}
+    current_fmap: str | None = None
+
+    for entry in timeline:
+        kind = entry["type"]
+        rel_path = entry["bids_path"]
+        full_path = root / rel_path
+
+        if kind == "fmap":
+            current_fmap = rel_path
+            assignments.setdefault(rel_path, [])
+        elif kind == "bold":
+            if current_fmap is None:
+                continue
+            if "ref" in Path(rel_path).name.lower():
+                continue
+            if not full_path.exists():
+                continue
+            assignments.setdefault(current_fmap, []).append(rel_path)
+
+    return assignments
+
+
+def _update_intended_for(
+    root: Path,
+    bids_root: Path,
+    timeline_map: dict[tuple[str, str], list[dict[str, str]]],
+) -> None:
     """Add ``IntendedFor`` entries to fieldmap JSONs under ``root``."""
-    # ``root`` points to either ``sub-<id>`` or ``sub-<id>/ses-<id>``
-    # within the BIDS dataset. The function expects ``fmap`` and ``func``
-    # directories side-by-side inside this folder.
     fmap_dir = root / "fmap"
     func_dir = root / "func"
 
-    # Skip if either directory does not exist (e.g. no functional runs).
-    if not (fmap_dir.is_dir() and func_dir.is_dir()):
+    if not fmap_dir.is_dir():
         return
 
-    # Collect paths of all functional images relative to the subject/session
-    # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
-    # Skip reference volumes (e.g. ``*_sbref``) as they should not appear in the
-    # ``IntendedFor`` lists.
     func_files = [
-        f for f in sorted(func_dir.glob("*.nii*")) if "ref" not in f.name.lower()
+        f for f in sorted(func_dir.glob("*.nii*")) if f.is_file() and "ref" not in f.name.lower()
     ]
-    if not func_files:
-        return
 
-    rel_paths = [f.relative_to(root).as_posix() for f in func_files]
+    rel_root = root.relative_to(bids_root)
+    parts = rel_root.parts
+    sub_id = next((p for p in parts if p.startswith("sub-")), "")
+    ses_id = next((p for p in parts if p.startswith("ses-")), "")
+    timeline = timeline_map.get((sub_id, ses_id), [])
 
-    # Update each JSON sidecar under ``fmap`` with the collected paths.
+    has_timeline = bool(timeline)
+    assignments = _assign_intended_from_timeline(root, timeline) if has_timeline else {}
+
+    fallback = [f.relative_to(root).as_posix() for f in func_files]
+
     for js in fmap_dir.glob("*.json"):
-        with open(js, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        meta["IntendedFor"] = rel_paths
-        with open(js, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=4)
-            f.write("\n")
+        intended_rel: list[str] = []
+        if assignments:
+            for candidate in _json_candidates(js, root):
+                targets = assignments.get(candidate)
+                if targets:
+                    intended_rel = targets
+                    break
+        if not intended_rel and fallback and not has_timeline:
+            intended_rel = fallback
+
+        formatted = []
+        if intended_rel:
+            formatted = list(dict.fromkeys(_format_intended(path) for path in intended_rel))
+
+        with open(js, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        meta["IntendedFor"] = formatted
+        with open(js, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, indent=4)
+            handle.write("\n")
         print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
 
 
 def add_intended_for(bids_root: Path) -> None:
     """Populate ``IntendedFor`` in all fieldmap JSONs."""
-    # Walk through all subjects and sessions in the dataset. ``_update_intended_for``
-    # handles the actual JSON editing for each folder.
+    timeline_map = _build_summary_timeline(bids_root)
+
     for sub in bids_root.glob("sub-*"):
         if not sub.is_dir():
             continue
         sessions = [s for s in sub.glob("ses-*") if s.is_dir()]
         if sessions:
             for ses in sessions:
-                _update_intended_for(ses, bids_root)
+                _update_intended_for(ses, bids_root, timeline_map)
         else:
-            _update_intended_for(sub, bids_root)
+            _update_intended_for(sub, bids_root, timeline_map)
 
 
 def _rename_in_scans(tsv: Path, bids_root: Path) -> None:
