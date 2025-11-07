@@ -75,7 +75,8 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea,
+    QToolButton
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import (
@@ -1785,11 +1786,37 @@ class BIDSManager(QMainWindow):
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
         metadata_toolbar = QHBoxLayout()
-        self.tsv_sort_button = QPushButton("Sort")
-        self.tsv_sort_button.setEnabled(False)
-        self.tsv_sort_button.setToolTip("Sort the scanned metadata table")
-        self.tsv_sort_button.clicked.connect(self._open_sort_dialog)
-        metadata_toolbar.addWidget(self.tsv_sort_button)
+        self.tsv_actions_button = QToolButton()
+        self.tsv_actions_button.setText("Actions")
+        self.tsv_actions_button.setPopupMode(QToolButton.InstantPopup)
+        self.tsv_actions_menu = QMenu(self.tsv_actions_button)
+
+        self.tsv_sort_action = QAction("Sort", self)
+        self.tsv_sort_action.setEnabled(False)
+        self.tsv_sort_action.setToolTip("Sort the scanned metadata table")
+        self.tsv_sort_action.triggered.connect(self._open_sort_dialog)
+        self.tsv_actions_menu.addAction(self.tsv_sort_action)
+
+        self.tsv_load_action = QAction("Load TSV…", self)
+        self.tsv_load_action.triggered.connect(self.selectAndLoadTSV)
+        self.tsv_actions_menu.addAction(self.tsv_load_action)
+
+        self.tsv_generate_ids_action = QAction("Generate unique IDs", self)
+        self.tsv_generate_ids_action.setEnabled(False)
+        self.tsv_generate_ids_action.triggered.connect(self.generateUniqueIDs)
+        self.tsv_actions_menu.addAction(self.tsv_generate_ids_action)
+
+        self.tsv_detect_rep_action = QAction("Detect repeats", self)
+        self.tsv_detect_rep_action.triggered.connect(self.detectRepeatedSequences)
+        self.tsv_actions_menu.addAction(self.tsv_detect_rep_action)
+
+        self.tsv_save_action = QAction("Save changes", self)
+        self.tsv_save_action.setEnabled(False)
+        self.tsv_save_action.triggered.connect(self.applyMappingChanges)
+        self.tsv_actions_menu.addAction(self.tsv_save_action)
+
+        self.tsv_actions_button.setMenu(self.tsv_actions_menu)
+        metadata_toolbar.addWidget(self.tsv_actions_button)
         metadata_toolbar.addStretch()
         metadata_layout.addLayout(metadata_toolbar)
         self.mapping_table = AutoFillTableWidget()
@@ -1824,25 +1851,7 @@ class BIDSManager(QMainWindow):
         self.mapping_table.setItemDelegateForColumn(5, SubjectDelegate(self.mapping_table))
         self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
         self.mapping_table.itemChanged.connect(self._onMappingItemChanged)
-        btn_row_tsv = QHBoxLayout()
-        self.tsv_save_button = QPushButton("Save changes")
-        self.tsv_save_button.setEnabled(False)
-        self.tsv_save_button.clicked.connect(self.applyMappingChanges)
-        self.tsv_load_button = QPushButton("Load TSV…")
-        self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
-        self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
-        self.tsv_generate_ids_button.setEnabled(False)
-        self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
-        self.tsv_detect_rep_button = QPushButton("Detect repeats")
-        self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
         metadata_layout.addWidget(self.mapping_table)
-        btn_row_tsv.addStretch()
-        btn_row_tsv.addWidget(self.tsv_save_button)
-        btn_row_tsv.addWidget(self.tsv_load_button)
-        btn_row_tsv.addWidget(self.tsv_generate_ids_button)
-        btn_row_tsv.addWidget(self.tsv_detect_rep_button)
-        btn_row_tsv.addStretch()
-        metadata_layout.addLayout(btn_row_tsv)
 
         self.tsv_tabs.addTab(metadata_tab, "Scanned metadata")
 
@@ -2860,7 +2869,7 @@ class BIDSManager(QMainWindow):
 
     def _updateDetectRepeatEnabled(self, _item=None):
         """Enable repeat detection when BIDS and Given names are filled."""
-        if not hasattr(self, "tsv_detect_rep_button"):
+        if not hasattr(self, "tsv_detect_rep_action"):
             return
         enabled = self.mapping_table.rowCount() > 0
         if enabled:
@@ -2870,7 +2879,7 @@ class BIDSManager(QMainWindow):
                 if bids is None or given is None or not bids.text().strip() or not given.text().strip():
                     enabled = False
                     break
-        self.tsv_detect_rep_button.setEnabled(enabled)
+        self.tsv_detect_rep_action.setEnabled(enabled)
 
     def _auto_apply_existing_study_mappings(self) -> None:
         """Queue a silent sync of BIDS names with existing output datasets."""
@@ -3035,14 +3044,14 @@ class BIDSManager(QMainWindow):
 
     def _updateMappingControlsEnabled(self):
         """Enable controls that require scanned data."""
-        if not hasattr(self, "tsv_generate_ids_button"):
+        if not hasattr(self, "tsv_generate_ids_action"):
             return
         has_data = self.mapping_table.rowCount() > 0
-        self.tsv_generate_ids_button.setEnabled(has_data)
-        if hasattr(self, "tsv_sort_button"):
-            self.tsv_sort_button.setEnabled(has_data)
-        if hasattr(self, "tsv_save_button"):
-            self.tsv_save_button.setEnabled(has_data)
+        self.tsv_generate_ids_action.setEnabled(has_data)
+        if hasattr(self, "tsv_sort_action"):
+            self.tsv_sort_action.setEnabled(has_data)
+        if hasattr(self, "tsv_save_action"):
+            self.tsv_save_action.setEnabled(has_data)
         self.last_rep_box.setEnabled(has_data)
         self.name_choice.setEnabled(has_data)
         if not has_data:
