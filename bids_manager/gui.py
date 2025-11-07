@@ -1825,6 +1825,9 @@ class BIDSManager(QMainWindow):
         self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
         self.mapping_table.itemChanged.connect(self._onMappingItemChanged)
         btn_row_tsv = QHBoxLayout()
+        self.tsv_save_button = QPushButton("Save changes")
+        self.tsv_save_button.setEnabled(False)
+        self.tsv_save_button.clicked.connect(self.applyMappingChanges)
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
         self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
@@ -1834,6 +1837,7 @@ class BIDSManager(QMainWindow):
         self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
         metadata_layout.addWidget(self.mapping_table)
         btn_row_tsv.addStretch()
+        btn_row_tsv.addWidget(self.tsv_save_button)
         btn_row_tsv.addWidget(self.tsv_load_button)
         btn_row_tsv.addWidget(self.tsv_generate_ids_button)
         btn_row_tsv.addWidget(self.tsv_detect_rep_button)
@@ -3037,6 +3041,8 @@ class BIDSManager(QMainWindow):
         self.tsv_generate_ids_button.setEnabled(has_data)
         if hasattr(self, "tsv_sort_button"):
             self.tsv_sort_button.setEnabled(has_data)
+        if hasattr(self, "tsv_save_button"):
+            self.tsv_save_button.setEnabled(has_data)
         self.last_rep_box.setEnabled(has_data)
         self.name_choice.setEnabled(has_data)
         if not has_data:
