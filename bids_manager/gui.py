@@ -1827,8 +1827,6 @@ class BIDSManager(QMainWindow):
         btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
-        self.tsv_apply_button = QPushButton("Apply changes")
-        self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
         self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
         self.tsv_generate_ids_button.setEnabled(False)
         self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
@@ -1837,7 +1835,6 @@ class BIDSManager(QMainWindow):
         metadata_layout.addWidget(self.mapping_table)
         btn_row_tsv.addStretch()
         btn_row_tsv.addWidget(self.tsv_load_button)
-        btn_row_tsv.addWidget(self.tsv_apply_button)
         btn_row_tsv.addWidget(self.tsv_generate_ids_button)
         btn_row_tsv.addWidget(self.tsv_detect_rep_button)
         btn_row_tsv.addStretch()
@@ -2402,9 +2399,7 @@ class BIDSManager(QMainWindow):
                 pass
 
         self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
-        QTimer.singleShot(0, self.populateSpecificTree)
-        self._updateMappingControlsEnabled()
+        self._schedule_mapping_refresh()
 
         if hasattr(self, "log_text"):
             summary = ", ".join(
@@ -2857,7 +2852,7 @@ class BIDSManager(QMainWindow):
             existing_ids.add(sid)
 
         self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
+        self._schedule_mapping_refresh()
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
         QTimer.singleShot(0, self._updateScanExistingEnabled)
@@ -2904,34 +2899,35 @@ class BIDSManager(QMainWindow):
         if not has_data:
             self.last_rep_box.setChecked(False)
 
-    def _onMappingItemChanged(self, item):
-        """Handle edits in the scanned data table."""
-        if self._loading_mapping_table or item is None:
-            return
-        if item.column() != 2:
-            # We only care about changes to the StudyDescription column here.
+    def _sync_row_info_from_table(self, row: int) -> None:
+        """Update cached ``row_info`` details after an in-place table edit."""
+        if not (0 <= row < len(self.row_info)):
             return
 
-        raw_text = item.text().strip()
-        cleaned = normalize_study_name(raw_text)
+        def _text(col: int) -> str:
+            item = self.mapping_table.item(row, col)
+            return item.text().strip() if item is not None else ""
 
-        if cleaned != item.text():
-            # Temporarily block signals so updating the text does not trigger
-            # additional ``itemChanged`` notifications.
-            self.mapping_table.blockSignals(True)
-            item.setText(cleaned)
-            self.mapping_table.blockSignals(False)
+        info = self.row_info[row]
+        info['study'] = _text(2)
+        info['bids'] = _text(5)
+        info['given'] = _text(7)
+        info['ses'] = _text(8)
+        info['seq'] = _text(9)
+        info['rep'] = _text(13)
+        info['mod'] = _text(14)
+        info['modb'] = _text(15)
 
-        row = item.row()
-        if 0 <= row < len(self.row_info):
-            self.row_info[row]['study'] = cleaned
+    def _schedule_mapping_refresh(self) -> None:
+        """Queue UI updates that reflect the current mapping table."""
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
 
-        bids_item = self.mapping_table.item(row, 5)
-        if bids_item is not None:
-            bids_item.setData(Qt.UserRole, cleaned)
-
-        # Recompute the set of known studies so preview generation detects when
-        # multiple studies are present after the edit.
+    def _update_study_set(self) -> None:
+        """Recompute list of studies present in the mapping table."""
         self.study_set = set()
         for r in range(self.mapping_table.rowCount()):
             study_item = self.mapping_table.item(r, 2)
@@ -2941,11 +2937,45 @@ class BIDSManager(QMainWindow):
             if study_text:
                 self.study_set.add(study_text)
 
-        self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
-        QTimer.singleShot(0, self.populateSpecificTree)
-        QTimer.singleShot(0, self.generatePreview)
-        self._updateDetectRepeatEnabled()
+    def _onMappingItemChanged(self, item):
+        """Handle edits in the scanned data table."""
+        if self._loading_mapping_table or item is None:
+            return
+
+        column = item.column()
+        row = item.row()
+
+        if column == 2:
+            raw_text = item.text().strip()
+            cleaned = normalize_study_name(raw_text)
+
+            if cleaned != item.text():
+                # Temporarily block signals so updating the text does not trigger
+                # additional ``itemChanged`` notifications.
+                self.mapping_table.blockSignals(True)
+                item.setText(cleaned)
+                self.mapping_table.blockSignals(False)
+
+            self._sync_row_info_from_table(row)
+
+            bids_item = self.mapping_table.item(row, 5)
+            if bids_item is not None:
+                bids_item.setData(Qt.UserRole, cleaned)
+
+            self._update_study_set()
+            self._rebuild_lookup_maps()
+            self._schedule_mapping_refresh()
+            return
+
+        if column == 0:
+            # Checkbox state changed; refresh dependent views.
+            self._schedule_mapping_refresh()
+            return
+
+        if column in {5, 7, 8, 9, 13, 14, 15}:
+            self._sync_row_info_from_table(row)
+            self._rebuild_lookup_maps()
+            self._schedule_mapping_refresh()
 
     def detectRepeatedSequences(self):
         """Detect repeated sequences within each subject and assign numbers."""
