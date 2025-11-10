@@ -3998,11 +3998,21 @@ class BIDSManager(QMainWindow):
                 return Qt.PartiallyChecked
             return Qt.Unchecked
 
+        multi_study = len(tree_map) > 1
+
         for study, sub_map in sorted(tree_map.items()):
             st_item = QTreeWidgetItem([study])
-            st_item.setFlags(st_item.flags() | Qt.ItemIsUserCheckable)
-            st_item.setCheckState(0, _state(self.study_rows.get(study, [])))
-            st_item.setData(0, Qt.UserRole, ('study', study))
+            if multi_study:
+                # Only expose the study-level checkbox when the dataset includes
+                # multiple studies so that users do not see a redundant single
+                # checkbox for the only available study.
+                st_item.setFlags(st_item.flags() | Qt.ItemIsUserCheckable)
+                st_item.setCheckState(0, _state(self.study_rows.get(study, [])))
+                st_item.setData(0, Qt.UserRole, ('study', study))
+            else:
+                # Remove the user-checkable flag to hide the checkbox while
+                # keeping the study label visible for context.
+                st_item.setFlags(st_item.flags() & ~Qt.ItemIsUserCheckable)
             for subj, ses_map in sorted(sub_map.items()):
                 su_item = QTreeWidgetItem([subj])
                 su_item.setFlags(su_item.flags() | Qt.ItemIsUserCheckable)
