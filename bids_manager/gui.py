@@ -7962,7 +7962,12 @@ class MetadataViewer(QWidget):
                     result['surface_type'] = 'freesurfer'
                 elif dicom:
                     # ``stop_before_pixels`` avoids loading heavy pixel data
-                    result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
+                    dataset = pydicom.dcmread(str(path), stop_before_pixels=True)
+                    result['ds'] = dataset
+                    # Preparing the nested metadata representation inside the
+                    # worker keeps the GUI responsive when large headers are
+                    # parsed.
+                    result['dicom_tree'] = self._dicom_dataset_to_tree(dataset)
             except Exception as exc:  # pragma: no cover - interactive load errors
                 load_error = exc
 
@@ -8008,7 +8013,7 @@ class MetadataViewer(QWidget):
             self._setup_surface_toolbar()
             self.viewer = self._surface_view(path, self.surface_data)
         elif dicom:
-            self.viewer = self._dicom_view(path, result.get('ds'))
+            self.viewer = self._dicom_view(path, result.get('dicom_tree'))
             self.toolbar.addStretch()
         elif ext in ['.html', '.htm']:
             self.viewer = self._html_view(path)
@@ -8879,8 +8884,40 @@ class MetadataViewer(QWidget):
         tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         return tbl
 
-    def _dicom_view(self, path: Path, dataset) -> QTreeWidget:
-        """Display DICOM metadata in a read-only tree."""
+    def _dicom_dataset_to_tree(self, dataset) -> Dict[str, Any]:
+        """Return a nested mapping representing the supplied DICOM dataset.
+
+        Iterating over all elements, especially sequences, can be expensive for
+        large headers.  Performing the conversion in a worker thread keeps the
+        GUI responsive while still producing a structure that mirrors the
+        hierarchical layout of the dataset for display.
+        """
+
+        def ds_to_dict(ds) -> Dict[str, Any]:
+            mapping: Dict[str, Any] = {}
+            if ds is None:
+                return mapping
+            for elem in ds:
+                name = elem.keyword or elem.name
+                if elem.VR == "SQ":  # Sequence elements contain nested datasets
+                    mapping[name] = [ds_to_dict(item) for item in elem.value]
+                else:
+                    # ``str`` ensures even binary/text values are rendered in a
+                    # readable form inside the tree widget.
+                    try:
+                        mapping[name] = str(elem.value)
+                    except Exception:
+                        mapping[name] = "<unavailable>"
+            return mapping
+
+        file_meta = getattr(dataset, "file_meta", None)
+        return {
+            "File Meta Information": ds_to_dict(file_meta),
+            "Dataset": ds_to_dict(dataset),
+        }
+
+    def _dicom_view(self, path: Path, metadata: Optional[Dict[str, Any]]) -> QTreeWidget:
+        """Display precomputed DICOM metadata in a read-only tree."""
 
         tree = QTreeWidget()
         tree.setColumnCount(2)
@@ -8890,23 +8927,7 @@ class MetadataViewer(QWidget):
         hdr.setSectionResizeMode(0, QHeaderView.Interactive)
         hdr.setSectionResizeMode(1, QHeaderView.Interactive)
 
-        # Convert ``pydicom`` dataset to nested dictionaries for display
-        def ds_to_dict(ds):
-            out = {}
-            for elem in ds:
-                name = elem.keyword or elem.name
-                if elem.VR == "SQ":  # sequence of items
-                    out[name] = [ds_to_dict(item) for item in elem.value]
-                else:
-                    out[name] = str(elem.value)
-            return out
-
-        data = {
-            "File Meta Information": ds_to_dict(dataset.file_meta)
-            if getattr(dataset, "file_meta", None)
-            else {},
-            "Dataset": ds_to_dict(dataset),
-        }
+        data = metadata or {"File Meta Information": {}, "Dataset": {}}
         self._populate_json(tree.invisibleRootItem(), data, editable=False)
         tree.expandAll()
         tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
