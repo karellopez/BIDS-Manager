@@ -2208,10 +2208,6 @@ class BIDSManager(QMainWindow):
 
         # Internal menu bar for Edit features
         menu = QMenuBar()
-        if sys.platform == "darwin":
-            # Force a widget-local menu on macOS so options remain visible
-            # within the Editor tab instead of moving to the global menu bar.
-            menu.setNativeMenuBar(False)
         menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         menu.setMaximumHeight(24)
         file_menu = menu.addMenu("File")
