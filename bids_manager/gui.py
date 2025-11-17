@@ -102,6 +102,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
+    QSurfaceFormat,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -113,6 +114,42 @@ import random
 import string
 import math
 from bids_manager import dicom_inventory
+
+
+def _configure_legacy_opengl_context() -> None:
+    """Ensure macOS requests a compatibility OpenGL profile.
+
+    ``pyqtgraph`` relies on legacy fixed-function OpenGL entry points such as
+    :func:`glMatrixMode`.  macOS defaults to a modern core profile that rejects
+    these calls, which leads to ``GL_INVALID_OPERATION`` errors and a blank
+    viewport.  Requesting a compatibility profile restores access to the
+    necessary functionality without affecting other platforms.
+    """
+
+    if not sys.platform.startswith("darwin"):
+        return
+
+    try:
+        current = QSurfaceFormat.defaultFormat()
+        profile = current.profile()
+        version = (current.majorVersion(), current.minorVersion())
+        if profile == QSurfaceFormat.CompatibilityProfile and version >= (2, 1):
+            return
+    except Exception:
+        # ``defaultFormat`` can raise if Qt is only partially initialised.
+        # Fall back to setting a fresh format in that case.
+        pass
+
+    fmt = QSurfaceFormat()
+    fmt.setRenderableType(QSurfaceFormat.OpenGL)
+    fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
+    fmt.setVersion(2, 1)
+    fmt.setDepthBufferSize(24)
+    fmt.setStencilBufferSize(8)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
+
+_configure_legacy_opengl_context()
 from bids_manager.schema_renamer import (
     DEFAULT_SCHEMA_DIR,
     DERIVATIVES_PIPELINE_NAME,
