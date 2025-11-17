@@ -102,6 +102,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
+    QSurfaceFormat,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -148,6 +149,17 @@ except Exception:  # pragma: no cover - optional dependency
     gl = None
     gl_shaders = None
     HAS_PYQTGRAPH = False
+
+if HAS_PYQTGRAPH and sys.platform == "darwin":
+    # ``GLViewWidget`` relies on the fixed function pipeline which macOS no
+    # longer exposes when Qt requests a modern core profile.  Forcing a
+    # compatibility profile ensures the legacy ``glMatrixMode`` operations used
+    # by PyQtGraph continue to work on Apple devices.
+    fmt = QSurfaceFormat()
+    fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
+    fmt.setRenderableType(QSurfaceFormat.OpenGL)
+    fmt.setVersion(2, 1)
+    QSurfaceFormat.setDefaultFormat(fmt)
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
