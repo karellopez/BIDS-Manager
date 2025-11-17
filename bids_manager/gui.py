@@ -150,16 +150,45 @@ except Exception:  # pragma: no cover - optional dependency
     gl_shaders = None
     HAS_PYQTGRAPH = False
 
-if HAS_PYQTGRAPH and sys.platform == "darwin":
-    # ``GLViewWidget`` relies on the fixed function pipeline which macOS no
-    # longer exposes when Qt requests a modern core profile.  Forcing a
-    # compatibility profile ensures the legacy ``glMatrixMode`` operations used
-    # by PyQtGraph continue to work on Apple devices.
+
+def _make_mac_compatible_gl_format() -> Optional[QSurfaceFormat]:
+    """Build the OpenGL surface format required by PyQtGraph on macOS.
+
+    ``GLViewWidget`` still relies on the fixed-function pipeline.  Modern
+    versions of macOS hide those entry points unless Qt opts into the legacy
+    compatibility profile, so we create the format lazily instead of changing
+    Qt's global default (which breaks WebGL in the embedded Chromium view).
+    """
+
+    if not HAS_PYQTGRAPH or sys.platform != "darwin":
+        return None
+
     fmt = QSurfaceFormat()
     fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
     fmt.setRenderableType(QSurfaceFormat.OpenGL)
     fmt.setVersion(2, 1)
-    QSurfaceFormat.setDefaultFormat(fmt)
+    return fmt
+
+
+def _create_gl_view_widget(*args: Any, **kwargs: Any):
+    """Instantiate ``GLViewWidget`` while preserving WebGL on macOS.
+
+    The helper applies the compatibility surface format only to the widgets
+    that need it, avoiding the Chromium/WebEngine warnings triggered when we
+    forced the format globally.
+    """
+
+    if not HAS_PYQTGRAPH or gl is None:
+        raise RuntimeError("PyQtGraph is not available; GL widgets cannot be created")
+
+    view = gl.GLViewWidget(*args, **kwargs)
+    fmt = _make_mac_compatible_gl_format()
+    if fmt is not None:
+        try:
+            view.setFormat(fmt)
+        except Exception:
+            logging.exception("Failed to apply macOS compatibility GL format")
+    return view
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -5260,7 +5289,7 @@ class Volume3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
-        self.view = gl.GLViewWidget()
+        self.view = _create_gl_view_widget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -6800,7 +6829,7 @@ class Surface3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the mesh when interacting with the viewport.
-        self.view = gl.GLViewWidget()
+        self.view = _create_gl_view_widget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -7556,7 +7585,7 @@ class FreeSurferSurfaceDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        self.view = gl.GLViewWidget()
+        self.view = _create_gl_view_widget()
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
