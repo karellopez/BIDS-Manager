@@ -150,39 +150,16 @@ except Exception:  # pragma: no cover - optional dependency
     gl_shaders = None
     HAS_PYQTGRAPH = False
 
-def _create_gl_view_widget() -> Optional["gl.GLViewWidget"]:
-    """Build a ``GLViewWidget`` with the correct OpenGL profile on macOS.
-
-    QtWebEngine (Chromium) requires a 3.2+ Core profile to expose WebGL on
-    Apple hardware while PyQtGraph's ``GLViewWidget`` still relies on the legacy
-    fixed-function pipeline that is only available through a 2.1 compatibility
-    context.  Instead of changing the default format globally—which breaks
-    Chromium—we temporarily request a compatibility format just for the lifetime
-    of the widget constructor and immediately restore the original Qt defaults.
-    On other platforms we simply instantiate the widget directly.
-    """
-
-    if not HAS_PYQTGRAPH or gl is None:
-        return None
-
-    if sys.platform != "darwin":
-        return gl.GLViewWidget()
-
-    original_format = QSurfaceFormat.defaultFormat()
-    compat_format = QSurfaceFormat(original_format)
-    compat_format.setProfile(QSurfaceFormat.CompatibilityProfile)
-    compat_format.setRenderableType(QSurfaceFormat.OpenGL)
-    compat_format.setVersion(2, 1)
-
-    QSurfaceFormat.setDefaultFormat(compat_format)
-    try:
-        widget = gl.GLViewWidget()
-    finally:
-        # Immediately restore the OpenGL defaults expected by QtWebEngine so
-        # Chromium can continue to use hardware acceleration/WebGL.
-        QSurfaceFormat.setDefaultFormat(original_format)
-
-    return widget
+if HAS_PYQTGRAPH and sys.platform == "darwin":
+    # ``GLViewWidget`` relies on the fixed function pipeline which macOS no
+    # longer exposes when Qt requests a modern core profile.  Forcing a
+    # compatibility profile ensures the legacy ``glMatrixMode`` operations used
+    # by PyQtGraph continue to work on Apple devices.
+    fmt = QSurfaceFormat()
+    fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
+    fmt.setRenderableType(QSurfaceFormat.OpenGL)
+    fmt.setVersion(2, 1)
+    QSurfaceFormat.setDefaultFormat(fmt)
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -5283,11 +5260,7 @@ class Volume3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
-        self.view = _create_gl_view_widget()
-        if self.view is None:  # pragma: no cover - optional dependency missing at runtime
-            raise RuntimeError(
-                "Unable to initialise the PyQtGraph 3-D viewer without a valid OpenGL widget."
-            )
+        self.view = gl.GLViewWidget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -6827,11 +6800,7 @@ class Surface3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the mesh when interacting with the viewport.
-        self.view = _create_gl_view_widget()
-        if self.view is None:  # pragma: no cover - optional dependency missing at runtime
-            raise RuntimeError(
-                "Unable to initialise the PyQtGraph 3-D viewer without a valid OpenGL widget."
-            )
+        self.view = gl.GLViewWidget()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -7587,11 +7556,7 @@ class FreeSurferSurfaceDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        self.view = _create_gl_view_widget()
-        if self.view is None:  # pragma: no cover - optional dependency missing at runtime
-            raise RuntimeError(
-                "Unable to initialise the PyQtGraph 3-D viewer without a valid OpenGL widget."
-            )
+        self.view = gl.GLViewWidget()
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
