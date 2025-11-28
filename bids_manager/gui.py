@@ -81,6 +81,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import (
     Qt,
+    QCoreApplication,
     QModelIndex,
     QTimer,
     QProcess,
@@ -102,6 +103,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
+    QSurfaceFormat,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -5248,7 +5250,24 @@ class Volume3DDialog(QDialog):
 
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
+        gl_format_reset = None
+        gl_format = None
+        if sys.platform == "darwin":
+            gl_format_reset = QSurfaceFormat.defaultFormat()
+            gl_format = QSurfaceFormat()
+            gl_format.setRenderableType(QSurfaceFormat.OpenGL)
+            gl_format.setProfile(QSurfaceFormat.CompatibilityProfile)
+            gl_format.setVersion(2, 1)
+            # Apply a temporary compatibility profile so the GLViewWidget receives
+            # a context macOS accepts while leaving the default intact for
+            # QtWebEngine (used for WebGL in other parts of the app).
+            QSurfaceFormat.setDefaultFormat(gl_format)
+
         self.view = gl.GLViewWidget()
+        if gl_format is not None and hasattr(self.view, "setFormat"):
+            self.view.setFormat(gl_format)
+        if gl_format_reset is not None:
+            QSurfaceFormat.setDefaultFormat(gl_format_reset)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -8971,6 +8990,8 @@ def main() -> None:
             )
         except Exception:
             pass
+    if sys.platform == "darwin":
+        QCoreApplication.setAttribute(Qt.AA_UseDesktopOpenGL)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     if ICON_FILE.exists():
