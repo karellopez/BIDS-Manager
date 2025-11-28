@@ -8994,6 +8994,7 @@ def main() -> None:
             pass
     if sys.platform == "darwin":
         QCoreApplication.setAttribute(Qt.AA_UseDesktopOpenGL)
+
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     if ICON_FILE.exists():
