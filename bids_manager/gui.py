@@ -171,20 +171,6 @@ def _mac_compatibility_format() -> Optional[QSurfaceFormat]:
     gl_format.setVersion(2, 1)
     return gl_format
 
-
-def _mac_webengine_format() -> Optional[QSurfaceFormat]:
-    """Return a hardware-accelerated OpenGL Core profile for Qt WebEngine on macOS."""
-
-    if sys.platform != "darwin":
-        return None
-
-    gl_format = QSurfaceFormat()
-    gl_format.setRenderableType(QSurfaceFormat.OpenGL)
-    gl_format.setProfile(QSurfaceFormat.CoreProfile)
-    # Qt WebEngine requires a 3.2+ Core profile; 4.1 matches the native macOS support
-    gl_format.setVersion(4, 1)
-    return gl_format
-
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
 
@@ -9007,7 +8993,7 @@ def main() -> None:
             pass
     if sys.platform == "darwin":
         QCoreApplication.setAttribute(Qt.AA_UseDesktopOpenGL)
-        gl_format = _mac_webengine_format()
+
         if gl_format is not None:
             QSurfaceFormat.setDefaultFormat(gl_format)
     app = QApplication(sys.argv)
