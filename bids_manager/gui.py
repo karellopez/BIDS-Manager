@@ -76,7 +76,7 @@ from PyQt5.QtWidgets import (
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea,
-    QToolButton, QOpenGLWidget,
+    QToolButton
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import (
@@ -5268,8 +5268,6 @@ class Volume3DDialog(QDialog):
             self.view.setFormat(gl_format)
         if gl_format_reset is not None:
             QSurfaceFormat.setDefaultFormat(gl_format_reset)
-        if hasattr(self.view, "setUpdateBehavior"):
-            self.view.setUpdateBehavior(QOpenGLWidget.NoPartialUpdate)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
