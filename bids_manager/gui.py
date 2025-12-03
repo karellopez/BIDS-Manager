@@ -1177,21 +1177,18 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         self._base_font = app.font()
         screen = app.primaryScreen()
-        # Detect the OS DPI scaling.  ``logicalDotsPerInch`` returns the
-        # effective DPI taking the system scaling factor into account.  We store
-        # the percentage relative to the base 96 DPI.
-        if screen is not None:
-            try:
-                self._os_dpi = round(screen.logicalDotsPerInch() / 96 * 100)
-            except Exception:
-                self._os_dpi = 100
-        else:
-            self._os_dpi = 100
+        # Detect the OS DPI scaling in a resilient way.  ``logicalDotsPerInch``
+        # is usually the most accurate value because it already factors in the
+        # operating-system scale factor.  On some platforms (e.g. X11 with
+        # unusual monitor reporting) this can be inaccurate, so we fall back to
+        # the device pixel ratio when needed.  The result is stored as a
+        # percentage relative to the 96 DPI base expected by Qt.
+        self._os_dpi = self._detect_system_dpi(screen)
 
-        # User requested DPI scale (100% by default).  The actual font scaling
-        # is calculated relative to ``self._os_dpi`` so that the GUI renders at
-        # the expected size even when the system DPI is above 100%.
-        self.dpi_scale = 100
+        # User-requested DPI scale.  By default we start from the detected
+        # system value so that the UI matches the OS scaling out of the box.
+        # Users can still fine-tune the value manually via the DPI dialog.
+        self.dpi_scale = self._os_dpi
 
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
@@ -1266,7 +1263,8 @@ class BIDSManager(QMainWindow):
         self.dpi_file = self.pref_dir / "dpi_scale.txt"
         # Load any previously stored DPI preference so the UI scale persists
         # across sessions.  Invalid or out-of-range values fall back to the
-        # default of 100%.
+        # detected system scale.  This keeps the first launch aligned with the
+        # host environment while preserving user tweaks afterwards.
         if self.dpi_file.exists():
             try:
                 saved_dpi = int(self.dpi_file.read_text().strip())
@@ -1674,24 +1672,68 @@ class BIDSManager(QMainWindow):
         """Apply current DPI scaling to the application font."""
         app = QApplication.instance()
         font = QFont(self._base_font)
-        # Calculate font size relative to the system DPI so that ``dpi_scale``
-        # represents the desired scaling independent of the OS setting.
-        scaled = max(
-            1, int(self._base_font.pointSize() * self.dpi_scale / self._os_dpi)
-        )
+        base_size = self._base_font.pointSizeF() or float(self._base_font.pointSize())
+        # Calculate the font size relative to the detected system DPI so that
+        # ``dpi_scale`` always represents the intended scale percentage of the
+        # 96-DPI baseline.  Using a ratio keeps the default matching the OS while
+        # letting users make incremental adjustments without surprises.
+        scale_ratio = max(0.5, min(2.0, self.dpi_scale / max(self._os_dpi, 1)))
+        scaled = max(1.0, base_size * scale_ratio)
         if self.current_theme in ("Contrast", "Contrast White"):
             font.setWeight(QFont.Bold)
-            font.setPointSize(scaled + 1)
+            font.setPointSizeF(scaled + 1)
         else:
             font.setWeight(QFont.Normal)
-            font.setPointSize(scaled)
+            font.setPointSizeF(scaled)
         app.setFont(font)
 
         # Ensure the tab labels also scale with the selected DPI
         if hasattr(self, "tabs"):
             tab_font = QFont(font)
-            tab_font.setPointSize(font.pointSize() + 1)
+            tab_font.setPointSizeF(font.pointSizeF() + 1)
             self.tabs.setFont(tab_font)
+
+    def _detect_system_dpi(self, screen):
+        """Return the system DPI percentage relative to 96 with fallbacks.
+
+        The logic prefers ``logicalDotsPerInch`` (Qt's effective DPI that already
+        accounts for the OS scale).  When that value is implausible we try the
+        physical DPI and the device pixel ratio, selecting the first reasonable
+        candidate.  This helps avoid wildly large or tiny UI defaults on
+        platforms that misreport DPI values.
+        """
+
+        if screen is None:
+            return 100
+
+        candidates = []
+        try:
+            logical = screen.logicalDotsPerInch()
+            if logical > 1:
+                candidates.append(logical / 96 * 100)
+        except Exception:
+            pass
+
+        try:
+            physical = screen.physicalDotsPerInch()
+            if physical > 1:
+                candidates.append(physical / 96 * 100)
+        except Exception:
+            pass
+
+        try:
+            ratio = screen.devicePixelRatio()
+            if ratio > 0:
+                candidates.append(ratio * 100)
+        except Exception:
+            pass
+
+        for candidate in candidates:
+            if 25 <= candidate <= 400:
+                return int(round(candidate))
+
+        # Fallback to a safe default when nothing sensible is reported.
+        return 100
 
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
@@ -4676,9 +4718,9 @@ class DpiSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # ``current`` is expressed as a percentage relative to a base scale of
-        # 100, regardless of the system's DPI setting.  A value of 100 thus
-        # keeps the GUI size unchanged, while values above or below enlarge or
-        # shrink it respectively.
+        # 100 (96 DPI).  The main window passes the detected system value by
+        # default so the initial UI matches the host environment.  Users can
+        # still nudge the scale above or below that baseline as needed.
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Scale (%):"))
