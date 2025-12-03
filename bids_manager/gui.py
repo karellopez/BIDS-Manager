@@ -1275,6 +1275,11 @@ class BIDSManager(QMainWindow):
             if saved_dpi is not None:
                 self.dpi_scale = max(50, min(200, saved_dpi))
         self.seq_dict_file = dicom_inventory.SEQ_DICT_FILE
+        # Flag used to automatically reapply the suffix dictionary after a fresh
+        # scan.  This keeps the scanned data table in sync with the latest
+        # custom patterns without overriding manual edits made later via
+        # ``applyMappingChanges``.
+        self._apply_sequence_on_load = False
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -1915,10 +1920,9 @@ class BIDSManager(QMainWindow):
         dict_layout.addWidget(self.seq_tabs_widget)
         dict_btn_row = QHBoxLayout()
         dict_btn_row.addStretch()
-        self.seq_apply_button = QPushButton("Apply")
-        self.seq_apply_button.clicked.connect(self.applySequenceDictionary)
-        dict_btn_row.addWidget(self.seq_apply_button)
         self.seq_save_button = QPushButton("Save")
+        # Saving the suffix dictionary also applies the changes immediately so
+        # users do not need a separate "Apply" step.
         self.seq_save_button.clicked.connect(self.saveSequenceDictionary)
         dict_btn_row.addWidget(self.seq_save_button)
         restore_btn = QPushButton("Restore defaults")
@@ -2565,6 +2569,12 @@ class BIDSManager(QMainWindow):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
+        # Remember to reapply the suffix dictionary automatically once the new
+        # scan results have been loaded.  This ensures custom patterns take
+        # effect immediately after a rescan without requiring another manual
+        # save on the suffix tab.
+        self._apply_sequence_on_load = self.use_custom_patterns_box.isChecked()
+
         # Clear the log so each scan run starts with a fresh history for the
         # user.
         self.log_text.clear()
@@ -2791,6 +2801,10 @@ class BIDSManager(QMainWindow):
             self._start_conflict_scan()
         else:
             self.log_text.append("TSV generation failed.")
+            # Avoid auto-applying the suffix dictionary when the scan failed;
+            # the mapping table will not be refreshed and we should not reuse
+            # the pending flag for future loads.
+            self._apply_sequence_on_load = False
 
     def stopInventory(self):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
@@ -2801,6 +2815,9 @@ class BIDSManager(QMainWindow):
             self.tsv_stop_button.setEnabled(False)
             self._stop_spinner()
             self.log_text.append("TSV generation cancelled.")
+            # Reset pending suffix reapplication because no new TSV will be
+            # loaded after a cancellation.
+            self._apply_sequence_on_load = False
 
     def applyMappingChanges(self):
         """Save edits in the scanned data table back to the TSV and refresh."""
@@ -3502,6 +3519,13 @@ class BIDSManager(QMainWindow):
             if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
                 self._onLastRepToggled(True)
 
+            if self._apply_sequence_on_load:
+                # Auto-apply the suffix dictionary after a fresh scan so the
+                # latest custom patterns are reflected in the newly loaded
+                # mapping table without requiring another manual save.
+                self.applySequenceDictionary()
+                self._apply_sequence_on_load = False
+
             # Populate naming table
             self.naming_table.blockSignals(True)
             self.naming_table.setRowCount(0)
@@ -3899,8 +3923,6 @@ class BIDSManager(QMainWindow):
             button.setEnabled(enabled)
         for button in self.custom_remove_buttons.values():
             button.setEnabled(enabled)
-        if hasattr(self, "seq_apply_button"):
-            self.seq_apply_button.setEnabled(enabled)
         if hasattr(self, "seq_save_button"):
             self.seq_save_button.setEnabled(enabled)
 
@@ -4013,7 +4035,10 @@ class BIDSManager(QMainWindow):
             f"Updated suffix patterns in {self.seq_dict_file}",
         )
         self._refresh_suffix_dictionary()
+        # Applying the sequence dictionary immediately updates the scanned data
+        # table so users do not need to trigger "Save changes" separately.
         self.applySequenceDictionary()
+        self.applyMappingChanges()
 
     def restoreSequenceDefaults(self) -> None:
         dicom_inventory.restore_sequence_dictionary()
