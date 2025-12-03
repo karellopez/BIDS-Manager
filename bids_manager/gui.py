@@ -1223,6 +1223,10 @@ class BIDSManager(QMainWindow):
         self.existing_used = {}
         self.use_bids_names = True
 
+        # Track repeat-detection state so we can notify the user when new
+        # duplicates are found and keep the "Only last repeats" option in sync.
+        self._last_repeat_count = 0
+
         # Flag used to skip expensive updates while the mapping table is being
         # populated programmatically.  ``QTableWidget`` emits ``itemChanged``
         # signals even when values are assigned in code, so we guard callbacks
@@ -2881,6 +2885,85 @@ class BIDSManager(QMainWindow):
                     break
         self.tsv_detect_rep_action.setEnabled(enabled)
 
+    @staticmethod
+    def _is_visual_only_sequence(sequence: str, modality: str = "") -> bool:
+        """Return ``True`` when the sequence should remain view-only."""
+
+        seq_lower = (sequence or "").lower()
+        mod_lower = (modality or "").lower()
+        # The check is intentionally substring-based so variations such as
+        # "Phoenix Report" or "Scout Image" are also captured.
+        visual_tokens = ("phoenix report", "scout image", "report")
+        return any(tok in seq_lower for tok in visual_tokens) or any(
+            tok in mod_lower for tok in visual_tokens
+        )
+
+    def _apply_visual_only_rules(self, row: int) -> None:
+        """Disable inclusion toggles for rows that must stay view-only."""
+
+        if not (0 <= row < self.mapping_table.rowCount()):
+            return
+        include_item = self.mapping_table.item(row, 0)
+        if include_item is None or row >= len(self.row_info):
+            return
+
+        is_visual_only = bool(self.row_info[row].get("visual_only"))
+        # Temporarily silence table signals while we adjust checkbox flags so
+        # we do not trigger downstream refreshes.
+        prev_block = self.mapping_table.signalsBlocked()
+        self.mapping_table.blockSignals(True)
+        try:
+            if is_visual_only:
+                include_item.setCheckState(Qt.Unchecked)
+                include_item.setFlags(
+                    (include_item.flags() & ~Qt.ItemIsEditable)
+                    & ~Qt.ItemIsUserCheckable
+                    & ~Qt.ItemIsEnabled
+                )
+                include_item.setToolTip(
+                    "Reports and scout images are shown for reference only."
+                )
+            else:
+                include_item.setFlags(
+                    (include_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                    & ~Qt.ItemIsEditable
+                )
+                include_item.setToolTip("")
+        finally:
+            self.mapping_table.blockSignals(prev_block)
+
+    def _count_non_visual_repeats(self) -> int:
+        """Return the number of repeated acquisitions excluding visual-only rows."""
+
+        count = 0
+        for info in self.row_info:
+            if info.get("visual_only"):
+                continue
+            rep_val = str(info.get("rep") or "").strip()
+            if rep_val.isdigit() and int(rep_val) > 1:
+                count += 1
+        return count
+
+    def _maybe_notify_repeats(self) -> None:
+        """Inform the user when new repeats are detected and sync selection."""
+
+        if not hasattr(self, "last_rep_box"):
+            return
+        repeat_count = self._count_non_visual_repeats()
+        if repeat_count > 0:
+            if not self.last_rep_box.isChecked():
+                self.last_rep_box.setChecked(True)
+            if self._last_repeat_count == 0:
+                QMessageBox.information(
+                    self,
+                    "Repeated sequences detected",
+                    (
+                        "Repeated acquisitions were found. The \"Only last repeats\" "
+                        "option is now active to keep the latest instance selected."
+                    ),
+                )
+        self._last_repeat_count = repeat_count
+
     def _auto_apply_existing_study_mappings(self) -> None:
         """Queue a silent sync of BIDS names with existing output datasets."""
 
@@ -3075,6 +3158,8 @@ class BIDSManager(QMainWindow):
         info['rep'] = _text(13)
         info['mod'] = _text(14)
         info['modb'] = _text(15)
+        info['visual_only'] = self._is_visual_only_sequence(info['seq'], info['mod'])
+        self._apply_visual_only_rules(row)
 
     def _schedule_mapping_refresh(self) -> None:
         """Queue UI updates that reflect the current mapping table."""
@@ -3167,6 +3252,7 @@ class BIDSManager(QMainWindow):
             self.row_info[i]['rep'] = str(val) if str(val) else ''
 
         self._rebuild_lookup_maps()
+        self._maybe_notify_repeats()
         QTimer.singleShot(0, self.populateModalitiesTree)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
@@ -3349,7 +3435,9 @@ class BIDSManager(QMainWindow):
                     'prop_base': prop_base,
                     'n_files': _clean(row.get('n_files')),
                     'acq_time': _clean(row.get('acq_time')),
+                    'visual_only': self._is_visual_only_sequence(seq, mod),
                 })
+                self._apply_visual_only_rules(r)
             self.log_text.append("Loaded TSV into mapping table.")
 
             # Apply always-exclude patterns before building lookup tables
@@ -3357,6 +3445,7 @@ class BIDSManager(QMainWindow):
 
             # Build modality/sequence lookup for tree interactions
             self._rebuild_lookup_maps()
+            self._maybe_notify_repeats()
 
             self.populateModalitiesTree()
             self.populateSpecificTree()
@@ -3487,11 +3576,17 @@ class BIDSManager(QMainWindow):
                     mod_item.setCheckState(0, Qt.Unchecked)
                 mod_item.setData(0, Qt.UserRole, ('mod', modb, mod))
                 for (seq, rep), info in sorted(seqs.items()):
+                    visual_only = bool(info.get("visual_only"))
                     label = seq
                     if rep:
                         label = f"{seq} (rep {rep})"
                     seq_item = QTreeWidgetItem([label])
-                    seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
+                    if visual_only:
+                        seq_item.setFlags(
+                            (seq_item.flags() & ~Qt.ItemIsUserCheckable) & ~Qt.ItemIsEnabled
+                        )
+                    else:
+                        seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
                     rows = self.seq_rows.get((modb, mod, seq, rep), [])
                     states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
                     if states and all(states):
@@ -3551,6 +3646,8 @@ class BIDSManager(QMainWindow):
         else:
             rows = []
         for r in rows:
+            if self.row_info[r].get("visual_only"):
+                continue
             self.mapping_table.item(r, 0).setCheckState(state)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
@@ -3618,15 +3715,16 @@ class BIDSManager(QMainWindow):
             rep_num = int(info['rep']) if str(info['rep']).isdigit() else 1
             groups.setdefault(key, []).append((rep_num, idx))
         for items in groups.values():
-            if len(items) < 2:
+            filtered = [entry for entry in items if not self.row_info[entry[1]].get("visual_only")]
+            if len(filtered) < 2:
                 continue
             if checked:
-                max_idx = max(items, key=lambda x: x[0])[1]
-                for _, i in items:
+                max_idx = max(filtered, key=lambda x: x[0])[1]
+                for _, i in filtered:
                     st = Qt.Checked if i == max_idx else Qt.Unchecked
                     self.mapping_table.item(i, 0).setCheckState(st)
             else:
-                for _, i in items:
+                for _, i in filtered:
                     self.mapping_table.item(i, 0).setCheckState(Qt.Checked)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
@@ -3921,6 +4019,8 @@ class BIDSManager(QMainWindow):
         self.spec_mod_rows_given = {}
         self.spec_seq_rows_given = {}
         for idx, info in enumerate(self.row_info):
+            if info.get("visual_only"):
+                continue
             # Populate lookup tables using BIDS subject names
             self.modb_rows.setdefault(info['modb'], []).append(idx)
             self.mod_rows.setdefault((info['modb'], info['mod']), []).append(idx)
@@ -4056,7 +4156,12 @@ class BIDSManager(QMainWindow):
                                 files = str(info['n_files'])
                                 time = info['acq_time']
                                 sq_item = QTreeWidgetItem([label, files, time])
-                                sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
+                                if info.get("visual_only"):
+                                    sq_item.setFlags(
+                                        (sq_item.flags() & ~Qt.ItemIsUserCheckable) & ~Qt.ItemIsEnabled
+                                    )
+                                else:
+                                    sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
                                 if self.use_bids_names:
                                     rows = self.spec_seq_rows.get((study, subj, ses, modb, mod, seq, rep), [])
                                 else:
@@ -4091,14 +4196,20 @@ class BIDSManager(QMainWindow):
         if role[0] == 'modb':
             modb = role[1]
             for r in self.modb_rows.get(modb, []):
+                if self.row_info[r].get("visual_only"):
+                    continue
                 self.mapping_table.item(r, 0).setCheckState(state)
         elif role[0] == 'mod':
             modb, mod = role[1], role[2]
             for r in self.mod_rows.get((modb, mod), []):
+                if self.row_info[r].get("visual_only"):
+                    continue
                 self.mapping_table.item(r, 0).setCheckState(state)
         elif role[0] == 'seq':
             modb, mod, seq, rep = role[1], role[2], role[3], role[4]
             for r in self.seq_rows.get((modb, mod, seq, rep), []):
+                if self.row_info[r].get("visual_only"):
+                    continue
                 self.mapping_table.item(r, 0).setCheckState(state)
         QTimer.singleShot(0, self.populateModalitiesTree)
 
