@@ -3374,11 +3374,17 @@ class BIDSManager(QMainWindow):
                 self.mapping_table.setItem(r, 5, bids_item)
 
                 subj_item = QTableWidgetItem(_clean(row.get('subject')))
-                subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
+                # Subject identifiers come from generated mappings or utilities
+                # such as ``generateUniqueIDs``; keep them read-only in the
+                # scanned data viewer so users do not alter them manually.
+                subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 6, subj_item)
 
                 given_item = QTableWidgetItem(_clean(row.get('GivenName')))
-                given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
+                # "GivenName" (the generated unique ID) must not be edited
+                # directly in the scanned data table to avoid inconsistencies
+                # with the subject mapping utilities.
+                given_item.setFlags(given_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 7, given_item)
 
                 session = _clean(row.get('session'))
@@ -3387,7 +3393,9 @@ class BIDSManager(QMainWindow):
                 self.mapping_table.setItem(r, 8, ses_item)
 
                 seq_item = QTableWidgetItem(_clean(row.get('sequence')))
-                seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
+                # Preserve the original DICOM sequence information as read-only
+                # so the viewer remains a faithful reflection of the scan data.
+                seq_item.setFlags(seq_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 9, seq_item)
 
                 preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
