@@ -3340,6 +3340,20 @@ class BIDSManager(QMainWindow):
         self._loading_mapping_table = True
         try:
             df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+
+            # Respect custom suffix patterns when building preview names by
+            # re-deriving modalities with the active dictionary before
+            # computing BIDS proposals.  This keeps freshly scanned tables in
+            # sync with the "Use custom suffix patterns" toggle without
+            # requiring a manual "Save" on the suffix tab first.
+            if self.use_custom_patterns_box.isChecked():
+                for idx, row in df.iterrows():
+                    seq = str(row.get("sequence") or "")
+                    mod = dicom_inventory.guess_modality(seq)
+                    modb = dicom_inventory.modality_to_container(mod)
+                    df.at[idx, "modality"] = mod
+                    df.at[idx, "modality_bids"] = modb
+
             preview_map = _compute_bids_preview(df, self._schema)
             df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
             df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
