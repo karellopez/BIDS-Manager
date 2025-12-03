@@ -1275,11 +1275,6 @@ class BIDSManager(QMainWindow):
             if saved_dpi is not None:
                 self.dpi_scale = max(50, min(200, saved_dpi))
         self.seq_dict_file = dicom_inventory.SEQ_DICT_FILE
-        # Flag used to automatically reapply the suffix dictionary after a fresh
-        # scan.  This keeps the scanned data table in sync with the latest
-        # custom patterns without overriding manual edits made later via
-        # ``applyMappingChanges``.
-        self._apply_sequence_on_load = False
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -1920,9 +1915,10 @@ class BIDSManager(QMainWindow):
         dict_layout.addWidget(self.seq_tabs_widget)
         dict_btn_row = QHBoxLayout()
         dict_btn_row.addStretch()
+        self.seq_apply_button = QPushButton("Apply")
+        self.seq_apply_button.clicked.connect(self.applySequenceDictionary)
+        dict_btn_row.addWidget(self.seq_apply_button)
         self.seq_save_button = QPushButton("Save")
-        # Saving the suffix dictionary also applies the changes immediately so
-        # users do not need a separate "Apply" step.
         self.seq_save_button.clicked.connect(self.saveSequenceDictionary)
         dict_btn_row.addWidget(self.seq_save_button)
         restore_btn = QPushButton("Restore defaults")
@@ -2569,12 +2565,6 @@ class BIDSManager(QMainWindow):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
-        # Remember to reapply the suffix dictionary automatically once the new
-        # scan results have been loaded.  This ensures custom patterns take
-        # effect immediately after a rescan without requiring another manual
-        # save on the suffix tab.
-        self._apply_sequence_on_load = self.use_custom_patterns_box.isChecked()
-
         # Clear the log so each scan run starts with a fresh history for the
         # user.
         self.log_text.clear()
@@ -2801,10 +2791,6 @@ class BIDSManager(QMainWindow):
             self._start_conflict_scan()
         else:
             self.log_text.append("TSV generation failed.")
-            # Avoid auto-applying the suffix dictionary when the scan failed;
-            # the mapping table will not be refreshed and we should not reuse
-            # the pending flag for future loads.
-            self._apply_sequence_on_load = False
 
     def stopInventory(self):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
@@ -2815,9 +2801,6 @@ class BIDSManager(QMainWindow):
             self.tsv_stop_button.setEnabled(False)
             self._stop_spinner()
             self.log_text.append("TSV generation cancelled.")
-            # Reset pending suffix reapplication because no new TSV will be
-            # loaded after a cancellation.
-            self._apply_sequence_on_load = False
 
     def applyMappingChanges(self):
         """Save edits in the scanned data table back to the TSV and refresh."""
@@ -3326,42 +3309,6 @@ class BIDSManager(QMainWindow):
         self._apply_existing_study_mappings(silent=False)
 
 
-    def _prop_path(self, row: pd.Series) -> str:
-        """Build a Proposed BIDS path for preview rows."""
-
-        base = row.get("proposed_basename")
-        dt = row.get("proposed_datatype")
-        if not base:
-            return ""
-        ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
-        return f"{dt}/{base}{ext}"
-
-    def _apply_proposed_names(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute datatype/basename proposals for the provided DataFrame."""
-
-        preview_map = _compute_bids_preview(df, self._schema)
-        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-        df["Proposed BIDS name"] = df.apply(self._prop_path, axis=1)
-        return df
-
-    def _sync_proposed_names_to_table(self, df: pd.DataFrame) -> None:
-        """Refresh Proposed BIDS name cells and cached row info from ``df``."""
-
-        for i in range(min(self.mapping_table.rowCount(), len(df))):
-            proposed = _clean(df.at[i, "Proposed BIDS name"])
-            dt_val = _clean(df.at[i, "proposed_datatype"])
-            base_val = _clean(df.at[i, "proposed_basename"])
-
-            preview_item = self.mapping_table.item(i, 10)
-            if preview_item is not None:
-                preview_item.setText(proposed)
-
-            if i < len(self.row_info):
-                self.row_info[i]["prop_dt"] = dt_val
-                self.row_info[i]["prop_base"] = base_val
-
-
     def loadMappingTable(self):
         logging.info("loadMappingTable → Loading TSV into table …")
         """
@@ -3376,7 +3323,19 @@ class BIDSManager(QMainWindow):
         self._loading_mapping_table = True
         try:
             df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-            df = self._apply_proposed_names(df)
+            preview_map = _compute_bids_preview(df, self._schema)
+            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+
+            def _prop_path(r):
+                base = r.get("proposed_basename")
+                dt = r.get("proposed_datatype")
+                if not base:
+                    return ""
+                ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+                return f"{dt}/{base}{ext}"
+
+            df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
             self.inventory_df = df
 
             # ----- load existing mappings without altering the TSV -----
@@ -3542,15 +3501,6 @@ class BIDSManager(QMainWindow):
             self.populateSpecificTree()
             if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
                 self._onLastRepToggled(True)
-
-            if self._apply_sequence_on_load:
-                # Auto-apply the suffix dictionary after a fresh scan so the
-                # latest custom patterns are reflected in the newly loaded
-                # mapping table without requiring another manual save.
-                self.applySequenceDictionary()
-                if self.inventory_df is not None:
-                    self._sync_proposed_names_to_table(self.inventory_df)
-                self._apply_sequence_on_load = False
 
             # Populate naming table
             self.naming_table.blockSignals(True)
@@ -3949,6 +3899,8 @@ class BIDSManager(QMainWindow):
             button.setEnabled(enabled)
         for button in self.custom_remove_buttons.values():
             button.setEnabled(enabled)
+        if hasattr(self, "seq_apply_button"):
+            self.seq_apply_button.setEnabled(enabled)
         if hasattr(self, "seq_save_button"):
             self.seq_save_button.setEnabled(enabled)
 
@@ -4061,10 +4013,7 @@ class BIDSManager(QMainWindow):
             f"Updated suffix patterns in {self.seq_dict_file}",
         )
         self._refresh_suffix_dictionary()
-        # Applying the sequence dictionary immediately updates the scanned data
-        # table so users do not need to trigger "Save changes" separately.
         self.applySequenceDictionary()
-        self.applyMappingChanges()
 
     def restoreSequenceDefaults(self) -> None:
         dicom_inventory.restore_sequence_dictionary()
@@ -4094,24 +4043,6 @@ class BIDSManager(QMainWindow):
                 if i < len(self.row_info):
                     self.row_info[i]['mod'] = mod
                     self.row_info[i]['modb'] = modb
-
-        # Refresh the BIDS preview to reflect the updated modality guesses so
-        # rescans immediately present accurate proposed filenames.
-        if self.inventory_df is not None:
-            refreshed_df = self.inventory_df.copy()
-            for i in range(min(self.mapping_table.rowCount(), len(refreshed_df))):
-                refreshed_df.at[i, "modality"] = self.mapping_table.item(i, 14).text()
-                refreshed_df.at[i, "modality_bids"] = self.mapping_table.item(i, 15).text()
-                refreshed_df.at[i, "sequence"] = self.mapping_table.item(i, 9).text()
-                refreshed_df.at[i, "BIDS_name"] = self.mapping_table.item(i, 5).text()
-                refreshed_df.at[i, "subject"] = self.mapping_table.item(i, 6).text()
-                refreshed_df.at[i, "GivenName"] = self.mapping_table.item(i, 7).text()
-                refreshed_df.at[i, "session"] = self.mapping_table.item(i, 8).text()
-                refreshed_df.at[i, "rep"] = self.mapping_table.item(i, 13).text()
-
-            refreshed_df = self._apply_proposed_names(refreshed_df)
-            self.inventory_df = refreshed_df
-            self._sync_proposed_names_to_table(refreshed_df)
             self._rebuild_lookup_maps()
             QTimer.singleShot(0, self.populateModalitiesTree)
             QTimer.singleShot(0, self.populateSpecificTree)
