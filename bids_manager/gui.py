@@ -102,6 +102,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
+    QScreen,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -1177,16 +1178,12 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         self._base_font = app.font()
         screen = app.primaryScreen()
-        # Detect the OS DPI scaling.  ``logicalDotsPerInch`` returns the
-        # effective DPI taking the system scaling factor into account.  We store
-        # the percentage relative to the base 96 DPI.
-        if screen is not None:
-            try:
-                self._os_dpi = round(screen.logicalDotsPerInch() / 96 * 100)
-            except Exception:
-                self._os_dpi = 100
-        else:
-            self._os_dpi = 100
+        # Detect the OS DPI scaling in a way that adapts to different platforms
+        # and Qt high-DPI modes.  ``logicalDotsPerInch`` reports the scaled DPI,
+        # while ``devicePixelRatio`` captures additional per-screen scaling
+        # applied by Qt.  We normalise everything relative to the common baseline
+        # of 96 DPI so that 100% represents an unscaled UI.
+        self._os_dpi = self._detect_os_dpi_percent(screen)
 
         # User requested DPI scale (100% by default).  The actual font scaling
         # is calculated relative to ``self._os_dpi`` so that the GUI renders at
@@ -1670,14 +1667,64 @@ class BIDSManager(QMainWindow):
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         return brightness < 128
 
+    def _detect_os_dpi_percent(self, screen: Optional[QScreen]) -> int:
+        """
+        Estimate the system DPI scale as a percentage of the 96 DPI baseline.
+
+        Qt exposes both ``logicalDotsPerInch`` (which already accounts for the
+        OS scaling factor) and ``devicePixelRatio`` (which captures additional
+        per-monitor scaling applied by Qt itself).  Combining these values gives
+        a more robust default across Linux and Windows, where the reported DPI
+        can otherwise be too low (tiny UI) or too high (huge UI).
+        """
+
+        if screen is None:
+            return 100
+
+        base_dpi = 96.0
+        try:
+            logical_dpi = float(screen.logicalDotsPerInch())
+        except Exception:
+            logical_dpi = base_dpi
+
+        try:
+            device_ratio = float(screen.devicePixelRatio())
+        except Exception:
+            device_ratio = 1.0
+
+        logical_scale = (
+            logical_dpi / base_dpi
+            if logical_dpi > 0 and math.isfinite(logical_dpi)
+            else 1.0
+        )
+        pixel_scale = device_ratio if device_ratio > 0 and math.isfinite(device_ratio) else 1.0
+
+        # Prefer the larger of the logical DPI and Qt-specific pixel ratio so we
+        # do not underestimate scaling on high-DPI displays.  Clamp to a sensible
+        # range to avoid runaway values from misreported hardware.
+        scale = max(logical_scale, pixel_scale)
+        scale = min(4.0, max(0.5, scale))
+
+        return int(round(scale * 100))
+
     def _apply_font_scale(self) -> None:
         """Apply current DPI scaling to the application font."""
         app = QApplication.instance()
         font = QFont(self._base_font)
         # Calculate font size relative to the system DPI so that ``dpi_scale``
-        # represents the desired scaling independent of the OS setting.
+        # represents the desired scaling independent of the OS setting.  Using
+        # ``self._os_dpi`` (percentage relative to 96 DPI) ensures that the
+        # chosen scale counteracts platform-specific defaults such as Windows'
+        # 125–150% scaling while still allowing fine-grained user control.
         scaled = max(
-            1, int(self._base_font.pointSize() * self.dpi_scale / self._os_dpi)
+            1,
+            int(
+                round(
+                    self._base_font.pointSize()
+                    * (self.dpi_scale / 100)
+                    / (self._os_dpi / 100)
+                )
+            ),
         )
         if self.current_theme in ("Contrast", "Contrast White"):
             font.setWeight(QFont.Bold)
