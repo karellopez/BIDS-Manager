@@ -64,6 +64,7 @@ except ModuleNotFoundError as exc:
 from pathlib import Path
 from collections import defaultdict
 from functools import cmp_to_key
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from joblib import Parallel, delayed
 from pandas.core.tools.datetimes import guess_datetime_format
@@ -102,6 +103,7 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
+    QSurfaceFormat,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -148,6 +150,35 @@ except Exception:  # pragma: no cover - optional dependency
     gl = None
     gl_shaders = None
     HAS_PYQTGRAPH = False
+
+
+@contextmanager
+def _temporary_macos_opengl_fallback() -> Any:
+    """Temporarily apply a compatibility OpenGL profile for macOS 3-D views.
+
+    Qt caches the default surface format globally. On macOS the WebEngine stack
+    benefits from the native OpenGL profile, but ``pyqtgraph``'s legacy
+    fixed-function pipeline requires the older compatibility profile to render
+    3-D scenes correctly. This context manager swaps the default format only
+    while a ``GLViewWidget``-backed dialog is active so WebGL-based widgets keep
+    using the optimised configuration once the 3-D viewer is closed.
+    """
+
+    if sys.platform != "darwin":
+        yield False
+        return
+
+    previous_format = QSurfaceFormat.defaultFormat()
+    fallback_format = QSurfaceFormat(previous_format)
+    fallback_format.setRenderableType(QSurfaceFormat.OpenGL)
+    fallback_format.setProfile(QSurfaceFormat.CompatibilityProfile)
+    fallback_format.setVersion(2, 1)
+
+    try:
+        QSurfaceFormat.setDefaultFormat(fallback_format)
+        yield True
+    finally:
+        QSurfaceFormat.setDefaultFormat(previous_format)
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -8537,26 +8568,29 @@ class MetadataViewer(QWidget):
             else "3D Volume Viewer"
         )
 
-        try:
-            dialog = Volume3DDialog(
-                self,
-                self.data,
-                meta=getattr(self, "_nifti_meta", {}),
-                voxel_sizes=voxel_sizes,
-                default_mode=default_mode,
-                title=title,
-                dark_theme=self._is_dark_theme(),
-            )
-        except Exception as exc:  # pragma: no cover - interactive error reporting
-            logging.exception("Failed to initialise 3-D viewer")
-            QMessageBox.critical(
-                self,
-                "3D Viewer",
-                f"Unable to open 3D view: {exc}",
-            )
-            return
+        # macOS needs a compatibility profile for ``pyqtgraph`` while the rest of
+        # the app (e.g. WebEngine) should keep the default OpenGL configuration.
+        with _temporary_macos_opengl_fallback():
+            try:
+                dialog = Volume3DDialog(
+                    self,
+                    self.data,
+                    meta=getattr(self, "_nifti_meta", {}),
+                    voxel_sizes=voxel_sizes,
+                    default_mode=default_mode,
+                    title=title,
+                    dark_theme=self._is_dark_theme(),
+                )
+            except Exception as exc:  # pragma: no cover - interactive error reporting
+                logging.exception("Failed to initialise 3-D viewer")
+                QMessageBox.critical(
+                    self,
+                    "3D Viewer",
+                    f"Unable to open 3D view: {exc}",
+                )
+                return
 
-        dialog.exec_()
+            dialog.exec_()
 
     def _show_surface_view(self) -> None:
         """Launch the interactive surface renderer for the loaded mesh."""
@@ -8573,35 +8607,38 @@ class MetadataViewer(QWidget):
 
         surface_type = str(self.surface_data.get('type') or '').lower()
 
-        try:
-            if surface_type == 'freesurfer':
-                dialog = FreeSurferSurfaceDialog(
+        # Apply the macOS OpenGL compatibility profile only for 3-D widgets so
+        # WebGL-enabled components continue using the system default.
+        with _temporary_macos_opengl_fallback():
+            try:
+                if surface_type == 'freesurfer':
+                    dialog = FreeSurferSurfaceDialog(
+                        self,
+                        self.surface_data.get('vertices'),
+                        self.surface_data.get('faces'),
+                        title=title,
+                        dark_theme=self._is_dark_theme(),
+                    )
+                else:
+                    dialog = Surface3DDialog(
+                        self,
+                        self.surface_data.get('vertices'),
+                        self.surface_data.get('faces'),
+                        scalars=self.surface_data.get('scalars'),
+                        meta=self.surface_data.get('meta'),
+                        title=title,
+                        dark_theme=self._is_dark_theme(),
+                    )
+            except Exception as exc:  # pragma: no cover - interactive error reporting
+                logging.exception("Failed to initialise surface viewer")
+                QMessageBox.critical(
                     self,
-                    self.surface_data.get('vertices'),
-                    self.surface_data.get('faces'),
-                    title=title,
-                    dark_theme=self._is_dark_theme(),
+                    "Surface Viewer",
+                    f"Unable to open surface view: {exc}",
                 )
-            else:
-                dialog = Surface3DDialog(
-                    self,
-                    self.surface_data.get('vertices'),
-                    self.surface_data.get('faces'),
-                    scalars=self.surface_data.get('scalars'),
-                    meta=self.surface_data.get('meta'),
-                    title=title,
-                    dark_theme=self._is_dark_theme(),
-                )
-        except Exception as exc:  # pragma: no cover - interactive error reporting
-            logging.exception("Failed to initialise surface viewer")
-            QMessageBox.critical(
-                self,
-                "Surface Viewer",
-                f"Unable to open surface view: {exc}",
-            )
-            return
+                return
 
-        dialog.exec_()
+            dialog.exec_()
 
     def _add_field(self):
         """Insert a new key/value pair into JSON tree."""
