@@ -102,7 +102,6 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
-    QSurfaceFormat,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -159,39 +158,6 @@ JOCHEM_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" /
 
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
-
-
-def _set_macos_gl_fallback(widget: Any) -> None:
-    """Apply a macOS-only OpenGL fallback to a specific GL widget.
-
-    The 3-D viewers rely on ``GLViewWidget`` from PyQtGraph, which can fail on
-    macOS unless the OpenGL format explicitly requests the older compatibility
-    profile. Setting a fallback globally would break other parts of the GUI
-    (notably QtWebEngine's WebGL support), so we apply the format directly to
-    the OpenGL widgets used by the 3-D viewers and leave the rest of the
-    application untouched.
-    """
-
-    if sys.platform != "darwin":
-        return
-
-    try:
-        fallback = QSurfaceFormat()
-        fallback.setRenderableType(QSurfaceFormat.OpenGL)
-        fallback.setVersion(2, 1)
-        # macOS only exposes the compatibility profile for OpenGL 3.2+. When
-        # requesting the 2.1 fallback we have to explicitly use ``NoProfile``
-        # or Qt will emit an ``invalid value`` error when creating the context.
-        fallback.setProfile(QSurfaceFormat.NoProfile)
-        fallback.setOption(QSurfaceFormat.DeprecatedFunctions)
-        fallback.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
-        widget.setFormat(fallback)
-    except Exception as exc:  # pragma: no cover - defensive guard for optional deps
-        logging.debug(
-            "Unable to apply macOS OpenGL compatibility fallback to %s: %s",
-            widget,
-            exc,
-        )
 
 
 class _ConflictScannerWorker(QObject):
@@ -5483,10 +5449,6 @@ class Volume3DDialog(QDialog):
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
         self.view = gl.GLViewWidget()
-        # Apply the macOS-specific OpenGL compatibility layer only to the 3-D view
-        # so QtWebEngine (used elsewhere for HTML rendering/WebGL) can continue
-        # using the system-provided OpenGL stack.
-        _set_macos_gl_fallback(self.view)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -7027,10 +6989,6 @@ class Surface3DDialog(QDialog):
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the mesh when interacting with the viewport.
         self.view = gl.GLViewWidget()
-        # Request the macOS-compatible OpenGL profile only for this viewer so
-        # other parts of the application keep the default (WebGL-friendly)
-        # configuration.
-        _set_macos_gl_fallback(self.view)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
@@ -7787,10 +7745,6 @@ class FreeSurferSurfaceDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.view = gl.GLViewWidget()
-        # Use the macOS OpenGL compatibility shim only for this viewer so the
-        # rest of the GUI (including WebGL in embedded browsers) keeps using
-        # the preferred platform OpenGL stack.
-        _set_macos_gl_fallback(self.view)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
