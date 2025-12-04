@@ -102,7 +102,6 @@ from PyQt5.QtGui import (
     QPainter,
     QPen,
     QIcon,
-    QSurfaceFormat,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -9172,16 +9171,6 @@ def main() -> None:
             )
         except Exception:
             pass
-    if sys.platform == "darwin":
-        # macOS defaults to a Core OpenGL profile where fixed-function matrix
-        # calls like ``glMatrixMode`` are invalid. The 3-D viewer relies on
-        # pyqtgraph's fixed-function pipeline, so request a compatibility
-        # context before creating the Qt application.
-        fmt = QSurfaceFormat()
-        fmt.setRenderableType(QSurfaceFormat.OpenGL)
-        fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
-        fmt.setVersion(2, 1)
-        QSurfaceFormat.setDefaultFormat(fmt)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     if ICON_FILE.exists():
