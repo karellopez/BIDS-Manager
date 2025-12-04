@@ -2952,7 +2952,7 @@ class BIDSManager(QMainWindow):
         mod_lower = (modality or "").lower()
         # The check is intentionally substring-based so variations such as
         # "Phoenix Report" or "Scout Image" are also captured.
-        visual_tokens = ("phoenix report", "scout image", "report")
+        visual_tokens = ("phoenix report", "scout", "report")
         return any(tok in seq_lower for tok in visual_tokens) or any(
             tok in mod_lower for tok in visual_tokens
         )
