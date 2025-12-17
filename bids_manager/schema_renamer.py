@@ -398,19 +398,12 @@ def _score_patterns(patterns: Tuple[str, ...], normalized: _NormalizedSeries) ->
     return best
 
 
-def _count_direction_markers(normalized: _NormalizedSeries) -> int:
-    """Return the number of recognised direction markers in ``normalized`` tokens."""
-
-    return sum(1 for tok in normalized.token_set if tok in _DIRECTION_MARKERS)
-
-
 def guess_modality(series: str) -> str:
     """Return the modality label whose patterns best describe ``series``."""
 
     normalized = _normalize_series(series)
-    direction_hits = _count_direction_markers(normalized)
     best_label = "unknown"
-    best_score: Optional[Tuple[int, int, int, int]] = None
+    best_score: Optional[Tuple[int, int, int]] = None
 
     for idx, (label, hint) in enumerate(SEQUENCE_HINTS.items()):
         patterns = hint.patterns
@@ -419,7 +412,7 @@ def guess_modality(series: str) -> str:
         score = _score_patterns(patterns, normalized)
         if score is None:
             continue
-        ranked = (score[0], score[1], direction_hits, -idx)
+        ranked = (score[0], score[1], -idx)
         if best_score is None or ranked > best_score:
             best_label = label
             best_score = ranked
@@ -439,53 +432,12 @@ def modality_to_container(mod: str) -> str:
 
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
 _ACQ_TOKEN = re.compile(r"(?:^|[_-])acq-([a-zA-Z0-9]+)", re.IGNORECASE)
-_DIRECTION_MARKERS = ("ap", "pa", "lr", "rl", "rev")
-
-# Canonical task labels mapped to the substrings that should trigger them.  The
-# mapping intentionally remains small to avoid over-eager task assignment on
-# functional scans that do not explicitly encode paradigm information.
-TASK_HINT_PATTERNS: "OrderedDict[str, Tuple[str, ...]]" = OrderedDict(
-    (
-        ("rest", ("rs", "_rs", "rs_", "rest", "resting")),
-        ("movie", ("movie",)),
-        ("nback", ("nback", "n-back")),
-        ("flanker", ("flanker",)),
-        ("stroop", ("stroop",)),
-        ("motor", ("motor",)),
-        ("checkerboard", ("checker", "checkerboard")),
-        ("exec", ("exec",)),
-        ("paradigm", ("paradigm", "paradigma")),
-        ("sparse", ("sparse",)),
-        ("activation", ("activation",)),
-        ("task", ("task",)),
-    )
-)
 
 
 def _sanitize_token(x: Optional[str]) -> Optional[str]:
     if not x:
         return None
     return _SANITIZE_TOKEN.sub("", x).strip()
-
-
-def _extract_direction_token(sequence: Optional[str]) -> Optional[str]:
-    """Return a standardised direction token from ``sequence`` if present.
-
-    Several centres encode the phase-encoding direction directly in the series
-    description using short markers such as ``AP``/``PA``/``LR``/``RL`` or the
-    more generic ``REV`` (reverse phase).  Capturing this information helps keep
-    proposed names unique and self-descriptive without requiring users to
-    manually provide ``dir`` hints.
-    """
-
-    if not sequence:
-        return None
-
-    clean = _SANITIZE_TOKEN.sub(" ", sequence).lower()
-    m = re.search(r"(?<![a-z0-9])(ap|pa|lr|rl|rev)(?![a-z0-9])", clean)
-    if m:
-        return m.group(1)
-    return None
 
 
 def _extract_acq_token(sequence: Optional[str]) -> Optional[str]:
@@ -517,30 +469,6 @@ def _extract_acq_token(sequence: Optional[str]) -> Optional[str]:
     # hints resolve to the most specific entry.
     best_token, _ = max(candidates, key=lambda item: (len(item[0]), item[1]))
     return best_token
-
-
-def _derive_complex_acq_label(sequence: Optional[str]) -> Optional[str]:
-    """Return a fallback ``acq`` label when ``sequence`` carries rich detail.
-
-    Some centres encode extensive protocol information directly in the series
-    name.  When no explicit ``acq`` label is supplied we prefer to capture that
-    detail in a single ``acq-`` token instead of fragmenting it across task or
-    other entities.  The heuristic triggers when the sequence has several
-    tokens or exceeds a modest length threshold.
-    """
-
-    if not sequence:
-        return None
-
-    normalized = _normalize_series(sequence)
-    cleaned = _sanitize_token(sequence) or ""
-
-    # Require either multiple tokens (rich protocol description) or a long
-    # cleaned string to avoid polluting simple series names with acq hints.
-    if len(normalized.tokens) < 4 and len(cleaned) <= 24:
-        return None
-
-    return cleaned[:48] or None
 
 
 def _strip_run_tokens(sequence: str) -> str:
@@ -581,38 +509,52 @@ def _extract_run_number(sequence: Optional[str]) -> Optional[int]:
     return None
 
 
-def _match_task_hint_from_text(text: Optional[str]) -> Optional[str]:
-    """Return the canonical task label whose pattern matches ``text``."""
-
-    if not text:
-        return None
-
-    explicit = _TASK_TOKEN.search(text)
-    if explicit:
-        token = _sanitize_token(explicit.group(1))
-        if token:
-            return token
-
-    low = text.lower()
-    for label, patterns in TASK_HINT_PATTERNS.items():
-        for pat in patterns:
-            pat_low = pat.lower()
-            if pat_low and pat_low in low:
-                return _sanitize_token(label)
-    return None
-
-
 def _guess_task_from_text(*candidates: Optional[str]) -> Optional[str]:
-    """Extract task name from text candidates using curated patterns only."""
-
+    """Extract task name from text candidates.
+    
+    This function tries to find meaningful task hints, but if none are found,
+    it will return None so the caller can use the full sequence as a fallback
+    to ensure uniqueness.
+    """
+    # First strip run tokens from all candidates
     clean_candidates = [_strip_run_tokens(c) if c else c for c in candidates]
-
+    
     for c in clean_candidates:
-        task = _match_task_hint_from_text(c) or _match_task_hint_from_text(_sanitize_token(c))
-        if task:
-            return task
-
-    # No hint found
+        if not c:
+            continue
+        m = _TASK_TOKEN.search(c)
+        if m:
+            return _sanitize_token(m.group(1))
+    
+    # Check for resting state patterns first
+    resting_patterns = ("rs", "_rs", "rs_", "rest", "resting")
+    for c in clean_candidates:
+        if not c:
+            continue
+        low = c.lower()
+        for pattern in resting_patterns:
+            if pattern in low:
+                return "rest"
+    
+    # Check for other common task patterns
+    task_hints = (
+        # Common explicit task labels
+        "movie", "nback", "flanker", "stroop", "motor", "checker", "checkerboard",
+        # Atypical labels observed in some centers
+        "exec", "paradigma", "paradigm", "sparse", "mb",
+        # Generic fallbacks
+        "task", "activation",
+    )
+    for c in clean_candidates:
+        if not c:
+            continue
+        low = c.lower()
+        for hint in task_hints:
+            if hint in low:
+                return _sanitize_token(hint)
+    
+    # DON'T try to extract parts here - return None so caller can use full sequence
+    # This ensures different sequences never get the same task name
     return None
 
 
@@ -880,14 +822,12 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     # runs) do not collide in their proposed BIDS names.
     run_number = _extract_run_number(series.sequence)
     clean_sequence = _strip_run_tokens(series.sequence)
-    complex_acq = _derive_complex_acq_label(clean_sequence)
 
     # ``task`` labels are mandatory for some suffixes (as per the schema
     # requirements) and also desirable for functional reference scans and
     # physiological recordings so that supporting files share the same base
     # name as their associated BOLD runs.  Treat ``physio`` like ``bold`` and
     # ``sbref`` so that it inherits task/run context from the sequence text.
-    task_assigned = False
     if "task" in required or suffix in ("bold", "sbref", "physio"):
         task_hint = series.extra.get("task") if series.extra else None
 
@@ -901,26 +841,22 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
                     token_s = _sanitize_token(token)
                     if not token_s:
                         continue
-                    mapped_token = _match_task_hint_from_text(token_s)
-                    if mapped_token:
-                        task_hint = mapped_token
-                        break
                     if token_s.lower() in clean_sequence.lower():
-                        task_hint = _match_task_hint_from_text(clean_sequence) or token_s
+                        task_hint = token_s
                         break
 
         # First try explicit or hit-based task hints, then try to guess from
         # the sequence text itself.
         task = _sanitize_token(task_hint) or _guess_task_from_text(clean_sequence)
-        if task:
-            task_assigned = True
-            parts.append(f"task-{task}")
-
-    # If no task could be assigned for functional-like scans, fall back to
-    # capturing the rich sequence description inside ``acq-`` so names remain
-    # unique while respecting the request to avoid synthetic task labels.
-    if suffix in ("bold", "sbref", "physio") and not task_assigned and not complex_acq:
-        complex_acq = _sanitize_token(clean_sequence)[:48] or complex_acq
+        
+        # If no specific task hint found, use the full sanitized sequence
+        # This ensures different sequences NEVER get the same BIDS name
+        if not task:
+            task = _sanitize_token(clean_sequence)[:48]  # Truncate for safety
+            if not task:
+                task = "unknown"
+        
+        parts.append(f"task-{task}")
 
     # Detect DWI derivative from the sequence text itself and adjust datatype
     # and suffix accordingly so Preview/Table point to the derivatives tree and
@@ -932,7 +868,7 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         datatype = "derivatives"
         # Keep an acquisition discriminator for uniqueness between different
         # series descriptions.
-        acq_token = sequence_acq or complex_acq or _sanitize_token(clean_sequence)[:32]
+        acq_token = sequence_acq or _sanitize_token(clean_sequence)[:32]
         if acq_token:
             parts.append(f"acq-{acq_token}")
         parts.append(f"desc-{map_name}")
@@ -964,7 +900,6 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
             _sanitize_token(explicit_acq) if explicit_acq else None,
             sequence_acq,
             _sanitize_token(inf_acq) if inf_acq else None,
-            complex_acq,
         )
         for acq in candidates:
             if acq:
@@ -977,8 +912,6 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         if echo:
             parts.append(f"echo-{echo}")
 
-    if not direction:
-        direction = _extract_direction_token(clean_sequence)
     if direction:
         direction = _sanitize_token(direction)
         if direction:
