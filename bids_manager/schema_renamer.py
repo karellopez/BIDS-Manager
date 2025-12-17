@@ -162,6 +162,7 @@ def _build_default_sequence_hints() -> "OrderedDict[str, SequenceHint]":
             "t1_",
             "t1 ",
             "mprage",
+            "mp2rage",
             "tfl3d",
             "fspgr",
         ),
@@ -173,7 +174,7 @@ def _build_default_sequence_hints() -> "OrderedDict[str, SequenceHint]":
         datatype=anat_dt,
         modality=mri_modality,
         required_entities=(subject_entity,),
-        default_patterns=("t2w", "space", "tse"),
+        default_patterns=("t2w", "space", "tse", "t2", "hires"),
     )
 
     hints["FLAIR"] = SequenceHint(
@@ -252,7 +253,7 @@ def _build_default_sequence_hints() -> "OrderedDict[str, SequenceHint]":
         datatype=func_dt,
         modality=mri_modality,
         required_entities=(subject_entity, task_entity),
-        default_patterns=("fmri", "bold", "task-"),
+        default_patterns=("fmri", "bold", "task-", "study", "test", "epi", "cmrr"),
     )
 
     hints["dwi"] = SequenceHint(
@@ -280,6 +281,7 @@ def _build_default_sequence_hints() -> "OrderedDict[str, SequenceHint]":
             "b0rf",
             "b0_map",
             "b0map",
+            "b0",
         ),
     )
 
