@@ -43,7 +43,7 @@ Source = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
 Tracker = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 
 [project.scripts]
-bids-manager = "bids_manager.gui:main"
+bids-manager = "bids_manager.GUI.main_window:main"
 dicom-inventory = "bids_manager.dicom_inventory:main"
 build-heuristic = "bids_manager.build_heuristic_from_tsv:main"
 run-heudiconv = "bids_manager.run_heudiconv_from_heuristic:main"
@@ -51,8 +51,10 @@ post-conv-renamer = "bids_manager.post_conv_renamer:main"
 fill-bids-ignore = "bids_manager.fill_bids_ignore:main"
 
 [tool.setuptools]
-packages = ["bids_manager"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["bids_manager", "bids_manager.*"]
 
 [tool.setuptools.package-data]
 "bids_manager" = [
