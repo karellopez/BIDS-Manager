@@ -113,7 +113,6 @@ import random
 import string
 import math
 from bids_manager import dicom_inventory
-from bids_manager.editor_tab import init_edit_tab
 from bids_manager.schema_renamer import (
     DEFAULT_SCHEMA_DIR,
     DERIVATIVES_PIPELINE_NAME,
@@ -1317,7 +1316,7 @@ class BIDSManager(QMainWindow):
 
         # Initialize tabs
         self.initConvertTab()
-        init_edit_tab(self, MetadataViewer)
+        self.initEditTab()
         self._updateMappingControlsEnabled()
 
         # Theme support
@@ -2244,6 +2243,87 @@ class BIDSManager(QMainWindow):
         self.preview_tree.expandAll()
 
     # (Rest of code remains unchanged)
+
+    def initEditTab(self):
+        """
+        Set up Edit tab to embed the full functionality of bids_editor_ancpbids.
+        """
+        # This tab provides a file browser, statistics viewer and the metadata
+        # editor used to inspect and modify BIDS sidecars.  It mirrors the
+        # standalone "bids-editor" utility but is embedded in this application.
+        self.edit_tab = QWidget()
+        edit_layout = QVBoxLayout(self.edit_tab)
+        edit_layout.setContentsMargins(10, 10, 10, 10)
+        edit_layout.setSpacing(8)
+
+        # Internal menu bar for Edit features
+        menu = QMenuBar()
+        menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        menu.setMaximumHeight(24)
+        file_menu = menu.addMenu("File")
+        open_act = QAction("Open BIDS…", self)
+        open_act.triggered.connect(self.openBIDSForEdit)
+        file_menu.addAction(open_act)
+        tools_menu = menu.addMenu("Tools")
+        rename_act = QAction("Batch Rename…", self)
+        rename_act.triggered.connect(self.launchBatchRename)
+        tools_menu.addAction(rename_act)
+
+        intended_act = QAction("Set Intended For…", self)
+        intended_act.triggered.connect(self.launchIntendedForEditor)
+        tools_menu.addAction(intended_act)
+
+        refresh_act = QAction("Refresh scans.tsv", self)
+        refresh_act.triggered.connect(self.refreshScansTsv)
+        tools_menu.addAction(refresh_act)
+
+        ignore_act = QAction("Edit .bidsignore…", self)
+        ignore_act.triggered.connect(self.launchBidsIgnore)
+        tools_menu.addAction(ignore_act)
+        edit_layout.addWidget(menu)
+
+        # Splitter between left (tree & stats) and right (metadata)
+        splitter = QSplitter()
+        splitter.setHandleWidth(4)
+
+        # Left panel: BIDSplorer and BIDStatistics
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        left_layout.addWidget(QLabel('<b>BIDSplorer</b>'))
+        self.model = QFileSystemModel()
+        self.model.setRootPath("")
+        self.tree = QTreeView()
+        self.tree.setModel(self.model)
+        self.tree.setEditTriggers(QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
+        self.tree.setColumnHidden(1, True)
+        self.tree.setColumnHidden(3, True)
+        hdr = self.tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.Interactive)
+        left_layout.addWidget(self.tree)
+        self.tree.clicked.connect(self.onTreeClicked)
+
+        left_layout.addWidget(QLabel('<b>BIDStatistics</b>'))
+        self.stats = QTreeWidget()
+        self.stats.setHeaderLabels(["Metric", "Value"])
+        self.stats.setAlternatingRowColors(True)
+        s_hdr = self.stats.header()
+        s_hdr.setSectionResizeMode(0, QHeaderView.Interactive)
+        s_hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+        left_layout.addWidget(self.stats)
+
+        splitter.addWidget(left_panel)
+
+        # Right panel: MetadataViewer (reused from original)
+        self.viewer = MetadataViewer()
+        splitter.addWidget(self.viewer)
+        splitter.setStretchFactor(1, 2)
+
+        edit_layout.addWidget(splitter)
+        self.tabs.addTab(self.edit_tab, "Editor")
 
     def selectDicomDir(self):
         """Select the raw DICOM input directory."""
