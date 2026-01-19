@@ -300,6 +300,33 @@ def _create_flat_color_shader():
     return shader_mod.ShaderProgram(None, [vertex, fragment], uniforms={})
 
 
+def _translucent_gl_options() -> dict:
+    """Return GL state options for reliable alpha blending."""
+
+    from OpenGL.GL import (
+        GL_BLEND,
+        GL_DEPTH_TEST,
+        GL_ONE_MINUS_SRC_ALPHA,
+        GL_SRC_ALPHA,
+    )
+
+    return {
+        "glEnable": GL_BLEND,
+        "glDisable": GL_DEPTH_TEST,
+        "glBlendFunc": (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA),
+        "glDepthMask": False,
+    }
+
+
+def _apply_translucent_options(item, alpha: float) -> None:
+    if item is None:
+        return
+    if alpha < 0.999:
+        item.setGLOptions(_translucent_gl_options())
+    else:
+        item.setGLOptions("opaque")
+
+
 _SLICE_ORIENTATIONS = (
     ("sagittal", 0, "Left", "Right"),
     ("coronal", 1, "Posterior", "Anterior"),
@@ -6715,7 +6742,7 @@ class Volume3DDialog(QDialog):
             self._scatter_item = gl.GLScatterPlotItem(pxMode=True)
             self.view.addItem(self._scatter_item)
         self._scatter_item.setData(pos=coords_mm, color=colors, size=float(self.point_slider.value()))
-        self._scatter_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_translucent_options(self._scatter_item, alpha)
 
         mins = coords_mm.min(axis=0)
         maxs = coords_mm.max(axis=0)
@@ -6851,7 +6878,7 @@ class Volume3DDialog(QDialog):
             self._mesh_item.setMeshData(meshdata=meshdata)
 
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_translucent_options(self._mesh_item, alpha)
 
         mins = np.min(verts, axis=0)
         maxs = np.max(verts, axis=0)
@@ -7700,7 +7727,7 @@ class Surface3DDialog(QDialog):
         else:
             self._mesh_item.setMeshData(meshdata=meshdata)
         self._update_light_shader()
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_translucent_options(self._mesh_item, alpha)
 
         mins = np.min(clipped_verts, axis=0)
         maxs = np.max(clipped_verts, axis=0)
@@ -7873,7 +7900,7 @@ class FreeSurferSurfaceDialog(QDialog):
 
         self._apply_mesh_shader()
         alpha = self.opacity_slider.value() / 100.0
-        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        _apply_translucent_options(self._mesh_item, alpha)
         if not self._initialising:
             self.view.update()
 
