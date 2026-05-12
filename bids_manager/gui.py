@@ -68,18 +68,18 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from joblib import Parallel, delayed
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
     QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QGroupBox, QGridLayout,
-    QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
+    QTextEdit, QTreeView, QTreeWidget, QTreeWidgetItem,
+    QHeaderView, QMessageBox, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
     QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea,
     QToolButton
 )
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import (
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtCore import (
     Qt,
     QModelIndex,
     QTimer,
@@ -93,7 +93,9 @@ from PyQt5.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt5.QtGui import (
+from PyQt6.QtGui import (
+    QAction,
+    QFileSystemModel,
     QPalette,
     QColor,
     QFont,
@@ -103,7 +105,7 @@ from PyQt5.QtGui import (
     QPen,
     QIcon,
 )
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
@@ -186,6 +188,67 @@ class _ConflictScannerWorker(QObject):
             self.failed.emit(str(exc))
         else:
             self.finished.emit(conflicts)
+
+
+class _EegMegWorker(QObject):
+    """Background worker for the EEG/MEG → BIDS pipeline.
+
+    Two modes:
+
+    * ``"scan"``: run :func:`bids_manager.eeg_meg_inventory.scan_eeg_meg`.
+    * ``"convert"``: run :func:`bids_manager.run_mne_bids.run` followed by
+      :class:`bids_manager.bids_metadata_engine.BIDSMetadataEngine`.
+
+    Mode + kwargs are passed in via the constructor so the GUI thread does
+    not need to import the worker modules at startup (mne is heavy).
+    """
+
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, mode: str, kwargs: dict):
+        super().__init__()
+        self._mode = mode
+        self._kwargs = kwargs
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            if self._mode == "scan":
+                from bids_manager.eeg_meg_inventory import scan_eeg_meg
+                df = scan_eeg_meg(self._kwargs["raw_root"], self._kwargs["output_tsv"])
+                self.finished.emit({"mode": "scan", "rows": len(df)})
+                return
+            if self._mode == "convert":
+                from bids_manager.run_mne_bids import run as run_mne
+                from bids_manager.bids_metadata_engine import (
+                    BIDSMetadataEngine, DatasetMetadata,
+                )
+                bids_root = self._kwargs["bids_root"]
+                self.progress.emit("Running mne-bids conversion…")
+                conv = run_mne(self._kwargs["tsv"], self._kwargs["raw_root"],
+                               bids_root, overwrite=True)
+                self.progress.emit("Running BIDS metadata engine…")
+                meta = BIDSMetadataEngine(
+                    bids_root=bids_root,
+                    inventory_tsv=self._kwargs.get("inventory_tsv"),
+                    dataset_meta=DatasetMetadata(name=Path(bids_root).name),
+                ).run()
+                self.finished.emit({
+                    "mode": "convert",
+                    "written": len(conv.written_paths),
+                    "missing_positions": len(conv.missing_positions),
+                    "missing_position_paths": [str(p) for p in conv.missing_positions],
+                    "errors": len(conv.errors),
+                    "error_messages": list(conv.errors),
+                    "meta_files": len(meta.files_written),
+                    "meta_warnings": len(meta.warnings),
+                })
+                return
+            self.failed.emit(f"unknown mode: {self._mode}")
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 def _create_directional_light_shader():
@@ -597,7 +660,7 @@ class AutoFillTableWidget(QTableWidget):
         if not index.isValid():
             return False
         flags = model.flags(index)
-        return bool(flags & Qt.ItemIsEditable)
+        return bool(flags & Qt.ItemFlag.ItemIsEditable)
 
     def _range_is_editable(
         self, rng: Optional[QTableWidgetSelectionRange]
@@ -692,9 +755,9 @@ class AutoFillTableWidget(QTableWidget):
         )
 
         painter = QPainter(self.viewport())
-        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.fillRect(self._handle_rect, self.palette().highlight())
-        border = QPen(self.palette().color(QPalette.Dark))
+        border = QPen(self.palette().color(QPalette.ColorRole.Dark))
         painter.setPen(border)
         painter.drawRect(self._handle_rect)
         painter.end()
@@ -703,14 +766,14 @@ class AutoFillTableWidget(QTableWidget):
     # Mouse interaction handling
     def mousePressEvent(self, event):  # noqa: D401 - Qt override
         if (
-            event.button() == Qt.LeftButton
-            and self._handle_rect.contains(event.pos())
+            event.button() == Qt.MouseButton.LeftButton
+            and self._handle_rect.contains(event.position().toPoint())
             and self._current_selection_range() is not None
         ):
             self._autofill_active = True
             self._autofill_origin_range = self._current_selection_range()
             self._autofill_current_range = self._autofill_origin_range
-            self.viewport().setCursor(Qt.SizeAllCursor)
+            self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
             event.accept()
             return
 
@@ -718,7 +781,7 @@ class AutoFillTableWidget(QTableWidget):
 
     def mouseMoveEvent(self, event):  # noqa: D401 - Qt override
         if self._autofill_active:
-            new_range = self._compute_drag_range(event.pos())
+            new_range = self._compute_drag_range(event.position().toPoint())
             if new_range is not None:
                 self._autofill_current_range = new_range
                 # Replace the selection with the preview range so the user sees
@@ -731,15 +794,15 @@ class AutoFillTableWidget(QTableWidget):
             event.accept()
             return
 
-        if self._handle_rect.contains(event.pos()):
-            self.viewport().setCursor(Qt.CrossCursor)
+        if self._handle_rect.contains(event.position().toPoint()):
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.viewport().unsetCursor()
 
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # noqa: D401 - Qt override
-        if self._autofill_active and event.button() == Qt.LeftButton:
+        if self._autofill_active and event.button() == Qt.MouseButton.LeftButton:
             try:
                 self._finish_autofill()
             finally:
@@ -1076,7 +1139,7 @@ class MappingSortDialog(QDialog):
         controls_layout.addStretch()
         layout.addLayout(controls_layout)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -1156,13 +1219,13 @@ class SubjectDelegate(QStyledItemDelegate):
         return QLineEdit(parent)
 
     def setEditorData(self, editor, index):  # noqa: D401 - Qt override
-        text = index.model().data(index, Qt.EditRole)
+        text = index.model().data(index, Qt.ItemDataRole.EditRole)
         suffix = text[4:] if text.startswith("sub-") else text
         editor.setText(suffix)
         editor.selectAll()
 
     def setModelData(self, editor, model, index):  # noqa: D401 - Qt override
-        model.setData(index, "sub-" + editor.text(), Qt.EditRole)
+        model.setData(index, "sub-" + editor.text(), Qt.ItemDataRole.EditRole)
 
 
 class ShrinkableScrollArea(QScrollArea):
@@ -1192,19 +1255,6 @@ class BIDSManager(QMainWindow):
 
         app = QApplication.instance()
         self._base_font = app.font()
-        screen = app.primaryScreen()
-        # Detect the OS DPI scaling in a resilient way.  ``logicalDotsPerInch``
-        # is usually the most accurate value because it already factors in the
-        # operating-system scale factor.  On some platforms (e.g. X11 with
-        # unusual monitor reporting) this can be inaccurate, so we fall back to
-        # the device pixel ratio when needed.  The result is stored as a
-        # percentage relative to the 96 DPI base expected by Qt.
-        self._os_dpi = self._detect_system_dpi(screen)
-
-        # User-requested DPI scale.  By default we start from the detected
-        # system value so that the UI matches the OS scaling out of the box.
-        # Users can still fine-tune the value manually via the DPI dialog.
-        self.dpi_scale = self._os_dpi
 
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
@@ -1276,20 +1326,6 @@ class BIDSManager(QMainWindow):
             pass
         self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
         self.theme_file = self.pref_dir / "theme.txt"
-        self.dpi_file = self.pref_dir / "dpi_scale.txt"
-        # Load any previously stored DPI preference so the UI scale persists
-        # across sessions.  Invalid or out-of-range values fall back to the
-        # detected system scale.  This keeps the first launch aligned with the
-        # host environment while preserving user tweaks afterwards.
-        if self.dpi_file.exists():
-            try:
-                saved_dpi = int(self.dpi_file.read_text().strip())
-            except ValueError:
-                saved_dpi = None
-            except Exception:
-                saved_dpi = None
-            if saved_dpi is not None:
-                self.dpi_scale = max(50, min(200, saved_dpi))
         self.seq_dict_file = dicom_inventory.SEQ_DICT_FILE
         # Flag used to automatically reapply the suffix dictionary after a fresh
         # scan.  This keeps the scanned data table in sync with the latest
@@ -1347,9 +1383,6 @@ class BIDSManager(QMainWindow):
         self.authorship_btn = QPushButton("Authorship")
         self.authorship_btn.setFixedWidth(90)
         self.authorship_btn.clicked.connect(self.show_authorship_dialog)
-        self.dpi_btn = QPushButton(f"DPI: {self.dpi_scale}%")
-        self.dpi_btn.setFixedWidth(80)
-        self.dpi_btn.clicked.connect(self.show_dpi_dialog)
         # Create a container widget with layout to adjust position
         container = QWidget()
         layout = QHBoxLayout()
@@ -1357,7 +1390,6 @@ class BIDSManager(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(self.theme_btn)
         layout.addWidget(self.cpu_btn)
-        layout.addWidget(self.dpi_btn)
         layout.addWidget(self.authorship_btn)
         container.setLayout(layout)
         # Add the container to the status bar (left-aligned)
@@ -1383,243 +1415,243 @@ class BIDSManager(QMainWindow):
         themes = {}
 
         dark_purple = QPalette()
-        dark_purple.setColor(QPalette.Window, QColor(53, 53, 53))
-        dark_purple.setColor(QPalette.WindowText, Qt.white)
-        dark_purple.setColor(QPalette.Base, QColor(35, 35, 35))
-        dark_purple.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        dark_purple.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
-        dark_purple.setColor(QPalette.ToolTipText, Qt.white)
-        dark_purple.setColor(QPalette.Text, Qt.white)
-        dark_purple.setColor(QPalette.Button, QColor(53, 53, 53))
-        dark_purple.setColor(QPalette.ButtonText, Qt.white)
-        dark_purple.setColor(QPalette.Highlight, QColor(142, 45, 197))
-        dark_purple.setColor(QPalette.HighlightedText, Qt.black)
+        dark_purple.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+        dark_purple.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        dark_purple.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+        dark_purple.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+        dark_purple.setColor(QPalette.ColorRole.ToolTipBase, QColor(65, 65, 65))
+        dark_purple.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        dark_purple.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        dark_purple.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+        dark_purple.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        dark_purple.setColor(QPalette.ColorRole.Highlight, QColor(142, 45, 197))
+        dark_purple.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Dark-purple"] = dark_purple
 
         dark_blue = QPalette()
-        dark_blue.setColor(QPalette.Window, QColor(53, 53, 53))
-        dark_blue.setColor(QPalette.WindowText, Qt.white)
-        dark_blue.setColor(QPalette.Base, QColor(35, 35, 35))
-        dark_blue.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        dark_blue.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
-        dark_blue.setColor(QPalette.ToolTipText, Qt.white)
-        dark_blue.setColor(QPalette.Text, Qt.white)
-        dark_blue.setColor(QPalette.Button, QColor(53, 53, 53))
-        dark_blue.setColor(QPalette.ButtonText, Qt.white)
-        dark_blue.setColor(QPalette.Highlight, QColor(65, 105, 225))
-        dark_blue.setColor(QPalette.HighlightedText, Qt.black)
+        dark_blue.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+        dark_blue.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        dark_blue.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+        dark_blue.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+        dark_blue.setColor(QPalette.ColorRole.ToolTipBase, QColor(65, 65, 65))
+        dark_blue.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        dark_blue.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        dark_blue.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+        dark_blue.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        dark_blue.setColor(QPalette.ColorRole.Highlight, QColor(65, 105, 225))
+        dark_blue.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Dark-blue"] = dark_blue
 
         dark_gold = QPalette()
-        dark_gold.setColor(QPalette.Window, QColor(53, 53, 53))
-        dark_gold.setColor(QPalette.WindowText, Qt.white)
-        dark_gold.setColor(QPalette.Base, QColor(35, 35, 35))
-        dark_gold.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        dark_gold.setColor(QPalette.ToolTipBase, QColor(65, 65, 65))
-        dark_gold.setColor(QPalette.ToolTipText, Qt.white)
-        dark_gold.setColor(QPalette.Text, Qt.white)
-        dark_gold.setColor(QPalette.Button, QColor(53, 53, 53))
-        dark_gold.setColor(QPalette.ButtonText, Qt.white)
-        dark_gold.setColor(QPalette.Highlight, QColor(218, 165, 32))
-        dark_gold.setColor(QPalette.HighlightedText, Qt.black)
+        dark_gold.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+        dark_gold.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        dark_gold.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+        dark_gold.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+        dark_gold.setColor(QPalette.ColorRole.ToolTipBase, QColor(65, 65, 65))
+        dark_gold.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        dark_gold.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        dark_gold.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+        dark_gold.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        dark_gold.setColor(QPalette.ColorRole.Highlight, QColor(218, 165, 32))
+        dark_gold.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Dark-gold"] = dark_gold
 
         light = QPalette()
-        light.setColor(QPalette.Window, Qt.white)
-        light.setColor(QPalette.WindowText, Qt.black)
-        light.setColor(QPalette.Base, QColor(245, 245, 245))
-        light.setColor(QPalette.AlternateBase, Qt.white)
-        light.setColor(QPalette.ToolTipBase, Qt.white)
-        light.setColor(QPalette.ToolTipText, Qt.black)
-        light.setColor(QPalette.Text, Qt.black)
-        light.setColor(QPalette.Button, QColor(240, 240, 240))
-        light.setColor(QPalette.ButtonText, Qt.black)
-        light.setColor(QPalette.Highlight, QColor(100, 149, 237))
-        light.setColor(QPalette.HighlightedText, Qt.white)
+        light.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.white)
+        light.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
+        light.setColor(QPalette.ColorRole.Base, QColor(245, 245, 245))
+        light.setColor(QPalette.ColorRole.AlternateBase, Qt.GlobalColor.white)
+        light.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
+        light.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.black)
+        light.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.black)
+        light.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
+        light.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.black)
+        light.setColor(QPalette.ColorRole.Highlight, QColor(100, 149, 237))
+        light.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         themes["Light"] = light
 
         beige = QPalette()
-        beige.setColor(QPalette.Window, QColor(243, 232, 210))
-        beige.setColor(QPalette.WindowText, Qt.black)
-        beige.setColor(QPalette.Base, QColor(250, 240, 222))
-        beige.setColor(QPalette.AlternateBase, QColor(246, 236, 218))
-        beige.setColor(QPalette.ToolTipBase, QColor(236, 224, 200))
-        beige.setColor(QPalette.ToolTipText, Qt.black)
-        beige.setColor(QPalette.Text, Qt.black)
-        beige.setColor(QPalette.Button, QColor(242, 231, 208))
-        beige.setColor(QPalette.ButtonText, Qt.black)
-        beige.setColor(QPalette.Highlight, QColor(196, 148, 70))
-        beige.setColor(QPalette.HighlightedText, Qt.white)
+        beige.setColor(QPalette.ColorRole.Window, QColor(243, 232, 210))
+        beige.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
+        beige.setColor(QPalette.ColorRole.Base, QColor(250, 240, 222))
+        beige.setColor(QPalette.ColorRole.AlternateBase, QColor(246, 236, 218))
+        beige.setColor(QPalette.ColorRole.ToolTipBase, QColor(236, 224, 200))
+        beige.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.black)
+        beige.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.black)
+        beige.setColor(QPalette.ColorRole.Button, QColor(242, 231, 208))
+        beige.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.black)
+        beige.setColor(QPalette.ColorRole.Highlight, QColor(196, 148, 70))
+        beige.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         themes["Beige"] = beige
 
         ocean = QPalette()
-        ocean.setColor(QPalette.Window, QColor(225, 238, 245))
-        ocean.setColor(QPalette.WindowText, Qt.black)
-        ocean.setColor(QPalette.Base, QColor(240, 248, 252))
-        ocean.setColor(QPalette.AlternateBase, QColor(230, 240, 247))
-        ocean.setColor(QPalette.ToolTipBase, QColor(215, 230, 240))
-        ocean.setColor(QPalette.ToolTipText, Qt.black)
-        ocean.setColor(QPalette.Text, Qt.black)
-        ocean.setColor(QPalette.Button, QColor(213, 234, 242))
-        ocean.setColor(QPalette.ButtonText, Qt.black)
-        ocean.setColor(QPalette.Highlight, QColor(0, 123, 167))
-        ocean.setColor(QPalette.HighlightedText, Qt.white)
+        ocean.setColor(QPalette.ColorRole.Window, QColor(225, 238, 245))
+        ocean.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
+        ocean.setColor(QPalette.ColorRole.Base, QColor(240, 248, 252))
+        ocean.setColor(QPalette.ColorRole.AlternateBase, QColor(230, 240, 247))
+        ocean.setColor(QPalette.ColorRole.ToolTipBase, QColor(215, 230, 240))
+        ocean.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.black)
+        ocean.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.black)
+        ocean.setColor(QPalette.ColorRole.Button, QColor(213, 234, 242))
+        ocean.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.black)
+        ocean.setColor(QPalette.ColorRole.Highlight, QColor(0, 123, 167))
+        ocean.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         themes["Ocean"] = ocean
 
         hc = QPalette()
-        hc.setColor(QPalette.Window, Qt.black)
-        hc.setColor(QPalette.WindowText, Qt.white)
-        hc.setColor(QPalette.Base, Qt.black)
-        hc.setColor(QPalette.AlternateBase, Qt.black)
-        hc.setColor(QPalette.ToolTipBase, Qt.black)
-        hc.setColor(QPalette.ToolTipText, Qt.white)
-        hc.setColor(QPalette.Text, Qt.white)
-        hc.setColor(QPalette.BrightText, Qt.white)
-        hc.setColor(QPalette.Button, Qt.black)
-        hc.setColor(QPalette.ButtonText, Qt.white)
-        hc.setColor(QPalette.Highlight, QColor(255, 215, 0))
-        hc.setColor(QPalette.HighlightedText, Qt.black)
+        hc.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.black)
+        hc.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        hc.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.black)
+        hc.setColor(QPalette.ColorRole.AlternateBase, Qt.GlobalColor.black)
+        hc.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.black)
+        hc.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        hc.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        hc.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.white)
+        hc.setColor(QPalette.ColorRole.Button, Qt.GlobalColor.black)
+        hc.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        hc.setColor(QPalette.ColorRole.Highlight, QColor(255, 215, 0))
+        hc.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Contrast"] = hc
 
         hc_w = QPalette()
-        hc_w.setColor(QPalette.Window, Qt.white)
-        hc_w.setColor(QPalette.WindowText, Qt.black)
-        hc_w.setColor(QPalette.Base, Qt.white)
-        hc_w.setColor(QPalette.AlternateBase, Qt.white)
-        hc_w.setColor(QPalette.ToolTipBase, Qt.white)
-        hc_w.setColor(QPalette.ToolTipText, Qt.black)
-        hc_w.setColor(QPalette.Text, Qt.black)
-        hc_w.setColor(QPalette.BrightText, Qt.black)
-        hc_w.setColor(QPalette.Button, Qt.white)
-        hc_w.setColor(QPalette.ButtonText, Qt.black)
-        hc_w.setColor(QPalette.Highlight, QColor(255, 215, 0))
-        hc_w.setColor(QPalette.HighlightedText, Qt.black)
+        hc_w.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.white)
+        hc_w.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
+        hc_w.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.white)
+        hc_w.setColor(QPalette.ColorRole.AlternateBase, Qt.GlobalColor.white)
+        hc_w.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
+        hc_w.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.black)
+        hc_w.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.black)
+        hc_w.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.black)
+        hc_w.setColor(QPalette.ColorRole.Button, Qt.GlobalColor.white)
+        hc_w.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.black)
+        hc_w.setColor(QPalette.ColorRole.Highlight, QColor(255, 215, 0))
+        hc_w.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Contrast White"] = hc_w
 
         solar = QPalette()
-        solar.setColor(QPalette.Window, QColor(253, 246, 227))
-        solar.setColor(QPalette.WindowText, QColor(101, 123, 131))
-        solar.setColor(QPalette.Base, QColor(255, 250, 240))
-        solar.setColor(QPalette.AlternateBase, QColor(253, 246, 227))
-        solar.setColor(QPalette.ToolTipBase, QColor(238, 232, 213))
-        solar.setColor(QPalette.ToolTipText, QColor(88, 110, 117))
-        solar.setColor(QPalette.Text, QColor(88, 110, 117))
-        solar.setColor(QPalette.Button, QColor(238, 232, 213))
-        solar.setColor(QPalette.ButtonText, QColor(88, 110, 117))
-        solar.setColor(QPalette.Highlight, QColor(38, 139, 210))
-        solar.setColor(QPalette.HighlightedText, Qt.white)
+        solar.setColor(QPalette.ColorRole.Window, QColor(253, 246, 227))
+        solar.setColor(QPalette.ColorRole.WindowText, QColor(101, 123, 131))
+        solar.setColor(QPalette.ColorRole.Base, QColor(255, 250, 240))
+        solar.setColor(QPalette.ColorRole.AlternateBase, QColor(253, 246, 227))
+        solar.setColor(QPalette.ColorRole.ToolTipBase, QColor(238, 232, 213))
+        solar.setColor(QPalette.ColorRole.ToolTipText, QColor(88, 110, 117))
+        solar.setColor(QPalette.ColorRole.Text, QColor(88, 110, 117))
+        solar.setColor(QPalette.ColorRole.Button, QColor(238, 232, 213))
+        solar.setColor(QPalette.ColorRole.ButtonText, QColor(88, 110, 117))
+        solar.setColor(QPalette.ColorRole.Highlight, QColor(38, 139, 210))
+        solar.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         themes["Solar"] = solar
 
         cyber = QPalette()
-        cyber.setColor(QPalette.Window, QColor(20, 20, 30))
-        cyber.setColor(QPalette.WindowText, QColor(0, 255, 255))
-        cyber.setColor(QPalette.Base, QColor(30, 30, 45))
-        cyber.setColor(QPalette.AlternateBase, QColor(25, 25, 35))
-        cyber.setColor(QPalette.ToolTipBase, QColor(45, 45, 65))
-        cyber.setColor(QPalette.ToolTipText, QColor(255, 0, 255))
-        cyber.setColor(QPalette.Text, QColor(0, 255, 255))
-        cyber.setColor(QPalette.Button, QColor(40, 40, 55))
-        cyber.setColor(QPalette.ButtonText, QColor(255, 0, 255))
-        cyber.setColor(QPalette.Highlight, QColor(255, 0, 128))
-        cyber.setColor(QPalette.HighlightedText, Qt.white)
+        cyber.setColor(QPalette.ColorRole.Window, QColor(20, 20, 30))
+        cyber.setColor(QPalette.ColorRole.WindowText, QColor(0, 255, 255))
+        cyber.setColor(QPalette.ColorRole.Base, QColor(30, 30, 45))
+        cyber.setColor(QPalette.ColorRole.AlternateBase, QColor(25, 25, 35))
+        cyber.setColor(QPalette.ColorRole.ToolTipBase, QColor(45, 45, 65))
+        cyber.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 0, 255))
+        cyber.setColor(QPalette.ColorRole.Text, QColor(0, 255, 255))
+        cyber.setColor(QPalette.ColorRole.Button, QColor(40, 40, 55))
+        cyber.setColor(QPalette.ColorRole.ButtonText, QColor(255, 0, 255))
+        cyber.setColor(QPalette.ColorRole.Highlight, QColor(255, 0, 128))
+        cyber.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         themes["Cyber"] = cyber
 
         drac = QPalette()
-        drac.setColor(QPalette.Window, QColor("#282a36"))
-        drac.setColor(QPalette.WindowText, QColor("#f8f8f2"))
-        drac.setColor(QPalette.Base, QColor("#1e1f29"))
-        drac.setColor(QPalette.AlternateBase, QColor("#282a36"))
-        drac.setColor(QPalette.ToolTipBase, QColor("#44475a"))
-        drac.setColor(QPalette.ToolTipText, QColor("#f8f8f2"))
-        drac.setColor(QPalette.Text, QColor("#f8f8f2"))
-        drac.setColor(QPalette.Button, QColor("#44475a"))
-        drac.setColor(QPalette.ButtonText, QColor("#f8f8f2"))
-        drac.setColor(QPalette.Highlight, QColor("#bd93f9"))
-        drac.setColor(QPalette.HighlightedText, Qt.black)
+        drac.setColor(QPalette.ColorRole.Window, QColor("#282a36"))
+        drac.setColor(QPalette.ColorRole.WindowText, QColor("#f8f8f2"))
+        drac.setColor(QPalette.ColorRole.Base, QColor("#1e1f29"))
+        drac.setColor(QPalette.ColorRole.AlternateBase, QColor("#282a36"))
+        drac.setColor(QPalette.ColorRole.ToolTipBase, QColor("#44475a"))
+        drac.setColor(QPalette.ColorRole.ToolTipText, QColor("#f8f8f2"))
+        drac.setColor(QPalette.ColorRole.Text, QColor("#f8f8f2"))
+        drac.setColor(QPalette.ColorRole.Button, QColor("#44475a"))
+        drac.setColor(QPalette.ColorRole.ButtonText, QColor("#f8f8f2"))
+        drac.setColor(QPalette.ColorRole.Highlight, QColor("#bd93f9"))
+        drac.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Dracula"] = drac
 
         nord = QPalette()
-        nord.setColor(QPalette.Window, QColor("#2e3440"))
-        nord.setColor(QPalette.WindowText, QColor("#d8dee9"))
-        nord.setColor(QPalette.Base, QColor("#3b4252"))
-        nord.setColor(QPalette.AlternateBase, QColor("#434c5e"))
-        nord.setColor(QPalette.ToolTipBase, QColor("#4c566a"))
-        nord.setColor(QPalette.ToolTipText, QColor("#eceff4"))
-        nord.setColor(QPalette.Text, QColor("#e5e9f0"))
-        nord.setColor(QPalette.Button, QColor("#4c566a"))
-        nord.setColor(QPalette.ButtonText, QColor("#d8dee9"))
-        nord.setColor(QPalette.Highlight, QColor("#88c0d0"))
-        nord.setColor(QPalette.HighlightedText, Qt.black)
+        nord.setColor(QPalette.ColorRole.Window, QColor("#2e3440"))
+        nord.setColor(QPalette.ColorRole.WindowText, QColor("#d8dee9"))
+        nord.setColor(QPalette.ColorRole.Base, QColor("#3b4252"))
+        nord.setColor(QPalette.ColorRole.AlternateBase, QColor("#434c5e"))
+        nord.setColor(QPalette.ColorRole.ToolTipBase, QColor("#4c566a"))
+        nord.setColor(QPalette.ColorRole.ToolTipText, QColor("#eceff4"))
+        nord.setColor(QPalette.ColorRole.Text, QColor("#e5e9f0"))
+        nord.setColor(QPalette.ColorRole.Button, QColor("#4c566a"))
+        nord.setColor(QPalette.ColorRole.ButtonText, QColor("#d8dee9"))
+        nord.setColor(QPalette.ColorRole.Highlight, QColor("#88c0d0"))
+        nord.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Nord"] = nord
 
         gruv = QPalette()
-        gruv.setColor(QPalette.Window, QColor("#282828"))
-        gruv.setColor(QPalette.WindowText, QColor("#ebdbb2"))
-        gruv.setColor(QPalette.Base, QColor("#32302f"))
-        gruv.setColor(QPalette.AlternateBase, QColor("#3c3836"))
-        gruv.setColor(QPalette.ToolTipBase, QColor("#504945"))
-        gruv.setColor(QPalette.ToolTipText, QColor("#fbf1c7"))
-        gruv.setColor(QPalette.Text, QColor("#ebdbb2"))
-        gruv.setColor(QPalette.Button, QColor("#504945"))
-        gruv.setColor(QPalette.ButtonText, QColor("#ebdbb2"))
-        gruv.setColor(QPalette.Highlight, QColor("#d79921"))
-        gruv.setColor(QPalette.HighlightedText, Qt.black)
+        gruv.setColor(QPalette.ColorRole.Window, QColor("#282828"))
+        gruv.setColor(QPalette.ColorRole.WindowText, QColor("#ebdbb2"))
+        gruv.setColor(QPalette.ColorRole.Base, QColor("#32302f"))
+        gruv.setColor(QPalette.ColorRole.AlternateBase, QColor("#3c3836"))
+        gruv.setColor(QPalette.ColorRole.ToolTipBase, QColor("#504945"))
+        gruv.setColor(QPalette.ColorRole.ToolTipText, QColor("#fbf1c7"))
+        gruv.setColor(QPalette.ColorRole.Text, QColor("#ebdbb2"))
+        gruv.setColor(QPalette.ColorRole.Button, QColor("#504945"))
+        gruv.setColor(QPalette.ColorRole.ButtonText, QColor("#ebdbb2"))
+        gruv.setColor(QPalette.ColorRole.Highlight, QColor("#d79921"))
+        gruv.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Gruvbox"] = gruv
 
         mono = QPalette()
-        mono.setColor(QPalette.Window, QColor("#272822"))
-        mono.setColor(QPalette.WindowText, QColor("#f8f8f2"))
-        mono.setColor(QPalette.Base, QColor("#1e1f1c"))
-        mono.setColor(QPalette.AlternateBase, QColor("#272822"))
-        mono.setColor(QPalette.ToolTipBase, QColor("#3e3d32"))
-        mono.setColor(QPalette.ToolTipText, QColor("#f8f8f2"))
-        mono.setColor(QPalette.Text, QColor("#f8f8f2"))
-        mono.setColor(QPalette.Button, QColor("#3e3d32"))
-        mono.setColor(QPalette.ButtonText, QColor("#f8f8f2"))
-        mono.setColor(QPalette.Highlight, QColor("#a6e22e"))
-        mono.setColor(QPalette.HighlightedText, Qt.black)
+        mono.setColor(QPalette.ColorRole.Window, QColor("#272822"))
+        mono.setColor(QPalette.ColorRole.WindowText, QColor("#f8f8f2"))
+        mono.setColor(QPalette.ColorRole.Base, QColor("#1e1f1c"))
+        mono.setColor(QPalette.ColorRole.AlternateBase, QColor("#272822"))
+        mono.setColor(QPalette.ColorRole.ToolTipBase, QColor("#3e3d32"))
+        mono.setColor(QPalette.ColorRole.ToolTipText, QColor("#f8f8f2"))
+        mono.setColor(QPalette.ColorRole.Text, QColor("#f8f8f2"))
+        mono.setColor(QPalette.ColorRole.Button, QColor("#3e3d32"))
+        mono.setColor(QPalette.ColorRole.ButtonText, QColor("#f8f8f2"))
+        mono.setColor(QPalette.ColorRole.Highlight, QColor("#a6e22e"))
+        mono.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Monokai"] = mono
 
         tokyo = QPalette()
-        tokyo.setColor(QPalette.Window, QColor("#1a1b26"))
-        tokyo.setColor(QPalette.WindowText, QColor("#c0caf5"))
-        tokyo.setColor(QPalette.Base, QColor("#1f2335"))
-        tokyo.setColor(QPalette.AlternateBase, QColor("#24283b"))
-        tokyo.setColor(QPalette.ToolTipBase, QColor("#414868"))
-        tokyo.setColor(QPalette.ToolTipText, QColor("#c0caf5"))
-        tokyo.setColor(QPalette.Text, QColor("#c0caf5"))
-        tokyo.setColor(QPalette.Button, QColor("#414868"))
-        tokyo.setColor(QPalette.ButtonText, QColor("#c0caf5"))
-        tokyo.setColor(QPalette.Highlight, QColor("#7aa2f7"))
-        tokyo.setColor(QPalette.HighlightedText, Qt.white)
+        tokyo.setColor(QPalette.ColorRole.Window, QColor("#1a1b26"))
+        tokyo.setColor(QPalette.ColorRole.WindowText, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.ColorRole.Base, QColor("#1f2335"))
+        tokyo.setColor(QPalette.ColorRole.AlternateBase, QColor("#24283b"))
+        tokyo.setColor(QPalette.ColorRole.ToolTipBase, QColor("#414868"))
+        tokyo.setColor(QPalette.ColorRole.ToolTipText, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.ColorRole.Text, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.ColorRole.Button, QColor("#414868"))
+        tokyo.setColor(QPalette.ColorRole.ButtonText, QColor("#c0caf5"))
+        tokyo.setColor(QPalette.ColorRole.Highlight, QColor("#7aa2f7"))
+        tokyo.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         themes["Tokyo"] = tokyo
 
         mocha = QPalette()
-        mocha.setColor(QPalette.Window, QColor("#1e1e2e"))
-        mocha.setColor(QPalette.WindowText, QColor("#cdd6f4"))
-        mocha.setColor(QPalette.Base, QColor("#181825"))
-        mocha.setColor(QPalette.AlternateBase, QColor("#1e1e2e"))
-        mocha.setColor(QPalette.ToolTipBase, QColor("#313244"))
-        mocha.setColor(QPalette.ToolTipText, QColor("#cdd6f4"))
-        mocha.setColor(QPalette.Text, QColor("#cdd6f4"))
-        mocha.setColor(QPalette.Button, QColor("#313244"))
-        mocha.setColor(QPalette.ButtonText, QColor("#cdd6f4"))
-        mocha.setColor(QPalette.Highlight, QColor("#f38ba8"))
-        mocha.setColor(QPalette.HighlightedText, Qt.black)
+        mocha.setColor(QPalette.ColorRole.Window, QColor("#1e1e2e"))
+        mocha.setColor(QPalette.ColorRole.WindowText, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.ColorRole.Base, QColor("#181825"))
+        mocha.setColor(QPalette.ColorRole.AlternateBase, QColor("#1e1e2e"))
+        mocha.setColor(QPalette.ColorRole.ToolTipBase, QColor("#313244"))
+        mocha.setColor(QPalette.ColorRole.ToolTipText, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.ColorRole.Text, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.ColorRole.Button, QColor("#313244"))
+        mocha.setColor(QPalette.ColorRole.ButtonText, QColor("#cdd6f4"))
+        mocha.setColor(QPalette.ColorRole.Highlight, QColor("#f38ba8"))
+        mocha.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Mocha"] = mocha
 
         pale = QPalette()
-        pale.setColor(QPalette.Window, QColor("#292d3e"))
-        pale.setColor(QPalette.WindowText, QColor("#a6accd"))
-        pale.setColor(QPalette.Base, QColor("#1b1d2b"))
-        pale.setColor(QPalette.AlternateBase, QColor("#222436"))
-        pale.setColor(QPalette.ToolTipBase, QColor("#444267"))
-        pale.setColor(QPalette.ToolTipText, QColor("#a6accd"))
-        pale.setColor(QPalette.Text, QColor("#a6accd"))
-        pale.setColor(QPalette.Button, QColor("#444267"))
-        pale.setColor(QPalette.ButtonText, QColor("#a6accd"))
-        pale.setColor(QPalette.Highlight, QColor("#82aaff"))
-        pale.setColor(QPalette.HighlightedText, Qt.black)
+        pale.setColor(QPalette.ColorRole.Window, QColor("#292d3e"))
+        pale.setColor(QPalette.ColorRole.WindowText, QColor("#a6accd"))
+        pale.setColor(QPalette.ColorRole.Base, QColor("#1b1d2b"))
+        pale.setColor(QPalette.ColorRole.AlternateBase, QColor("#222436"))
+        pale.setColor(QPalette.ColorRole.ToolTipBase, QColor("#444267"))
+        pale.setColor(QPalette.ColorRole.ToolTipText, QColor("#a6accd"))
+        pale.setColor(QPalette.ColorRole.Text, QColor("#a6accd"))
+        pale.setColor(QPalette.ColorRole.Button, QColor("#444267"))
+        pale.setColor(QPalette.ColorRole.ButtonText, QColor("#a6accd"))
+        pale.setColor(QPalette.ColorRole.Highlight, QColor("#82aaff"))
+        pale.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
         themes["Palenight"] = pale
 
         return themes
@@ -1634,33 +1666,19 @@ class BIDSManager(QMainWindow):
         except Exception:
             pass
         self._update_logo()
-        self._apply_font_scale()
+        self._apply_theme_font()
 
     def show_cpu_dialog(self) -> None:
         """Display dialog to choose number of CPUs."""
         dlg = CpuSettingsDialog(self, self.num_cpus)
-        if dlg.exec_() == QDialog.Accepted:
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             self.num_cpus = dlg.spin.value()
             self.cpu_btn.setText(f"CPU: {self.num_cpus}")
 
     def show_authorship_dialog(self) -> None:
         """Display authorship information dialog."""
         dlg = AuthorshipDialog(self)
-        dlg.exec_()
-
-    def show_dpi_dialog(self) -> None:
-        """Display dialog to adjust UI scale."""
-        dlg = DpiSettingsDialog(self, self.dpi_scale)
-        if dlg.exec_() == QDialog.Accepted:
-            self.dpi_scale = dlg.spin.value()
-            self.dpi_btn.setText(f"DPI: {self.dpi_scale}%")
-            self._apply_font_scale()
-            # Persist the user-selected DPI so the preference is restored next
-            # time the application starts.
-            try:
-                self.dpi_file.write_text(str(self.dpi_scale))
-            except Exception:
-                pass
+        dlg.exec()
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
@@ -1685,76 +1703,27 @@ class BIDSManager(QMainWindow):
             self.spinner_label.hide()
 
     def _is_dark_theme(self) -> bool:
-        color = self.palette().color(QPalette.Window)
+        color = self.palette().color(QPalette.ColorRole.Window)
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         return brightness < 128
 
-    def _apply_font_scale(self) -> None:
-        """Apply current DPI scaling to the application font."""
+    def _apply_theme_font(self) -> None:
+        """Apply theme-dependent font weight and size to the application."""
         app = QApplication.instance()
         font = QFont(self._base_font)
         base_size = self._base_font.pointSizeF() or float(self._base_font.pointSize())
-        # Calculate the font size relative to the detected system DPI so that
-        # ``dpi_scale`` always represents the intended scale percentage of the
-        # 96-DPI baseline.  Using a ratio keeps the default matching the OS while
-        # letting users make incremental adjustments without surprises.
-        scale_ratio = max(0.5, min(2.0, self.dpi_scale / max(self._os_dpi, 1)))
-        scaled = max(1.0, base_size * scale_ratio)
         if self.current_theme in ("Contrast", "Contrast White"):
-            font.setWeight(QFont.Bold)
-            font.setPointSizeF(scaled + 1)
+            font.setWeight(QFont.Weight.Bold)
+            font.setPointSizeF(base_size + 1)
         else:
-            font.setWeight(QFont.Normal)
-            font.setPointSizeF(scaled)
+            font.setWeight(QFont.Weight.Normal)
+            font.setPointSizeF(base_size)
         app.setFont(font)
 
-        # Ensure the tab labels also scale with the selected DPI
         if hasattr(self, "tabs"):
             tab_font = QFont(font)
             tab_font.setPointSizeF(font.pointSizeF() + 1)
             self.tabs.setFont(tab_font)
-
-    def _detect_system_dpi(self, screen):
-        """Return the system DPI percentage relative to 96 with fallbacks.
-
-        The logic prefers ``logicalDotsPerInch`` (Qt's effective DPI that already
-        accounts for the OS scale).  When that value is implausible we try the
-        physical DPI and the device pixel ratio, selecting the first reasonable
-        candidate.  This helps avoid wildly large or tiny UI defaults on
-        platforms that misreport DPI values.
-        """
-
-        if screen is None:
-            return 100
-
-        candidates = []
-        try:
-            logical = screen.logicalDotsPerInch()
-            if logical > 1:
-                candidates.append(logical / 96 * 100)
-        except Exception:
-            pass
-
-        try:
-            physical = screen.physicalDotsPerInch()
-            if physical > 1:
-                candidates.append(physical / 96 * 100)
-        except Exception:
-            pass
-
-        try:
-            ratio = screen.devicePixelRatio()
-            if ratio > 0:
-                candidates.append(ratio * 100)
-        except Exception:
-            pass
-
-        for candidate in candidates:
-            if 25 <= candidate <= 400:
-                return int(round(candidate))
-
-        # Fallback to a safe default when nothing sensible is reported.
-        return 100
 
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
@@ -1767,7 +1736,7 @@ class BIDSManager(QMainWindow):
             img = pix.toImage()
             img.invertPixels()
             pix = QPixmap.fromImage(img)
-        self.logo_label.setPixmap(pix.scaledToHeight(120, Qt.SmoothTransformation))
+        self.logo_label.setPixmap(pix.scaledToHeight(120, Qt.TransformationMode.SmoothTransformation))
 
     def initConvertTab(self):
         """Create the Convert tab with a cleaner layout."""
@@ -1825,15 +1794,15 @@ class BIDSManager(QMainWindow):
         logo_container = QWidget()
         lc_layout = QVBoxLayout(logo_container)
         lc_layout.setContentsMargins(0, 0, 0, 0)
-        lc_layout.addWidget(self.logo_label, alignment=Qt.AlignCenter)
+        lc_layout.addWidget(self.logo_label, alignment=Qt.AlignmentFlag.AlignCenter)
         top_row.addWidget(logo_container)
         top_row.setStretch(0, 1)
         top_row.setStretch(1, 1)
         main_layout.addLayout(top_row)
         self._update_logo()
 
-        self.left_split = QSplitter(Qt.Vertical)
-        self.right_split = QSplitter(Qt.Vertical)
+        self.left_split = QSplitter(Qt.Orientation.Vertical)
+        self.right_split = QSplitter(Qt.Orientation.Vertical)
 
         self.tsv_group = QGroupBox("Scanned data viewer")
         tsv_layout = QVBoxLayout(self.tsv_group)
@@ -1841,7 +1810,7 @@ class BIDSManager(QMainWindow):
         self.tsv_detach_button.setFixedWidth(20)
         self.tsv_detach_button.setFixedHeight(20)
         self.tsv_detach_button.clicked.connect(self.detachTSVWindow)
-        self.tsv_detach_button.setFocusPolicy(Qt.NoFocus)
+        self.tsv_detach_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         header_row_tsv = QHBoxLayout()
         header_row_tsv.addStretch()
         header_row_tsv.addWidget(self.tsv_detach_button)
@@ -1855,7 +1824,7 @@ class BIDSManager(QMainWindow):
         metadata_toolbar = QHBoxLayout()
         self.tsv_actions_button = QToolButton()
         self.tsv_actions_button.setText("Actions")
-        self.tsv_actions_button.setPopupMode(QToolButton.InstantPopup)
+        self.tsv_actions_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.tsv_actions_menu = QMenu(self.tsv_actions_button)
 
         self.tsv_sort_action = QAction("Sort", self)
@@ -1910,7 +1879,7 @@ class BIDSManager(QMainWindow):
             "modality_bids",
         ])
         hdr = self.mapping_table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr.setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
         # Keep BIDS name edits constrained by the delegate despite the shifted
@@ -1970,7 +1939,7 @@ class BIDSManager(QMainWindow):
         self.full_tree.setHeaderLabels(["BIDS Modality"])
         hdr = self.full_tree.header()
         for i in range(self.full_tree.columnCount()):
-            hdr.setSectionResizeMode(i, QHeaderView.Interactive)
+            hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         for i in range(self.full_tree.columnCount()):
             self.full_tree.resizeColumnToContents(i)
         full_layout.addWidget(self.full_tree)
@@ -1983,7 +1952,7 @@ class BIDSManager(QMainWindow):
         self.specific_tree.setHeaderLabels(["Study/Subject", "Files", "Time"])
         s_hdr = self.specific_tree.header()
         for i in range(self.specific_tree.columnCount()):
-            s_hdr.setSectionResizeMode(i, QHeaderView.Interactive)
+            s_hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         for i in range(self.specific_tree.columnCount()):
             self.specific_tree.resizeColumnToContents(i)
         specific_layout.addWidget(self.specific_tree)
@@ -2000,7 +1969,7 @@ class BIDSManager(QMainWindow):
         self.naming_table.setHorizontalHeaderLabels(["Study", "Given name", "BIDS name"])
         n_hdr = self.naming_table.horizontalHeader()
         for i in range(self.naming_table.columnCount()):
-            n_hdr.setSectionResizeMode(i, QHeaderView.Interactive)
+            n_hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         n_hdr.setStretchLastSection(True)
         for i in range(self.naming_table.columnCount()):
             self.naming_table.resizeColumnToContents(i)
@@ -2021,8 +1990,8 @@ class BIDSManager(QMainWindow):
         self.exclude_table.setColumnCount(2)
         self.exclude_table.setHorizontalHeaderLabels(["Active", "Pattern"])
         ex_hdr = self.exclude_table.horizontalHeader()
-        ex_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        ex_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        ex_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        ex_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         exclude_layout.addWidget(self.exclude_table)
 
         ex_add_row = QHBoxLayout()
@@ -2035,7 +2004,7 @@ class BIDSManager(QMainWindow):
 
         ex_save_btn = QPushButton("Save")
         ex_save_btn.clicked.connect(self.saveExcludePatterns)
-        exclude_layout.addWidget(ex_save_btn, alignment=Qt.AlignRight)
+        exclude_layout.addWidget(ex_save_btn, alignment=Qt.AlignmentFlag.AlignRight)
         self.modal_tabs.addTab(exclude_tab, "Always exclude")
 
         # Load saved exclude patterns now that the table exists
@@ -2046,7 +2015,7 @@ class BIDSManager(QMainWindow):
         self.filter_detach_button.setFixedWidth(20)
         self.filter_detach_button.setFixedHeight(20)
         self.filter_detach_button.clicked.connect(self.detachFilterWindow)
-        self.filter_detach_button.setFocusPolicy(Qt.NoFocus)
+        self.filter_detach_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         header_row_filter.addStretch()
         header_row_filter.addWidget(self.filter_detach_button)
         modal_layout.addLayout(header_row_filter)
@@ -2091,7 +2060,7 @@ class BIDSManager(QMainWindow):
         self.preview_detach_button.setFixedWidth(20)
         self.preview_detach_button.setFixedHeight(20)
         self.preview_detach_button.clicked.connect(self.detachPreviewWindow)
-        self.preview_detach_button.setFocusPolicy(Qt.NoFocus)
+        self.preview_detach_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         header_row_preview.addStretch()
         header_row_preview.addWidget(self.preview_detach_button)
         preview_layout.addLayout(header_row_preview)
@@ -2101,12 +2070,27 @@ class BIDSManager(QMainWindow):
         preview_layout.addWidget(self.preview_button)
 
         btn_row = QHBoxLayout()
+        engine_label = QLabel("Engine:")
+        self.engine_combo = QComboBox()
+        # The default ("HeuDiConv") preserves the historical pipeline; the
+        # alternative ("dcm2bids") routes through build_dcm2bids_config +
+        # run_dcm2bids and finishes with bids_metadata_engine.
+        self.engine_combo.addItem("HeuDiConv", userData="heudiconv")
+        self.engine_combo.addItem("dcm2bids", userData="dcm2bids")
+        self.engine_combo.setToolTip(
+            "Choose the conversion backend. dcm2bids also runs the BIDS "
+            "metadata engine after conversion to fill participants.tsv, "
+            "dataset_description.json, scans.tsv, README and CHANGES."
+        )
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.runFullConversion)
         self.run_stop_button = QPushButton("Stop")
         self.run_stop_button.setEnabled(False)
         self.run_stop_button.clicked.connect(self.stopConversion)
         btn_row.addStretch()
+        btn_row.addWidget(engine_label)
+        btn_row.addWidget(self.engine_combo)
+        btn_row.addSpacing(12)
         btn_row.addWidget(self.run_button)
         btn_row.addWidget(self.run_stop_button)
         btn_row.addStretch()
@@ -2136,7 +2120,7 @@ class BIDSManager(QMainWindow):
         self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
         self.spinner_label = QLabel()
-        self.spinner_label.setAlignment(Qt.AlignLeft)
+        self.spinner_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.spinner_label.hide()
         log_layout.addWidget(self.spinner_label)
 
@@ -2180,7 +2164,7 @@ class BIDSManager(QMainWindow):
 
         selected = []
         for i in range(self.mapping_table.rowCount()):
-            if self.mapping_table.item(i, 0).checkState() == Qt.Checked:
+            if self.mapping_table.item(i, 0).checkState() == Qt.CheckState.Checked:
                 selected.append(self.row_info[i])
 
         rep_counts = defaultdict(int)
@@ -2274,7 +2258,7 @@ class BIDSManager(QMainWindow):
 
         # Internal menu bar for Edit features
         menu = QMenuBar()
-        menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        menu.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         menu.setMaximumHeight(24)
         file_menu = menu.addMenu("File")
         open_act = QAction("Open BIDS…", self)
@@ -2313,12 +2297,12 @@ class BIDSManager(QMainWindow):
         self.model.setRootPath("")
         self.tree = QTreeView()
         self.tree.setModel(self.model)
-        self.tree.setEditTriggers(QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed | QAbstractItemView.EditTrigger.SelectedClicked)
         self.tree.setColumnHidden(1, True)
         self.tree.setColumnHidden(3, True)
         hdr = self.tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(2, QHeaderView.Interactive)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         left_layout.addWidget(self.tree)
         self.tree.clicked.connect(self.onTreeClicked)
 
@@ -2327,8 +2311,8 @@ class BIDSManager(QMainWindow):
         self.stats.setHeaderLabels(["Metric", "Value"])
         self.stats.setAlternatingRowColors(True)
         s_hdr = self.stats.header()
-        s_hdr.setSectionResizeMode(0, QHeaderView.Interactive)
-        s_hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+        s_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        s_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         left_layout.addWidget(self.stats)
 
         splitter.addWidget(left_panel)
@@ -2340,6 +2324,194 @@ class BIDSManager(QMainWindow):
 
         edit_layout.addWidget(splitter)
         self.tabs.addTab(self.edit_tab, "Editor")
+
+        # ----- EEG/MEG → BIDS tab (mne-bids backend) -----
+        self._buildEegMegTab()
+
+    # ------------------------------------------------------------ EEG/MEG tab
+    def _buildEegMegTab(self) -> None:
+        """Construct the EEG/MEG raw → BIDS workflow tab."""
+        self.eeg_tab = QWidget()
+        layout = QVBoxLayout(self.eeg_tab)
+        layout.setSpacing(8)
+
+        # Path pickers
+        path_grid = QGridLayout()
+        self.eeg_raw_dir = ""
+        self.eeg_bids_out_dir = ""
+        self.eeg_raw_edit = QLineEdit()
+        self.eeg_raw_edit.setReadOnly(True)
+        eeg_raw_btn = QPushButton("Select Raw Dir…")
+        eeg_raw_btn.clicked.connect(self._selectEegRawDir)
+        self.eeg_bids_edit = QLineEdit()
+        self.eeg_bids_edit.setReadOnly(True)
+        eeg_bids_btn = QPushButton("Select BIDS Output…")
+        eeg_bids_btn.clicked.connect(self._selectEegBidsOutDir)
+        path_grid.addWidget(QLabel("Raw EEG/MEG dir:"), 0, 0)
+        path_grid.addWidget(self.eeg_raw_edit, 0, 1)
+        path_grid.addWidget(eeg_raw_btn, 0, 2)
+        path_grid.addWidget(QLabel("BIDS output dir:"), 1, 0)
+        path_grid.addWidget(self.eeg_bids_edit, 1, 1)
+        path_grid.addWidget(eeg_bids_btn, 1, 2)
+        layout.addLayout(path_grid)
+
+        # Inventory table
+        self.eeg_table = QTableWidget(0, 8)
+        self.eeg_table.setHorizontalHeaderLabels([
+            "include", "BIDS_name", "session", "task", "datatype",
+            "format", "n_channels", "source_file",
+        ])
+        self.eeg_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.eeg_table.horizontalHeader().setStretchLastSection(True)
+        self.eeg_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.eeg_table, 1)
+
+        # Scan / Run buttons
+        btn_row = QHBoxLayout()
+        self.eeg_scan_btn = QPushButton("Scan")
+        self.eeg_scan_btn.clicked.connect(self._eegScan)
+        self.eeg_run_btn = QPushButton("Run")
+        self.eeg_run_btn.clicked.connect(self._eegRun)
+        self.eeg_run_btn.setEnabled(False)
+        btn_row.addStretch()
+        btn_row.addWidget(self.eeg_scan_btn)
+        btn_row.addWidget(self.eeg_run_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # Worker handles for the threaded scan/convert path
+        self._eeg_thread: Optional[QThread] = None
+        self._eeg_worker: Optional[QObject] = None
+        self._eeg_inventory_path: Optional[Path] = None
+
+        self.tabs.addTab(self.eeg_tab, "EEG/MEG")
+
+    def _selectEegRawDir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Select Raw EEG/MEG Directory")
+        if d:
+            self.eeg_raw_dir = d
+            self.eeg_raw_edit.setText(d)
+
+    def _selectEegBidsOutDir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Select BIDS Output Directory")
+        if d:
+            self.eeg_bids_out_dir = d
+            self.eeg_bids_edit.setText(d)
+
+    def _eegLog(self, msg: str) -> None:
+        """Append a line to the shared log group."""
+        try:
+            self.log_text.append(msg)
+        except Exception:
+            print(msg)
+
+    def _eegScan(self) -> None:
+        if not self.eeg_raw_dir:
+            QMessageBox.warning(self, "No Raw Dir", "Please select a raw EEG/MEG directory.")
+            return
+        if not self.eeg_bids_out_dir:
+            QMessageBox.warning(self, "No Output Dir",
+                                "Please select a BIDS output directory (used to store the inventory).")
+            return
+        self._eegLog(f"Scanning {self.eeg_raw_dir}…")
+        self.eeg_scan_btn.setEnabled(False)
+        self.eeg_run_btn.setEnabled(False)
+        inv_path = Path(self.eeg_bids_out_dir) / "eeg_meg_inventory.tsv"
+        self._eeg_inventory_path = inv_path
+        self._startEegWorker(mode="scan",
+                             raw_root=self.eeg_raw_dir,
+                             output_tsv=inv_path)
+
+    def _eegRun(self) -> None:
+        if not self._eeg_inventory_path or not self._eeg_inventory_path.exists():
+            QMessageBox.warning(self, "Inventory missing", "Run Scan first.")
+            return
+        # Persist any user edits from the table back to the inventory TSV.
+        self._eegSaveTableToTsv()
+        self._eegLog(f"Converting EEG/MEG via mne-bids → {self.eeg_bids_out_dir}")
+        self.eeg_scan_btn.setEnabled(False)
+        self.eeg_run_btn.setEnabled(False)
+        self._startEegWorker(mode="convert",
+                             tsv=self._eeg_inventory_path,
+                             raw_root=Path(self.eeg_raw_dir),
+                             bids_root=Path(self.eeg_bids_out_dir))
+
+    def _startEegWorker(self, mode: str, **kwargs) -> None:
+        """Run the inventory / conversion in a background QThread."""
+        self._eeg_thread = QThread(self)
+        self._eeg_worker = _EegMegWorker(mode, kwargs)
+        self._eeg_worker.moveToThread(self._eeg_thread)
+        self._eeg_thread.started.connect(self._eeg_worker.run)
+        self._eeg_worker.progress.connect(self._eegLog)
+        self._eeg_worker.finished.connect(self._eegOnFinished)
+        self._eeg_worker.failed.connect(self._eegOnFailed)
+        self._eeg_worker.finished.connect(self._eeg_thread.quit)
+        self._eeg_worker.failed.connect(self._eeg_thread.quit)
+        self._eeg_thread.finished.connect(self._eeg_thread.deleteLater)
+        self._eeg_thread.start()
+
+    @pyqtSlot(dict)
+    def _eegOnFinished(self, payload: dict) -> None:
+        mode = payload.get("mode")
+        if mode == "scan":
+            self._eegLog(f"Scan complete: {payload.get('rows', 0)} recording(s).")
+            self._eegLoadTableFromTsv()
+            self.eeg_run_btn.setEnabled(True)
+        elif mode == "convert":
+            self._eegLog(
+                f"Conversion done: {payload.get('written', 0)} recording(s); "
+                f"{payload.get('missing_positions', 0)} without channel positions; "
+                f"{payload.get('errors', 0)} error(s)."
+            )
+            for p in payload.get("missing_position_paths", [])[:10]:
+                self._eegLog(f"  ! no channel positions: {p}")
+            for e in payload.get("error_messages", [])[:10]:
+                self._eegLog(f"  ! {e}")
+            self._eegLog(
+                f"Metadata engine wrote {payload.get('meta_files', 0)} dataset-level file(s); "
+                f"{payload.get('meta_warnings', 0)} warning(s)."
+            )
+        self.eeg_scan_btn.setEnabled(True)
+
+    @pyqtSlot(str)
+    def _eegOnFailed(self, msg: str) -> None:
+        self._eegLog(f"  ! pipeline failed: {msg}")
+        self.eeg_scan_btn.setEnabled(True)
+        self.eeg_run_btn.setEnabled(self._eeg_inventory_path is not None
+                                     and self._eeg_inventory_path.exists())
+
+    def _eegLoadTableFromTsv(self) -> None:
+        """Populate the EEG/MEG table from the inventory TSV."""
+        if not self._eeg_inventory_path or not self._eeg_inventory_path.exists():
+            return
+        df = pd.read_csv(self._eeg_inventory_path, sep="\t", dtype=str,
+                         keep_default_na=False)
+        cols = ["include", "BIDS_name", "session", "task", "datatype",
+                "format", "n_channels", "source_file"]
+        self.eeg_table.setRowCount(0)
+        self.eeg_table.setRowCount(len(df))
+        for r, (_, row) in enumerate(df.iterrows()):
+            for c, key in enumerate(cols):
+                item = QTableWidgetItem(str(row.get(key, "")))
+                if key == "format":
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.eeg_table.setItem(r, c, item)
+
+    def _eegSaveTableToTsv(self) -> None:
+        """Write user-edited table values back into the inventory TSV."""
+        if not self._eeg_inventory_path or not self._eeg_inventory_path.exists():
+            return
+        df = pd.read_csv(self._eeg_inventory_path, sep="\t", dtype=str,
+                         keep_default_na=False)
+        cols = ["include", "BIDS_name", "session", "task", "datatype",
+                "format", "n_channels", "source_file"]
+        for r in range(self.eeg_table.rowCount()):
+            for c, key in enumerate(cols):
+                item = self.eeg_table.item(r, c)
+                if item is None:
+                    continue
+                df.at[r, key] = item.text()
+        df.to_csv(self._eeg_inventory_path, sep="\t", index=False)
 
     def selectDicomDir(self):
         """Select the raw DICOM input directory."""
@@ -2378,7 +2550,7 @@ class BIDSManager(QMainWindow):
                 headers.append(header_item.text())
 
         dialog = MappingSortDialog(headers, self)
-        if dialog.exec_() != QDialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         instructions = dialog.sort_instructions()
@@ -2417,10 +2589,10 @@ class BIDSManager(QMainWindow):
                     cloned = QTableWidgetItem()
                 if col == 0:
                     # Preserve checkbox behaviour in the include column.
-                    cloned.setFlags((cloned.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
-                    state = item.checkState() if item is not None else Qt.Unchecked
+                    cloned.setFlags((cloned.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEditable)
+                    state = item.checkState() if item is not None else Qt.CheckState.Unchecked
                     cloned.setCheckState(state)
-                    sort_value = (0, 1 if state == Qt.Checked else 0)
+                    sort_value = (0, 1 if state == Qt.CheckState.Checked else 0)
                 else:
                     text = item.text() if item is not None else ""
                     sort_value = self._coerce_sort_value(text)
@@ -2511,7 +2683,7 @@ class BIDSManager(QMainWindow):
         if getattr(self, "tsv_dialog", None):
             self.tsv_dialog.activateWindow()
             return
-        self.tsv_dialog = QDialog(self, flags=Qt.Window)
+        self.tsv_dialog = QDialog(self, flags=Qt.WindowType.Window)
         self.tsv_dialog.setWindowTitle("Scanned data viewer")
         lay = QVBoxLayout(self.tsv_dialog)
         self.tsv_container.setParent(None)
@@ -2529,7 +2701,7 @@ class BIDSManager(QMainWindow):
         if getattr(self, "filter_dialog", None):
             self.filter_dialog.activateWindow()
             return
-        self.filter_dialog = QDialog(self, flags=Qt.Window)
+        self.filter_dialog = QDialog(self, flags=Qt.WindowType.Window)
         self.filter_dialog.setWindowTitle("Filter")
         lay = QVBoxLayout(self.filter_dialog)
         self.filter_container.setParent(None)
@@ -2548,7 +2720,7 @@ class BIDSManager(QMainWindow):
         if getattr(self, "preview_dialog", None):
             self.preview_dialog.activateWindow()
             return
-        self.preview_dialog = QDialog(self, flags=Qt.Window)
+        self.preview_dialog = QDialog(self, flags=Qt.WindowType.Window)
         self.preview_dialog.setWindowTitle("Preview")
         lay = QVBoxLayout(self.preview_dialog)
         self.preview_container.setParent(None)
@@ -2582,7 +2754,7 @@ class BIDSManager(QMainWindow):
         self.tsv_path = os.path.join(self.bids_out_dir, name)
 
         # Run dicom_inventory asynchronously
-        if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
+        if self.inventory_process and self.inventory_process.state() != QProcess.ProcessState.NotRunning:
             return
 
         # Remember to reapply the suffix dictionary automatically once the new
@@ -2601,7 +2773,7 @@ class BIDSManager(QMainWindow):
         self.inventory_process = QProcess(self)
         if self.terminal_cb.isChecked():
             # Forward stdout and stderr when the user wants to see terminal output
-            self.inventory_process.setProcessChannelMode(QProcess.ForwardedChannels)
+            self.inventory_process.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedChannels)
         else:
             # Discard output to avoid hangs on Windows when not showing the terminal
             self.inventory_process.setStandardOutputFile(QProcess.nullDevice())
@@ -2786,9 +2958,9 @@ class BIDSManager(QMainWindow):
                 self,
                 "Multiple sessions detected",
                 msg,
-                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if resp == QMessageBox.Yes:
+            if resp == QMessageBox.StandardButton.Yes:
                 self._reorganize_conflicting_sessions(conflicts)
                 # Re-run the inventory now that the folders have been separated.
                 self.runInventory()
@@ -2823,7 +2995,7 @@ class BIDSManager(QMainWindow):
             self._apply_sequence_on_load = False
 
     def stopInventory(self):
-        if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
+        if self.inventory_process and self.inventory_process.state() != QProcess.ProcessState.NotRunning:
             pid = int(self.inventory_process.processId())
             _terminate_process_tree(pid)
             self.inventory_process = None
@@ -2848,7 +3020,7 @@ class BIDSManager(QMainWindow):
             QMessageBox.warning(self, "Error", "Row count mismatch")
             return
         for i in range(self.mapping_table.rowCount()):
-            df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
+            df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.CheckState.Checked else 0
             df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
             study_item = self.mapping_table.item(i, 2)
             study_text = study_item.text() if study_item is not None else ""
@@ -2919,10 +3091,10 @@ class BIDSManager(QMainWindow):
                     self,
                     "Subject exists",
                     "This subject already exist in the study. Would you like to use the same unique ID?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
                 )
-                if resp == QMessageBox.Yes:
+                if resp == QMessageBox.StandardButton.Yes:
                     sid = prior
 
             if sid is None:
@@ -2989,19 +3161,19 @@ class BIDSManager(QMainWindow):
         self.mapping_table.blockSignals(True)
         try:
             if is_visual_only:
-                include_item.setCheckState(Qt.Unchecked)
+                include_item.setCheckState(Qt.CheckState.Unchecked)
                 include_item.setFlags(
-                    (include_item.flags() & ~Qt.ItemIsEditable)
-                    & ~Qt.ItemIsUserCheckable
-                    & ~Qt.ItemIsEnabled
+                    (include_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    & ~Qt.ItemFlag.ItemIsUserCheckable
+                    & ~Qt.ItemFlag.ItemIsEnabled
                 )
                 include_item.setToolTip(
                     "Reports and scout images are shown for reference only."
                 )
             else:
                 include_item.setFlags(
-                    (include_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                    & ~Qt.ItemIsEditable
+                    (include_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                    & ~Qt.ItemFlag.ItemIsEditable
                 )
                 include_item.setToolTip("")
         finally:
@@ -3278,7 +3450,7 @@ class BIDSManager(QMainWindow):
 
             bids_item = self.mapping_table.item(row, 5)
             if bids_item is not None:
-                bids_item.setData(Qt.UserRole, cleaned)
+                bids_item.setData(Qt.ItemDataRole.UserRole, cleaned)
 
             self._update_study_set()
             self._rebuild_lookup_maps()
@@ -3429,36 +3601,36 @@ class BIDSManager(QMainWindow):
                 self.mapping_table.insertRow(r)
                 include_item = QTableWidgetItem()
                 include_item.setFlags(
-                    (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                    (include_item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEditable
                 )
                 include_item.setCheckState(
-                    Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked
+                    Qt.CheckState.Checked if row.get('include', 1) == 1 else Qt.CheckState.Unchecked
                 )
                 self.mapping_table.setItem(r, 0, include_item)
 
                 src_item = QTableWidgetItem(_clean(row.get('source_folder')))
-                src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
+                src_item.setFlags(src_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 1, src_item)
 
                 study_raw = _clean(row.get('StudyDescription'))
                 study = normalize_study_name(study_raw)
 
                 study_item = QTableWidgetItem(study)
-                study_item.setFlags(study_item.flags() | Qt.ItemIsEditable)
+                study_item.setFlags(study_item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 2, study_item)
 
                 family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
-                family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
+                family_item.setFlags(family_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 3, family_item)
 
                 patient_item = QTableWidgetItem(_clean(row.get('PatientID')))
-                patient_item.setFlags(patient_item.flags() & ~Qt.ItemIsEditable)
+                patient_item.setFlags(patient_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 4, patient_item)
 
                 bids_name = _clean(row.get('BIDS_name'))
                 bids_item = QTableWidgetItem(bids_name)
-                bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
-                bids_item.setData(Qt.UserRole, study)
+                bids_item.setFlags(bids_item.flags() | Qt.ItemFlag.ItemIsEditable)
+                bids_item.setData(Qt.ItemDataRole.UserRole, study)
                 self.study_set.add(study)
                 self.mapping_table.setItem(r, 5, bids_item)
 
@@ -3466,51 +3638,51 @@ class BIDSManager(QMainWindow):
                 # Subject identifiers come from generated mappings or utilities
                 # such as ``generateUniqueIDs``; keep them read-only in the
                 # scanned data viewer so users do not alter them manually.
-                subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
+                subj_item.setFlags(subj_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 6, subj_item)
 
                 given_item = QTableWidgetItem(_clean(row.get('GivenName')))
                 # "GivenName" (the generated unique ID) must not be edited
                 # directly in the scanned data table to avoid inconsistencies
                 # with the subject mapping utilities.
-                given_item.setFlags(given_item.flags() & ~Qt.ItemIsEditable)
+                given_item.setFlags(given_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 7, given_item)
 
                 session = _clean(row.get('session'))
                 ses_item = QTableWidgetItem(session)
-                ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
+                ses_item.setFlags(ses_item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 8, ses_item)
 
                 seq_item = QTableWidgetItem(_clean(row.get('sequence')))
                 # Preserve the original DICOM sequence information as read-only
                 # so the viewer remains a faithful reflection of the scan data.
-                seq_item.setFlags(seq_item.flags() & ~Qt.ItemIsEditable)
+                seq_item.setFlags(seq_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 9, seq_item)
 
                 preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
-                preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
+                preview_item.setFlags(preview_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 10, preview_item)
 
                 uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
-                uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
+                uid_item.setFlags(uid_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 11, uid_item)
 
                 acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
-                acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
+                acq_item.setFlags(acq_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 12, acq_item)
 
                 rep_item = QTableWidgetItem(_clean(row.get('rep')))
                 # Allow editing the repeat number directly in the table
-                rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
+                rep_item.setFlags(rep_item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 13, rep_item)
 
                 mod_item = QTableWidgetItem(_clean(row.get('modality')))
-                mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
+                mod_item.setFlags(mod_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 14, mod_item)
 
                 modb = _clean(row.get('modality_bids'))
                 modb_item = QTableWidgetItem(modb)
-                modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
+                modb_item.setFlags(modb_item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self.mapping_table.setItem(r, 15, modb_item)
 
                 mod = _clean(row.get('modality'))
@@ -3565,13 +3737,13 @@ class BIDSManager(QMainWindow):
                 nr = self.naming_table.rowCount()
                 self.naming_table.insertRow(nr)
                 sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
-                sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
+                sitem.setFlags(sitem.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.naming_table.setItem(nr, 0, sitem)
                 gitem = QTableWidgetItem(_clean(row["GivenName"]))
-                gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
+                gitem.setFlags(gitem.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.naming_table.setItem(nr, 1, gitem)
                 bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
-                bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
+                bitem.setFlags(bitem.flags() | Qt.ItemFlag.ItemIsEditable)
                 self.naming_table.setItem(nr, 2, bitem)
             self.naming_table.blockSignals(False)
             self._updateMappingControlsEnabled()
@@ -3656,29 +3828,29 @@ class BIDSManager(QMainWindow):
 
         for modb, mod_map in sorted(modb_map.items()):
             modb_item = QTreeWidgetItem([modb])
-            modb_item.setFlags(modb_item.flags() | Qt.ItemIsUserCheckable)
+            modb_item.setFlags(modb_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             rows = self.modb_rows.get(modb, [])
-            states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+            states = [self.mapping_table.item(r, 0).checkState() == Qt.CheckState.Checked for r in rows]
             if states and all(states):
-                modb_item.setCheckState(0, Qt.Checked)
+                modb_item.setCheckState(0, Qt.CheckState.Checked)
             elif states and any(states):
-                modb_item.setCheckState(0, Qt.PartiallyChecked)
+                modb_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
             else:
-                modb_item.setCheckState(0, Qt.Unchecked)
-            modb_item.setData(0, Qt.UserRole, ('modb', modb))
+                modb_item.setCheckState(0, Qt.CheckState.Unchecked)
+            modb_item.setData(0, Qt.ItemDataRole.UserRole, ('modb', modb))
 
             for mod, seqs in sorted(mod_map.items()):
                 mod_item = QTreeWidgetItem([mod])
-                mod_item.setFlags(mod_item.flags() | Qt.ItemIsUserCheckable)
+                mod_item.setFlags(mod_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 rows = self.mod_rows.get((modb, mod), [])
-                states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+                states = [self.mapping_table.item(r, 0).checkState() == Qt.CheckState.Checked for r in rows]
                 if states and all(states):
-                    mod_item.setCheckState(0, Qt.Checked)
+                    mod_item.setCheckState(0, Qt.CheckState.Checked)
                 elif states and any(states):
-                    mod_item.setCheckState(0, Qt.PartiallyChecked)
+                    mod_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
                 else:
-                    mod_item.setCheckState(0, Qt.Unchecked)
-                mod_item.setData(0, Qt.UserRole, ('mod', modb, mod))
+                    mod_item.setCheckState(0, Qt.CheckState.Unchecked)
+                mod_item.setData(0, Qt.ItemDataRole.UserRole, ('mod', modb, mod))
                 for (seq, rep), info in sorted(seqs.items()):
                     visual_only = bool(info.get("visual_only"))
                     label = seq
@@ -3687,19 +3859,19 @@ class BIDSManager(QMainWindow):
                     seq_item = QTreeWidgetItem([label])
                     if visual_only:
                         seq_item.setFlags(
-                            (seq_item.flags() & ~Qt.ItemIsUserCheckable) & ~Qt.ItemIsEnabled
+                            (seq_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled
                         )
                     else:
-                        seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
+                        seq_item.setFlags(seq_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     rows = self.seq_rows.get((modb, mod, seq, rep), [])
-                    states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+                    states = [self.mapping_table.item(r, 0).checkState() == Qt.CheckState.Checked for r in rows]
                     if states and all(states):
-                        seq_item.setCheckState(0, Qt.Checked)
+                        seq_item.setCheckState(0, Qt.CheckState.Checked)
                     elif states and any(states):
-                        seq_item.setCheckState(0, Qt.PartiallyChecked)
+                        seq_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
                     else:
-                        seq_item.setCheckState(0, Qt.Unchecked)
-                    seq_item.setData(0, Qt.UserRole, ('seq', modb, mod, seq, rep))
+                        seq_item.setCheckState(0, Qt.CheckState.Unchecked)
+                    seq_item.setData(0, Qt.ItemDataRole.UserRole, ('seq', modb, mod, seq, rep))
                     mod_item.addChild(seq_item)
                 modb_item.addChild(mod_item)
             self.full_tree.addTopLevelItem(modb_item)
@@ -3715,7 +3887,7 @@ class BIDSManager(QMainWindow):
             self.full_tree.resizeColumnToContents(i)
 
     def onSpecificItemChanged(self, item, column):
-        role = item.data(0, Qt.UserRole)
+        role = item.data(0, Qt.ItemDataRole.UserRole)
         if not role:
             return
         state = item.checkState(0)
@@ -3825,11 +3997,11 @@ class BIDSManager(QMainWindow):
             if checked:
                 max_idx = max(filtered, key=lambda x: x[0])[1]
                 for _, i in filtered:
-                    st = Qt.Checked if i == max_idx else Qt.Unchecked
+                    st = Qt.CheckState.Checked if i == max_idx else Qt.CheckState.Unchecked
                     self.mapping_table.item(i, 0).setCheckState(st)
             else:
                 for _, i in filtered:
-                    self.mapping_table.item(i, 0).setCheckState(Qt.Checked)
+                    self.mapping_table.item(i, 0).setCheckState(Qt.CheckState.Checked)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
 
@@ -3841,8 +4013,8 @@ class BIDSManager(QMainWindow):
         r = self.exclude_table.rowCount()
         self.exclude_table.insertRow(r)
         chk = QTableWidgetItem()
-        chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
-        chk.setCheckState(Qt.Checked)
+        chk.setFlags(chk.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        chk.setCheckState(Qt.CheckState.Checked)
         self.exclude_table.setItem(r, 0, chk)
         self.exclude_table.setItem(r, 1, QTableWidgetItem(pattern))
         self.exclude_edit.clear()
@@ -3875,8 +4047,8 @@ class BIDSManager(QMainWindow):
             r = self.exclude_table.rowCount()
             self.exclude_table.insertRow(r)
             chk = QTableWidgetItem()
-            chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
-            chk.setCheckState(Qt.Checked if active else Qt.Unchecked)
+            chk.setFlags(chk.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            chk.setCheckState(Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
             self.exclude_table.setItem(r, 0, chk)
             self.exclude_table.setItem(r, 1, QTableWidgetItem(pat))
         self.applyExcludePatterns()
@@ -3888,7 +4060,7 @@ class BIDSManager(QMainWindow):
             pat = self.exclude_table.item(r, 1).text().strip()
             if not pat:
                 continue
-            active = self.exclude_table.item(r, 0).checkState() == Qt.Checked
+            active = self.exclude_table.item(r, 0).checkState() == Qt.CheckState.Checked
             rows.append({"active": int(active), "pattern": pat})
         pd.DataFrame(rows).to_csv(self.exclude_patterns_file, sep="\t", index=False)
         QMessageBox.information(self, "Saved", f"Updated {self.exclude_patterns_file}")
@@ -3900,12 +4072,12 @@ class BIDSManager(QMainWindow):
         patterns = [
             self.exclude_table.item(r, 1).text().strip().lower()
             for r in range(self.exclude_table.rowCount())
-            if self.exclude_table.item(r, 0).checkState() == Qt.Checked
+            if self.exclude_table.item(r, 0).checkState() == Qt.CheckState.Checked
         ]
         for r in range(self.mapping_table.rowCount()):
             seq = self.mapping_table.item(r, 9).text().lower()
             if any(p in seq for p in patterns):
-                self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
+                self.mapping_table.item(r, 0).setCheckState(Qt.CheckState.Unchecked)
 
     # ----- suffix dictionary helpers -----
     def _custom_add(self, suffix: str) -> None:
@@ -4010,7 +4182,7 @@ class BIDSManager(QMainWindow):
             table = QTableWidget()
             table.setColumnCount(1)
             table.setHorizontalHeaderLabels(["Pattern"])
-            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             for pat in custom_patterns.get(suffix, ()):  # populate stored entries
                 row = table.rowCount()
                 table.insertRow(row)
@@ -4196,12 +4368,12 @@ class BIDSManager(QMainWindow):
                     .setdefault(info['mod'], {})[(info['seq'], info['rep'])] = info
 
         def _state(rows):
-            states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
+            states = [self.mapping_table.item(r, 0).checkState() == Qt.CheckState.Checked for r in rows]
             if states and all(states):
-                return Qt.Checked
+                return Qt.CheckState.Checked
             if states and any(states):
-                return Qt.PartiallyChecked
-            return Qt.Unchecked
+                return Qt.CheckState.PartiallyChecked
+            return Qt.CheckState.Unchecked
 
         multi_study = len(tree_map) > 1
 
@@ -4211,49 +4383,49 @@ class BIDSManager(QMainWindow):
                 # Only expose the study-level checkbox when the dataset includes
                 # multiple studies so that users do not see a redundant single
                 # checkbox for the only available study.
-                st_item.setFlags(st_item.flags() | Qt.ItemIsUserCheckable)
+                st_item.setFlags(st_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 st_item.setCheckState(0, _state(self.study_rows.get(study, [])))
-                st_item.setData(0, Qt.UserRole, ('study', study))
+                st_item.setData(0, Qt.ItemDataRole.UserRole, ('study', study))
             else:
                 # Remove the user-checkable flag to hide the checkbox while
                 # keeping the study label visible for context.
-                st_item.setFlags(st_item.flags() & ~Qt.ItemIsUserCheckable)
+                st_item.setFlags(st_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             for subj, ses_map in sorted(sub_map.items()):
                 su_item = QTreeWidgetItem([subj])
-                su_item.setFlags(su_item.flags() | Qt.ItemIsUserCheckable)
+                su_item.setFlags(su_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 if self.use_bids_names:
                     rows = self.subject_rows.get((study, subj), [])
                 else:
                     rows = self.subject_rows_given.get((study, subj), [])
                 su_item.setCheckState(0, _state(rows))
-                su_item.setData(0, Qt.UserRole, ('subject', study, subj))
+                su_item.setData(0, Qt.ItemDataRole.UserRole, ('subject', study, subj))
                 for ses, modb_map in sorted(ses_map.items()):
                     se_item = QTreeWidgetItem([ses])
-                    se_item.setFlags(se_item.flags() | Qt.ItemIsUserCheckable)
+                    se_item.setFlags(se_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     if self.use_bids_names:
                         rows = self.session_rows.get((study, subj, ses), [])
                     else:
                         rows = self.session_rows_given.get((study, subj, ses), [])
                     se_item.setCheckState(0, _state(rows))
-                    se_item.setData(0, Qt.UserRole, ('session', study, subj, ses))
+                    se_item.setData(0, Qt.ItemDataRole.UserRole, ('session', study, subj, ses))
                     for modb, mod_map in sorted(modb_map.items()):
                         mb_item = QTreeWidgetItem([modb, "", ""])
-                        mb_item.setFlags(mb_item.flags() | Qt.ItemIsUserCheckable)
+                        mb_item.setFlags(mb_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                         if self.use_bids_names:
                             rows = self.spec_modb_rows.get((study, subj, ses, modb), [])
                         else:
                             rows = self.spec_modb_rows_given.get((study, subj, ses, modb), [])
                         mb_item.setCheckState(0, _state(rows))
-                        mb_item.setData(0, Qt.UserRole, ('modb', study, subj, ses, modb))
+                        mb_item.setData(0, Qt.ItemDataRole.UserRole, ('modb', study, subj, ses, modb))
                         for mod, seqs in sorted(mod_map.items()):
                             mo_item = QTreeWidgetItem([mod, "", ""])
-                            mo_item.setFlags(mo_item.flags() | Qt.ItemIsUserCheckable)
+                            mo_item.setFlags(mo_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                             if self.use_bids_names:
                                 rows = self.spec_mod_rows.get((study, subj, ses, modb, mod), [])
                             else:
                                 rows = self.spec_mod_rows_given.get((study, subj, ses, modb, mod), [])
                             mo_item.setCheckState(0, _state(rows))
-                            mo_item.setData(0, Qt.UserRole, ('mod', study, subj, ses, modb, mod))
+                            mo_item.setData(0, Qt.ItemDataRole.UserRole, ('mod', study, subj, ses, modb, mod))
                             for (seq, rep), info in sorted(seqs.items()):
                                 label = seq
                                 if rep:
@@ -4263,16 +4435,16 @@ class BIDSManager(QMainWindow):
                                 sq_item = QTreeWidgetItem([label, files, time])
                                 if info.get("visual_only"):
                                     sq_item.setFlags(
-                                        (sq_item.flags() & ~Qt.ItemIsUserCheckable) & ~Qt.ItemIsEnabled
+                                        (sq_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled
                                     )
                                 else:
-                                    sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
+                                    sq_item.setFlags(sq_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                                 if self.use_bids_names:
                                     rows = self.spec_seq_rows.get((study, subj, ses, modb, mod, seq, rep), [])
                                 else:
                                     rows = self.spec_seq_rows_given.get((study, subj, ses, modb, mod, seq, rep), [])
                                 sq_item.setCheckState(0, _state(rows))
-                                sq_item.setData(0, Qt.UserRole, ('seq', study, subj, ses, modb, mod, seq, rep))
+                                sq_item.setData(0, Qt.ItemDataRole.UserRole, ('seq', study, subj, ses, modb, mod, seq, rep))
                                 mo_item.addChild(sq_item)
                             mb_item.addChild(mo_item)
                         se_item.addChild(mb_item)
@@ -4294,7 +4466,7 @@ class BIDSManager(QMainWindow):
 
 
     def onModalityItemChanged(self, item, column):
-        role = item.data(0, Qt.UserRole)
+        role = item.data(0, Qt.ItemDataRole.UserRole)
         if not role:
             return
         state = item.checkState(0)
@@ -4320,7 +4492,7 @@ class BIDSManager(QMainWindow):
 
     def runFullConversion(self):
         logging.info("runFullConversion → Starting full pipeline …")
-        if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
+        if self.conv_process and self.conv_process.state() != QProcess.ProcessState.NotRunning:
             return
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             QMessageBox.warning(self, "No TSV", "Please generate the TSV first.")
@@ -4329,12 +4501,16 @@ class BIDSManager(QMainWindow):
             QMessageBox.warning(self, "No BIDS Output", "Please select a BIDS output directory.")
             return
 
+        # Dispatch on the engine selector. The dcm2bids pathway shares the TSV
+        # save logic below but then hands off to a separate state machine.
+        engine = self.engine_combo.currentData() if hasattr(self, "engine_combo") else "heudiconv"
+
         # 1) Save updated TSV from table
         try:
             df_orig = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
             df_conv = df_orig.copy()
             for i in range(self.mapping_table.rowCount()):
-                include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
+                include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.CheckState.Checked else 0
                 info = self.row_info[i]
                 seq = self.mapping_table.item(i, 9).text()
                 modb = self.mapping_table.item(i, 15).text()
@@ -4363,6 +4539,10 @@ class BIDSManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {e}")
             return
 
+        if engine == "dcm2bids":
+            self._runFullConversionDcm2bids()
+            return
+
         # Paths for scripts
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.build_script = os.path.join(script_dir, "build_heuristic_from_tsv.py")
@@ -4380,7 +4560,7 @@ class BIDSManager(QMainWindow):
         self.conv_process = QProcess(self)
         if self.terminal_cb.isChecked():
             # Forward output so the user can monitor conversion progress
-            self.conv_process.setProcessChannelMode(QProcess.ForwardedChannels)
+            self.conv_process.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedChannels)
         else:
             # Prevent blocked pipes on Windows when the terminal isn't shown
             self.conv_process.setStandardOutputFile(QProcess.nullDevice())
@@ -4454,7 +4634,7 @@ class BIDSManager(QMainWindow):
             logging.warning(f"Failed to move heuristics: {exc}")
 
     def stopConversion(self, success: bool = False):
-        if self.conv_process and self.conv_process.state() != QProcess.NotRunning:
+        if self.conv_process and self.conv_process.state() != QProcess.ProcessState.NotRunning:
             pid = int(self.conv_process.processId())
             _terminate_process_tree(pid)
         self.conv_process = None
@@ -4463,6 +4643,141 @@ class BIDSManager(QMainWindow):
         self.run_stop_button.setEnabled(False)
         if not success:
             self.log_text.append("Conversion cancelled.")
+
+    # ----- dcm2bids pipeline -----
+
+    def _runFullConversionDcm2bids(self):
+        """Pipeline analogue of runFullConversion using dcm2bids + metadata engine.
+
+        Stages:
+          0: build_dcm2bids_config (TSV → dcm2bids_config_<study>.json)
+          1: run_dcm2bids          (per-subject Dcm2BidsGen invocations)
+          2: post_conv_renamer     (per-study, same fixups as heudiconv path)
+          3: bids_metadata_engine  (per-study, in-process; finalise pipeline)
+        """
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.dcm2bids_build_script = os.path.join(script_dir, "build_dcm2bids_config.py")
+        self.dcm2bids_run_script = os.path.join(script_dir, "run_dcm2bids.py")
+        self.rename_script = os.path.join(script_dir, "post_conv_renamer.py")
+
+        self.dcm2bids_config_dir = os.path.join(self.bids_out_dir, "dcm2bids_configs")
+        self.dcm2bids_studies_to_postprocess = []
+        self.conv_stage = 0
+
+        self.log_text.append("Building dcm2bids configs…")
+        self._start_spinner("Converting (dcm2bids)")
+        self.run_button.setEnabled(False)
+        self.run_stop_button.setEnabled(True)
+        self.conv_process = QProcess(self)
+        if self.terminal_cb.isChecked():
+            self.conv_process.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedChannels)
+        else:
+            self.conv_process.setStandardOutputFile(QProcess.nullDevice())
+            self.conv_process.setStandardErrorFile(QProcess.nullDevice())
+        self.conv_process.finished.connect(self._convStepFinishedDcm2bids)
+        args = [self.dcm2bids_build_script, self.tsv_for_conv, self.dcm2bids_config_dir]
+        self.conv_process.start(sys.executable, args)
+
+    def _convStepFinishedDcm2bids(self, exitCode, _status):
+        if self.conv_stage == 0:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "build_dcm2bids_config failed")
+                self.stopConversion()
+                return
+            self.log_text.append(f"dcm2bids configs written to {self.dcm2bids_config_dir}")
+            self.conv_stage = 1
+            self.log_text.append("Running dcm2bids…")
+            args = [
+                self.dcm2bids_run_script,
+                self.tsv_for_conv,
+                self.dcm2bids_config_dir,
+                self.dicom_dir,
+                self.bids_out_dir,
+            ]
+            self.conv_process.start(sys.executable, args)
+        elif self.conv_stage == 1:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "run_dcm2bids failed")
+                self.stopConversion()
+                return
+            self.log_text.append("dcm2bids conversion complete.")
+            # Build per-study list — one folder per dcm2bids_config_<study>.json
+            cfg_dir = Path(self.dcm2bids_config_dir)
+            studies = []
+            for cfg in sorted(cfg_dir.glob("dcm2bids_config_*.json")):
+                study = cfg.stem.replace("dcm2bids_config_", "")
+                study_root = Path(self.bids_out_dir) / study
+                if study_root.exists():
+                    studies.append(study_root)
+            self.dcm2bids_studies_to_postprocess = studies
+            self.conv_stage = 2
+            self._runNextDcm2bidsRename()
+        elif self.conv_stage == 2:
+            if exitCode != 0:
+                QMessageBox.critical(self, "Error", "post_conv_renamer (dcm2bids) failed")
+                self.stopConversion()
+                return
+            if self.dcm2bids_studies_to_postprocess:
+                self._runNextDcm2bidsRename()
+            else:
+                # Move on to schema renamer + metadata engine in-process; the
+                # remaining work is fast and doesn't need its own QProcess.
+                if self.inventory_df is not None:
+                    rename_map = self._post_conversion_schema_rename(self.bids_out_dir, self.inventory_df)
+                    self.log_text.append(
+                        f"Schema renamer moved/renamed {len(rename_map)} files."
+                    )
+                self._runMetadataEngineForAllStudies()
+                if getattr(self, 'tsv_for_conv', self.tsv_path) != self.tsv_path:
+                    try:
+                        os.remove(self.tsv_for_conv)
+                    except Exception:
+                        pass
+                self.log_text.append("dcm2bids pipeline finished successfully.")
+                self.stopConversion(success=True)
+
+    def _runNextDcm2bidsRename(self):
+        if not self.dcm2bids_studies_to_postprocess:
+            self._convStepFinishedDcm2bids(0, 0)
+            return
+        study_root = self.dcm2bids_studies_to_postprocess.pop(0)
+        self.log_text.append(f"Renaming fieldmaps for {study_root.name}…")
+        args = [self.rename_script, str(study_root)]
+        self.conv_process.start(sys.executable, args)
+
+    def _runMetadataEngineForAllStudies(self):
+        """Generate dataset_description.json, participants.tsv, scans.tsv, etc.
+
+        Runs in-process so we can pass DatasetMetadata fields directly. Each
+        study folder under ``bids_out_dir`` is treated as an independent BIDS
+        dataset and gets its own metadata files.
+        """
+        try:
+            from .bids_metadata_engine import BIDSMetadataEngine, DatasetMetadata
+        except Exception:
+            from bids_metadata_engine import BIDSMetadataEngine, DatasetMetadata  # type: ignore
+
+        bids_out = Path(self.bids_out_dir)
+        for study_root in sorted(p for p in bids_out.iterdir()
+                                  if p.is_dir() and not p.name.startswith(".")
+                                  and p.name not in ("dcm2bids_configs", "heuristics")):
+            self.log_text.append(f"Generating BIDS metadata for {study_root.name}…")
+            try:
+                meta = DatasetMetadata(name=study_root.name)
+                report = BIDSMetadataEngine(
+                    bids_root=study_root,
+                    inventory_tsv=Path(self.tsv_path) if self.tsv_path else None,
+                    dataset_meta=meta,
+                ).run()
+                self.log_text.append(
+                    f"  · wrote {len(report.files_written)} file(s); "
+                    f"{len(report.sidecar_fills)} sidecar fill(s); "
+                    f"{len(report.warnings)} warning(s)"
+                )
+                for w in report.warnings[:10]:
+                    self.log_text.append(f"    ! {w}")
+            except Exception as exc:
+                self.log_text.append(f"  ! metadata engine failed for {study_root.name}: {exc}")
 
     # ----- Edit tab methods (full bids_editor_ancpbids features) -----
     def openBIDSForEdit(self):
@@ -4541,7 +4856,7 @@ class BIDSManager(QMainWindow):
             )
             return
         dlg = RemapDialog(self, self.bids_root)
-        dlg.exec_()
+        dlg.exec()
 
     def launchIntendedForEditor(self):
         """Open the manual IntendedFor editor dialog."""
@@ -4553,7 +4868,7 @@ class BIDSManager(QMainWindow):
             )
             return
         dlg = IntendedForDialog(self, self.bids_root)
-        dlg.exec_()
+        dlg.exec()
 
     def refreshScansTsv(self):
         """Update ``*_scans.tsv`` files to match current filenames."""
@@ -4582,7 +4897,7 @@ class BIDSManager(QMainWindow):
             )
             return
         dlg = BidsIgnoreDialog(self, self.bids_root)
-        dlg.exec_()
+        dlg.exec()
 
 
 class RemapDialog(QDialog):
@@ -4632,8 +4947,8 @@ class RemapDialog(QDialog):
         self.preview_tree.setColumnCount(2)
         self.preview_tree.setHeaderLabels(["Original", "New Name"])
         hdr = self.preview_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.preview_tree)
 
     def add_condition(self):
@@ -4643,8 +4958,8 @@ class RemapDialog(QDialog):
         rules_tbl = QTableWidget(0, 2)
         rules_tbl.setHorizontalHeaderLabels(["Pattern", "Replacement"])
         hdr = rules_tbl.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         rule_btns = QHBoxLayout()
         btn_addr = QPushButton("Add Rule")
         btn_addr.clicked.connect(lambda: rules_tbl.insertRow(rules_tbl.rowCount()))
@@ -4758,35 +5073,7 @@ class CpuSettingsDialog(QDialog):
         row.addWidget(self.spin)
         layout.addLayout(row)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-
-class DpiSettingsDialog(QDialog):
-    """Dialog to adjust UI scale (DPI)."""
-
-    def __init__(self, parent, current: int = 100):
-        super().__init__(parent)
-        self.setWindowTitle("UI Scale")
-        layout = QVBoxLayout(self)
-
-        # ``current`` is expressed as a percentage relative to a base scale of
-        # 100 (96 DPI).  The main window passes the detected system value by
-        # default so the initial UI matches the host environment.  Users can
-        # still nudge the scale above or below that baseline as needed.
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Scale (%):"))
-        self.spin = QSpinBox()
-        self.spin.setRange(50, 200)
-        self.spin.setSingleStep(25)
-        self.spin.setValue(current)
-        row.addWidget(self.spin)
-        layout.addLayout(row)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
@@ -4806,8 +5093,8 @@ class AuthorshipDialog(QDialog):
         if ANCP_LAB_FILE.exists():
             logo = QLabel()
             pix = QPixmap(str(ANCP_LAB_FILE))
-            logo.setPixmap(pix.scaledToWidth(320, Qt.SmoothTransformation))
-            logo.setAlignment(Qt.AlignCenter)
+            logo.setPixmap(pix.scaledToWidth(320, Qt.TransformationMode.SmoothTransformation))
+            logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(logo)
             layout.addSpacing(10)
         desc = QLabel(
@@ -4816,12 +5103,12 @@ class AuthorshipDialog(QDialog):
             "to BIDS format, easy metadata handling, and quality control."
         )
         desc.setWordWrap(True)
-        desc.setAlignment(Qt.AlignCenter)
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
 
         # Authors
         auth_label = QLabel("<b>Authors</b>")
-        auth_label.setAlignment(Qt.AlignCenter)
+        auth_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(auth_label)
         layout.addSpacing(10)
 
@@ -4829,8 +5116,8 @@ class AuthorshipDialog(QDialog):
         k_row.setSpacing(20)
         if KAREL_IMG_FILE.exists():
             k_pic = QLabel()
-            k_pic.setPixmap(QPixmap(str(KAREL_IMG_FILE)).scaledToWidth(140, Qt.SmoothTransformation))
-            k_pic.setAlignment(Qt.AlignCenter)
+            k_pic.setPixmap(QPixmap(str(KAREL_IMG_FILE)).scaledToWidth(140, Qt.TransformationMode.SmoothTransformation))
+            k_pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
             k_row.addWidget(k_pic)
         k_desc = QLabel(
             "<b>Dr. Karel López Vilaret<br/>BIDS Manager App Lead</b><br/><br/>"
@@ -4849,8 +5136,8 @@ class AuthorshipDialog(QDialog):
         j_row.setSpacing(20)
         if JOCHEM_IMG_FILE.exists():
             j_pic = QLabel()
-            j_pic.setPixmap(QPixmap(str(JOCHEM_IMG_FILE)).scaledToWidth(140, Qt.SmoothTransformation))
-            j_pic.setAlignment(Qt.AlignCenter)
+            j_pic.setPixmap(QPixmap(str(JOCHEM_IMG_FILE)).scaledToWidth(140, Qt.TransformationMode.SmoothTransformation))
+            j_pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
             j_row.addWidget(j_pic)
         j_desc = QLabel(
             "<b>Prof. Dr. rer. nat. Jochem Rieger<br/>Applied Neurocognitive Psychology</b><br/><br/>"
@@ -4867,7 +5154,7 @@ class AuthorshipDialog(QDialog):
 
         # Acknowledgements
         ack_label = QLabel("<b>Acknowledgements</b>")
-        ack_label.setAlignment(Qt.AlignCenter)
+        ack_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(ack_label)
         ack = QLabel(
             "Dr. Jorge Bosch-Bayard\n"
@@ -4879,11 +5166,11 @@ class AuthorshipDialog(QDialog):
             "Msc. Shari Hiltner"
         )
         ack.setWordWrap(True)
-        ack.setAlignment(Qt.AlignCenter)
+        ack.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(ack)
         layout.addSpacing(10)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         btn_box.accepted.connect(self.accept)
         layout.addWidget(btn_box)
 
@@ -4950,7 +5237,7 @@ class IntendedForDialog(QDialog):
         mid_layout = QVBoxLayout()
         mid_layout.addWidget(QLabel("IntendedFor:"))
         intended = QListWidget()
-        intended.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        intended.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         mid_layout.addWidget(intended)
         rm_save = QHBoxLayout()
         remove = QPushButton("Remove")
@@ -4967,7 +5254,7 @@ class IntendedForDialog(QDialog):
         label = "Functional images:" if mode == "bold" else "Diffusion images:"
         right_layout.addWidget(QLabel(label))
         func_list = QListWidget()
-        func_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        func_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         right_layout.addWidget(func_list)
         add_btn = QPushButton("← Add")
         add_btn.clicked.connect(lambda: self._add_selected(mode))
@@ -5177,11 +5464,11 @@ class IntendedForDialog(QDialog):
             }
             if not (self.b0_box.isChecked() and self._is_b0(base)):
                 item_bold = QTreeWidgetItem([base])
-                item_bold.setData(0, Qt.UserRole, key)
+                item_bold.setData(0, Qt.ItemDataRole.UserRole, key)
                 bold_parent.addChild(item_bold)
             if dwi_parent is not None and self._is_b0(base):
                 item_dwi = QTreeWidgetItem([base])
-                item_dwi.setData(0, Qt.UserRole, key)
+                item_dwi.setData(0, Qt.ItemDataRole.UserRole, key)
                 dwi_parent.addChild(item_dwi)
 
     def _load_intended(self, path: Path, root: Path) -> tuple[list[str], list[str]]:
@@ -5219,7 +5506,7 @@ class IntendedForDialog(QDialog):
         it = tree.currentItem()
         if not it:
             return
-        key = it.data(0, Qt.UserRole)
+        key = it.data(0, Qt.ItemDataRole.UserRole)
         if not key:
             return
         info = self.data.get(key, {})
@@ -5236,7 +5523,7 @@ class IntendedForDialog(QDialog):
         it = tree.currentItem()
         if not it:
             return
-        key = it.data(0, Qt.UserRole)
+        key = it.data(0, Qt.ItemDataRole.UserRole)
         if not key:
             return
         info = self.data[key]
@@ -5252,7 +5539,7 @@ class IntendedForDialog(QDialog):
         it = tree.currentItem()
         if not it:
             return
-        key = it.data(0, Qt.UserRole)
+        key = it.data(0, Qt.ItemDataRole.UserRole)
         if not key:
             return
         info = self.data[key]
@@ -5265,7 +5552,7 @@ class IntendedForDialog(QDialog):
         it = tree.currentItem()
         if not it:
             return
-        key = it.data(0, Qt.UserRole)
+        key = it.data(0, Qt.ItemDataRole.UserRole)
         if not key:
             return
         info = self.data[key]
@@ -5314,7 +5601,7 @@ class BidsIgnoreDialog(QDialog):
         lists.addLayout(left_box)
         left_box.addWidget(QLabel("Ignored files:"))
         self.ignore_list = QListWidget()
-        self.ignore_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.ignore_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         left_box.addWidget(self.ignore_list)
         rm_btn = QPushButton("Remove")
         rm_btn.clicked.connect(self._remove_selected)
@@ -5328,14 +5615,14 @@ class BidsIgnoreDialog(QDialog):
         self.search.textChanged.connect(self._populate_lists)
         right_box.addWidget(self.search)
         self.file_list = QListWidget()
-        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         right_box.addWidget(self.file_list)
         add_btn = QPushButton("Add")
         add_btn.clicked.connect(self._add_selected)
         right_box.addWidget(add_btn)
 
         # buttons
-        btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(self.save)
         btn_box.rejected.connect(self.reject)
         main.addWidget(btn_box)
@@ -5452,7 +5739,7 @@ class Volume3DDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        self._splitter = QSplitter(Qt.Vertical)
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.setHandleWidth(12)
         layout.addWidget(self._splitter)
@@ -5465,7 +5752,7 @@ class Volume3DDialog(QDialog):
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the voxel subset on every interaction.
         self.view = gl.GLViewWidget()
-        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
@@ -5529,7 +5816,7 @@ class Volume3DDialog(QDialog):
 
         self.thresh_text = QLabel("Threshold:")
         slider_grid.addWidget(self.thresh_text, 0, 0)
-        self.thresh_slider = QSlider(Qt.Horizontal)
+        self.thresh_slider = QSlider(Qt.Orientation.Horizontal)
         self.thresh_slider.setRange(0, 100)
         self.thresh_slider.setValue(60)
         self.thresh_slider.setPageStep(5)
@@ -5543,7 +5830,7 @@ class Volume3DDialog(QDialog):
 
         self.point_label = QLabel("Point size:")
         slider_grid.addWidget(self.point_label, 1, 0)
-        self.point_slider = QSlider(Qt.Horizontal)
+        self.point_slider = QSlider(Qt.Orientation.Horizontal)
         self.point_slider.setRange(1, 12)
         self.point_slider.setValue(4)
         self.point_slider.setToolTip("Marker diameter for point-cloud rendering.")
@@ -5584,7 +5871,7 @@ class Volume3DDialog(QDialog):
 
         row += 1
         options.addWidget(QLabel("Opacity:"), row, 0)
-        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(80)
         self.opacity_slider.setToolTip(
@@ -5596,7 +5883,7 @@ class Volume3DDialog(QDialog):
 
         row += 1
         options.addWidget(QLabel("Colour intensity:"), row, 0)
-        self.intensity_slider = QSlider(Qt.Horizontal)
+        self.intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.intensity_slider.setRange(10, 200)
         self.intensity_slider.setValue(100)
         self.intensity_slider.setToolTip(
@@ -5645,7 +5932,7 @@ class Volume3DDialog(QDialog):
 
         row += 1
         options.addWidget(QLabel("Axis thickness:"), row, 0)
-        self.axis_thickness_slider = QSlider(Qt.Horizontal)
+        self.axis_thickness_slider = QSlider(Qt.Orientation.Horizontal)
         self.axis_thickness_slider.setRange(1, 12)
         self.axis_thickness_slider.setValue(3)
         self.axis_thickness_slider.setToolTip(
@@ -5670,7 +5957,7 @@ class Volume3DDialog(QDialog):
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
         self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
-        self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._colorbar_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
@@ -5696,7 +5983,7 @@ class Volume3DDialog(QDialog):
             row_layout.addWidget(checkbox)
             row_layout.addSpacing(4)
             row_layout.addWidget(QLabel(f"{neg_name}:"))
-            min_slider = QSlider(Qt.Horizontal)
+            min_slider = QSlider(Qt.Orientation.Horizontal)
             min_slider.setRange(0, 100)
             min_slider.setValue(0)
             min_slider.setEnabled(False)
@@ -5705,7 +5992,7 @@ class Volume3DDialog(QDialog):
             row_layout.addWidget(min_value)
             row_layout.addSpacing(6)
             row_layout.addWidget(QLabel(f"{pos_name}:"))
-            max_slider = QSlider(Qt.Horizontal)
+            max_slider = QSlider(Qt.Orientation.Horizontal)
             max_slider.setRange(0, 100)
             max_slider.setValue(100)
             max_slider.setEnabled(False)
@@ -5739,7 +6026,7 @@ class Volume3DDialog(QDialog):
         light_layout.addWidget(self.light_enable_checkbox, light_row, 0, 1, 3)
         light_row += 1
         light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
-        self.light_azimuth_slider = QSlider(Qt.Horizontal)
+        self.light_azimuth_slider = QSlider(Qt.Orientation.Horizontal)
         self.light_azimuth_slider.setRange(-180, 180)
         self.light_azimuth_slider.setValue(-45)
         self.light_azimuth_slider.setToolTip(
@@ -5751,7 +6038,7 @@ class Volume3DDialog(QDialog):
 
         light_row += 1
         light_layout.addWidget(QLabel("Elevation:"), light_row, 0)
-        self.light_elevation_slider = QSlider(Qt.Horizontal)
+        self.light_elevation_slider = QSlider(Qt.Orientation.Horizontal)
         self.light_elevation_slider.setRange(-90, 90)
         self.light_elevation_slider.setValue(30)
         self.light_elevation_slider.setToolTip(
@@ -5763,7 +6050,7 @@ class Volume3DDialog(QDialog):
 
         light_row += 1
         light_layout.addWidget(QLabel("Intensity:"), light_row, 0)
-        self.light_intensity_slider = QSlider(Qt.Horizontal)
+        self.light_intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.light_intensity_slider.setRange(10, 300)
         self.light_intensity_slider.setValue(130)
         self.light_intensity_slider.setToolTip(
@@ -5784,11 +6071,11 @@ class Volume3DDialog(QDialog):
         self._panel_scroll = ShrinkableScrollArea()
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
-        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # A nested splitter keeps the scrollable controls and the colour bar in
         # separate panes so each can be resized without affecting the other.
-        self._panel_splitter = QSplitter(Qt.Vertical)
+        self._panel_splitter = QSplitter(Qt.Orientation.Vertical)
         self._panel_splitter.setChildrenCollapsible(False)
         self._panel_splitter.addWidget(self._panel_scroll)
         self._panel_splitter.addWidget(self._colorbar_panel)
@@ -5857,11 +6144,11 @@ class Volume3DDialog(QDialog):
         if normalised not in {"bottom", "left", "right"}:
             normalised = "bottom"
 
-        orientation = Qt.Vertical if normalised == "bottom" else Qt.Horizontal
+        orientation = Qt.Orientation.Vertical if normalised == "bottom" else Qt.Orientation.Horizontal
         self._splitter.setOrientation(orientation)
 
         view_first = True
-        if orientation == Qt.Horizontal:
+        if orientation == Qt.Orientation.Horizontal:
             view_first = normalised != "left"
 
         panel_widget = getattr(self, "_panel_container", None)
@@ -5889,11 +6176,11 @@ class Volume3DDialog(QDialog):
         if isinstance(panel_splitter, QSplitter):
             # Rotate the internal splitter so the colour bar always occupies its
             # own pane next to the parameter controls regardless of docking side.
-            if orientation == Qt.Vertical:
-                panel_splitter.setOrientation(Qt.Horizontal)
+            if orientation == Qt.Orientation.Vertical:
+                panel_splitter.setOrientation(Qt.Orientation.Horizontal)
                 panel_splitter.setSizes([220, 160])
             else:
-                panel_splitter.setOrientation(Qt.Vertical)
+                panel_splitter.setOrientation(Qt.Orientation.Vertical)
                 panel_splitter.setSizes([300, 160])
 
     def _on_panel_location_change(self, location: str) -> None:
@@ -6992,7 +7279,7 @@ class Surface3DDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        self._splitter = QSplitter(Qt.Vertical)
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.setHandleWidth(12)
         layout.addWidget(self._splitter)
@@ -7005,7 +7292,7 @@ class Surface3DDialog(QDialog):
         # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
         # not require recomputing the mesh when interacting with the viewport.
         self.view = gl.GLViewWidget()
-        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.view.setBackgroundColor(self._canvas_bg)
         self.view.opts["distance"] = 200
         self.view.opts["elevation"] = 20
@@ -7072,7 +7359,7 @@ class Surface3DDialog(QDialog):
 
         row += 1
         appearance_layout.addWidget(QLabel("Opacity:"), row, 0)
-        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(80)
         self.opacity_slider.setToolTip(
@@ -7084,7 +7371,7 @@ class Surface3DDialog(QDialog):
 
         row += 1
         appearance_layout.addWidget(QLabel("Colour intensity:"), row, 0)
-        self.color_intensity_slider = QSlider(Qt.Horizontal)
+        self.color_intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.color_intensity_slider.setRange(10, 200)
         self.color_intensity_slider.setValue(100)
         self.color_intensity_slider.setToolTip(
@@ -7102,7 +7389,7 @@ class Surface3DDialog(QDialog):
         colorbar_layout.setContentsMargins(8, 6, 8, 6)
         colorbar_layout.setSpacing(4)
         self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
-        self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._colorbar_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._colorbar_canvas.setFixedHeight(180)
         self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
         colorbar_layout.addWidget(self._colorbar_canvas)
@@ -7119,7 +7406,7 @@ class Surface3DDialog(QDialog):
 
         row += 1
         axes_layout.addWidget(QLabel("Axis thickness:"), row, 0)
-        self.axis_thickness_slider = QSlider(Qt.Horizontal)
+        self.axis_thickness_slider = QSlider(Qt.Orientation.Horizontal)
         self.axis_thickness_slider.setRange(1, 12)
         self.axis_thickness_slider.setValue(3)
         self.axis_thickness_slider.setToolTip(
@@ -7150,7 +7437,7 @@ class Surface3DDialog(QDialog):
             row_layout.addWidget(checkbox)
             row_layout.addSpacing(4)
             row_layout.addWidget(QLabel(f"{neg_name}:"))
-            min_slider = QSlider(Qt.Horizontal)
+            min_slider = QSlider(Qt.Orientation.Horizontal)
             min_slider.setRange(0, 100)
             min_slider.setValue(0)
             min_slider.setEnabled(False)
@@ -7159,7 +7446,7 @@ class Surface3DDialog(QDialog):
             row_layout.addWidget(min_value)
             row_layout.addSpacing(6)
             row_layout.addWidget(QLabel(f"{pos_name}:"))
-            max_slider = QSlider(Qt.Horizontal)
+            max_slider = QSlider(Qt.Orientation.Horizontal)
             max_slider.setRange(0, 100)
             max_slider.setValue(100)
             max_slider.setEnabled(False)
@@ -7197,7 +7484,7 @@ class Surface3DDialog(QDialog):
         light_layout.addWidget(self.light_enable_checkbox, light_row, 0, 1, 3)
         light_row += 1
         light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
-        self.light_azimuth_slider = QSlider(Qt.Horizontal)
+        self.light_azimuth_slider = QSlider(Qt.Orientation.Horizontal)
         self.light_azimuth_slider.setRange(-180, 180)
         self.light_azimuth_slider.setValue(-45)
         self.light_azimuth_slider.setToolTip(
@@ -7209,7 +7496,7 @@ class Surface3DDialog(QDialog):
 
         light_row += 1
         light_layout.addWidget(QLabel("Elevation:"), light_row, 0)
-        self.light_elevation_slider = QSlider(Qt.Horizontal)
+        self.light_elevation_slider = QSlider(Qt.Orientation.Horizontal)
         self.light_elevation_slider.setRange(-90, 90)
         self.light_elevation_slider.setValue(30)
         self.light_elevation_slider.setToolTip(
@@ -7221,7 +7508,7 @@ class Surface3DDialog(QDialog):
 
         light_row += 1
         light_layout.addWidget(QLabel("Intensity:"), light_row, 0)
-        self.light_intensity_slider = QSlider(Qt.Horizontal)
+        self.light_intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.light_intensity_slider.setRange(10, 300)
         self.light_intensity_slider.setValue(130)
         self.light_intensity_slider.setToolTip(
@@ -7242,7 +7529,7 @@ class Surface3DDialog(QDialog):
         self._panel_scroll = ShrinkableScrollArea()
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
-        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._splitter.addWidget(self._panel_scroll)
         self._splitter.setStretchFactor(0, 4)
         self._splitter.setStretchFactor(1, 1)
@@ -7285,10 +7572,10 @@ class Surface3DDialog(QDialog):
 
         view_first = True
         if normalised == "bottom":
-            self._splitter.setOrientation(Qt.Vertical)
+            self._splitter.setOrientation(Qt.Orientation.Vertical)
             view_first = True
         else:
-            self._splitter.setOrientation(Qt.Horizontal)
+            self._splitter.setOrientation(Qt.Orientation.Horizontal)
             view_first = normalised != "left"
 
         widgets = [self._view_container, self._panel_scroll]
@@ -7790,7 +8077,7 @@ class FreeSurferSurfaceDialog(QDialog):
 
         row += 1
         controls_layout.addWidget(QLabel("Opacity:"), row, 0)
-        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(85)
         controls_layout.addWidget(self.opacity_slider, row, 1)
@@ -7978,7 +8265,7 @@ class MetadataViewer(QWidget):
         self.welcome = QLabel(
             "<h3>Metadata BIDSualizer</h3><br>Load data via File → Open or select a file to begin editing."
         )
-        self.welcome.setAlignment(Qt.AlignCenter)
+        self.welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vlay.addWidget(self.welcome)
         self.toolbar = QHBoxLayout()
         vlay.addLayout(self.toolbar)
@@ -7988,7 +8275,7 @@ class MetadataViewer(QWidget):
         # created as an overlay so it always appears above whatever viewer is
         # currently shown.  The font is enlarged for better visibility.
         self.loading_label = QLabel(self)
-        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_label.setStyleSheet(
             "font-size: 24px; background-color: rgba(0, 0, 0, 128);"
             "color: white;"
@@ -8043,7 +8330,7 @@ class MetadataViewer(QWidget):
 
     def _is_dark_theme(self) -> bool:
         """Detect whether the current palette is dark or light."""
-        color = self.palette().color(QPalette.Window)
+        color = self.palette().color(QPalette.ColorRole.Window)
         brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
         return brightness < 128
 
@@ -8487,7 +8774,7 @@ class MetadataViewer(QWidget):
         def add_slider(title, slider, val_label=None):
             box = QVBoxLayout()
             lab = QLabel(title)
-            lab.setAlignment(Qt.AlignCenter)
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
             box.addWidget(lab)
             row = QHBoxLayout()
             row.addWidget(slider)
@@ -8497,25 +8784,25 @@ class MetadataViewer(QWidget):
             self.toolbar.addLayout(box)
 
         # Slice slider
-        self.slice_slider = QSlider(Qt.Horizontal)
+        self.slice_slider = QSlider(Qt.Orientation.Horizontal)
         self.slice_slider.valueChanged.connect(self._update_slice)
         self.slice_val = QLabel("0")
         add_slider("Slice", self.slice_slider, self.slice_val)
 
         # Volume slider
-        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.valueChanged.connect(self._update_slice)
         self.vol_val = QLabel("0")
         add_slider("Volume", self.vol_slider, self.vol_val)
         # Brightness slider
-        self.bright_slider = QSlider(Qt.Horizontal)
+        self.bright_slider = QSlider(Qt.Orientation.Horizontal)
         self.bright_slider.setRange(-100, 100)
         self.bright_slider.setValue(0)
         self.bright_slider.valueChanged.connect(self._update_slice)
         add_slider("Brightness", self.bright_slider)
 
         # Contrast slider
-        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
         self.contrast_slider.setRange(0, 200)
         self.contrast_slider.setValue(100)
         self.contrast_slider.valueChanged.connect(self._update_slice)
@@ -8572,7 +8859,7 @@ class MetadataViewer(QWidget):
             )
             return
 
-        dialog.exec_()
+        dialog.exec()
 
     def _show_surface_view(self) -> None:
         """Launch the interactive surface renderer for the loaded mesh."""
@@ -8617,14 +8904,14 @@ class MetadataViewer(QWidget):
             )
             return
 
-        dialog.exec_()
+        dialog.exec()
 
     def _add_field(self):
         """Insert a new key/value pair into JSON tree."""
         tree = self.viewer
         sel = tree.currentItem() or tree.invisibleRootItem()
         item = QTreeWidgetItem(["newKey", "newValue"])
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
         sel.addChild(item)
         tree.editItem(item, 0)
 
@@ -8704,9 +8991,9 @@ class MetadataViewer(QWidget):
         self._img_scale = (1.0, 1.0)
 
         self.img_label = _ImageLabel(self._update_slice, self._on_image_clicked)
-        self.img_label.setAlignment(Qt.AlignCenter)
+        self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Allow the image to shrink as well as expand when resizing
-        self.img_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.img_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.img_label.setMinimumSize(1, 1)
 
         # Center the image label within a container so resizing doesn't shift
@@ -8716,7 +9003,7 @@ class MetadataViewer(QWidget):
         ic_layout.setContentsMargins(0, 0, 0, 0)
         ic_layout.addWidget(self.img_label)
 
-        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.splitter.addWidget(img_container)
 
         # Graph panel with scope selector
@@ -8726,7 +9013,7 @@ class MetadataViewer(QWidget):
         g_lay.setSpacing(2)
 
         self.graph_canvas = FigureCanvas(plt.Figure(figsize=(4, 2)))
-        self.graph_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.graph_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.ax = self.graph_canvas.figure.subplots()
         g_lay.addWidget(self.graph_canvas)
 
@@ -8829,15 +9116,15 @@ class MetadataViewer(QWidget):
         arr = np.rot90(arr)
         if arr.ndim == 2:
             h, w = arr.shape
-            img = QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8)
+            img = QImage(arr.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
         else:
             h, w, c = arr.shape
-            fmt = QImage.Format_RGB888 if c == 3 else QImage.Format_RGBA8888
+            fmt = QImage.Format.Format_RGB888 if c == 3 else QImage.Format.Format_RGBA8888
             bytes_per_line = w * c
             img = QImage(arr.tobytes(), w, h, bytes_per_line, fmt)
         pix = QPixmap.fromImage(img)
 
-        scaled = pix.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = pix.scaled(self.img_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self._img_scale = (scaled.width() / w, scaled.height() / h)
 
         # Draw crosshair after scaling for consistent width
@@ -8848,7 +9135,7 @@ class MetadataViewer(QWidget):
             y_s = int(y_rot * scale_y)
             # Use the highlight color so the crosshair is visible on any theme
             painter = QPainter(scaled)
-            theme_color = self.palette().color(QPalette.Highlight)
+            theme_color = self.palette().color(QPalette.ColorRole.Highlight)
             pen = QPen(theme_color)
             pen.setWidth(1)
             painter.setPen(pen)
@@ -8917,7 +9204,7 @@ class MetadataViewer(QWidget):
         return x, y
 
     def _on_image_clicked(self, event):
-        coords = self._label_pos_to_img_coords(event.pos())
+        coords = self._label_pos_to_img_coords(event.position().toPoint())
         if coords:
             voxel = self._arr_to_voxel(*coords)
             self.cross_voxel = list(voxel)
@@ -8978,8 +9265,8 @@ class MetadataViewer(QWidget):
         )
 
         line_color = "#000000" if not self._is_dark_theme() else "#ffffff"
-        marker_color = self.palette().color(QPalette.Highlight).name()
-        bg_color = self.palette().color(QPalette.Base).name()
+        marker_color = self.palette().color(QPalette.ColorRole.Highlight).name()
+        bg_color = self.palette().color(QPalette.ColorRole.Base).name()
         dot_size = self.dot_size_spin.value()
         self.graph_canvas.figure.set_facecolor(bg_color)
         self.markers = []
@@ -9036,7 +9323,7 @@ class MetadataViewer(QWidget):
             or getattr(self, '_nifti_is_color', False)
         ):
             return
-        marker_color = self.palette().color(QPalette.Highlight).name()
+        marker_color = self.palette().color(QPalette.ColorRole.Highlight).name()
         idx = self.vol_slider.value()
         for marker, ts in zip(self.markers, self.marker_ts):
             i = max(0, min(idx, len(ts) - 1))
@@ -9052,13 +9339,13 @@ class MetadataViewer(QWidget):
         tree.setHeaderLabels(["Key", "Value"])
         tree.setAlternatingRowColors(True)
         hdr = tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         if data is None:
             data = json.loads(path.read_text(encoding='utf-8'))
         self._populate_json(tree.invisibleRootItem(), data)
         tree.expandAll()
-        tree.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        tree.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
         return tree
 
     def _populate_json(self, parent, data, editable: bool = True):
@@ -9068,7 +9355,7 @@ class MetadataViewer(QWidget):
             for k, v in data.items():
                 it = QTreeWidgetItem([str(k), '' if isinstance(v, (dict, list)) else str(v)])
                 if editable:
-                    it.setFlags(it.flags() | Qt.ItemIsEditable)
+                    it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
                 parent.addChild(it)
                 if isinstance(v, (dict, list)):
                     self._populate_json(it, v, editable)
@@ -9076,7 +9363,7 @@ class MetadataViewer(QWidget):
             for i, v in enumerate(data):
                 it = QTreeWidgetItem([str(i), '' if isinstance(v, (dict, list)) else str(v)])
                 if editable:
-                    it.setFlags(it.flags() | Qt.ItemIsEditable)
+                    it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
                 parent.addChild(it)
                 if isinstance(v, (dict, list)):
                     self._populate_json(it, v, editable)
@@ -9088,16 +9375,16 @@ class MetadataViewer(QWidget):
         tbl = QTableWidget(df.shape[0], df.shape[1])
         tbl.setAlternatingRowColors(True)
         hdr = tbl.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         for j, col in enumerate(df.columns):
             tbl.setHorizontalHeaderItem(j, QTableWidgetItem(col))
             for i, val in enumerate(df[col].astype(str)):
                 item = QTableWidgetItem(val)
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                 tbl.setItem(i, j, item)
         for j in range(1, tbl.columnCount()):
-            hdr.setSectionResizeMode(j, QHeaderView.Interactive)
-        tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+            hdr.setSectionResizeMode(j, QHeaderView.ResizeMode.Interactive)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
         return tbl
 
     def _dicom_dataset_to_tree(self, dataset) -> Dict[str, Any]:
@@ -9140,13 +9427,13 @@ class MetadataViewer(QWidget):
         tree.setHeaderLabels(["Tag", "Value"])
         tree.setAlternatingRowColors(True)
         hdr = tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
 
         data = metadata or {"File Meta Information": {}, "Dataset": {}}
         self._populate_json(tree.invisibleRootItem(), data, editable=False)
         tree.expandAll()
-        tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         return tree
 
     def _html_view(self, path: Path) -> QWebEngineView:
@@ -9193,7 +9480,7 @@ def main() -> None:
         app.setWindowIcon(QIcon(str(ICON_FILE)))
     win = BIDSManager()
     win.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == '__main__':

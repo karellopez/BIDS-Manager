@@ -1,0 +1,44 @@
+Metadata-Version: 2.4
+Name: bids-manager
+Version: 0.2.5
+Summary: GUI application to manage BIDS datasets
+Author-email: Karel López Vilaret <karel.mauricio.lopez.vilaret@uni-oldenburg.de>
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/ANCPLabOldenburg/BIDS-Manager
+Project-URL: Documentation, https://github.com/ANCPLabOldenburg/BIDS-Manager
+Project-URL: Source, https://github.com/ANCPLabOldenburg/BIDS-Manager
+Project-URL: Tracker, https://github.com/ANCPLabOldenburg/BIDS-Manager/issues
+Keywords: BIDS,DICOM,GUI,Neuroimaging
+Classifier: Development Status :: 3 - Alpha
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: setuptools<81
+Requires-Dist: pydicom==3.0.1
+Requires-Dist: pandas==2.3.1
+Requires-Dist: PyQt6==6.11.0
+Requires-Dist: PyQt6-WebEngine==6.11.0
+Requires-Dist: ancpbids>=0.3.1
+Requires-Dist: heudiconv-ancp
+Requires-Dist: dcm2niix==1.0.20250506
+Requires-Dist: bidsphysio==21.6.24
+Requires-Dist: nibabel==5.3.2
+Requires-Dist: numpy==2.2.6
+Requires-Dist: psutil==7.0.0
+Requires-Dist: matplotlib==3.10.3
+Requires-Dist: joblib==1.4.2
+Requires-Dist: scikit-image==0.24.0
+Requires-Dist: pyqtgraph==0.14.0
+Requires-Dist: PyOpenGL==3.1.7
+Dynamic: license-file
+
+
+# BIDS Manager
+
+**BIDS Manager** is a **PyQt-based** GUI that converts **DICOM** folders into **BIDS**-compliant datasets and allows easy metadata editing.
+
+---
+# Check the 📜 [documentation](https://ancplaboldenburg.github.io/bids_manager_documentation/) 📜
+

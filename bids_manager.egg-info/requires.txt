@@ -1,0 +1,17 @@
+setuptools<81
+pydicom==3.0.1
+pandas==2.3.1
+PyQt6==6.11.0
+PyQt6-WebEngine==6.11.0
+ancpbids>=0.3.1
+heudiconv-ancp
+dcm2niix==1.0.20250506
+bidsphysio==21.6.24
+nibabel==5.3.2
+numpy==2.2.6
+psutil==7.0.0
+matplotlib==3.10.3
+joblib==1.4.2
+scikit-image==0.24.0
+pyqtgraph==0.14.0
+PyOpenGL==3.1.7
