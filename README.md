@@ -1,182 +1,133 @@
-# BIDS Manager
+<h1 align="center">
+  <br>
+  <!-- Here, insert the wordmark image. Use bidsmgr/gui/assets/wordmark.png,
+       transparent background, around 480 px wide. -->
+  <img src="bidsmgr/gui/assets/wordmark.png" alt="BIDS Manager" width="480">
+  <br>
+</h1>
 
-**Schema-driven BIDS converter, curator, and editor.** PyQt6 GUI + CLI for
-turning **DICOM**, **EEG**, and **MEG** trees into BIDS-compliant datasets,
-with a post-conversion Editor for sidecar / TSV / NIfTI inspection and
-metadata fixes.
+<h3 align="center">Making raw-to-BIDS less painful.</h3>
 
-📜 [documentation](https://ancplaboldenburg.github.io/bids_manager_documentation/) 📜
+<p align="center">
+  <a href="https://pypi.org/project/bids-manager/"><img alt="PyPI" src="https://img.shields.io/pypi/v/bids-manager?color=4FC3F7&label=PyPI"></a>
+  <a href="https://pypi.org/project/bids-manager/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/bids-manager?color=4FC3F7"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/pypi/l/bids-manager?color=4FC3F7"></a>
+  <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4FC3F7"></a>
+</p>
 
----
+<p align="center">
+  <img src="miscellaneous/hero.gif" alt="BIDS Manager in action" width="100%">
+</p>
 
-## What's new in v1.0.0
+## What is BIDS Manager?
 
-v1.0.0 is a **complete re-imagination** of BIDS-Manager (0.x). The old
-HeuDiConv / dcm2bids two-engine pipeline + 9.2k-LOC single-file GUI has
-been replaced by:
-
-* A **schema-driven engine** — every layer (classification, naming,
-  GUI forms, validation, sidecar generation) reads from the same
-  machine-readable BIDS schema via
-  [`bidsschematools`](https://github.com/bids-standard/bids-specification).
-  Naming logic is no longer scattered across the heuristic, the config
-  builder, and the renamer.
-* **`dcm2niix` invoked directly** as the default MRI backend — no
-  HeuDiConv / dcm2bids wrapper between us and the converter.
-* A **two-tab PyQt6 GUI** — *Converter* (scan + plan + run) and
-  *Editor* (post-conversion BIDS tree + sidecar form + TSV editor +
-  NIfTI viewer + validator).
-* A **NIfTI viewer** in the Editor with single-pane + tri-view
-  (sagittal / coronal / axial) sharing one crosshair, click-and-drag
-  scrubbing, and a 4-D time-series Graph with neighbour-scope grid.
-  All NIfTI loads run on a `QThread` so the GUI doesn't freeze on
-  large BOLDs.
-* **Event-sourced project bundles** (`.bidsmgr/` directories) recording
-  every user action for full undo + provenance.
-* **Modular, testable architecture** — 16 sub-packages, no `Pipeline`
-  god-object, no Qt outside `bidsmgr.gui`. ~730 unit/GUI tests + 49
-  real-data tests passing.
-
-The PyPI distribution name is **`bids-manager`** (unchanged from 0.x).
-The import name is **`bidsmgr`** (new) — same pattern as
-`pip install scikit-learn` → `import sklearn`.
-
-If you're upgrading from v0.2.5: the old `from bids_manager import …`
-imports and the old CLI entry points (`dicom-inventory`,
-`build-heuristic`, `run-heudiconv`, `run-dcm2bids`, `post-conv-renamer`,
-…) are gone. The replacement surface is documented below. The v0.2.5
-codebase is preserved in git history.
-
----
-
-## Install
+BIDS Manager is a desktop app that helps researchers turn raw MRI, EEG, and MEG
+recordings into BIDS-compliant datasets. It scans your raw data, lets you review
+and fix every conversion decision in a spreadsheet, runs the conversion, and then
+opens the result for metadata editing, volume inspection, and validation. All in
+one place, without writing scripts or editing JSON files by hand.
 
 ```bash
 pip install bids-manager
+bidsmgr
 ```
 
-Requires Python ≥ 3.10. Installs the `bidsmgr` Python package and
-seven console scripts (one GUI + five CLI verbs, see below).
+## The workflow
 
----
+<p align="center">
+  <img src="docs/workflow.svg" alt="Raw data, then Scan, Review and edit inventory, Convert, Fix metadata, Inspect volumes, Validate, then BIDS dataset" width="55%">
+</p>
 
-## Use
+Each feature below maps to one of the stages above.
 
-### GUI
+## Features
+
+### 1. See what you have
+
+Point the app at a folder of DICOM, EEG, or MEG recordings, or all three at once.
+It walks the tree, classifies every series, and shows the proposed BIDS names in
+a spreadsheet you can sort, filter, and bulk-edit.
+
+<p align="center">
+  <img src="miscellaneous/see.gif" alt="See what you have" width="100%">
+</p>
+
+### 2. Convert with confidence
+
+Override any cell before you commit. Subject names, sessions, tasks, runs:
+everything updates the BIDS filename live. Hit Run and BIDS Manager handles
+`dcm2niix`, `mne-bids`, and the physio backends behind the scenes, with atomic
+staging so a failure never leaves your output tree half-converted.
+
+### 3. Fix metadata visually
+
+JSON sidecars become forms. Required fields appear in red, recommended in amber,
+and missing fields are listed for you with empty inputs ready to fill. TSVs open
+in an editable table. No more hand-editing files in a text editor.
+
+<p align="center">
+  <img src="miscellaneous/fix.gif" alt="Fix metadata visually" width="100%">
+</p>
+
+### 4. Inspect your volumes
+
+A built-in NIfTI viewer with single-slice and tri-view modes. Drag the crosshair
+across all three orientations at once. For 4D data, a time-series plot shows the
+signal at the crosshair voxel, with a scope grid for neighbouring voxels.
+
+<p align="center">
+  <img src="miscellaneous/inspect.gif" alt="Inspect your volumes" width="100%">
+</p>
+
+### 5. Validate in one click
+
+Run the official BIDS validator against your dataset. Every error is clickable.
+It takes you straight to the offending file, scrolls to the broken field, and
+opens it for editing. Fix it, revalidate, done.
+
+<p align="center">
+  <img src="miscellaneous/validate.gif" alt="Validate in one click" width="100%">
+</p>
+
+### 6. Provenance built in
+
+Every action you take is recorded in your project file. Undo a mistake from
+yesterday. See why a subject was renamed. Your dataset arrives with its history
+attached in `dataset_description.json`, so anyone who picks it up can trace what
+happened and when.
+
+## Get started
 
 ```bash
-bidsmgr                  # launch the GUI
-bidsmgr --theme dark     # force a theme on launch
-bidsmgr --project PATH.bidsmgr   # open a saved project
+pip install bids-manager   # needs Python 3.10 or newer
+bidsmgr                    # launch the GUI
 ```
 
-The GUI has two tabs:
+Prefer the command line? Five verbs cover the whole pipeline:
+`bidsmgr-scan`, `bidsmgr-rebuild`, `bidsmgr-convert`, `bidsmgr-metadata`,
+and `bidsmgr-validate`. See the [docs](https://ancplaboldenburg.github.io/bids_manager_documentation/)
+for examples *(docs are being updated)*.
 
-* **Converter** — point at a raw DICOM / EEG / MEG tree, review the
-  schema-classified inventory in the inspection table, edit subject /
-  session / sequence assignments via the Properties panel, run the
-  conversion through `dcm2niix` (MRI) / `mne-bids` (EEG/MEG) /
-  `bidsphysio` (Siemens physio). Per-subject staging with atomic
-  commit; errors land under `<bids_root>/.bidsmgr/errors/`.
-* **Editor** — open any BIDS dataset, browse it as a tree, edit JSON
-  sidecars in a schema-aware form (required/recommended/optional
-  fields colour-coded), edit TSVs in a table, view NIfTI volumes
-  (2-D slice, tri-view, 4-D time-series graph), and run dataset /
-  folder / file validation (layer 1 always; the official
-  `bidsschematools.validator.validate_bids` as layer 2 via the Strict
-  toggle).
+## Authors
 
-### CLI
-
-Five verbs covering the whole pipeline:
-
-```
-bidsmgr-scan      <raw_root>     <inv.tsv>      [--dataset NAME] [--line-freq 50|60] [--montage NAME] [-j N] [--probe-convert]
-bidsmgr-rebuild   <inv.tsv>                     [--from {entities,columns}] [--dry-run]
-bidsmgr-convert   <inv.tsv>      <bids_parent>  [--dataset NAME] [-j N] [--overwrite] [--dry-run]
-bidsmgr-metadata  <bids_parent>                 [--inventory-tsv …] [--fill-todos] [--name …]
-bidsmgr-validate  <bids_parent>                 [--strict] [--strict-warn] [--html]
-```
-
-Each verb has independent CLI dispatch under `bidsmgr.cli.<verb>:main`
-and reads/writes files on disk, so any stage can be run standalone.
-
----
-
-## Project layout
-
-```
-BIDS-Manager/                      ← repo root
-├── pyproject.toml                  PEP 621, name = "bids-manager"
-├── README.md                       ← you are here
-├── LICENSE
-├── CLAUDE.md                       project map for Claude Code
-├── docs/                           architecture + planning documents
-│   ├── architecture.md
-│   ├── super_plan.md
-│   ├── improvement_plan.md
-│   ├── gui_mockups.html
-│   └── inspector_proto/            standalone PyQt6 GUI prototype
-├── miscellaneous/images/           non-package image assets
-├── external/                       vendored Python embed (Windows installer)
-├── Installers/                     packaged Windows installer
-├── bidsmgr/                        ← the importable Python package
-│   ├── __init__.py                 __version__ = "1.0.0"
-│   ├── main.py                     GUI entry
-│   ├── schema/                     bidsschematools wrapper (keystone)
-│   ├── inventory/                  per-modality scanners
-│   ├── classifier/                 chained classifiers
-│   ├── planner/                    EntityPlan + edits
-│   ├── converter/                  pluggable backends
-│   │   └── backends/
-│   ├── metadata/                   post-conv schema engine
-│   ├── fixups/                     fmap, IntendedFor, scans.tsv
-│   ├── project/                    event-sourced .bidsmgr files
-│   ├── editor/                     post-conv editor logic (no Qt)
-│   ├── gui/                        ← THE ONLY Qt subtree
-│   │   ├── theme.qss
-│   │   ├── theme_manager.py
-│   │   ├── widgets/  delegates/  models/
-│   ├── workers/                    QThread bridges
-│   ├── cli/                        CLI verbs
-│   └── util/                       cross-OS path safety, Qt platform helpers
-└── tests/
-    ├── unit/  integration/  real_data/  gui/  fixtures/
-```
-
-**Architectural prevention guards** (see `docs/architecture.md`):
-
-1. `schema/` is the keystone — everything imports from it; it imports nothing.
-2. `gui/` is the only Qt-coupled subtree; `workers/` also imports Qt
-   (the QThread bridge); nothing else does.
-3. **No `Pipeline` orchestrator.** Orchestration is explicit code in
-   `cli/<verb>.py` and `gui/<panel>.py`.
-4. Pure-data types only (Pydantic / dataclass; no I/O methods).
-5. Functions over classes where possible.
-
----
-
-## Develop
-
-```bash
-pip install -e ".[dev]"
-python -c "import bidsmgr; print(bidsmgr.__version__)"
-pytest
-```
-
-GUI tests run headless under `QT_QPA_PLATFORM=offscreen` via
-`pytest-qt`. Real-data tests are gated on env vars
-`BIDS_MANAGER_REAL_{MRI,EEG,MEG}_DATA=1` and datasets at
-`/Users/karelo/Development/datasets/BIDS_Manager/raw_data/`.
-
----
+**Karel López Vilaret** and **Jochem Rieger**, ANCP Lab,
+Carl von Ossietzky Universität Oldenburg.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).
 
 ## Citation
 
-Authored by **Karel López Vilaret** and **Jochem Rieger**, ANCP Lab,
-Carl von Ossietzky Universität Oldenburg. See the *About* dialog in
-the GUI for the full acknowledgements.
+```
+López Vilaret, K. M. and Rieger, J.
+BIDS Manager (v1.0.0). 2026. https://github.com/karellopez/BIDS-Manager
+```
+
+<p align="center">
+  <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/">Documentation</a>
+  ·
+  <a href="https://github.com/karellopez/BIDS-Manager/issues">Report a bug</a>
+  ·
+  <a href="https://github.com/karellopez/BIDS-Manager/issues/new">Suggest a feature</a>
+</p>
