@@ -42,7 +42,7 @@ PYPI_PKG="bids-manager"
 DESKTOP_DIR="$HOME/Desktop"
 APPDIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
-PYTHON_URL="https://raw.githubusercontent.com/karellopez/BIDS-Manager/main/external/python-embed/python-3.10.13%2B20240107-x86_64-unknown-linux-gnu-install_only.zip"
+PYTHON_URL="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/external/python-embed/python-3.10.13%2B20240107-x86_64-unknown-linux-gnu-install_only.zip"
 PYTHON_BIN="$INSTALL_DIR/bin/python3.10"
 MIN_DISK_MB=2500
 

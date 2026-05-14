@@ -112,7 +112,15 @@ include-package-data = true
 include = ["bidsmgr*"]
 
 [tool.setuptools.package-data]
-"bidsmgr.gui"               = ["*.qss", "assets/*.png", "assets/*.jpg", "assets/*.jpeg"]
+"bidsmgr.gui"               = [
+    "*.qss",
+    "assets/*.png",
+    "assets/*.jpg",
+    "assets/*.jpeg",
+    "assets/macos/*.png",
+    "assets/macos/*.icns",
+    "assets/windows/*.ico",
+]
 "bidsmgr.schema"            = ["bundled/**/*"]
 "bidsmgr.vendor"            = ["README.md"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]

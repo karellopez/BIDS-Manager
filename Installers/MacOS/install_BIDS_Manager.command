@@ -39,7 +39,7 @@ PYPI_PKG="bids-manager"
 DESKTOP_DIR="$HOME/Desktop"
 APPLICATIONS_DIR="$HOME/Applications"
 APP_BUNDLE="$APPLICATIONS_DIR/BIDS-Manager.app"
-PYTHON_URL="https://raw.githubusercontent.com/karellopez/BIDS-Manager/main/external/python-embed/cpython-3.10.13%2B20240107-aarch64-apple-darwin-install_only.tar.gz"
+PYTHON_URL="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/external/python-embed/cpython-3.10.13%2B20240107-aarch64-apple-darwin-install_only.tar.gz"
 PYTHON_BIN="$INSTALL_DIR/bin/python3.10"
 MIN_DISK_MB=2500
 

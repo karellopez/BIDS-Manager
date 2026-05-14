@@ -28,7 +28,7 @@ set "ENVDIR=%BASEDIR%\env"
 set "LOG_FILE=%BASEDIR%\install.log"
 set "PYPI_PKG=bids-manager"
 set "ICO_FILE=%BASEDIR%\bids-manager.ico"
-set "ZIPURL=https://raw.githubusercontent.com/karellopez/BIDS-Manager/main/external/python-embed/python-3.10.11-embed-amd64.zip"
+set "ZIPURL=https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/external/python-embed/python-3.10.11-embed-amd64.zip"
 
 rem Determine Desktop and Start Menu paths
 set "DESKTOP="
