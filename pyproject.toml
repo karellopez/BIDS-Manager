@@ -64,11 +64,9 @@ dependencies = [
     "mne-bids>=0.15,<=0.17.0",
     "edfio>=0.3,<=0.4.13",
 
-    # Physio (Siemens PhysioLog DICOM to BIDS).
-    "bidsphysio>=21.5,<=21.6.24",
-    # bidsphysio still uses pkg_resources.declare_namespace, which was
-    # removed in setuptools 81+. Cap below that until bidsphysio migrates.
-    "setuptools<81",
+    # Physio (Siemens PhysioLog DICOM to BIDS): vendored at
+    # ``bidsmgr.vendor.bidsphysio`` (MIT, see that subdir's LICENSE).
+    # No transitive setuptools cap required as a result.
 
     # Data handling.
     "pandas>=2.0,<3.0",
@@ -114,8 +112,10 @@ include-package-data = true
 include = ["bidsmgr*"]
 
 [tool.setuptools.package-data]
-"bidsmgr.gui"    = ["*.qss", "assets/*.png", "assets/*.jpg", "assets/*.jpeg"]
-"bidsmgr.schema" = ["bundled/**/*"]
+"bidsmgr.gui"               = ["*.qss", "assets/*.png", "assets/*.jpg", "assets/*.jpeg"]
+"bidsmgr.schema"            = ["bundled/**/*"]
+"bidsmgr.vendor"            = ["README.md"]
+"bidsmgr.vendor.bidsphysio" = ["LICENSE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
