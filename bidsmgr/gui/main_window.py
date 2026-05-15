@@ -245,7 +245,9 @@ class MainWindow(QMainWindow):
         self._apply_active_view(settings.active_view, persist=False)
 
         # Status bar — forwards the Converter's log messages so the
-        # user sees scan / convert progress.
+        # user sees scan / convert progress. The bottom-right corner
+        # carries the installed version label + "Check updates" button
+        # via :func:`update_widgets.attach_update_widgets`.
         sb = QStatusBar()
         sb.setSizeGripEnabled(False)
         self._status_text = QLabel("Ready")
@@ -254,6 +256,16 @@ class MainWindow(QMainWindow):
 
         self.converter.log_message.connect(self._set_status)
         self.editor.log_message.connect(self._set_status)
+
+        # Bottom-right: "vX.Y.Z" + "Check updates". Wrapped in try/except
+        # because a broken update path must never prevent the GUI from
+        # opening (offline machines, missing certifi, etc.).
+        try:
+            from .update_widgets import attach_update_widgets, run_startup_check
+            attach_update_widgets(sb, self)
+            run_startup_check(self)
+        except Exception as exc:
+            log.warning("update check disabled: %s", exc)
 
         # Subscribe to palette changes so widgets whose colors are read
         # at construction time (delegate paints, inline ``setStyleSheet``)
