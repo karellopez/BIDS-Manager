@@ -134,12 +134,11 @@ def attach_update_widgets(
     version_label = QLabel(f"v{current}")
     version_label.setToolTip(f"Installed bids-manager version ({current}).")
     version_label.setObjectName("update-version-label")
-    version_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
 
     check_btn = QPushButton("Check updates")
     check_btn.setObjectName("update-check-btn")
     check_btn.setToolTip("Check PyPI for a newer bids-manager release.")
-    check_btn.setFlat(True)
+    check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
     check_btn.clicked.connect(
         lambda: check_for_updates_interactive(parent_window, check_btn)
     )

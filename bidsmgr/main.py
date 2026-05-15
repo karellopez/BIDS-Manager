@@ -86,7 +86,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     app.setApplicationName("bidsmgr")
     app.setStyle("Fusion")
     font = app.font()
-    font.setPointSize(13)
+    # Pixel size (not point size) so the app-font baseline matches the
+    # QSS rules in ``theme.qss`` exactly. Point sizes are DPI-relative
+    # (13 pt is ~13 px on macOS at 72 dpi but ~17 px on Windows / Linux
+    # at 96 dpi), which left every widget *without* an explicit QSS
+    # ``font-size`` rule rendering larger than the QSS-styled ones.
+    font.setPixelSize(13)
     app.setFont(font)
 
     # Brand icon for the title bar / taskbar / alt-tab on Linux and
