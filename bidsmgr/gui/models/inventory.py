@@ -214,6 +214,17 @@ class InventoryTableModel(QAbstractTableModel):
         if role == HIGHLIGHT_ROLE:
             return self._highlight_aborts and self.is_row_aborted(row)
 
+        # Hovering any cell of a flagged row surfaces the scanner's
+        # ``proposed_issues`` (e.g. the "non-image series" reason) so the
+        # user sees *why* a row is highlighted without unhiding the issues
+        # column. Newline-split the `` | ``-joined notes for readability.
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if "proposed_issues" in self._df.columns:
+                issues = str(self._df.at[row, "proposed_issues"] or "").strip()
+                if issues:
+                    return issues.replace(" | ", "\n")
+            return None
+
         # Checkbox and status cells communicate via PAYLOAD_ROLE instead
         # of DisplayRole; they have no text body.
         if spec.role == "checkbox":
@@ -764,6 +775,17 @@ class InventoryTableModel(QAbstractTableModel):
         Drives the row tint applied by every delegate. Selection is
         applied by the view at paint time, not stored here.
         """
+        # Non-image DERIVED objects (no pixel data; e.g. a Siemens TENSOR
+        # map) are flagged by the scanner via the ``non-image series``
+        # token in ``proposed_issues`` (see ``cli/scan.NONIMAGE_ISSUE_TOKEN``).
+        # They are excluded from conversion (include=0) but must still read
+        # as a deliberate, highlighted "not an image" state rather than a
+        # de-emphasised skip — so this check wins over the include check.
+        if "proposed_issues" in self._df.columns:
+            issues_l = str(self._df.at[row, "proposed_issues"] or "").lower()
+            if "non-image series" in issues_l:
+                return "noimg"
+
         if not self._read_include(row):
             return "skip"
 
@@ -807,6 +829,8 @@ class InventoryTableModel(QAbstractTableModel):
         keep their distinct icon.
         """
         state = self._row_states[row]
+        if state == "noimg":
+            return "noimg"
         if state == "skip":
             return "skip"
         if state == "err":

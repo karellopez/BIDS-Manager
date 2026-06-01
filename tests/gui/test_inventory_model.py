@@ -262,6 +262,51 @@ def test_status_kind_ok_for_valid_mri_row() -> None:
     assert model.data(model.index(0, status_col), PAYLOAD_ROLE) == "ok"
 
 
+def test_row_state_noimg_for_nonimage_series() -> None:
+    """A DERIVED non-image series (flagged by the scanner with the
+    ``non-image series`` token) reads as ``noimg`` — taking priority over
+    the ``skip`` it would otherwise get for being excluded (include=0)."""
+    df = make_df([_ok_row(
+        include=0,
+        bids_guess_skip=True,
+        proposed_issues=(
+            "non-image series: the DICOM headers carry no pixel data "
+            "(Rows/Columns absent), so dcm2niix cannot convert it. "
+            "Excluded from conversion."
+        ),
+    )])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "noimg"
+
+
+def test_status_kind_noimg_for_nonimage_series() -> None:
+    df = make_df([_ok_row(
+        include=0, bids_guess_skip=True,
+        proposed_issues="non-image series: no pixel data; excluded.",
+    )])
+    model = InventoryTableModel(df)
+    status_col = next(i for i, c in enumerate(COLUMNS) if c.key == "status")
+    assert model.data(model.index(0, status_col), PAYLOAD_ROLE) == "noimg"
+
+
+def test_tooltip_surfaces_proposed_issues() -> None:
+    """Hovering any cell of a flagged row shows the scanner's reason."""
+    df = make_df([_ok_row(
+        proposed_issues="non-image series: no pixel data | trivial: few files",
+    )])
+    model = InventoryTableModel(df)
+    tip = model.data(model.index(0, 1), Qt.ItemDataRole.ToolTipRole)
+    assert tip is not None and "non-image series" in tip
+    # `` | ``-joined notes are split onto separate lines for readability.
+    assert "\n" in tip
+
+
+def test_no_tooltip_when_no_issues() -> None:
+    df = make_df([_ok_row(proposed_issues="")])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.ToolTipRole) is None
+
+
 def test_include_payload_reads_dataframe() -> None:
     df = make_df([_ok_row(include=1), _ok_row(include=0)])
     model = InventoryTableModel(df)

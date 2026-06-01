@@ -39,9 +39,9 @@ def paint_row_state(
 ) -> None:
     """Tint the cell's background according to ``row_state``.
 
-    Recognised values: ``"selected"``, ``"warn"``, ``"err"``, ``"skip"``.
-    Anything else (including ``None`` / ``""``) is a no-op so the model
-    can omit the role for non-special rows.
+    Recognised values: ``"selected"``, ``"warn"``, ``"err"``, ``"skip"``,
+    ``"noimg"``. Anything else (including ``None`` / ``""``) is a no-op so
+    the model can omit the role for non-special rows.
     """
     if not row_state:
         return
@@ -54,6 +54,11 @@ def paint_row_state(
         painter.fillRect(option.rect, rgba(pal["error"], 0.06))
     elif row_state == "skip":
         painter.fillRect(option.rect, QColor(pal["bg"]))
+    elif row_state == "noimg":
+        # DERIVED non-image object (no pixel data; excluded from convert).
+        # A distinct teal wash so it reads as "flagged / informational"
+        # rather than the de-emphasised grey of an ordinary skip.
+        painter.fillRect(option.rect, rgba(pal["teal"], 0.14))
 
 
 def paint_highlight(

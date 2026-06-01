@@ -920,7 +920,78 @@ def _augment_dataframe(
                     annotated_issues.append(anomaly)
                     df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
 
+    _flag_nonimage_rows(df)
     return df
+
+
+# Marker prepended to ``proposed_issues`` for a DERIVED non-image series.
+# The GUI inventory model keys on the leading ``NONIMAGE_ISSUE_TOKEN``
+# substring to paint the row's "not an image" highlight, so keep the two
+# in sync (mirrors how the abort highlight keys on ``suspected_abort``).
+NONIMAGE_ISSUE_TOKEN = "non-image series"
+NONIMAGE_ISSUE = (
+    "non-image series: the DICOM headers carry no pixel data "
+    "(Rows/Columns absent), so dcm2niix cannot convert it to NIfTI. "
+    "This is typically a scanner-derived object such as a Siemens "
+    "diffusion TENSOR map. Excluded from conversion."
+)
+
+
+def _is_nonimage_flag(val: object) -> bool:
+    """True only when the internal ``_has_pixel_data`` flag is explicitly
+    False. NaN / blank / True (fmap-collapsed rows, EEG/MEG rows, real
+    images) are treated as images."""
+    if val is True or val is False:
+        return val is False
+    return str(val).strip().lower() in ("false", "0")
+
+
+def _is_physio_row(df: pd.DataFrame, idx: object) -> bool:
+    """True for Siemens CMRR ``_PhysioLog.dcm`` rows.
+
+    Physio DICOMs carry no Image Pixel module (no Rows/Columns) just like a
+    DERIVED non-image object, but unlike one they ARE convertible -- the
+    ``PhysioDcmBackend`` (bidsphysio) turns them into ``_physio.tsv.gz`` +
+    ``_physio.json``. So they must be exempt from the non-image exclusion.
+    Identified by the ``physio`` suffix the converter dispatches on, with
+    ``modality`` / basename fallbacks for robustness."""
+    def _cell(col: str) -> str:
+        return str(df.at[idx, col]).strip().lower() if col in df.columns else ""
+
+    return (
+        _cell("bids_guess_suffix") == "physio"
+        or _cell("modality") == "physio"
+        or _cell("proposed_basename").endswith("_physio")
+    )
+
+
+def _flag_nonimage_rows(df: pd.DataFrame) -> None:
+    """Exclude + annotate DICOM series that carry no pixel data.
+
+    A series whose DICOMs lack the Image Pixel module (Rows/Columns) is a
+    DERIVED non-image object (commonly a Siemens diffusion TENSOR map, also
+    structured reports / spectroscopy frames). dcm2niix cannot turn it into
+    a NIfTI, so instead of letting the converter attempt it and fail with a
+    cryptic ``rc=2`` we flag the row here: force ``bids_guess_skip`` /
+    ``include=0`` so it is never converted, and prepend a clear reason to
+    ``proposed_issues`` so it surfaces in the inventory table highlighted as
+    "not an actual image". Operates on the internal ``_has_pixel_data``
+    column (stamped by ``inventory.mri_dicom``, dropped from the final TSV).
+    """
+    if "_has_pixel_data" not in df.columns:
+        return
+    for df_idx in df.index:
+        if not _is_nonimage_flag(df.at[df_idx, "_has_pixel_data"]):
+            continue
+        # Physio rows have no pixel data but ARE convertible (bidsphysio).
+        if _is_physio_row(df, df_idx):
+            continue
+        df.at[df_idx, "bids_guess_skip"] = True
+        df.at[df_idx, "include"] = 0
+        existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
+        df.at[df_idx, "proposed_issues"] = (
+            f"{NONIMAGE_ISSUE} | {existing}" if existing else NONIMAGE_ISSUE
+        )
 
 
 def _probe_anomaly(
