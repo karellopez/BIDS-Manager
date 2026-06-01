@@ -28,6 +28,7 @@ KIND_CHAR: dict[str, str] = {
     "phys": "P",
     "skip": "−",
     "info": "i",
+    "noimg": "⊘",   # DERIVED non-image object (no pixel data; not convertible)
 }
 
 # Background color: which palette token to tint, and at what alpha.
@@ -38,12 +39,14 @@ KIND_BG_TOKEN: dict[str, tuple[str, float]] = {
     "phys": ("accent",  0.18),
     "skip": ("muted",   0.20),
     "info": ("accent",  0.18),
+    "noimg": ("teal",   0.20),
 }
 
 # Foreground (glyph) color token.
 KIND_FG_TOKEN: dict[str, str] = {
     "ok": "success", "warn": "warning", "err": "error",
     "phys": "accent", "skip": "dim", "info": "accent",
+    "noimg": "teal",
 }
 
 

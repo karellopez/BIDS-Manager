@@ -171,6 +171,13 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
     folder = root_dir.name if rel == "." else rel
     series = str(getattr(ds, "SeriesDescription", "n/a")).strip()
     uid = str(getattr(ds, "SeriesInstanceUID", ""))
+    # Pixel presence: a real image carries the Image Pixel module's
+    # Rows + Columns (0028,0010 / 0028,0011). DERIVED non-image objects
+    # (a Siemens diffusion TENSOR map, a structured report, a
+    # spectroscopy frame, ...) omit them and dcm2niix cannot turn them
+    # into a NIfTI. We OR this across a series' files downstream so a
+    # series counts as an image if ANY of its files carries pixels.
+    has_pixels = ("Rows" in ds) and ("Columns" in ds)
     img_list = normalize_image_type(getattr(ds, "ImageType", None))
     img3 = classify_fieldmap_type(img_list)
     if not img3:
@@ -206,6 +213,7 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         "study_uid": study_uid,
         "study_date": study_date,
         "study_time": study_time,
+        "has_pixels": has_pixels,
         "demo": {
             "GivenName": given,
             "FamilyName": family_name,
@@ -249,6 +257,10 @@ def scan_dicoms_long(
     imgtypes: dict = defaultdict(lambda: defaultdict(dict))
     sessset: dict = defaultdict(lambda: defaultdict(set))
     file_dirs: dict = defaultdict(lambda: defaultdict(dict))
+    # Per-series pixel presence: True once any file in the series carries
+    # an Image Pixel module (Rows/Columns). Series with no pixel-bearing
+    # file are DERIVED non-image objects dcm2niix cannot convert.
+    haspix: dict = defaultdict(lambda: defaultdict(dict))
     # study-level metadata (per series): subj_key -> folder -> (series,uid) -> study tuple
     study_uids: dict = defaultdict(lambda: defaultdict(dict))
     # all distinct study tuples seen for each subject (for session inference).
@@ -281,6 +293,9 @@ def scan_dicoms_long(
             acq_times[subj_key][folder][key] = res["acq_time"]
         if key not in file_dirs[subj_key][folder]:
             file_dirs[subj_key][folder][key] = res["file_dir"]
+        haspix[subj_key][folder][key] = (
+            haspix[subj_key][folder].get(key, False) or bool(res.get("has_pixels"))
+        )
         # Track every DICOM file path per UID for later per-series probe.
         uid_str = res["uid"]
         if uid_str:
@@ -397,6 +412,12 @@ def scan_dicoms_long(
                     "study_date": study_tuple[1],
                     "study_time": study_tuple[2],
                     "_source_dir": file_dirs[subj_key][folder].get((series, uid), ""),
+                    # Internal flag (leading underscore -> dropped from the
+                    # final TSV by ``cli/scan._unified_column_order``).
+                    # Consumed by ``cli/scan`` to flag/exclude non-image
+                    # DERIVED objects (e.g. Siemens TENSOR) that dcm2niix
+                    # cannot convert.
+                    "_has_pixel_data": haspix[subj_key][folder].get((series, uid), False),
                     **demo[subj_key],
                 })
 
