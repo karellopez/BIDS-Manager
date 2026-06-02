@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Optional
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -23,14 +25,23 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .. import schema
+from ..classifier import sequence_dict
+from ..classifier import user_rules
 from ..util.system_info import SystemInfo, get_system_info
 from .app_settings import AppSettings
 
@@ -83,6 +94,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_display_tab(), "Display")
         tabs.addTab(self._build_system_tab(), "System")
         tabs.addTab(self._build_scan_tab(), "Scan")
+        tabs.addTab(self._build_scan_rules_tab(), "Scan rules")
         tabs.addTab(self._build_convert_tab(), "Convert + post-convert")
         v.addWidget(tabs, 1)
 
@@ -232,6 +244,263 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return w
 
+    # ------------------------------------------------------------------
+    # Scan rules tab (exclusions + user hints + read-only built-ins)
+    # ------------------------------------------------------------------
+
+    def _build_scan_rules_tab(self) -> QWidget:
+        # Valid BIDS datatypes for the hint dropdowns (derivatives excluded -
+        # user hints route to raw datatypes only).
+        self._valid_datatypes = sorted(
+            d for d in schema.list_datatypes() if d != "derivatives"
+        )
+
+        content = QWidget()
+        v = QVBoxLayout(content)
+
+        intro = QLabel(
+            "These rules apply to MRI / DICOM series, which are classified "
+            "from their SeriesDescription. EEG / MEG recordings are classified "
+            "by a different built-in method (mne channel types) and are NOT "
+            "affected by custom sequence hints. Path-based exclusions can still "
+            "skip any modality."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #8b949e;")
+        v.addWidget(intro)
+
+        # Exclusions.
+        excl_box = QGroupBox("Scan exclusions (skip matching series)")
+        ebl = QVBoxLayout(excl_box)
+        self._excl_table = QTableWidget(0, 3)
+        self._excl_table.setHorizontalHeaderLabels(["Pattern", "Match against", "Mode"])
+        self._excl_table.verticalHeader().setVisible(False)
+        self._excl_table.setMinimumHeight(130)
+        self._excl_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        ebl.addWidget(self._excl_table)
+        ebl.addLayout(self._rule_row_buttons(self._add_exclusion_row, self._excl_table))
+        v.addWidget(excl_box)
+
+        # User hints (MRI / DICOM only).
+        hint_box = QGroupBox("Custom sequence hints (MRI / DICOM only)")
+        hbl = QVBoxLayout(hint_box)
+        self._hint_table = QTableWidget(0, 6)
+        self._hint_table.setHorizontalHeaderLabels(
+            ["Patterns (comma-separated)", "Datatype", "Suffix", "Task", "Mode", "Force"]
+        )
+        self._hint_table.verticalHeader().setVisible(False)
+        self._hint_table.setMinimumHeight(150)
+        self._hint_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        hbl.addWidget(self._hint_table)
+        force_hint = QLabel(
+            "Datatype + suffix are chosen from the BIDS schema (no free text). "
+            "'Force' overrides even the dcm2niix classifier; otherwise a hint "
+            "only beats the built-in regex layer. 'Task' is the optional "
+            "task-<label> for func rows."
+        )
+        force_hint.setWordWrap(True)
+        force_hint.setStyleSheet("color: #8b949e;")
+        hbl.addWidget(force_hint)
+        hbl.addLayout(self._rule_row_buttons(self._add_hint_row, self._hint_table))
+        v.addWidget(hint_box)
+
+        # Read-only built-in criteria.
+        builtin_box = QGroupBox("Built-in MRI classifier criteria (read-only)")
+        bbl = QVBoxLayout(builtin_box)
+        builtin_note = QLabel(
+            "What the MRI classifier already matches. EEG / MEG do not use this "
+            "table - their datatype comes from mne channel types."
+        )
+        builtin_note.setWordWrap(True)
+        builtin_note.setStyleSheet("color: #8b949e;")
+        bbl.addWidget(builtin_note)
+        builtin = QTableWidget(0, 4)
+        builtin.setHorizontalHeaderLabels(
+            ["Label / group", "Datatype", "Suffix", "Match patterns"]
+        )
+        builtin.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        builtin.verticalHeader().setVisible(False)
+        builtin.setMinimumHeight(240)
+        builtin.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )
+        self._populate_builtin_criteria(builtin)
+        bbl.addWidget(builtin)
+        v.addWidget(builtin_box)
+        v.addStretch(1)
+
+        # Whole tab scrolls (not just the built-in table).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
+
+    def _rule_row_buttons(self, add_cb, table: QTableWidget) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        add = QPushButton("Add row")
+        add.clicked.connect(lambda: add_cb())
+        rem = QPushButton("Delete selected")
+        rem.clicked.connect(lambda: self._delete_selected_rows(table))
+        bar.addStretch(1)
+        bar.addWidget(add)
+        bar.addWidget(rem)
+        return bar
+
+    @staticmethod
+    def _delete_selected_rows(table: QTableWidget) -> None:
+        for r in sorted({i.row() for i in table.selectedIndexes()}, reverse=True):
+            table.removeRow(r)
+
+    def _add_exclusion_row(self, pattern: str = "", target: str = "sequence",
+                           mode: str = "substring") -> None:
+        t = self._excl_table
+        r = t.rowCount()
+        t.insertRow(r)
+        t.setItem(r, 0, QTableWidgetItem(pattern))
+        target_cb = QComboBox()
+        target_cb.addItems(list(user_rules.EXCLUSION_TARGETS))
+        target_cb.setCurrentText(target if target in user_rules.EXCLUSION_TARGETS else "sequence")
+        t.setCellWidget(r, 1, target_cb)
+        mode_cb = QComboBox()
+        mode_cb.addItems(list(user_rules.MATCH_MODES))
+        mode_cb.setCurrentText(mode if mode in user_rules.MATCH_MODES else "substring")
+        t.setCellWidget(r, 2, mode_cb)
+
+    def _add_hint_row(self, patterns: str = "", datatype: str = "", suffix: str = "",
+                      task: str = "", mode: str = "substring", force: bool = False) -> None:
+        t = self._hint_table
+        r = t.rowCount()
+        t.insertRow(r)
+        t.setItem(r, 0, QTableWidgetItem(patterns))
+
+        # Datatype + suffix are constrained dropdowns (no hand-typed labels).
+        # The suffix list depends on the chosen datatype, so it re-fills
+        # whenever the datatype changes.
+        dt_cb = QComboBox()
+        dt_cb.addItems(self._valid_datatypes)
+        suffix_cb = QComboBox()
+
+        def _refill_suffixes(dt: str) -> None:
+            suffix_cb.blockSignals(True)
+            suffix_cb.clear()
+            try:
+                suffix_cb.addItems(sorted(schema.list_suffixes(dt)))
+            except Exception:
+                pass
+            suffix_cb.blockSignals(False)
+
+        dt_cb.currentTextChanged.connect(_refill_suffixes)
+        if datatype in self._valid_datatypes:
+            dt_cb.setCurrentText(datatype)
+        _refill_suffixes(dt_cb.currentText())   # seed for the initial datatype
+        if suffix:
+            idx = suffix_cb.findText(suffix)
+            if idx >= 0:
+                suffix_cb.setCurrentIndex(idx)
+        t.setCellWidget(r, 1, dt_cb)
+        t.setCellWidget(r, 2, suffix_cb)
+
+        t.setItem(r, 3, QTableWidgetItem(task))
+        mode_cb = QComboBox()
+        mode_cb.addItems(list(user_rules.MATCH_MODES))
+        mode_cb.setCurrentText(mode if mode in user_rules.MATCH_MODES else "substring")
+        t.setCellWidget(r, 4, mode_cb)
+        force_item = QTableWidgetItem()
+        force_item.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+        )
+        force_item.setCheckState(Qt.CheckState.Checked if force else Qt.CheckState.Unchecked)
+        t.setItem(r, 5, force_item)
+
+    @staticmethod
+    def _populate_builtin_criteria(table: QTableWidget) -> None:
+        rows: list[tuple[str, str, str, str]] = []
+        for label, hint in sequence_dict.SEQUENCE_HINTS.items():
+            dt = hint.container_override or (hint.datatype or "")
+            rows.append((label, dt, hint.suffix or "", ", ".join(hint.patterns)))
+        for rgx, suffix, dt in sequence_dict._DWI_DERIVATIVE_PATTERNS:
+            rows.append(("dwi-derivative", dt, suffix, rgx))
+        for task_label, pats in sequence_dict.TASK_HINT_PATTERNS.items():
+            rows.append((f"task:{task_label}", "func", "(task entity)", ", ".join(pats)))
+        table.setRowCount(len(rows))
+        for r, cells in enumerate(rows):
+            for col, val in enumerate(cells):
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                table.setItem(r, col, it)
+
+    def _read_scan_rules(self) -> tuple[list[dict], list[dict], Optional[str]]:
+        """Read both editable tables into list[dict]. Returns
+        ``(hints, exclusions, error)`` - ``error`` non-None means a hint /
+        regex was invalid and the dialog must not save."""
+        # Exclusions.
+        exclusions: list[dict] = []
+        for r in range(self._excl_table.rowCount()):
+            item = self._excl_table.item(r, 0)
+            pattern = item.text().strip() if item else ""
+            if not pattern:
+                continue
+            mode = self._excl_table.cellWidget(r, 2).currentText()
+            if mode == "regex":
+                err = user_rules.validate_regex(pattern)
+                if err:
+                    return [], [], f"Exclusion regex {pattern!r} is invalid: {err}"
+            exclusions.append({
+                "pattern": pattern,
+                "target": self._excl_table.cellWidget(r, 1).currentText(),
+                "match_mode": mode,
+            })
+
+        # Hints.
+        hints: list[dict] = []
+        valid_datatypes = schema.list_datatypes()
+        for r in range(self._hint_table.rowCount()):
+            pat_item = self._hint_table.item(r, 0)
+            patterns = [p.strip() for p in (pat_item.text() if pat_item else "").split(",") if p.strip()]
+            if not patterns:
+                continue
+            # Datatype + suffix come from constrained dropdowns.
+            datatype = self._hint_table.cellWidget(r, 1).currentText().strip()
+            suffix = self._hint_table.cellWidget(r, 2).currentText().strip()
+            task = (self._hint_table.item(r, 3).text().strip() if self._hint_table.item(r, 3) else "")
+            mode = self._hint_table.cellWidget(r, 4).currentText()
+            force_item = self._hint_table.item(r, 5)
+            force = bool(force_item and force_item.checkState() == Qt.CheckState.Checked)
+
+            if not datatype or not suffix:
+                return [], [], f"Hint for {patterns!r} needs both a datatype and a suffix."
+            if datatype == "derivatives" or datatype not in valid_datatypes:
+                return [], [], (
+                    f"Hint datatype {datatype!r} is not a valid BIDS datatype. "
+                    f"Choose one of: {', '.join(sorted(valid_datatypes))}."
+                )
+            if suffix not in schema.list_suffixes(datatype):
+                return [], [], (
+                    f"Suffix {suffix!r} is not valid for datatype {datatype!r}."
+                )
+            if mode == "regex":
+                for p in patterns:
+                    err = user_rules.validate_regex(p)
+                    if err:
+                        return [], [], f"Hint regex {p!r} is invalid: {err}"
+            hints.append({
+                "patterns": patterns,
+                "datatype": datatype,
+                "suffix": suffix,
+                "task": task,
+                "entities": {},
+                "match_mode": mode,
+                "force": force,
+            })
+        return hints, exclusions, None
+
     def _build_convert_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
@@ -362,13 +631,45 @@ class SettingsDialog(QDialog):
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
 
+        # Scan rules: rebuild both editable tables from the persisted lists
+        # (clear first so Restore-defaults empties them).
+        self._excl_table.setRowCount(0)
+        for e in s.scan_exclusions:
+            self._add_exclusion_row(
+                pattern=str(e.get("pattern", "")),
+                target=str(e.get("target", "sequence")),
+                mode=str(e.get("match_mode", "substring")),
+            )
+        self._hint_table.setRowCount(0)
+        for h in s.user_hints:
+            pats = h.get("patterns", [])
+            if isinstance(pats, str):
+                pats = [pats]
+            self._add_hint_row(
+                patterns=", ".join(str(p) for p in pats),
+                datatype=str(h.get("datatype", "")),
+                suffix=str(h.get("suffix", "")),
+                task=str(h.get("task", "") or ""),
+                mode=str(h.get("match_mode", "substring")),
+                force=bool(h.get("force", False)),
+            )
+
     def _on_restore_defaults(self) -> None:
         """Reset all widgets to the AppSettings field defaults (not saved
         until the user clicks Save)."""
         self._load_into_widgets(AppSettings())
 
     def _on_save(self) -> None:
+        # Validate the scan rules first so an invalid hint blocks the save
+        # without losing the user's other edits.
+        hints, exclusions, error = self._read_scan_rules()
+        if error:
+            QMessageBox.warning(self, "Invalid scan rule", error)
+            return
+
         s = self._settings
+        s.user_hints = hints
+        s.scan_exclusions = exclusions
         s.theme = self._theme_combo.currentText()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()

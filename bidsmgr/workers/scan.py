@@ -89,6 +89,8 @@ class ScanWorker(QThread):
         n_jobs: int = 1,
         skip_bids_guess: bool = False,
         probe_convert: bool = False,
+        user_hints=None,
+        exclusions=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -100,6 +102,10 @@ class ScanWorker(QThread):
         self._n_jobs = n_jobs
         self._skip_bids_guess = skip_bids_guess
         self._probe_convert = probe_convert
+        # User scan rules (classifier hints + exclusions), already converted
+        # to the engine's frozen dataclasses by the caller.
+        self._user_hints = user_hints
+        self._exclusions = exclusions
         # Cooperative stop flag. ``run_scan`` polls ``_stop.is_set`` at
         # DICOM-read boundaries and raises ``OperationCancelled`` when set.
         self._stop = threading.Event()
@@ -144,6 +150,8 @@ class ScanWorker(QThread):
                 line_freq=self._line_freq,
                 montage=self._montage,
                 cancel_check=self._stop.is_set,
+                user_hints=self._user_hints,
+                exclusions=self._exclusions,
             )
             self.progress.emit(
                 f"Scan complete: {len(df)} row(s) → {self._output_tsv}"

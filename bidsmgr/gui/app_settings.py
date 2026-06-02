@@ -13,7 +13,8 @@ adding a new one outside that namespace is a code smell.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +46,10 @@ KEYS = {
     "convert_n_jobs":     "convert/n_jobs",
     "convert_overwrite":  "convert/overwrite",
     "convert_skip_residuals": "convert/skip_residuals",
+    # Scan rules (user-extensible classifier hints + series exclusions).
+    # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
+    "user_hints":         "classifier/user_hints",
+    "scan_exclusions":    "classifier/scan_exclusions",
     # Post-convert chain
     "post_run_metadata":  "post_convert/run_metadata",
     "post_run_validate":  "post_convert/run_validate",
@@ -137,6 +142,16 @@ class AppSettings:
     # "app_icon" → full-color BIDS-Manager app icon (``assets/macos/AppIcon128.png``).
     header_logo: str = "default"
 
+    # Scan rules (JSON-serialisable list[dict]); converted to/from the
+    # engine's frozen dataclasses at the boundary via ``to_user_hints`` /
+    # ``to_exclusions`` (keeps the classifier import out of this module's
+    # hot path and the engine free of any GUI dependency).
+    # hint:      {"patterns": [...], "datatype", "suffix", "task",
+    #             "entities": {k: v}, "match_mode", "force"}
+    # exclusion: {"pattern", "target": "sequence"|"path", "match_mode"}
+    user_hints: list = field(default_factory=list)
+    scan_exclusions: list = field(default_factory=list)
+
     # ------------------------------------------------------------------
     @staticmethod
     def _settings() -> QSettings:
@@ -173,6 +188,16 @@ class AppSettings:
 
         def _as_str(v, default: str) -> str:
             return str(v) if v not in (None, "") else default
+
+        def _as_json_list(v, default: list) -> list:
+            """Parse a JSON list stored in QSettings; corrupt/non-list -> default."""
+            if not v:
+                return list(default)
+            try:
+                out = json.loads(v) if isinstance(v, str) else v
+            except (ValueError, TypeError):
+                return list(default)
+            return out if isinstance(out, list) else list(default)
 
         out.theme = _as_str(s.value(KEYS["theme"]), out.theme)
         if out.theme not in ("dark", "light"):
@@ -251,6 +276,8 @@ class AppSettings:
         )
         if out.header_logo not in ("default", "app_icon"):
             out.header_logo = "default"
+        out.user_hints = _as_json_list(s.value(KEYS["user_hints"]), [])
+        out.scan_exclusions = _as_json_list(s.value(KEYS["scan_exclusions"]), [])
         return out
 
     def save(self) -> None:
@@ -286,6 +313,9 @@ class AppSettings:
         s.setValue(KEYS["skipped_update_version"], self.skipped_update_version)
         s.setValue(KEYS["font_scale"], float(self.font_scale))
         s.setValue(KEYS["header_logo"], self.header_logo)
+        # Scan rules as JSON blobs.
+        s.setValue(KEYS["user_hints"], json.dumps(self.user_hints))
+        s.setValue(KEYS["scan_exclusions"], json.dumps(self.scan_exclusions))
         s.sync()
 
     # ------------------------------------------------------------------
@@ -336,6 +366,24 @@ class AppSettings:
         cls._settings().setValue(
             KEYS["editor_strict_validate"], "1" if enabled else "0",
         )
+
+    # ------------------------------------------------------------------
+    # Scan-rules boundary: list[dict] (JSON) <-> engine frozen dataclasses.
+    # The conversion lives here so the engine never imports settings and the
+    # GUI / CLI share one (de)serialiser (``classifier.user_rules``).
+    # ------------------------------------------------------------------
+
+    def to_user_hints(self) -> list:
+        """Return the persisted hints as ``list[UserHint]`` for the scanner."""
+        from ..classifier import user_rules
+        hints, _ = user_rules.from_json({"user_hints": self.user_hints})
+        return hints
+
+    def to_exclusions(self) -> list:
+        """Return the persisted exclusions as ``list[ExclusionRule]``."""
+        from ..classifier import user_rules
+        _, excl = user_rules.from_json({"scan_exclusions": self.scan_exclusions})
+        return excl
 
     @classmethod
     def remember_nifti_crosshair(cls, color: str, thickness: int) -> None:

@@ -335,6 +335,8 @@ class ConverterPanel(QWidget):
         n_jobs: int = 1,
         probe_convert: bool = False,
         skip_bids_guess: bool = False,
+        user_hints=None,
+        exclusions=None,
     ) -> ScanWorker:
         """Kick off a background scan.
 
@@ -359,6 +361,8 @@ class ConverterPanel(QWidget):
             n_jobs=n_jobs,
             probe_convert=probe_convert,
             skip_bids_guess=skip_bids_guess,
+            user_hints=user_hints,
+            exclusions=exclusions,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -953,6 +957,8 @@ class ConverterPanel(QWidget):
             n_jobs=s.scan_n_jobs,
             probe_convert=s.scan_probe_convert,
             skip_bids_guess=s.scan_skip_bids_guess,
+            user_hints=s.to_user_hints(),
+            exclusions=s.to_exclusions(),
         )
 
     def _on_tsv_filename_edited(self) -> None:

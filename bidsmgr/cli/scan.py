@@ -46,6 +46,12 @@ import pandas as pd
 from .. import schema
 from ..classifier import dcm2niix_bidsguess, sequence_dict
 from ..classifier.types import Classification
+from ..classifier.user_rules import (
+    ExclusionRule,
+    UserHint,
+    exclusion_matches,
+)
+from ..classifier import user_rules as user_rules_module
 from ..inventory import probe_convert as probe_convert_module
 from ..inventory._time import parse_dicom_time_seconds as _parse_dicom_time_seconds
 from ..inventory.eeg_meg import EEG_MEG_COLUMNS, scan_eeg_meg
@@ -202,6 +208,10 @@ def _reroute_b0_references_to_fmap_epi(
     for k, c in list(chosen.items()):
         if c.datatype != "dwi" or c.suffix != "dwi":
             continue
+        # A user hint that resolved to dwi/dwi is the user's explicit choice;
+        # don't second-guess it with the B0 reroute.
+        if c.classifier == "user_hint":
+            continue
         row = rows_by_id.get(k)
         if row is None:
             continue
@@ -316,13 +326,51 @@ def _is_classification_schema_valid(c: Classification) -> bool:
     return not [v for v in verdicts if v.severity is schema.Severity.ERROR]
 
 
-def _run_classifier_chain(rows: list[InventoryRow]) -> dict[str, Classification]:
+# A user-hint classification at or above this confidence is a "force" hint
+# (sequence_dict emits 0.95 for force, 0.60 otherwise; dcm2niix BidsGuess is
+# 0.85). Force hints override BidsGuess; non-force hints only beat the regex
+# fallback.
+_FORCE_HINT_CONFIDENCE = 0.90
+
+
+def _user_hint_classifications(
+    rows: list[InventoryRow],
+    user_hints: Optional[list[UserHint]],
+) -> dict[str, Classification]:
+    """Return ``{row_id hex -> Classification}`` for rows matching a user hint,
+    schema-validated. ``derivatives`` is rejected (user hints route to raw
+    BIDS datatypes only). A hand-edited / invalid hint is dropped with a log
+    rather than producing a broken basename."""
+    out: dict[str, Classification] = {}
+    for c in sequence_dict.classify_user_hints(rows, user_hints):
+        if c.datatype == "derivatives":
+            log.debug("user hint rejected (derivatives not allowed): %s", c)
+            continue
+        if not _is_classification_schema_valid(c):
+            log.debug("user hint rejected by schema: %s", c)
+            continue
+        out[c.row_id.hex] = c
+    return out
+
+
+def _run_classifier_chain(
+    rows: list[InventoryRow],
+    *,
+    user_hints: Optional[list[UserHint]] = None,
+) -> dict[str, Classification]:
     """Run the BidsGuess classifier first; fall back to sequence_dict.
 
     Returns a mapping ``row_id (hex) -> Classification``. Each row gets at
-    most one classification — the highest-confidence schema-valid result,
-    or the sequence_dict fallback if BidsGuess produced nothing usable.
+    most one classification — the highest-confidence schema-valid result.
+
+    User hints (when supplied) sit by confidence: a ``force`` hint (0.95)
+    overrides even BidsGuess (0.85); a default hint (0.60) beats the regex
+    fallback (0.40/0.45) but loses to BidsGuess.
     """
+
+    user_cls = _user_hint_classifications(rows, user_hints)
+    force_hints = {h: c for h, c in user_cls.items() if c.confidence >= _FORCE_HINT_CONFIDENCE}
+    nonforce_hints = {h: c for h, c in user_cls.items() if c.confidence < _FORCE_HINT_CONFIDENCE}
 
     # Layer 1 — dcm2niix BidsGuess.
     try:
@@ -333,7 +381,9 @@ def _run_classifier_chain(rows: list[InventoryRow]) -> dict[str, Classification]
 
     rows_by_id = {r.row_id.hex: r for r in rows}
 
-    chosen: dict[str, Classification] = {}
+    # Seed force user hints (0.95) before BidsGuess so BidsGuess (0.85) can't
+    # displace them.
+    chosen: dict[str, Classification] = dict(force_hints)
     for c in bg_results:
         if not _is_classification_schema_valid(c):
             log.debug("BidsGuess result rejected by schema: %s", c)
@@ -350,6 +400,12 @@ def _run_classifier_chain(rows: list[InventoryRow]) -> dict[str, Classification]
         key = c.row_id.hex
         existing = chosen.get(key)
         if existing is None or c.confidence > existing.confidence:
+            chosen[key] = c
+
+    # Non-force user hints (0.60) win on rows BidsGuess did not claim, before
+    # the regex fallback gets a turn.
+    for key, c in nonforce_hints.items():
+        if key not in chosen:
             chosen[key] = c
 
     # Layer 3 — legacy regex/sequence-dictionary classifier (also runs the
@@ -994,6 +1050,52 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
         )
 
 
+# Marker prepended to ``proposed_issues`` for a user-excluded series. Mirrors
+# the non-image precedent: row stays visible (include=0) so the user can
+# re-enable it; the GUI surfaces the reason via the issues column / tooltip.
+USER_EXCLUDED_ISSUE_TOKEN = "user-excluded"
+
+
+def _apply_user_exclusions(
+    df: pd.DataFrame,
+    exclusions: Optional[list[ExclusionRule]],
+) -> None:
+    """Flag rows matching a user exclusion rule: ``include=0`` +
+    ``bids_guess_skip`` + a ``user-excluded`` note prepended to
+    ``proposed_issues``. Reversible (the row stays in the inventory; the user
+    can re-tick ``include``). Matches the rule against the series description
+    (``sequence``) or the relative path (``source_folder`` / ``source_file``).
+    """
+    if not exclusions:
+        return
+
+    def _cell(idx, col: str) -> str:
+        return str(df.at[idx, col]).strip() if col in df.columns else ""
+
+    for idx in df.index:
+        sequence = _cell(idx, "sequence")
+        path = _cell(idx, "source_folder") or _cell(idx, "source_file")
+        matched = next(
+            (r for r in exclusions
+             if exclusion_matches(r, sequence=sequence, path=path)),
+            None,
+        )
+        if matched is None:
+            continue
+        if "include" in df.columns:
+            df.at[idx, "include"] = 0
+        if "bids_guess_skip" in df.columns:
+            df.at[idx, "bids_guess_skip"] = True
+        note = (
+            f"{USER_EXCLUDED_ISSUE_TOKEN}: matched the scan exclusion rule "
+            f"'{matched.pattern}' ({matched.target}/{matched.match_mode}); "
+            "excluded from conversion. Re-tick 'include' to convert it anyway."
+        )
+        existing = str(df.at[idx, "proposed_issues"] or "").strip() if "proposed_issues" in df.columns else ""
+        if "proposed_issues" in df.columns:
+            df.at[idx, "proposed_issues"] = f"{note} | {existing}" if existing else note
+
+
 def _probe_anomaly(
     datatype: str, suffix: str, *, n_nifti: int, n_uids: int,
 ) -> Optional[str]:
@@ -1121,6 +1223,8 @@ def run_scan(
     line_freq: Optional[float] = None,
     montage: Optional[str] = None,
     cancel_check=None,
+    user_hints: Optional[list[UserHint]] = None,
+    exclusions: Optional[list[ExclusionRule]] = None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -1186,6 +1290,7 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
+        _apply_user_exclusions(merged, exclusions)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
         log.warning(
@@ -1198,11 +1303,13 @@ def run_scan(
 
     chosen: dict[str, Classification] = {}
     if skip_bids_guess:
-        # Only run sequence_dict (legacy regex layer).
+        # Only run sequence_dict (legacy regex layer). User hints (force +
+        # non-force) still apply, taking priority over the regex fallback.
+        chosen = dict(_user_hint_classifications(rows, user_hints))
         for c in sequence_dict.classify(rows):
             chosen.setdefault(c.row_id.hex, c)
     else:
-        chosen = _run_classifier_chain(rows)
+        chosen = _run_classifier_chain(rows, user_hints=user_hints)
 
     chosen = _reroute_b0_references_to_fmap_epi(rows, chosen)
     abort_verdicts = _detect_aborts(rows, chosen)
@@ -1255,6 +1362,11 @@ def run_scan(
     else:
         merged = df
     merged = _finalize_unified_dataframe(merged)
+
+    # User exclusions run last, on the unified frame, so they cover MRI +
+    # EEG/MEG rows and stamp the same proposed_issues cell after non-image
+    # flagging (mutates in place; reversible).
+    _apply_user_exclusions(merged, exclusions)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,
@@ -1342,6 +1454,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--rules-file", default=None,
+        help=(
+            "Path to a JSON file with user scan rules: "
+            "{\"user_hints\": [{\"patterns\": [...], \"datatype\": \"func\", "
+            "\"suffix\": \"bold\", \"task\": \"rest\", \"match_mode\": "
+            "\"substring\", \"force\": false}], \"scan_exclusions\": "
+            "[{\"pattern\": \"calibration\", \"target\": \"sequence\", "
+            "\"match_mode\": \"substring\"}]}. Same schema the GUI Settings "
+            "'Scan rules' tab persists. Hints extend the classifier; "
+            "exclusions mark matching series include=0."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -1349,6 +1474,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+
+    user_hints: Optional[list[UserHint]] = None
+    exclusions: Optional[list[ExclusionRule]] = None
+    if args.rules_file:
+        try:
+            with open(args.rules_file, "r", encoding="utf-8") as fh:
+                rules_obj = json.load(fh)
+        except (OSError, ValueError) as exc:
+            parser.error(f"--rules-file could not be read as JSON: {exc}")
+        user_hints, exclusions = user_rules_module.from_json(rules_obj)
+        # Reject any bad regex up front so the scan doesn't run a no-op rule.
+        for h in user_hints:
+            if h.match_mode == "regex":
+                for p in h.patterns:
+                    err = user_rules_module.validate_regex(p)
+                    if err:
+                        parser.error(f"--rules-file: bad hint regex {p!r}: {err}")
+        for r in exclusions:
+            if r.match_mode == "regex":
+                err = user_rules_module.validate_regex(r.pattern)
+                if err:
+                    parser.error(f"--rules-file: bad exclusion regex {r.pattern!r}: {err}")
 
     run_scan(
         Path(args.dicom_root),
@@ -1359,6 +1506,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         dataset=args.dataset,
         line_freq=args.line_freq,
         montage=args.montage,
+        user_hints=user_hints,
+        exclusions=exclusions,
     )
     return 0
 

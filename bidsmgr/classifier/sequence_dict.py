@@ -26,6 +26,7 @@ from typing import Iterable, Optional
 
 from ..inventory.types import InventoryRow
 from .types import Classification
+from .user_rules import UserHint, hint_matches
 
 
 _WORD_RE = re.compile(r"[0-9A-Za-z]+")
@@ -340,6 +341,63 @@ def looks_like_b0_reference(sequence: Optional[str]) -> bool:
     return bool(_B0_REFERENCE_RE.search(sequence))
 
 
+def _classification_from_user_hint(row: InventoryRow, hint: UserHint) -> Classification:
+    """Build a Classification from a matched user hint.
+
+    Confidence: ``0.95`` when ``hint.force`` (overrides even dcm2niix
+    BidsGuess), else ``0.60`` (beats the built-in regex fallback at 0.40/0.45
+    but loses to BidsGuess). The chain in ``cli/scan`` applies the priority.
+    """
+    sequence = row.series_description or ""
+    entities: dict[str, str] = {}
+    direction = extract_direction_token(sequence)
+    if direction:
+        entities["direction"] = direction.upper()
+    acq = extract_acq_token(sequence)
+    if acq:
+        entities["acquisition"] = acq
+    if hint.task:
+        entities["task"] = hint.task
+    for k, v in hint.entities:  # explicit user overrides win
+        entities[k] = v
+    conf = 0.95 if hint.force else 0.60
+    return Classification(
+        row_id=row.row_id,
+        classifier="user_hint",
+        datatype=hint.datatype,
+        suffix=hint.suffix,
+        candidate_entities=entities,
+        confidence=conf,
+        rationale=(
+            f"user hint matched {list(hint.patterns)!r} -> "
+            f"{hint.datatype}/{hint.suffix}" + (" (force)" if hint.force else "")
+        ),
+        skip=False,
+    )
+
+
+def classify_user_hints(
+    rows: Iterable[InventoryRow],
+    user_hints: Optional[list[UserHint]],
+) -> list[Classification]:
+    """Emit a Classification ONLY for rows matching a user hint.
+
+    Unlike :func:`classify`, this does no regex/modality fallback - it is the
+    user-hint layer the chain in ``cli/scan`` seeds / overlays with priority.
+    The first matching hint (document order) wins for a given row.
+    """
+    if not user_hints:
+        return []
+    out: list[Classification] = []
+    for row in rows:
+        sequence = row.series_description or ""
+        for hint in user_hints:
+            if hint_matches(hint, sequence):
+                out.append(_classification_from_user_hint(row, hint))
+                break
+    return out
+
+
 def classify(rows: Iterable[InventoryRow]) -> list[Classification]:
     """Legacy regex/sequence-dictionary classifier — architecture.md §4.2 layer 3.
 
@@ -453,4 +511,5 @@ __all__ = [
     "detect_dwi_derivative",
     "looks_like_b0_reference",
     "classify",
+    "classify_user_hints",
 ]
