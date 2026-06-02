@@ -73,6 +73,11 @@ dependencies = [
     "numpy>=1.26,<3.0",
     "joblib>=1.3,<=1.5.3",
 
+    # System info (CPU thread count, total RAM) shown in Settings and used
+    # to cap the parallel-workers spinboxes. Already pulled in transitively
+    # by joblib/loky; declared explicitly so the cap never silently breaks.
+    "psutil>=5.9,<=7.0.0",
+
     # Editor viewer.
     "pyqtgraph>=0.13,<=0.14.0",
     "PyOpenGL>=3.1,<=3.1.10",

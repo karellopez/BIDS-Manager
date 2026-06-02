@@ -200,7 +200,14 @@ def test_id_strips_sub_prefix() -> None:
 
 
 def test_session_strips_ses_prefix_and_dashes_empty() -> None:
-    df = make_df([_ok_row(session="ses-pre"), _ok_row(session="")])
+    # Row 1 has no session at all (entities lacks it) -> empty mirror cell.
+    # The model mirrors entities -> cells on load, so a row whose entities
+    # carry a session always shows it; only a genuinely session-less row
+    # renders "—".
+    df = make_df([
+        _ok_row(session="ses-pre"),
+        _ok_row(session="", entities=json.dumps({"subject": "001"}, sort_keys=True)),
+    ])
     model = InventoryTableModel(df)
     col = next(i for i, c in enumerate(COLUMNS) if c.key == "ses")
     assert model.data(model.index(0, col), Qt.ItemDataRole.DisplayRole) == "pre"
@@ -345,6 +352,68 @@ def test_setdata_same_value_is_noop() -> None:
     model = InventoryTableModel(df)
     task_col = next(i for i, c in enumerate(COLUMNS) if c.key == "task")
     assert model.setData(model.index(0, task_col), "rest") is False
+
+
+def test_editing_task_preserves_run_entity() -> None:
+    """Regression: a fresh scan TSV carries entities in JSON but leaves the
+    mirror cells (task / run / session) blank. Editing one mirror cell must
+    not delete the others. Previously, changing ``task`` ran
+    ``rebuild_from_columns`` which saw the blank ``run`` cell and dropped
+    ``run`` from the entities, so ``sub-001_task-X_run-1_bold`` lost its run.
+    """
+    # Mirror cells deliberately blank, entities holds run+task (real scan shape).
+    row = _ok_row(
+        proposed_datatype="func",
+        bids_guess_datatype="func",
+        bids_guess_suffix="bold",
+        proposed_basename="sub-001_task-dmaging_run-1_bold",
+        task="",   # blank mirror cell, as a fresh scan TSV leaves it
+        run="",
+        session="",
+        entities=json.dumps(
+            {"subject": "001", "task": "dmaging", "run": "1"},
+            sort_keys=True,
+        ),
+    )
+    model = InventoryTableModel(make_df([row]))
+
+    # The load pass should have mirrored entities → cells.
+    assert model.entities(0).get("run") == "1"
+
+    task_col = next(i for i, c in enumerate(COLUMNS) if c.key == "task")
+    bn_col = next(i for i, c in enumerate(COLUMNS) if c.key == "basename")
+    assert model.setData(model.index(0, task_col), "newtask") is True
+
+    new_bn = model.data(model.index(0, bn_col), Qt.ItemDataRole.DisplayRole)
+    assert "task-newtask" in new_bn
+    assert "run-1" in new_bn          # run entity survived the task edit
+    assert model.entities(0).get("run") == "1"
+
+
+def test_bulk_edit_task_preserves_run_across_rows() -> None:
+    """The same guarantee via the bulk-edit path (``bulk_set``)."""
+    rows = [
+        _ok_row(
+            proposed_datatype="func",
+            bids_guess_datatype="func",
+            bids_guess_suffix="bold",
+            proposed_basename=f"sub-001_task-dmaging_run-{n}_bold",
+            task="", run="", session="", series_uid=f"uid-{n}",
+            entities=json.dumps(
+                {"subject": "001", "task": "dmaging", "run": str(n)},
+                sort_keys=True,
+            ),
+        )
+        for n in (1, 2, 3)
+    ]
+    model = InventoryTableModel(make_df(rows))
+    changed = model.bulk_set([0, 1, 2], "task", "memory")
+    assert changed == 3
+    bn_col = next(i for i, c in enumerate(COLUMNS) if c.key == "basename")
+    for r, n in zip((0, 1, 2), (1, 2, 3)):
+        bn = model.data(model.index(r, bn_col), Qt.ItemDataRole.DisplayRole)
+        assert "task-memory" in bn
+        assert f"run-{n}" in bn
 
 
 def test_toggling_include_changes_row_state_to_skip() -> None:

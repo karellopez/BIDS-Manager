@@ -48,6 +48,16 @@ class ConvertTask(BaseModel):
     expected_outputs: tuple[str, ...] = (".nii.gz", ".json")
     repetition_type: str = ""
 
+    # When True (default), the MRI backend drops dcm2niix "residual"
+    # secondary outputs -- the derived single-volume duplicates dcm2niix
+    # splits off a single input series and names by gluing a collision
+    # letter onto the basename (e.g. ``..._bold`` -> ``..._bolda``) or with
+    # an ``_Eq_<n>`` / ``_ROI`` / ``_i<instance>`` marker. They are not real
+    # acquired images and have no valid BIDS suffix. Legitimate multi-output
+    # (fmap ``_e1``/``_e2``/``_ph``, complex ``_real``/``_imaginary``,
+    # DWI ``.bval``/``.bvec``) is never affected. Set False to keep them.
+    skip_residuals: bool = True
+
     # EEG/MEG-specific: per-row knobs that the inventory TSV carries.
     # Backends consult these when present; the CLI passes its own
     # default so blank cells fall back to the dataset-wide value.

@@ -56,6 +56,7 @@ from ..converter import (
     select_backend,
 )
 from ..fixups import apply_fieldmap_renames, populate_intended_for, update_scans_tsv
+from ..util.cancel import OperationCancelled, is_cancelled
 from ..util.paths import long_path, safe_path_component
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,8 @@ def run_convert(
     line_freq: Optional[float] = 50.0,
     montage: Optional[str] = None,
     raw_root: Optional[Path] = None,
+    skip_residuals: bool = True,
+    cancel_check=None,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
 
@@ -86,6 +89,10 @@ def run_convert(
     ``line_freq`` and ``montage`` are EEG/MEG-only knobs passed to the
     mne-bids backend; they fill in metadata (``PowerLineFrequency``,
     ``electrodes.tsv``) that recording files don't always carry.
+
+    ``skip_residuals`` (default True) drops the dcm2niix residual/secondary
+    outputs -- derived single-volume duplicates split off one input series
+    (e.g. ``..._bolda`` next to ``..._bold``). Pass False to keep them.
     """
     tsv = Path(tsv)
     bids_parent = Path(bids_parent)
@@ -165,7 +172,10 @@ def run_convert(
     dcm2niix_version = _dcm2niix_version_string(primary.binary)
 
     n_failed = 0
+    cancelled = False
     for dataset_name, dataset_df in df.groupby("dataset"):
+        if cancelled:
+            break
         if not dataset_name:
             log.warning("skipping %d rows with empty dataset name", len(dataset_df))
             continue
@@ -176,6 +186,12 @@ def run_convert(
             _ensure_dataset_description(bids_root, dcm2niix_version)
 
         for subject, subject_df in dataset_df.groupby("BIDS_name", sort=True):
+            # Stop here if the user requested it. Subjects committed before
+            # this point stay (the desired "stop now" behaviour); nothing
+            # half-written is left because the commit is per-subject atomic.
+            if is_cancelled(cancel_check):
+                cancelled = True
+                break
             if not subject:
                 log.warning("skipping rows with empty BIDS_name")
                 continue
@@ -183,6 +199,7 @@ def run_convert(
             tasks = _build_tasks_for_subject(
                 subject_df, bids_root, files_by_uid,
                 source_search_roots=source_search_roots,
+                skip_residuals=skip_residuals,
             )
             if not tasks:
                 continue
@@ -196,11 +213,19 @@ def run_convert(
                     tasks, bids_root, backends,
                     n_jobs=n_jobs, overwrite=overwrite,
                     dcm2niix_version=dcm2niix_version,
+                    cancel_check=cancel_check,
                 )
+            except OperationCancelled:
+                log.warning("conversion stopped by user (sub-%s not committed)", subject)
+                cancelled = True
+                break
             except Exception:
                 log.exception("subject %s failed during conversion", subject)
                 n_failed += 1
 
+    if cancelled:
+        log.warning("conversion stopped by user before all subjects were processed")
+        return 130  # 128 + SIGINT, conventional "interrupted" code
     return 0 if n_failed == 0 else 1
 
 
@@ -217,6 +242,7 @@ def _convert_subject(
     n_jobs: int,
     overwrite: bool,
     dcm2niix_version: str,
+    cancel_check=None,
 ) -> None:
     """Run Phases 1–3 for a single (dataset, subject, session) group."""
     subject = tasks[0].subject
@@ -234,7 +260,7 @@ def _convert_subject(
     try:
         # Phase 1: parallel per-series dispatch + conversion.
         results = _phase1_parallel_dcm2niix(
-            tasks, staging, backends, n_jobs=n_jobs,
+            tasks, staging, backends, n_jobs=n_jobs, cancel_check=cancel_check,
         )
 
         # Phase 2: per-subject post-conv (sequential, fast).
@@ -256,6 +282,11 @@ def _convert_subject(
         )
         log.info("committed sub-%s to %s", subject, target)
 
+    except OperationCancelled:
+        # User Stop, not a failure: no forensic error log. The ``finally``
+        # wipes staging so this subject leaves nothing half-written; the
+        # caller (run_convert) stops the subject loop.
+        raise
     except Exception as exc:
         # Determine which phase blew up: results being non-empty means
         # Phase 1 finished before something went wrong.
@@ -325,19 +356,40 @@ def _phase1_parallel_dcm2niix(
     backends: list,
     *,
     n_jobs: int,
+    cancel_check=None,
 ) -> list[ConvertResult]:
     """Run per-series conversion in parallel; return per-task results.
 
     Backend selection is per-task: each task is dispatched to the
     first registered backend whose ``can_handle()`` returns True.
+
+    A Stop request raises :class:`OperationCancelled` once the in-flight
+    task(s) return -- new tasks stop dispatching, the subject's staging is
+    wiped by the caller's ``finally``, and nothing is committed.
     """
+    from ..util.cancel import OperationCancelled, is_cancelled
+
+    if is_cancelled(cancel_check):
+        raise OperationCancelled("conversion cancelled by user")
+
     if n_jobs == 1 or len(tasks) == 1:
-        return [_phase1_one(backends, t, staging) for t in tasks]
+        out: list[ConvertResult] = []
+        for t in tasks:
+            if is_cancelled(cancel_check):
+                raise OperationCancelled("conversion cancelled by user")
+            out.append(_phase1_one(backends, t, staging))
+        return out
 
     parallel_backend = "threading" if len(tasks) < 4 else "loky"
-    return Parallel(n_jobs=n_jobs, backend=parallel_backend)(
+    gen = Parallel(n_jobs=n_jobs, backend=parallel_backend, return_as="generator")(
         delayed(_phase1_one)(backends, t, staging) for t in tasks
     )
+    out = []
+    for res in gen:
+        out.append(res)
+        if is_cancelled(cancel_check):
+            raise OperationCancelled("conversion cancelled by user")
+    return out
 
 
 def _phase1_one(backends: list, task: ConvertTask, staging: Path) -> ConvertResult:
@@ -445,12 +497,14 @@ def _build_tasks_for_subject(
     files_by_uid: dict[str, list[str]],
     *,
     source_search_roots: tuple[Path, ...] = (),
+    skip_residuals: bool = True,
 ) -> list[ConvertTask]:
     tasks: list[ConvertTask] = []
     for _, row in subject_df.iterrows():
         task = _row_to_task(
             row, bids_root, files_by_uid,
             source_search_roots=source_search_roots,
+            skip_residuals=skip_residuals,
         )
         if task is not None:
             tasks.append(task)
@@ -463,6 +517,7 @@ def _row_to_task(
     files_by_uid: dict[str, list[str]],
     *,
     source_search_roots: tuple[Path, ...] = (),
+    skip_residuals: bool = True,
 ) -> Optional[ConvertTask]:
     """Detect MRI vs EEG/MEG row shape and dispatch to the right builder.
 
@@ -472,7 +527,9 @@ def _row_to_task(
     """
     series_uid = str(row.get("series_uid", "")).strip()
     if series_uid:
-        return _row_to_task_mri(row, bids_root, files_by_uid)
+        return _row_to_task_mri(
+            row, bids_root, files_by_uid, skip_residuals=skip_residuals,
+        )
 
     source_file = str(row.get("source_file", "")).strip()
     if source_file:
@@ -487,6 +544,8 @@ def _row_to_task_mri(
     row: pd.Series,
     bids_root: Path,
     files_by_uid: dict[str, list[str]],
+    *,
+    skip_residuals: bool = True,
 ) -> Optional[ConvertTask]:
     series_uid = str(row.get("series_uid", "")).strip()
     if not series_uid:
@@ -566,6 +625,7 @@ def _row_to_task_mri(
         basename=basename,
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
+        skip_residuals=skip_residuals,
     )
 
 
@@ -967,6 +1027,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--keep-residuals", action="store_true",
+        help=(
+            "Keep dcm2niix residual/secondary outputs. By default the "
+            "converter drops the derived single-volume duplicates dcm2niix "
+            "splits off one input series (e.g. ..._bolda alongside ..._bold, "
+            "or _Eq_ / _ROI markers). These are not real acquired images and "
+            "have no valid BIDS suffix. Pass this flag to keep them."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -986,6 +1056,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         line_freq=args.line_freq if args.line_freq > 0 else None,
         montage=args.montage,
         raw_root=args.raw_root,
+        skip_residuals=not args.keep_residuals,
     )
 
 

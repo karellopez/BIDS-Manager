@@ -110,6 +110,7 @@ class _TopHeader(QFrame):
 
     view_changed = pyqtSignal(str)  # "converter" | "editor"
     about_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
 
     def __init__(self, theme: ThemeManager, parent=None) -> None:
         super().__init__(parent)
@@ -159,10 +160,22 @@ class _TopHeader(QFrame):
         h.addStretch(1)
 
         self._theme = theme
+        from . import icons
+
+        # Settings gear, immediately left of the theme toggle. Lives in the
+        # header (not the converter toolbar) so it reads as a global control
+        # alongside the theme toggle and is reachable from either view.
+        self._settings_btn = QPushButton()
+        self._settings_btn.setObjectName("theme-toggle")  # same compact icon-button style
+        self._settings_btn.setToolTip("Settings")
+        self._settings_btn.setFixedSize(32, 28)
+        icons.apply_button(self._settings_btn, "settings")
+        self._settings_btn.clicked.connect(self.settings_requested.emit)
+        h.addWidget(self._settings_btn)
+
         # Icon-only toggle. ``sun`` glyph in dark mode (click to lighten),
         # ``moon`` glyph in light mode (click to darken). Re-tinted in
         # ``repaint_for_palette`` on every theme swap.
-        from . import icons
         self._theme_btn = QPushButton()
         self._theme_btn.setObjectName("theme-toggle")
         self._theme_btn.setToolTip("Toggle light / dark theme")
@@ -270,6 +283,7 @@ class _TopHeader(QFrame):
         """Reload the logo under the new palette (inverts when dark)."""
         self._apply_logo_pixmap(pal)
         from . import icons
+        icons.apply_button(self._settings_btn, "settings")
         icons.apply_button(
             self._theme_btn,
             "sun" if self._theme.name == "dark" else "moon",
@@ -319,6 +333,7 @@ class MainWindow(QMainWindow):
 
         self._header.view_changed.connect(self._on_view_changed)
         self._header.about_requested.connect(self._show_about_dialog)
+        self._header.settings_requested.connect(self._open_settings)
 
         # Restore the user's last view. Pills are syncronised silently
         # so we don't fire a redundant ``view_changed`` on startup.
@@ -353,6 +368,28 @@ class MainWindow(QMainWindow):
         # at construction time (delegate paints, inline ``setStyleSheet``)
         # repaint with the new palette without requiring an app restart.
         theme.add_listener(self._on_palette_changed)
+
+    def _open_settings(self) -> None:
+        """Open the Settings dialog (triggered by the header gear).
+
+        Lives on the window because the gear now sits in the global header
+        next to the theme toggle, so it must work from either view. On Save
+        we apply the font scale + theme live (the window owns the
+        ``ThemeManager``) and let the Converter pick up new scan / convert
+        defaults on its next run.
+        """
+        from .app_settings import AppSettings
+        from .settings_dialog import SettingsDialog
+        s = AppSettings.load()
+        dlg = SettingsDialog(s, self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            # Font scale first, then theme — a single Save can change both
+            # and the theme re-apply re-substitutes the scaled QSS template.
+            self.apply_font_scale(s.font_scale)
+            self.apply_theme(s.theme)
+            reload_fn = getattr(self.converter, "reload_app_settings", None)
+            if callable(reload_fn):
+                reload_fn()
 
     def apply_theme(self, theme: str) -> None:
         """Switch the live theme. Called by the Settings dialog on save."""

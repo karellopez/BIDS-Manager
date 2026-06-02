@@ -117,8 +117,8 @@ def test_placeholder_labels_use_pane_hint_object_name(qapp) -> None:
         lbl for lbl in win.findChildren(QLabel)
         if lbl.objectName() == "pane-hint"
     ]
-    # At least one hint per: raw FS pane, filter pane, conflicts tab,
-    # stats tab, inspection-stack empty, plus the "(coming in a later
-    # milestone)" placeholders. We don't pin an exact count — just that
-    # the namespace is in use.
+    # At least one hint per: raw FS pane, filter pane, stats tab,
+    # inspection-stack empty, plus the "(coming in a later milestone)"
+    # placeholders. We don't pin an exact count — just that the namespace
+    # is in use.
     assert len(hints) >= 3

@@ -6,7 +6,7 @@ Reference: ``inspector_proto/proto.py`` ``ConverterView``,
 M3 scope: this lands the **toolbar + path bars + Inspection table**
 backed by a real :class:`InventoryTableModel`. The other three panes
 in the prototype (raw-FS tree, filter tree, properties panel) and the
-bottom dock (BIDS preview / Log / Conflicts / Stats) are stubbed as
+bottom dock (BIDS preview / Log / Stats) are stubbed as
 empty placeholders so the splitter shape matches; they fill in during
 later milestones.
 
@@ -39,7 +39,6 @@ from typing import Optional
 
 import pandas as pd
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -48,7 +47,6 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -77,7 +75,7 @@ from .models import COLUMNS, MANDATORY_COLUMN_KEYS, InventoryTableModel
 from .output_fs_pane import OutputFsPane
 from .properties_panel import PropertiesPanel
 from .raw_fs_pane import RawFsPane
-from .widgets import BusySpinner, Chip, PaneHeader, PathBar, VSep
+from .widgets import BusySpinner, Chip, PaneHeader, PanelFrame, PathBar, VSep
 
 log = logging.getLogger(__name__)
 
@@ -150,34 +148,92 @@ class ConverterPanel(QWidget):
         h_split.setHandleWidth(1)
         h_split.setChildrenCollapsible(False)
 
-        # Col 1 is itself a vertical splitter: raw input tree on top,
-        # BIDS output tree below. Lets the user watch the converted
-        # tree grow without leaving the Converter view.
+        # Every side region is wrapped in a ``PanelFrame`` so it can be
+        # collapsed toward its edge and detached into a floating window.
+        # Collapsing a region hands its space to the inspection unit (the
+        # work surface), which always carries the stretch.
+        #   * Raw + Output trees: fold up individually (edge="top"); the
+        #     whole left column also folds left as one (col1_frame).
+        #   * Filter: folds left.   Properties: folds right.
+        #   * Inspection + Properties detach together as one unit.
+        self._panel_frames: list[PanelFrame] = []
+
+        # Left column: raw tree over output tree, each individually
+        # collapsible (fold up) + detachable, wrapped again so the whole
+        # column folds to the left as one.
         self._raw_pane = RawFsPane()
         self._output_pane = OutputFsPane()
-        col1 = QSplitter(Qt.Orientation.Vertical)
-        col1.setHandleWidth(1)
-        col1.setChildrenCollapsible(False)
-        col1.addWidget(self._raw_pane)
-        col1.addWidget(self._output_pane)
-        col1.setStretchFactor(0, 1)
-        col1.setStretchFactor(1, 1)
-        col1.setSizes([320, 320])
-        h_split.addWidget(col1)
+        self._raw_frame = PanelFrame(self._raw_pane, "Raw data tree", edge="top")
+        self._output_frame = PanelFrame(self._output_pane, "Output data tree", edge="top")
+        col1_inner = QSplitter(Qt.Orientation.Vertical)
+        col1_inner.setHandleWidth(1)
+        col1_inner.setChildrenCollapsible(False)
+        col1_inner.addWidget(self._raw_frame)
+        col1_inner.addWidget(self._output_frame)
+        col1_inner.setStretchFactor(0, 1)
+        col1_inner.setStretchFactor(1, 1)
+        col1_inner.setSizes([320, 320])
+        self._raw_frame.attach_splitter(col1_inner)
+        self._output_frame.attach_splitter(col1_inner)
+        self._col1_frame = PanelFrame(
+            col1_inner, "Raw / Output trees", edge="left",
+            detachable=False, hide_inner_header=False,
+        )
+        h_split.addWidget(self._col1_frame)
 
         self._filter_pane = FilterPane()
-        h_split.addWidget(self._filter_pane)
-        h_split.addWidget(self._build_inspection_pane())
+        self._filter_frame = PanelFrame(self._filter_pane, "Filter / structure", edge="left")
+        h_split.addWidget(self._filter_frame)
+
+        # Inspection (work surface, never collapsible) + Properties (folds
+        # right) live in one horizontal sub-splitter; the surrounding frame
+        # detaches both together as a single unit.
         self._properties = PropertiesPanel()
         self._properties.set_project(self._project)
-        h_split.addWidget(self._properties)
+        self._properties_frame = PanelFrame(
+            self._properties, "Properties", edge="right", detachable=False,
+        )
+        right_inner = QSplitter(Qt.Orientation.Horizontal)
+        right_inner.setHandleWidth(1)
+        right_inner.setChildrenCollapsible(False)
+        self._inspection_pane = self._build_inspection_pane()
+        right_inner.addWidget(self._inspection_pane)
+        right_inner.addWidget(self._properties_frame)
+        right_inner.setStretchFactor(0, 1)
+        right_inner.setStretchFactor(1, 0)
+        right_inner.setSizes([720, 320])
+        # Collapsing Properties hands its width to the inspection table.
+        self._properties_frame.attach_splitter(right_inner, grow_target=self._inspection_pane)
+        self._inspection_unit = PanelFrame(
+            right_inner, "Inspection", collapsible=False, detachable=True,
+        )
+        h_split.addWidget(self._inspection_unit)
+
+        # Collapsing the left column or the filter hands width to the
+        # inspection unit (the work surface), which grows automatically.
+        self._col1_frame.attach_splitter(h_split, grow_target=self._inspection_unit)
+        self._filter_frame.attach_splitter(h_split, grow_target=self._inspection_unit)
+        self._panel_frames = [
+            self._raw_frame, self._output_frame, self._col1_frame,
+            self._filter_frame, self._properties_frame, self._inspection_unit,
+        ]
         h_split.setStretchFactor(0, 0)
         h_split.setStretchFactor(1, 0)
         h_split.setStretchFactor(2, 1)
-        h_split.setStretchFactor(3, 0)
-        h_split.setSizes([240, 220, 720, 320])
+        h_split.setSizes([240, 220, 1040])
         v_split.addWidget(h_split)
-        v_split.addWidget(self._build_bottom_dock())
+
+        # The whole bottom dock (Log / BIDS preview / Statistics) folds down
+        # as one and its panes detach; wrap it so it grows the panes above
+        # when collapsed.
+        self._dock_frame = PanelFrame(
+            self._build_bottom_dock(), "Output panels", edge="bottom",
+            detachable=False, hide_inner_header=False,
+        )
+        self._panel_frames.append(self._dock_frame)
+        v_split.addWidget(self._dock_frame)
+        # Collapsing the bottom dock hands its height to the panes above.
+        self._dock_frame.attach_splitter(v_split, grow_target=h_split)
         v_split.setStretchFactor(0, 1)
         v_split.setStretchFactor(1, 0)
         v_split.setSizes([560, 200])
@@ -296,7 +352,6 @@ class ConverterPanel(QWidget):
         self._output_tsv = Path(output_tsv)
         self._raw_pathbar.set_value(str(self._raw_root), ok=True)
 
-        self._scan_btn.setEnabled(False)
         self._spinner.set_busy(True, message=f"Scanning {self._raw_root.name}…")
         worker = ScanWorker(
             self._raw_root, self._output_tsv,
@@ -309,8 +364,11 @@ class ConverterPanel(QWidget):
         worker.progress.connect(self._on_progress)
         worker.finished_with_result.connect(self._on_scan_finished)
         worker.failed.connect(self._on_scan_failed)
+        worker.stopped.connect(self._on_scan_stopped)
         worker.finished.connect(self._on_worker_qt_finished)
         self._scan_worker = worker
+        # Flip the Scan button to "Stop scanning" and lock out Run.
+        self._set_scan_running(True)
         worker.start()
         return worker
 
@@ -398,6 +456,18 @@ class ConverterPanel(QWidget):
         )
         self._bulk_btn.clicked.connect(self._on_bulk_edit_clicked)
 
+        # "Manage columns" opens a popup to toggle every column at once,
+        # with a description of each. Replaces the one-at-a-time header
+        # right-click menu (which still works as a shortcut).
+        self._columns_btn = QPushButton("  Manage columns…")
+        self._columns_btn.setObjectName("tb-btn")
+        icons.apply_button(self._columns_btn, "columns")
+        self._columns_btn.setToolTip(
+            "Choose which columns the inspection table shows, with a note on "
+            "what each one means."
+        )
+        self._columns_btn.clicked.connect(self._open_column_manager)
+
         # Busy spinner + status message — visible only while a worker
         # is running. Lives in the centre of the toolbar so it's hard
         # to miss when something's in flight.
@@ -406,11 +476,8 @@ class ConverterPanel(QWidget):
 
         lay.addStretch(1)
 
-        self._settings_btn = QPushButton("  Settings…")
-        self._settings_btn.setObjectName("tb-btn")
-        icons.apply_button(self._settings_btn, "settings")
-        self._settings_btn.clicked.connect(self._on_settings_clicked)
-        lay.addWidget(self._settings_btn)
+        # The Settings gear lives in the global top header (left of the
+        # theme toggle), not here -- see ``_TopHeader`` in main_window.
 
         self._run_btn = QPushButton("  Run conversion")
         self._run_btn.setObjectName("tb-btn-primary")
@@ -478,6 +545,7 @@ class ConverterPanel(QWidget):
         fl.setSpacing(8)
         fl.addWidget(self._aborts_btn)
         fl.addStretch(1)
+        fl.addWidget(self._columns_btn)
         fl.addWidget(self._bulk_btn)
         v.addWidget(footer)
         return pane
@@ -498,13 +566,25 @@ class ConverterPanel(QWidget):
         )
         t.verticalHeader().setVisible(False)
         t.verticalHeader().setDefaultSectionSize(26)
+        # Spreadsheet-style sizing: every column is independently resizable
+        # (no greedy stretch column to fight) and the table scrolls
+        # horizontally when the columns overflow. The last visible section
+        # stretches only to fill leftover space so there's no dead gap.
+        t.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         header = t.horizontalHeader()
         header.setHighlightSections(False)
-        header.setStretchLastSection(False)
-
-        # Right-click anywhere on the header opens the column-visibility menu.
-        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        header.customContextMenuRequested.connect(self._show_column_menu)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # Drag to reorder columns; the order is persisted (see
+        # ``_persist_column_order`` / ``_restore_column_order``).
+        header.setSectionsMovable(True)
+        header.sectionMoved.connect(self._on_section_moved)
+        # Double-clicking a column's right edge auto-fits it to its contents
+        # so shrunk-too-small text becomes readable again. Works per column.
+        header.setSectionsClickable(True)
+        header.sectionHandleDoubleClicked.connect(self._table_resize_column_to_contents)
+        # Column visibility is managed solely via the "Manage columns" button
+        # (a header right-click menu interfered with drag-to-reorder).
 
         # Per-column delegates — reuse the M1 extractions.
         for col, spec in enumerate(COLUMNS):
@@ -518,11 +598,24 @@ class ConverterPanel(QWidget):
 
     def _apply_column_widths(self) -> None:
         header = self._table.horizontalHeader()
+        # Every column Interactive (user-resizable); seed a sensible width.
+        # No per-column Stretch mode -- ``stretchLastSection`` fills any
+        # leftover space, so each column (incl. the predicted-basename one)
+        # can be freely shrunk or widened.
         for col, spec in enumerate(COLUMNS):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self._table.setColumnWidth(col, spec.width)
-            if spec.stretch:
-                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
         self._apply_column_visibility()
+        self._restore_column_order()
+
+    def _table_resize_column_to_contents(self, logical_index: int) -> None:
+        """Auto-fit a column to its contents on header-handle double-click.
+
+        Lets the user reopen a column they shrank too small to read.
+        """
+        if not (0 <= logical_index < len(COLUMNS)):
+            return
+        self._table.resizeColumnToContents(logical_index)
 
     # ------------------------------------------------------------------
     # Column visibility (persisted via QSettings)
@@ -557,6 +650,11 @@ class ConverterPanel(QWidget):
         for col, spec in enumerate(COLUMNS):
             visible = self._column_visible.get(spec.key, spec.default_visible)
             self._table.setColumnHidden(col, not visible)
+            # A column revealed for the first time can come back at width 0
+            # (Qt collapses hidden interactive sections). Re-seed its width
+            # so it shows up draggable rather than as a hairline.
+            if visible and self._table.columnWidth(col) <= 0:
+                self._table.setColumnWidth(col, spec.width)
 
     def set_column_visible(self, key: str, visible: bool) -> None:
         """Toggle a column's visibility + persist the choice."""
@@ -566,28 +664,66 @@ class ConverterPanel(QWidget):
         self._settings().setValue(f"inspector/columns/{key}", "1" if visible else "0")
         self._apply_column_visibility()
 
-    def _show_column_menu(self, pos) -> None:
-        """Build the header right-click menu listing every column."""
-        menu = QMenu(self)
-        for spec in COLUMNS:
-            if spec.key in MANDATORY_COLUMN_KEYS:
-                # Show as a disabled item so the user understands it
-                # exists but cannot be hidden.
-                act = QAction(spec.header or spec.key, menu)
-                act.setEnabled(False)
-                act.setCheckable(True)
-                act.setChecked(True)
-                menu.addAction(act)
+    def set_columns_visible(self, mapping: dict[str, bool]) -> None:
+        """Apply visibility for many columns at once (from the manage dialog)
+        and persist each. Mandatory columns are forced visible."""
+        s = self._settings()
+        for key, visible in mapping.items():
+            if key in MANDATORY_COLUMN_KEYS:
+                self._column_visible[key] = True
                 continue
-            label = spec.header or spec.key
-            act = QAction(label, menu)
-            act.setCheckable(True)
-            act.setChecked(self._column_visible.get(spec.key, spec.default_visible))
-            act.toggled.connect(lambda checked, k=spec.key: self.set_column_visible(k, checked))
-            menu.addAction(act)
-        # Show at the header's global coordinate.
+            self._column_visible[key] = visible
+            s.setValue(f"inspector/columns/{key}", "1" if visible else "0")
+        self._apply_column_visibility()
+
+    def _open_column_manager(self) -> None:
+        """Popup to toggle every column at once, with per-column notes."""
+        from .column_manager_dialog import ColumnManagerDialog
+        dlg = ColumnManagerDialog(dict(self._column_visible), self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            self.set_columns_visible(dlg.result_visibility())
+
+    # ------------------------------------------------------------------
+    # Column order (drag-to-reorder, persisted via QSettings)
+    # ------------------------------------------------------------------
+
+    def _on_section_moved(self, _logical: int, _old_vis: int, _new_vis: int) -> None:
+        """User dragged a header section -> persist the new visual order."""
+        if getattr(self, "_restoring_order", False):
+            return
+        self._persist_column_order()
+
+    def _persist_column_order(self) -> None:
         header = self._table.horizontalHeader()
-        menu.exec(header.mapToGlobal(pos))
+        # Keys ordered by their current visual position.
+        ordered = sorted(
+            range(len(COLUMNS)), key=lambda logical: header.visualIndex(logical)
+        )
+        keys = [COLUMNS[logical].key for logical in ordered]
+        self._settings().setValue("inspector/column_order", ",".join(keys))
+
+    def _restore_column_order(self) -> None:
+        """Re-apply the persisted visual order to the header (if any)."""
+        raw = self._settings().value("inspector/column_order", "")
+        if not raw:
+            return
+        saved = [k for k in str(raw).split(",") if k]
+        key_to_logical = {spec.key: i for i, spec in enumerate(COLUMNS)}
+        header = self._table.horizontalHeader()
+        self._restoring_order = True
+        try:
+            target_visual = 0
+            for key in saved:
+                logical = key_to_logical.get(key)
+                if logical is None:
+                    continue
+                current_visual = header.visualIndex(logical)
+                if current_visual != -1 and current_visual != target_visual:
+                    header.moveSection(current_visual, target_visual)
+                target_visual += 1
+        finally:
+            self._restoring_order = False
+
 
     # ------------------------------------------------------------------
     # Internals — bottom dock
@@ -596,9 +732,8 @@ class ConverterPanel(QWidget):
     def _build_bottom_dock(self) -> QSplitter:
         """Bottom dock split into two tabbed halves.
 
-        Left half:  Log + Conflicts   — the "what happened" pane (live
-                                         output from workers + collision
-                                         warnings).
+        Left half:  Log              — the "what happened" pane (live
+                                        output from workers).
         Right half: BIDS preview + Statistics — the "what will be
                                          produced" pane (predicted tree
                                          + row counts).
@@ -610,7 +745,7 @@ class ConverterPanel(QWidget):
         split.setHandleWidth(1)
         split.setChildrenCollapsible(False)
 
-        # ---------- left: Log + Conflicts ----------
+        # ---------- left: Log ----------
         left_tabs = QTabWidget()
         left_tabs.setDocumentMode(True)
         left_tabs.setMovable(False)
@@ -624,13 +759,14 @@ class ConverterPanel(QWidget):
         left_tabs.addTab(self._log_view, "Log")
         icons.apply_tab(left_tabs, 0, "log")
 
-        conflicts = QLabel("(no conflicts detected yet)")
-        conflicts.setObjectName("pane-hint")
-        conflicts.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left_tabs.addTab(conflicts, "Conflicts")
-        icons.apply_tab(left_tabs, 1, "warning")
-
-        split.addWidget(left_tabs)
+        # Detach-only wrappers so the Log and the preview/stats group can
+        # each pop out into their own window (no collapse here -- the whole
+        # dock collapses together via the surrounding ``_dock_frame``).
+        self._log_frame = PanelFrame(
+            left_tabs, "Log", collapsible=False, detachable=True,
+            hide_inner_header=False,
+        )
+        split.addWidget(self._log_frame)
 
         # ---------- right: BIDS preview + Statistics ----------
         right_tabs = QTabWidget()
@@ -656,7 +792,13 @@ class ConverterPanel(QWidget):
         self._left_tabs = left_tabs
         self._right_tabs = right_tabs
 
-        split.addWidget(right_tabs)
+        self._preview_frame = PanelFrame(
+            right_tabs, "BIDS preview", collapsible=False, detachable=True,
+            hide_inner_header=False,
+        )
+        split.addWidget(self._preview_frame)
+        # Register the dock's two detach frames for theme re-tinting.
+        self._panel_frames.extend([self._log_frame, self._preview_frame])
 
         # Equal split by default; user can drag the handle to rebalance.
         split.setStretchFactor(0, 1)
@@ -769,6 +911,16 @@ class ConverterPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_scan_clicked(self) -> None:
+        # Toggle: while a scan is running this button reads "Stop scanning",
+        # so a click requests a cooperative stop instead of starting a scan.
+        if self._scan_worker is not None and self._scan_worker.isRunning():
+            self._scan_worker.request_stop()
+            self._scan_btn.setEnabled(False)
+            self._scan_btn.setText("  Stopping…")
+            self.log_message.emit(
+                "Stop requested; finishing the read already in flight, then halting."
+            )
+            return
         # 1. Raw input is required.
         if self._raw_root is None:
             self._on_pick_raw_dir()
@@ -839,9 +991,17 @@ class ConverterPanel(QWidget):
         self._output_pane.set_root(self._bids_parent)
 
     def _on_run_clicked(self) -> None:
-        if self._model is None or self._output_tsv is None:
-            return
+        # Toggle: while a conversion is running this button reads "Stop
+        # conversion", so a click requests a cooperative stop.
         if self._convert_worker is not None and self._convert_worker.isRunning():
+            self._convert_worker.request_stop()
+            self._run_btn.setEnabled(False)
+            self._run_btn.setText("  Stopping…")
+            self.log_message.emit(
+                "Stop requested; finishing the subject already in flight, then halting."
+            )
+            return
+        if self._model is None or self._output_tsv is None:
             return
         # Use the pre-set BIDS output if the user picked one; otherwise
         # prompt now.
@@ -861,8 +1021,6 @@ class ConverterPanel(QWidget):
         self._app_settings = AppSettings.load()
         if n_jobs is None:
             n_jobs = self._app_settings.convert_n_jobs
-        self._run_btn.setEnabled(False)
-        self._scan_btn.setEnabled(False)
         self._spinner.set_busy(True, message="Converting…")
         worker = ConvertWorker(
             self._model.dataframe(),
@@ -873,13 +1031,17 @@ class ConverterPanel(QWidget):
             raw_root=self._raw_root,
             line_freq=self._app_settings.scan_line_freq or None,
             montage=self._app_settings.scan_montage or None,
+            skip_residuals=self._app_settings.convert_skip_residuals,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
         worker.finished_with_result.connect(self._on_convert_finished)
         worker.failed.connect(self._on_convert_failed)
+        worker.stopped.connect(self._on_convert_stopped)
         worker.finished.connect(self._on_convert_worker_qt_finished)
         self._convert_worker = worker
+        # Flip the Run button to "Stop conversion" and lock out Scan.
+        self._set_convert_running(True)
         worker.start()
         return worker
 
@@ -1019,7 +1181,15 @@ class ConverterPanel(QWidget):
         self.log_message.emit(tb)
         QMessageBox.critical(self, "Conversion crashed", tb)
 
+    def _on_convert_stopped(self) -> None:
+        """The conversion halted because the user clicked Stop."""
+        self.log_message.emit(
+            "Conversion stopped. Subjects committed before the stop were kept."
+        )
+
     def _on_convert_worker_qt_finished(self) -> None:
+        # Restore the Run button from "Stop conversion" and re-enable Scan.
+        self._set_convert_running(False)
         self._run_btn.setEnabled(self._model is not None and self._model.rowCount() > 0)
         self._scan_btn.setEnabled(True)
         self._convert_worker = None
@@ -1050,17 +1220,27 @@ class ConverterPanel(QWidget):
             self._output_pane.repaint_for_palette(pal)
         if hasattr(self, "_filter_pane"):
             self._filter_pane.repaint_for_palette(pal)
+        # Re-tint the collapse/detach icons on every panel frame.
+        for frame in getattr(self, "_panel_frames", []):
+            frame._refresh_icons()
         # Re-tint toolbar icons + bottom-tab icons. The cache lives in
         # ``icons``; ``MainWindow`` clears it once per swap, so every
         # call below produces an icon in the newly applied palette.
-        icons.apply_button(self._scan_btn, "scan")
+        # While a scan / convert is running these buttons show the "stop"
+        # glyph, so don't clobber it on a mid-run theme swap.
+        scan_running = self._scan_worker is not None and self._scan_worker.isRunning()
+        convert_running = self._convert_worker is not None and self._convert_worker.isRunning()
+        icons.apply_button(self._scan_btn, "stop" if scan_running else "scan")
         icons.apply_button(self._aborts_btn, "highlight")
         icons.apply_button(self._bulk_btn, "bulk_edit")
-        icons.apply_button(self._settings_btn, "settings")
-        icons.apply_button(self._run_btn, "run", color=pal.get("primary_btn_text"))
+        icons.apply_button(self._columns_btn, "columns")
+        icons.apply_button(
+            self._run_btn,
+            "stop" if convert_running else "run",
+            color=pal.get("primary_btn_text"),
+        )
         if hasattr(self, "_left_tabs"):
             icons.apply_tab(self._left_tabs, 0, "log")
-            icons.apply_tab(self._left_tabs, 1, "warning")
         if hasattr(self, "_right_tabs"):
             icons.apply_tab(self._right_tabs, 0, "preview")
             icons.apply_tab(self._right_tabs, 1, "statistics")
@@ -1098,27 +1278,15 @@ class ConverterPanel(QWidget):
             self._table.ScrollHint.PositionAtCenter,
         )
 
-    def _on_settings_clicked(self) -> None:
-        from .settings_dialog import SettingsDialog
-        # Pass a fresh load so the dialog sees the latest persisted values.
-        s = AppSettings.load()
-        dlg = SettingsDialog(s, self)
-        if dlg.exec() == dlg.DialogCode.Accepted:
-            self._app_settings = s
-            # Push the new font scale into the live ThemeManager before
-            # re-applying the theme; the manager re-substitutes the QSS
-            # template with the scaled font-size values and resizes the
-            # QApplication default font in one step.
-            apply_scale = getattr(self.window(), "apply_font_scale", None)
-            if callable(apply_scale):
-                apply_scale(s.font_scale)
-            # Forward the theme change to the listener registered by
-            # MainWindow (which owns the ThemeManager). Done via the
-            # parent's ``apply_theme`` if present so the panel stays
-            # decoupled from QApplication.
-            apply_fn = getattr(self.window(), "apply_theme", None)
-            if callable(apply_fn):
-                apply_fn(s.theme)
+    def reload_app_settings(self) -> None:
+        """Re-read persisted settings into the live panel.
+
+        Called by :class:`MainWindow` after the header Settings dialog is
+        saved so changed scan / convert defaults take effect without a
+        restart. (Scan / convert also reload settings at launch time, so
+        this is belt-and-braces for any cached toolbar state.)
+        """
+        self._app_settings = AppSettings.load()
 
     def _on_current_row_changed(self, current, _previous) -> None:
         """Forward the table's row selection to the Properties panel."""
@@ -1200,12 +1368,53 @@ class ConverterPanel(QWidget):
         self.log_message.emit(tb)
         QMessageBox.critical(self, "Scan failed", tb)
 
+    def _on_scan_stopped(self) -> None:
+        """The scan halted because the user clicked Stop (no TSV written)."""
+        self.log_message.emit("Scan stopped. No inventory was written.")
+
     def _on_worker_qt_finished(self) -> None:
-        # Re-enable the Scan button once the worker's event loop wraps
-        # up (this fires after both success and failure paths).
-        self._scan_btn.setEnabled(True)
+        # Restore the Scan button from "Stop scanning"/"Stopping…" and
+        # re-enable Run if a prior scan populated the model. Fires after
+        # the success, failure, and stopped paths.
         self._scan_worker = None
         self._spinner.set_busy(False)
+        self._set_scan_running(False)
+        self._run_btn.setEnabled(self._model is not None and self._model.rowCount() > 0)
+
+    # ------------------------------------------------------------------
+    # Scan / Convert run-state button toggles (item: Stop + mutual lock)
+    # ------------------------------------------------------------------
+
+    def _set_scan_running(self, running: bool) -> None:
+        """Flip the Scan button between "Scan…" and "Stop scanning", and
+        lock the Run button out while a scan is in flight."""
+        if running:
+            self._scan_btn.setText("  Stop scanning")
+            icons.apply_button(self._scan_btn, "stop")
+            self._scan_btn.setToolTip("Stop the running scan")
+            self._scan_btn.setEnabled(True)
+            self._run_btn.setEnabled(False)  # mutual exclusion
+        else:
+            self._scan_btn.setText("  Scan…")
+            icons.apply_button(self._scan_btn, "scan")
+            self._scan_btn.setToolTip("")
+            self._scan_btn.setEnabled(True)
+            # Run re-enabled by the caller based on model state.
+
+    def _set_convert_running(self, running: bool) -> None:
+        """Flip the Run button between "Run conversion" and "Stop
+        conversion", and lock the Scan button out while converting."""
+        if running:
+            self._run_btn.setText("  Stop conversion")
+            icons.apply_button(self._run_btn, "stop")
+            self._run_btn.setToolTip("Stop the running conversion")
+            self._run_btn.setEnabled(True)
+            self._scan_btn.setEnabled(False)  # mutual exclusion
+        else:
+            self._run_btn.setText("  Run conversion")
+            icons.apply_button(self._run_btn, "run", color=CUR().get("primary_btn_text"))
+            self._run_btn.setToolTip("")
+            self._scan_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Status chips

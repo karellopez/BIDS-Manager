@@ -43,6 +43,7 @@ from .widgets import (
     Chip,
     NiftiViewerPane,
     PaneHeader,
+    PanelFrame,
     PathBar,
     SidecarFormPane,
     TsvViewerPane,
@@ -109,13 +110,31 @@ class EditorPanel(QWidget):
         self._center_stack.addWidget(self._nifti_viewer)
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
-        self._splitter.addWidget(self._tree_pane)
-        self._splitter.addWidget(self._center_stack)
-        self._splitter.addWidget(self._validation_pane)
+        # The BIDS tree folds to the left, the validation pane to the right,
+        # and the center viewer grows into the freed space. The viewer is
+        # not collapsible (it's the main surface) but IS detachable so the
+        # JSON / TSV / NIfTI view can pop out into its own window.
+        self._tree_frame = PanelFrame(self._tree_pane, "BIDS tree", edge="left")
+        self._center_frame = PanelFrame(
+            self._center_stack, "Viewer", collapsible=False, detachable=True,
+            hide_inner_header=False,
+        )
+        self._validation_frame = PanelFrame(
+            self._validation_pane, "Validation", edge="right",
+        )
+        self._panel_frames = [
+            self._tree_frame, self._center_frame, self._validation_frame,
+        ]
+        self._splitter.addWidget(self._tree_frame)
+        self._splitter.addWidget(self._center_frame)
+        self._splitter.addWidget(self._validation_frame)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 0)
         self._splitter.setSizes([320, 700, 380])
+        # Collapsing the tree / validation hands width to the center viewer.
+        self._tree_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
+        self._validation_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
         v.addWidget(self._splitter, 1)
 
         # Restore last-opened root if available.
@@ -678,6 +697,8 @@ class EditorPanel(QWidget):
         self._tsv_viewer.repaint_for_palette(pal)
         self._nifti_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
+        for frame in getattr(self, "_panel_frames", []):
+            frame._refresh_icons()
         # Re-tint toolbar icons after the icon cache is cleared in
         # ``MainWindow._on_palette_changed``.
         icons.apply_button(self._open_btn, "open_folder")

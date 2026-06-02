@@ -44,6 +44,7 @@ KEYS = {
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
     "convert_overwrite":  "convert/overwrite",
+    "convert_skip_residuals": "convert/skip_residuals",
     # Post-convert chain
     "post_run_metadata":  "post_convert/run_metadata",
     "post_run_validate":  "post_convert/run_validate",
@@ -110,6 +111,9 @@ class AppSettings:
     # Convert defaults
     convert_n_jobs: int = 1
     convert_overwrite: bool = False
+    # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
+    # ``..._bold``). Default on: they are derived duplicates, not real images.
+    convert_skip_residuals: bool = True
 
     # Post-convert chain
     post_run_metadata: bool = True
@@ -218,6 +222,9 @@ class AppSettings:
         out.convert_n_jobs = _as_int(s.value(KEYS["convert_n_jobs"]), out.convert_n_jobs)
         out.convert_overwrite = _as_bool(s.value(KEYS["convert_overwrite"]),
                                           out.convert_overwrite)
+        out.convert_skip_residuals = _as_bool(
+            s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
+        )
 
         out.post_run_metadata = _as_bool(s.value(KEYS["post_run_metadata"]),
                                          out.post_run_metadata)
@@ -267,6 +274,7 @@ class AppSettings:
             ("scan_probe_convert",       self.scan_probe_convert),
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
+            ("convert_skip_residuals",   self.convert_skip_residuals),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),

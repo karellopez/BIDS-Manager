@@ -26,6 +26,7 @@ Signals
 from __future__ import annotations
 
 import logging
+import threading
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -73,6 +74,9 @@ class ScanWorker(QThread):
     progress = pyqtSignal(str)
     finished_with_result = pyqtSignal(object, object)
     failed = pyqtSignal(str)
+    # Emitted (instead of ``failed``) when the run stopped because the user
+    # clicked Stop. The GUI treats this as a clean, expected outcome.
+    stopped = pyqtSignal()
 
     def __init__(
         self,
@@ -96,6 +100,17 @@ class ScanWorker(QThread):
         self._n_jobs = n_jobs
         self._skip_bids_guess = skip_bids_guess
         self._probe_convert = probe_convert
+        # Cooperative stop flag. ``run_scan`` polls ``_stop.is_set`` at
+        # DICOM-read boundaries and raises ``OperationCancelled`` when set.
+        self._stop = threading.Event()
+
+    def request_stop(self) -> None:
+        """Ask the in-flight scan to stop at the next read boundary.
+
+        Thread-safe (just sets an Event). The scan finishes the read
+        already in flight, then aborts without writing a TSV.
+        """
+        self._stop.set()
 
     # ------------------------------------------------------------------
     def run(self) -> None:
@@ -106,6 +121,7 @@ class ScanWorker(QThread):
         # construction on the main thread. Also keeps the worker module
         # cheap to import in tests that don't actually start it.
         from ..cli.scan import run_scan
+        from ..util.cancel import OperationCancelled
 
         handler = _LogToSignal(self.progress.emit)
         handler.setLevel(logging.INFO)
@@ -127,11 +143,15 @@ class ScanWorker(QThread):
                 dataset=self._dataset,
                 line_freq=self._line_freq,
                 montage=self._montage,
+                cancel_check=self._stop.is_set,
             )
             self.progress.emit(
                 f"Scan complete: {len(df)} row(s) → {self._output_tsv}"
             )
             self.finished_with_result.emit(df, self._output_tsv)
+        except OperationCancelled:
+            self.progress.emit("Scan stopped by user")
+            self.stopped.emit()
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:

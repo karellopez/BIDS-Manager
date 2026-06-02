@@ -123,6 +123,46 @@ COLUMNS: tuple[ColumnSpec, ...] = (
 MANDATORY_COLUMN_KEYS: frozenset[str] = frozenset({"include", "status", "id"})
 
 
+# Plain-language description per column, surfaced in the "Manage columns"
+# dialog so a non-technical user understands what each one means. Keyed by
+# ``ColumnSpec.key``.
+COLUMN_DESCRIPTIONS: dict[str, str] = {
+    "include":   "Whether this row is converted. Untick to skip the series.",
+    "status":    "At-a-glance state badge: ok, warning, error, skipped, non-image, or physio.",
+    "id":        "Subject label (sub-XXX) the row converts under.",
+    "dataset":   "BIDS dataset slug. Rows with different datasets become sibling BIDS roots.",
+    "ses":       "Session label (ses-XXX). Blank when the study has no sessions.",
+    "mod":       "Detected modality (mri, eeg, meg, physio, ...).",
+    "datatype":  "BIDS datatype folder the row lands in (anat, func, dwi, fmap, eeg, ...).",
+    "suffix":    "BIDS suffix (T1w, bold, dwi, physio, ...).",
+    "task":      "Task entity (task-XXX) for func / eeg / meg rows.",
+    "run":       "Run index (run-N) when a series was repeated.",
+    "conf":      "Classifier confidence (0-1) for the predicted datatype + suffix.",
+    "sequence":  "Scanner sequence name / source description used for classification.",
+    "basename":  "Full predicted BIDS filename (without extension).",
+    "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, or bidsphysio.",
+    "source_file": "Source recording path (EEG / MEG). Blank for DICOM rows.",
+    "n_files":   "Number of source files in the series.",
+    "acq_time":  "Acquisition time from the DICOM / recording header.",
+    "image_type": "DICOM ImageType (ORIGINAL / DERIVED, MAGNITUDE / PHASE, ...).",
+    "study_date": "Study date, used to cluster longitudinal sessions.",
+    "PatientID": "DICOM PatientID, a key part of subject identity.",
+    "GivenName": "Patient given name from the header.",
+    "FamilyName": "Patient family name from the header.",
+    "PatientSex": "Patient sex from the header.",
+    "PatientAge": "Patient age from the header.",
+    "n_channels": "EEG / MEG channel count.",
+    "sfreq":     "Sampling frequency (Hz) of the recording.",
+    "duration_sec": "Recording duration in seconds.",
+    "line_freq": "Power-line frequency (Hz) written to the sidecar. Editable.",
+    "montage":   "EEG / MEG montage applied on conversion. Editable.",
+    "probe_n_nifti": "NIfTI files dcm2niix actually produced in a --probe-convert run.",
+    "probe_n_vols":  "Volumes dcm2niix actually produced in a --probe-convert run.",
+    "repetition_type": "Repeat classification, e.g. suspected_abort (operator restart).",
+    "proposed_issues": "Scanner-detected notes: non-image series, B0 reroute, missing entity, ...",
+}
+
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -155,6 +195,20 @@ class InventoryTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._df: pd.DataFrame = df.reset_index(drop=True).copy()
         self._project: Optional[Project] = project
+
+        # Populate the mirror cells (session / task / run) from each row's
+        # ``entities`` JSON on load. A fresh ``bidsmgr-scan`` TSV carries the
+        # entities in JSON but leaves the mirror columns blank. Without this
+        # pass, editing one mirror cell (e.g. ``task``) runs
+        # ``rebuild_from_columns``, which reads the *other* still-blank mirror
+        # cells (e.g. ``run``) as "user cleared it" and drops those entities —
+        # so changing the task silently deleted ``run``. Mirroring entities →
+        # cells up front means a later single-cell edit only ever changes the
+        # field the user actually touched; every other entity is preserved.
+        # This matches what ``cli/convert.py`` does in memory before reading
+        # rows. Idempotent: ``proposed_basename`` is rebuilt from the same
+        # entities, so a well-formed scan TSV is unchanged.
+        rebuild_from_entities(self._df, in_place=True)
 
         if project is not None:
             self._apply_project_overlay(project.state())
@@ -842,4 +896,10 @@ class InventoryTableModel(QAbstractTableModel):
         return "ok"
 
 
-__all__ = ["COLUMNS", "ColumnSpec", "InventoryTableModel"]
+__all__ = [
+    "COLUMNS",
+    "COLUMN_DESCRIPTIONS",
+    "ColumnSpec",
+    "InventoryTableModel",
+    "MANDATORY_COLUMN_KEYS",
+]

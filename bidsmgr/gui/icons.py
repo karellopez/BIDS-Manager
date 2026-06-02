@@ -76,7 +76,9 @@ NAMES: dict[str, tuple[str, str]] = {
     "scan":         ("mdi6.magnify-scan",             "accent"),
     "settings":     ("mdi6.cog-outline",              "text"),
     "run":          ("mdi6.play",                     "success"),
+    "stop":         ("mdi6.stop-circle-outline",      "error"),
     "bulk_edit":    ("mdi6.pencil-outline",           "text"),
+    "columns":      ("mdi6.view-column-outline",      "text"),
     "highlight":    ("mdi6.flag-outline",             "warning"),
 
     # ---- Converter bottom tabs ----
@@ -107,6 +109,13 @@ NAMES: dict[str, tuple[str, str]] = {
     "info":         ("mdi6.information-outline",      "accent"),
     "close":        ("mdi6.close",                    "text"),
     "check":        ("mdi6.check",                    "success"),
+
+    # ---- Collapsible / detachable panel frame ----
+    "panel_collapse": ("mdi6.chevron-down",           "text"),
+    "panel_expand":   ("mdi6.chevron-right",          "text"),
+    "chevron_left":   ("mdi6.chevron-left",           "text"),
+    "detach":         ("mdi6.open-in-new",            "text"),
+    "reattach":       ("mdi6.dock-window",            "text"),
 }
 
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -155,6 +156,21 @@ class Dcm2niixDirect:
             )
 
         staged = _collect_outputs(output_dir, task.basename)
+
+        if task.skip_residuals:
+            staged, dropped = _partition_residuals(staged, task.basename)
+            for p in dropped:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass  # best-effort; a leftover residual is harmless
+            if dropped:
+                log.info(
+                    "skip_residuals: dropped %d dcm2niix residual output(s) "
+                    "for %s: %s",
+                    len(dropped), task.basename,
+                    ", ".join(p.name for p in dropped),
+                )
 
         missing = _missing_expected(staged, task.expected_outputs, task.basename, output_dir)
         if missing:
@@ -292,6 +308,61 @@ def _collect_outputs(output_dir: Path, basename: str) -> list[Path]:
     catches them all; deterministic sorting makes the result stable.
     """
     return sorted(output_dir.glob(f"{basename}*"))
+
+
+# Extensions dcm2niix may write for one task. Stripped before the residual
+# match so the marker is compared against the bare stem (longest first so
+# ``.nii.gz`` wins over ``.nii``).
+_KNOWN_OUTPUT_EXTS: tuple[str, ...] = (
+    ".nii.gz", ".tsv.gz", ".nii", ".json", ".bval", ".bvec",
+)
+
+# A "residual" is an EXTRA output dcm2niix splits off a single input series:
+# a derived / secondary volume that is not a real acquired image and has no
+# valid BIDS suffix. dcm2niix names them by appending a marker to the
+# user-supplied ``-f`` basename (the PRIMARY image keeps the exact basename):
+#   * a single glued collision letter   ``..._bold`` -> ``..._bolda``
+#   * ``_Eq_<n>``   an equidistant-resliced duplicate of a variable-spacing run
+#   * ``_ROI<n>``   a Siemens on-scanner MoCo / ROI secondary series
+#   * ``_i<instance>``  a raw per-instance dump (5+ digits)
+# Legitimate multi-output is deliberately NOT matched here: fmap/multi-echo
+# (``_e1`` / ``_e2`` / ``_ph`` / ``_e2_ph``), complex parts
+# (``_real`` / ``_imaginary``), and DWI ``.bval`` / ``.bvec`` all survive
+# (their tails start with ``_e`` / ``_real`` / ``_imag`` or strip to an empty
+# tail), so the fmap and DWI fixups still see everything they expect.
+_RESIDUAL_TAIL_RE = re.compile(r"^(?:[a-z]|_Eq_\d+|_ROI\d*|_i\d{5,})$")
+
+
+def _strip_known_ext(name: str) -> str:
+    for ext in _KNOWN_OUTPUT_EXTS:
+        if name.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def _is_residual_output(path: Path, basename: str) -> bool:
+    """True if ``path`` is a dcm2niix residual/secondary output for ``basename``.
+
+    The PRIMARY output (stem == ``basename``) and every legitimate sibling
+    return False; only the appended-marker duplicates documented in
+    :data:`_RESIDUAL_TAIL_RE` return True.
+    """
+    stem = _strip_known_ext(path.name)
+    if not stem.startswith(basename):
+        return False
+    tail = stem[len(basename):]
+    return bool(_RESIDUAL_TAIL_RE.match(tail))
+
+
+def _partition_residuals(
+    staged: list[Path], basename: str,
+) -> tuple[list[Path], list[Path]]:
+    """Split ``staged`` into (keep, residual) by :func:`_is_residual_output`."""
+    keep: list[Path] = []
+    residual: list[Path] = []
+    for p in staged:
+        (residual if _is_residual_output(p, basename) else keep).append(p)
+    return keep, residual
 
 
 def _missing_expected(

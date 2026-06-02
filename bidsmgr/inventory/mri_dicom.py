@@ -230,6 +230,7 @@ def scan_dicoms_long(
     output_tsv: Optional[str | os.PathLike] = None,
     n_jobs: int = 1,
     dataset: Optional[str] = None,
+    cancel_check=None,
 ) -> pd.DataFrame:
     """Walk ``root_dir`` and return a long-format inventory DataFrame.
 
@@ -278,7 +279,21 @@ def scan_dicoms_long(
             if is_dicom_file(fpath):
                 file_list.append(fpath)
 
-    results = Parallel(n_jobs=n_jobs)(delayed(_read_one)(fp, root_dir) for fp in file_list)
+    # Consume the parallel reads as a generator so a Stop request can
+    # break out promptly (the loky/threading pool stops dispatching new
+    # reads once we abandon the generator). Results stream back in
+    # submission order, so the collected list is identical to the eager
+    # ``Parallel(...)(...)`` form when not cancelled.
+    from ..util.cancel import OperationCancelled, is_cancelled
+    _gen = Parallel(n_jobs=n_jobs, return_as="generator")(
+        delayed(_read_one)(fp, root_dir) for fp in file_list
+    )
+    results = []
+    for _i, _res in enumerate(_gen):
+        # Poll periodically (every 64 reads) to keep the check cheap.
+        if (_i & 63) == 0 and is_cancelled(cancel_check):
+            raise OperationCancelled("scan cancelled by user")
+        results.append(_res)
     for res in results:
         if not res:
             continue

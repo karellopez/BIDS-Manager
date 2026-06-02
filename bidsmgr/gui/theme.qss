@@ -284,6 +284,38 @@ QLabel#pane-hint {
     font-size: 11px;
 }
 
+/* Collapsible / detachable panel-frame header bar. Mirrors the pane-h5
+ * look (surface background + bottom rule) but carries a collapse caret on
+ * the left and a detach button on the right. The title label inside drops
+ * its own background / border so the bar reads as one strip. */
+QFrame#panel-frame-header {
+    background: $surface;
+    border-bottom: 1px solid $subtle;
+}
+QFrame#panel-frame-header QLabel#pane-h5 {
+    background: transparent;
+    border-bottom: none;
+    padding: 0px 2px;
+}
+/* Vertical collapse strip for left / right panels: a thin bar carrying a
+ * vertically-centred caret (+ detach button) on the panel's outer edge. */
+QFrame#panel-frame-strip {
+    background: $surface;
+    border-right: 1px solid $subtle;
+    border-left: 1px solid $subtle;
+}
+QToolButton#panel-frame-caret,
+QToolButton#panel-frame-detach {
+    background: transparent;
+    border: none;
+    padding: 2px;
+}
+QToolButton#panel-frame-caret:hover,
+QToolButton#panel-frame-detach:hover {
+    background: $border;
+    border-radius: 3px;
+}
+
 /* Bottom-dock log view. Uses a slightly tinted background so the
  * worker output reads clearly against both palettes. Selection inherits
  * the accent token (already covered by ``QPalette.Highlight``). */

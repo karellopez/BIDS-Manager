@@ -174,7 +174,7 @@ def test_start_scan_on_empty_dir_finishes_and_loads_empty_model(qtbot, tmp_path:
     assert out_tsv.exists()
 
 
-def test_scan_button_disabled_while_scan_runs(qtbot, tmp_path: Path) -> None:
+def test_scan_button_becomes_stop_and_locks_run_while_scan_runs(qtbot, tmp_path: Path) -> None:
     panel = ConverterPanel()
     qtbot.addWidget(panel)
 
@@ -182,13 +182,19 @@ def test_scan_button_disabled_while_scan_runs(qtbot, tmp_path: Path) -> None:
     raw.mkdir()
 
     worker = panel.start_scan(raw, tmp_path / "inv.tsv", n_jobs=1)
-    # While the worker is alive the button is disabled.
-    assert not panel._scan_btn.isEnabled()
+    # While the worker is alive the Scan button stays enabled but reads
+    # "Stop scanning"; the Run button is locked out (mutual exclusion).
+    assert panel._scan_btn.isEnabled()
+    assert "Stop" in panel._scan_btn.text()
+    assert not panel._run_btn.isEnabled()
     with qtbot.waitSignal(panel.scan_finished, timeout=60_000):
         pass
     worker.wait()
     qtbot.wait(50)
+    # On completion it reverts to "Scan…".
     assert panel._scan_btn.isEnabled()
+    assert "Scan" in panel._scan_btn.text()
+    assert "Stop" not in panel._scan_btn.text()
 
 
 def test_log_messages_forwarded_to_panel_signal(qtbot, tmp_path: Path) -> None:
@@ -237,56 +243,35 @@ def test_panel_uses_attached_project_for_edits(qtbot, tmp_path: Path) -> None:
 
 
 def test_bottom_dock_split_layout(qtbot) -> None:
-    """Bottom dock is now a horizontal splitter with two QTabWidgets:
-    Log + Conflicts on the left, BIDS preview + Statistics on the right.
+    """Bottom dock is a horizontal splitter of two detach-only PanelFrames,
+    each wrapping a QTabWidget: Log on the left, BIDS preview + Statistics
+    on the right. The whole dock is wrapped in a collapse-to-bottom frame.
     """
-    from PyQt6.QtWidgets import QSplitter, QTabWidget
-
     panel = ConverterPanel()
     qtbot.addWidget(panel)
 
-    # The dock is now a QSplitter (not the original single QTabWidget).
-    # Locate it via the _log_view + _bids_preview children whose
-    # ancestors must include the dock.
-    def _ancestors(w):
-        cur = w
-        while cur is not None:
-            yield cur
-            cur = cur.parent()
-
-    log_ancestors = set(id(a) for a in _ancestors(panel._log_view))
-    preview_ancestors = set(id(a) for a in _ancestors(panel._bids_preview))
-
-    # Find the *common* QSplitter ancestor — that's the dock.
-    common = log_ancestors & preview_ancestors
-    splitters = [
-        w for w in panel.findChildren(QSplitter)
-        if id(w) in common
-    ]
-    # The vertical splitter (top half vs dock) is also a common ancestor;
-    # the horizontal one is the dock itself. Pick the horizontal one.
-    horizontal_splitters = [
-        s for s in splitters if s.orientation().name == "Horizontal"
-    ]
-    assert horizontal_splitters, "expected at least one horizontal splitter"
-    # The dock-level horizontal splitter holds exactly two QTabWidgets.
-    dock_candidates = [
-        s for s in horizontal_splitters
-        if s.count() == 2 and all(
-            isinstance(s.widget(i), QTabWidget) for i in range(2)
-        )
-    ]
-    assert dock_candidates, "expected the dock to be a QSplitter with 2 QTabWidgets"
-
-    dock = dock_candidates[0]
-    left_tabs = dock.widget(0)
-    right_tabs = dock.widget(1)
+    # The dock's two tab groups are wrapped in detach PanelFrames; read the
+    # tab titles directly off the (kept) QTabWidget references.
+    left_tabs = panel._left_tabs
+    right_tabs = panel._right_tabs
     left_titles = [left_tabs.tabText(i) for i in range(left_tabs.count())]
     right_titles = [right_tabs.tabText(i) for i in range(right_tabs.count())]
     assert any("Log" in t for t in left_titles)
-    assert any("Conflicts" in t for t in left_titles)
+    # The Conflicts tab was removed; Log is the only left-hand tab now.
+    assert not any("Conflicts" in t for t in left_titles)
     assert any("BIDS preview" in t for t in right_titles)
     assert any("Statistics" in t for t in right_titles)
+
+    # The Log + preview groups are each independently detachable, and the
+    # whole dock collapses toward the bottom.
+    assert panel._log_frame.is_detached() is False
+    assert panel._preview_frame.is_detached() is False
+    panel._log_frame.detach()
+    assert panel._log_frame.is_detached() is True
+    panel._log_frame.reattach()
+    assert panel._dock_frame.is_collapsed() is False
+    panel._dock_frame.set_collapsed(True)
+    assert panel._dock_frame.is_collapsed() is True
 
 
 def test_log_tab_appends_progress_messages(qtbot) -> None:

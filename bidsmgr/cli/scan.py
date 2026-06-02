@@ -1120,6 +1120,7 @@ def run_scan(
     dataset: Optional[str] = None,
     line_freq: Optional[float] = None,
     montage: Optional[str] = None,
+    cancel_check=None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -1157,7 +1158,13 @@ def run_scan(
 
     df = scan_dicoms_long(
         dicom_root, output_tsv=None, n_jobs=n_jobs, dataset=dataset_slug,
+        cancel_check=cancel_check,
     )
+
+    # Honour a Stop requested during the (dominant) DICOM read before
+    # starting the EEG/MEG walk.
+    from ..util.cancel import raise_if_cancelled
+    raise_if_cancelled(cancel_check, "scan cancelled by user")
 
     # EEG/MEG branch: independent walk, merged at the end.
     df_eeg = scan_eeg_meg(
