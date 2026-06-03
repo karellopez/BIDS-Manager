@@ -201,3 +201,85 @@ def test_panel_project_integration(qtbot, tmp_path: Path) -> None:
     panel._on_entity_committed("acquisition", "mprage")
     events = [e for e in project.log if isinstance(e, UserSetEntity)]
     assert any(e.entity == "acquisition" and e.value == "mprage" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Per-row recording-metadata section (EEG/MEG)
+# ---------------------------------------------------------------------------
+
+
+def _eeg_row(**overrides) -> dict:
+    base = {
+        "BIDS_name": "sub-001",
+        "session": "",
+        "include": 1,
+        "modality": "eeg",
+        "proposed_datatype": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "Proposed BIDS name": "sub-001_task-rest_eeg",
+        "bids_guess_suffix": "eeg",
+        "bids_guess_confidence": "1.00",
+        "bids_guess_skip": False,
+        "proposed_issues": "",
+        "entities": json.dumps({"subject": "001", "task": "rest"}, sort_keys=True),
+        "task": "rest",
+        "run": "",
+        "source_file": "sub-001/rec.edf",
+        "series_uid": "",
+        "montage": "",
+        "line_freq": "",
+        "eeg_reference": "",
+        "eeg_ground": "",
+        "PatientSex": "",
+        "PatientAge": "",
+        "Handedness": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_per_row_meta_writeback_updates_model(qtbot) -> None:
+    """The Properties panel's per-recording fields write back to the model."""
+    panel, m = _build_panel_with_model(qtbot, _eeg_row())
+    panel._on_meta_field_changed("eeg_reference", "Cz")
+    panel._on_meta_field_changed("montage", "standard_1005")
+    panel._on_meta_field_changed("Handedness", "R")
+    panel._on_meta_field_changed("PatientSex", "F")
+    df = m.dataframe()
+    assert df.at[0, "eeg_reference"] == "Cz"
+    assert df.at[0, "montage"] == "standard_1005"
+    assert df.at[0, "Handedness"] == "R"
+    assert df.at[0, "PatientSex"] == "F"
+
+
+def test_per_row_meta_section_renders_for_eeg(qtbot) -> None:
+    """Selecting an EEG row renders without error (the meta section shows)."""
+    panel, _m = _build_panel_with_model(qtbot, _eeg_row())
+    # The entity rows still render; the meta section is appended below them.
+    names = [r.entity_name for r in panel._entity_rows]
+    assert "subject" in names and "task" in names
+
+
+def test_participant_section_writeback_for_mri(qtbot) -> None:
+    """MRI (func) rows now get a per-row Participant section -> participants.tsv."""
+    row = _func_row(PatientSex="", PatientAge="", Handedness="")
+    panel, m = _build_panel_with_model(qtbot, row)
+    panel._on_meta_field_changed("PatientSex", "F")
+    panel._on_meta_field_changed("Handedness", "L")
+    panel._on_meta_field_changed("PatientAge", "41")
+    df = m.dataframe()
+    assert df.at[0, "PatientSex"] == "F"
+    assert df.at[0, "Handedness"] == "L"
+    assert df.at[0, "PatientAge"] == "41"
+
+
+def test_companion_link_writeback(qtbot) -> None:
+    """Linking a companion file writes a JSON list into the row's cell."""
+    import json as _json
+    row = _eeg_row(companion_files="")
+    panel, m = _build_panel_with_model(qtbot, row)
+    panel._write_companions(0, [("events", "/data/sub-001_events.tsv")])
+    stored = _json.loads(m.dataframe().at[0, "companion_files"])
+    assert stored == [{"suffix": "events", "path": "/data/sub-001_events.tsv"}]
+    # Round-trips back through the reader.
+    assert panel._companions(0) == [("events", "/data/sub-001_events.tsv")]

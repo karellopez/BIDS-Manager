@@ -40,12 +40,12 @@ _SUPPORTED_DATATYPES: frozenset[str] = frozenset({"eeg", "meg", "ieeg", "nirs"})
 class MneBidsBackend:
     """Convert raw EEG/MEG/iEEG/NIRS recordings via mne-bids.
 
-    Per-row knobs come from the :class:`ConvertTask` (set by the CLI
-    from the inventory TSV's ``line_freq`` / ``montage`` columns). The
-    constructor takes only fallback defaults used when those columns
-    are blank — typical case is the user supplies a single dataset-
-    wide default at scan time and the per-row column carries it
-    forward.
+    The per-row ``line_freq`` and ``montage`` come from the
+    :class:`ConvertTask`, already resolved by the CLI (the inventory cell,
+    else the recording-metadata dataset default). The backend applies them
+    during the write; richer sidecar metadata (reference, ground, filters,
+    device, institution, ...) is folded in afterwards by
+    :func:`bidsmgr.fixups.eeg_sidecar.enrich_recording_sidecars`.
 
     What the backend writes (via mne-bids):
 
@@ -58,20 +58,10 @@ class MneBidsBackend:
       ``line_freq``).
     * ``*_events.tsv`` from ``raw.annotations`` (auto for EDF+).
     * ``*_electrodes.tsv`` + ``*_coordsystem.json`` when a montage is
-      applied (per-row ``montage`` column, fallback to constructor).
+      applied (per-row ``montage``; never for MEG).
     """
 
     name = "mne_bids"
-
-    def __init__(
-        self,
-        *,
-        line_freq: Optional[float] = 50.0,
-        montage: Optional[str] = None,
-    ) -> None:
-        # Fallback defaults used when the per-task value is None/blank.
-        self.default_line_freq = line_freq
-        self.default_montage = montage
 
     def can_handle(self, task: ConvertTask) -> bool:
         if task.datatype not in _SUPPORTED_DATATYPES:
@@ -135,11 +125,10 @@ class MneBidsBackend:
                     duration_s=time.monotonic() - t0,
                 )
 
-            # Per-row line_freq (TSV) wins; constructor default is the
-            # dataset-wide fallback.
+            # ``line_freq`` is the resolved per-row value (inventory cell,
+            # else the recording-metadata dataset default). Written into
+            # raw.info so mne-bids emits PowerLineFrequency in the sidecar.
             line_freq = task.line_freq
-            if line_freq is None:
-                line_freq = self.default_line_freq
             if line_freq is not None and not raw.info.get("line_freq"):
                 with raw.info._unlock() if hasattr(raw.info, "_unlock") else _noop():
                     raw.info["line_freq"] = float(line_freq)
@@ -152,7 +141,7 @@ class MneBidsBackend:
             # + ``EEG 001`` channel sets after non-alphanumeric stripping).
             # Skip silently for MEG so the user's dataset-wide setting
             # doesn't crash MEG rows.
-            montage_name = task.montage or self.default_montage
+            montage_name = task.montage
             if montage_name and task.datatype != "meg":
                 _apply_standard_montage(raw, montage_name, source)
 
@@ -298,6 +287,27 @@ def _apply_standard_montage(raw, montage_name: str, source: Path) -> None:
                 "channel rename failed for %s: %s — proceeding without rename",
                 source.name, exc,
             )
+
+    # Safety: ``set_montage(on_missing="ignore")`` silently assigns positions
+    # only to channels whose names match the montage and leaves the rest
+    # unset — so a valid-but-wrong montage produces a partly-wrong
+    # electrodes.tsv with no error. Surface the match rate so the user can
+    # catch a mismatched montage choice. ``ch_names`` here are already
+    # normalised by the rename above; match case-insensitively.
+    montage_names = {n.lower() for n in getattr(montage, "ch_names", [])}
+    raw_names = {n.lower() for n in raw.ch_names}
+    n_matched = len(montage_names & raw_names)
+    if n_matched == 0:
+        log.warning(
+            "montage %r matched none of %s's %d channels; positions not "
+            "applied (montage likely wrong for this recording)",
+            montage_name, source.name, len(raw.ch_names),
+        )
+    else:
+        log.info(
+            "montage %r matched %d/%d channel(s) in %s",
+            montage_name, n_matched, len(raw.ch_names), source.name,
+        )
 
     try:
         raw.set_montage(

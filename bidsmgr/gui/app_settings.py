@@ -39,8 +39,6 @@ KEYS = {
     # Scan defaults
     "scan_n_jobs":        "scan/n_jobs",
     "scan_probe_convert": "scan/probe_convert",
-    "scan_line_freq":     "scan/line_freq",
-    "scan_montage":       "scan/montage",
     "scan_skip_bids_guess": "scan/skip_bids_guess",
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
@@ -109,8 +107,6 @@ class AppSettings:
     # Scan defaults
     scan_n_jobs: int = 1
     scan_probe_convert: bool = False
-    scan_line_freq: float = 50.0
-    scan_montage: str = ""
     scan_skip_bids_guess: bool = False
 
     # Convert defaults
@@ -239,8 +235,6 @@ class AppSettings:
         out.scan_n_jobs = _as_int(s.value(KEYS["scan_n_jobs"]), out.scan_n_jobs)
         out.scan_probe_convert = _as_bool(s.value(KEYS["scan_probe_convert"]),
                                           out.scan_probe_convert)
-        out.scan_line_freq = _as_float(s.value(KEYS["scan_line_freq"]), out.scan_line_freq)
-        out.scan_montage = _as_str(s.value(KEYS["scan_montage"]), out.scan_montage)
         out.scan_skip_bids_guess = _as_bool(s.value(KEYS["scan_skip_bids_guess"]),
                                             out.scan_skip_bids_guess)
 
@@ -286,14 +280,12 @@ class AppSettings:
         s.setValue(KEYS["theme"], self.theme)
         s.setValue(KEYS["dataset_slug"], self.dataset_slug)
         s.setValue(KEYS["scan_tsv_filename"], self.scan_tsv_filename)
-        s.setValue(KEYS["scan_montage"], self.scan_montage)
         if self.raw_root is not None:
             s.setValue(KEYS["raw_root"], self.raw_root)
         if self.bids_parent is not None:
             s.setValue(KEYS["bids_parent"], self.bids_parent)
         # Ints / floats.
         s.setValue(KEYS["scan_n_jobs"], int(self.scan_n_jobs))
-        s.setValue(KEYS["scan_line_freq"], float(self.scan_line_freq))
         s.setValue(KEYS["convert_n_jobs"], int(self.convert_n_jobs))
         # Bools — store as strings so the load path doesn't depend on
         # platform-specific QVariant→Python bool quirks.

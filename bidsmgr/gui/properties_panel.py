@@ -28,6 +28,7 @@ the panel auto-refreshes when the model emits ``dataChanged``.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -35,21 +36,31 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+import pandas as pd
+
 from .. import schema as schema_mod
 from ..project import Project
+from .delegates import builtin_montages
 from .models import InventoryTableModel
 from .theme_manager import CUR, scaled_px
 from .widgets import PaneHeader, ValMessage
+
+# Datatypes that carry recording-metadata (the per-row section appears only
+# for these). MEG has no scalp montage / reference / ground concept.
+_EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 log = logging.getLogger(__name__)
 
@@ -306,6 +317,14 @@ class PropertiesPanel(QWidget):
         for vmsg in self._build_validation_messages(datatype, suffix, entities):
             self._body_layout.addWidget(vmsg)
 
+        # 5. Per-row metadata, grouped by destination file. The participant
+        # section is modality-agnostic (every row, incl. MRI); the recording
+        # sidecar section only for EEG/MEG/iEEG/NIRS.
+        self._append_participant_section(row)
+        if datatype in _EEG_MEG_DATATYPES:
+            self._append_recording_section(row, datatype)
+        self._append_companion_section(row)
+
         self._body_layout.addStretch(1)
 
     def _build_combo_row(self, label_text: str, value: str, *, options: list[str],
@@ -516,6 +535,225 @@ class PropertiesPanel(QWidget):
         datatype, _sf = self._model.datatype_suffix(self._row)
         self._model.set_datatype_suffix(self._row, datatype, new_value)
         self.set_selected_row(self._row)
+
+    # ------------------------------------------------------------------
+    # Per-row metadata, grouped by destination file
+    # ------------------------------------------------------------------
+
+    def _section_header(self, title: str, destination: str) -> QWidget:
+        """A section title plus a dim ``-> <destination file>`` annotation."""
+        pal = CUR()
+        lbl = QLabel(
+            f'<span style="color:{pal["text"]};font-weight:600;">{title}</span>'
+            f'<span style="color:{pal["dim"]};"> &rarr; {destination}</span>'
+        )
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setStyleSheet(f"font-size: {scaled_px(10)}px; background: transparent;")
+        return lbl
+
+    def _append_participant_section(self, row: int) -> None:
+        """Demographics for ANY row (incl. MRI) -> participants.tsv.
+
+        Modality-agnostic: every subject has a participants.tsv row. Handedness
+        is user-entered (never auto-assumed).
+        """
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header("PARTICIPANT", "participants.tsv"))
+        self._body_layout.addWidget(self._meta_combo_row(
+            "sex", "PatientSex", ["", "M", "F", "O"], self._cell(row, "PatientSex"), "",
+        ))
+        self._body_layout.addWidget(self._meta_edit_row(
+            "age", "PatientAge", self._cell(row, "PatientAge"),
+        ))
+        self._body_layout.addWidget(self._meta_combo_row(
+            "hand", "Handedness", ["", "R", "L", "A"], self._cell(row, "Handedness"), "",
+        ))
+
+    def _append_recording_section(self, row: int, datatype: str) -> None:
+        """EEG/MEG/iEEG/NIRS sidecar fields -> sub-..._<datatype>.json.
+
+        Inheritance fields show the EFFECTIVE value (per-row override, else the
+        dataset default); writing the default clears the override. Fields that
+        do not apply to the datatype are not shown (MEG has no scalp montage /
+        reference / ground).
+        """
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "RECORDING", f"sub-..._{datatype}.json"))
+
+        show_montage = datatype in ("eeg", "ieeg", "nirs")
+        show_ref_ground = datatype in ("eeg", "ieeg")
+
+        if show_montage:
+            self._body_layout.addWidget(self._meta_combo_row(
+                "montage", "montage",
+                ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
+            ))
+        lf = self._eff(row, "line_freq")
+        lf = lf[:-2] if lf.endswith(".0") else lf
+        self._body_layout.addWidget(self._meta_combo_row(
+            "line_freq", "line_freq", ["(blank)", "50", "60"], lf, "(blank)",
+        ))
+        if show_ref_ground:
+            self._body_layout.addWidget(self._meta_edit_row(
+                "reference", "eeg_reference", self._eff(row, "eeg_reference"),
+            ))
+            self._body_layout.addWidget(self._meta_edit_row(
+                "ground", "eeg_ground", self._eff(row, "eeg_ground"),
+            ))
+
+    def _append_companion_section(self, row: int) -> None:
+        """Link already-curated companion files (events/beh/stim/...) for a row.
+
+        Modality-agnostic: any recording can carry curated sidecar companions
+        the converter copies into the BIDS tree (place + name, no conversion).
+        """
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "COMPANION FILES", "events / beh / stim (copied into BIDS)"))
+
+        self._companion_list = QListWidget()
+        self._companion_list.setMaximumHeight(72)
+        for suffix, path in self._companions(row):
+            self._companion_list.addItem(f"{suffix}: {path}")
+        self._body_layout.addWidget(self._companion_list)
+
+        ctl = QWidget()
+        ctl.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(ctl)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        self._companion_suffix = QComboBox()
+        self._companion_suffix.addItems(
+            ["events", "beh", "stim", "physio", "channels", "electrodes"]
+        )
+        link = QPushButton("Link file…")
+        link.clicked.connect(lambda _=False, r=row: self._link_companion(r))
+        rem = QPushButton("Remove")
+        rem.clicked.connect(lambda _=False, r=row: self._remove_companion(r))
+        h.addWidget(self._companion_suffix)
+        h.addWidget(link)
+        h.addWidget(rem)
+        h.addStretch(1)
+        self._body_layout.addWidget(ctl)
+
+    def _companions(self, row: int) -> list[tuple[str, str]]:
+        raw = self._cell(row, "companion_files")
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        out: list[tuple[str, str]] = []
+        if isinstance(data, list):
+            for it in data:
+                if isinstance(it, dict) and it.get("suffix") and it.get("path"):
+                    out.append((str(it["suffix"]), str(it["path"])))
+        return out
+
+    def _write_companions(self, row: int, items: list[tuple[str, str]]) -> None:
+        if self._model is None:
+            return
+        payload = (
+            json.dumps([{"suffix": s, "path": p} for s, p in items]) if items else ""
+        )
+        # dataChanged from bulk_set re-renders this section with the new list.
+        self._model.bulk_set([row], "companion_files", payload)
+
+    def _link_companion(self, row: int) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Link a curated companion file", "", "All files (*)",
+        )
+        if not path:
+            return
+        items = self._companions(row)
+        items.append((self._companion_suffix.currentText(), path))
+        self._write_companions(row, items)
+
+    def _remove_companion(self, row: int) -> None:
+        sel = self._companion_list.currentRow()
+        items = self._companions(row)
+        if 0 <= sel < len(items):
+            items.pop(sel)
+            self._write_companions(row, items)
+
+    def _meta_combo_row(self, label: str, key: str, options: list[str],
+                        current: str, blank_label: str) -> QWidget:
+        row_w = QWidget()
+        row_w.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row_w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setMinimumWidth(76)
+        lbl.setMaximumWidth(76)
+        lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        h.addWidget(lbl)
+
+        combo = QComboBox()
+        combo.setObjectName("ent-input")
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        combo.addItems(options)
+        cur = current.strip()
+        if not cur:
+            combo.setCurrentText(blank_label)
+        else:
+            if combo.findText(cur) < 0:
+                combo.addItem(cur)
+            combo.setCurrentText(cur)
+        combo.activated.connect(
+            lambda _i, c=combo, k=key, bl=blank_label:
+            self._on_meta_field_changed(k, "" if c.currentText() == bl else c.currentText())
+        )
+        h.addWidget(combo, 1)
+        return row_w
+
+    def _meta_edit_row(self, label: str, key: str, current: str) -> QWidget:
+        row_w = QWidget()
+        row_w.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row_w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setMinimumWidth(76)
+        lbl.setMaximumWidth(76)
+        lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        h.addWidget(lbl)
+        edit = QLineEdit(current)
+        edit.setObjectName("ent-input")
+        edit.setPlaceholderText("—")
+        edit.editingFinished.connect(
+            lambda e=edit, k=key: self._on_meta_field_changed(k, e.text().strip())
+        )
+        h.addWidget(edit, 1)
+        return row_w
+
+    def _eff(self, row: int, col: str) -> str:
+        """Effective value (per-row override else inherited dataset default)."""
+        if self._model is None:
+            return ""
+        return self._model.effective_value(row, col)
+
+    def _cell(self, row: int, col: str) -> str:
+        if self._model is None:
+            return ""
+        df = self._model.dataframe()
+        if col not in df.columns or not (0 <= row < len(df)):
+            return ""
+        v = df.iloc[row][col]
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        s = str(v)
+        return "" if s.lower() in ("nan", "none") else s
+
+    def _on_meta_field_changed(self, key: str, value: str) -> None:
+        if self._suppress_writeback or self._model is None or self._row is None:
+            return
+        self._model.bulk_set([self._row], key, value)
 
     def _on_model_data_changed(self, top_left, bottom_right, _roles=()) -> None:
         if self._model is None or self._row is None:

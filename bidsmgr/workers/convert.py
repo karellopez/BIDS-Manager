@@ -60,7 +60,7 @@ class ConvertWorker(QThread):
     bids_parent
         Destination parent dir; ``run_convert`` creates one
         ``<bids_parent>/<dataset>/`` per dataset slug.
-    n_jobs, overwrite, dry_run, line_freq, montage
+    n_jobs, overwrite, dry_run, recording_meta
         Pass-through to the CLI verb's keyword args.
     """
 
@@ -81,8 +81,7 @@ class ConvertWorker(QThread):
         n_jobs: int = 1,
         overwrite: bool = False,
         dry_run: bool = False,
-        line_freq: Optional[float] = 50.0,
-        montage: Optional[str] = None,
+        recording_meta: Optional[Path] = None,
         raw_root: Optional[Path] = None,
         skip_residuals: bool = True,
         parent=None,
@@ -94,8 +93,7 @@ class ConvertWorker(QThread):
         self._n_jobs = n_jobs
         self._overwrite = overwrite
         self._dry_run = dry_run
-        self._line_freq = line_freq
-        self._montage = montage
+        self._recording_meta = Path(recording_meta) if recording_meta is not None else None
         self._raw_root = Path(raw_root) if raw_root is not None else None
         self._skip_residuals = skip_residuals
         # Cooperative stop flag, polled by ``run_convert`` between subjects
@@ -134,8 +132,7 @@ class ConvertWorker(QThread):
                 n_jobs=self._n_jobs,
                 overwrite=self._overwrite,
                 dry_run=self._dry_run,
-                line_freq=self._line_freq,
-                montage=self._montage,
+                recording_meta=self._recording_meta,
                 raw_root=self._raw_root,
                 skip_residuals=self._skip_residuals,
                 cancel_check=self._stop.is_set,

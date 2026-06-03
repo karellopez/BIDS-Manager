@@ -55,11 +55,29 @@ from ..converter import (
     dispatch,
     select_backend,
 )
-from ..fixups import apply_fieldmap_renames, populate_intended_for, update_scans_tsv
+from ..fixups import (
+    apply_fieldmap_renames,
+    attach_companion_files,
+    enrich_recording_sidecars,
+    populate_intended_for,
+    update_scans_tsv,
+)
+from ..recording_meta import (
+    RecordingMetaSpec,
+    default_spec,
+    load_spec,
+    resolve_effective,
+    scaffold_sidecar_path,
+)
 from ..util.cancel import OperationCancelled, is_cancelled
 from ..util.paths import long_path, safe_path_component
 
 log = logging.getLogger(__name__)
+
+# Datatypes converted by the mne-bids backend. These rows are run
+# sequentially in Phase 1 because ``write_raw_bids`` mutates shared
+# dataset files (participants.tsv / scans.tsv) on every call.
+_MNE_BIDS_DATATYPES: frozenset[str] = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +94,7 @@ def run_convert(
     overwrite: bool = False,
     dry_run: bool = False,
     dcm2niix_bin: Optional[Path] = None,
-    line_freq: Optional[float] = 50.0,
-    montage: Optional[str] = None,
+    recording_meta: Optional[Path] = None,
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     cancel_check=None,
@@ -86,9 +103,12 @@ def run_convert(
 
     Returns 0 on success, non-zero if any subject failed.
 
-    ``line_freq`` and ``montage`` are EEG/MEG-only knobs passed to the
-    mne-bids backend; they fill in metadata (``PowerLineFrequency``,
-    ``electrodes.tsv``) that recording files don't always carry.
+    ``recording_meta`` points at an optional recording-metadata JSON. Its
+    dataset defaults supply EEG/MEG ``line_freq`` / ``montage`` when the
+    inventory cell is blank, and its richer fields (reference, ground,
+    filters, device, institution, event maps, ...) are folded into the BIDS
+    sidecars after the write. When omitted, a default spec is used
+    (``PowerLineFrequency = 50``), preserving prior behaviour.
 
     ``skip_residuals`` (default True) drops the dcm2niix residual/secondary
     outputs -- derived single-volume duplicates split off one input series
@@ -161,11 +181,21 @@ def run_convert(
         log.warning("no rows to convert (after filtering)")
         return 0
 
-    backends = default_backends(
-        dcm2niix_bin=dcm2niix_bin,
-        line_freq=line_freq,
-        montage=montage,
-    )
+    # Recording-metadata spec for EEG/MEG enrichment. Precedence: an explicit
+    # --recording-meta path, else the scaffold the scan wrote next to the TSV
+    # (auto-discovered), else a default spec (keeps PowerLineFrequency=50).
+    if recording_meta is not None:
+        spec = load_spec(Path(recording_meta))
+        log.info("loaded recording metadata from %s", recording_meta)
+    else:
+        auto_meta = scaffold_sidecar_path(tsv)
+        if auto_meta.exists():
+            spec = load_spec(auto_meta)
+            log.info("auto-loaded recording-metadata scaffold %s", auto_meta)
+        else:
+            spec = default_spec()
+
+    backends = default_backends(dcm2niix_bin=dcm2niix_bin)
     # Capture dcm2niix version once for provenance — it's still the
     # primary backend for MRI rows.
     primary = select_backend("mri", dcm2niix_bin=dcm2niix_bin)
@@ -200,6 +230,7 @@ def run_convert(
                 subject_df, bids_root, files_by_uid,
                 source_search_roots=source_search_roots,
                 skip_residuals=skip_residuals,
+                spec=spec,
             )
             if not tasks:
                 continue
@@ -214,6 +245,7 @@ def run_convert(
                     n_jobs=n_jobs, overwrite=overwrite,
                     dcm2niix_version=dcm2niix_version,
                     cancel_check=cancel_check,
+                    spec=spec,
                 )
             except OperationCancelled:
                 log.warning("conversion stopped by user (sub-%s not committed)", subject)
@@ -243,6 +275,7 @@ def _convert_subject(
     overwrite: bool,
     dcm2niix_version: str,
     cancel_check=None,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> None:
     """Run Phases 1–3 for a single (dataset, subject, session) group."""
     subject = tasks[0].subject
@@ -269,6 +302,12 @@ def _convert_subject(
         n_intended_for = populate_intended_for(
             staging, subject=subject, session=tasks[0].session,
         )
+        # EEG/MEG sidecar/channels/events enrichment from the recording-
+        # metadata spec (no-op for MRI-only subjects or when spec is None).
+        n_enriched = enrich_recording_sidecars(staging, tasks, spec)
+        # Copy any per-row curated companion files (events/beh/stim/...) into
+        # the staged tree (place + name only; no conversion).
+        n_enriched += attach_companion_files(staging, tasks)
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we
@@ -278,7 +317,7 @@ def _convert_subject(
         _atomic_commit(staging, target, overwrite=overwrite)
         _write_provenance(
             target, results, rename_map, n_intended_for, n_scans_tsv,
-            dcm2niix_version=dcm2niix_version,
+            dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
         )
         log.info("committed sub-%s to %s", subject, target)
 
@@ -372,23 +411,40 @@ def _phase1_parallel_dcm2niix(
     if is_cancelled(cancel_check):
         raise OperationCancelled("conversion cancelled by user")
 
-    if n_jobs == 1 or len(tasks) == 1:
-        out: list[ConvertResult] = []
-        for t in tasks:
-            if is_cancelled(cancel_check):
-                raise OperationCancelled("conversion cancelled by user")
-            out.append(_phase1_one(backends, t, staging))
-        return out
+    # mne-bids' ``write_raw_bids`` rewrites shared dataset files
+    # (``participants.tsv`` and the subject's ``*_scans.tsv``) on *every*
+    # call. Running several EEG/MEG recordings for one subject in parallel
+    # therefore races on those files: one worker truncates+rewrites while
+    # another reads, and mne-bids blows up ("loadtxt: input contained no
+    # data" -> IndexError). dcm2niix (MRI) and physio tasks write only their
+    # own independent outputs and are safe to parallelise. So split the work:
+    # mne-bids-backed tasks run sequentially, the rest run in the pool.
+    serial = [t for t in tasks if t.datatype in _MNE_BIDS_DATATYPES]
+    parallel_tasks = [t for t in tasks if t.datatype not in _MNE_BIDS_DATATYPES]
 
-    parallel_backend = "threading" if len(tasks) < 4 else "loky"
-    gen = Parallel(n_jobs=n_jobs, backend=parallel_backend, return_as="generator")(
-        delayed(_phase1_one)(backends, t, staging) for t in tasks
-    )
-    out = []
-    for res in gen:
-        out.append(res)
+    out: list[ConvertResult] = []
+
+    for t in serial:
         if is_cancelled(cancel_check):
             raise OperationCancelled("conversion cancelled by user")
+        out.append(_phase1_one(backends, t, staging))
+
+    if parallel_tasks:
+        if n_jobs == 1 or len(parallel_tasks) == 1:
+            for t in parallel_tasks:
+                if is_cancelled(cancel_check):
+                    raise OperationCancelled("conversion cancelled by user")
+                out.append(_phase1_one(backends, t, staging))
+        else:
+            parallel_backend = "threading" if len(parallel_tasks) < 4 else "loky"
+            gen = Parallel(
+                n_jobs=n_jobs, backend=parallel_backend, return_as="generator",
+            )(delayed(_phase1_one)(backends, t, staging) for t in parallel_tasks)
+            for res in gen:
+                out.append(res)
+                if is_cancelled(cancel_check):
+                    raise OperationCancelled("conversion cancelled by user")
+
     return out
 
 
@@ -498,6 +554,7 @@ def _build_tasks_for_subject(
     *,
     source_search_roots: tuple[Path, ...] = (),
     skip_residuals: bool = True,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> list[ConvertTask]:
     tasks: list[ConvertTask] = []
     for _, row in subject_df.iterrows():
@@ -505,6 +562,7 @@ def _build_tasks_for_subject(
             row, bids_root, files_by_uid,
             source_search_roots=source_search_roots,
             skip_residuals=skip_residuals,
+            spec=spec,
         )
         if task is not None:
             tasks.append(task)
@@ -518,6 +576,7 @@ def _row_to_task(
     *,
     source_search_roots: tuple[Path, ...] = (),
     skip_residuals: bool = True,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
     """Detect MRI vs EEG/MEG row shape and dispatch to the right builder.
 
@@ -534,7 +593,7 @@ def _row_to_task(
     source_file = str(row.get("source_file", "")).strip()
     if source_file:
         return _row_to_task_eeg_meg(
-            row, bids_root, source_search_roots=source_search_roots,
+            row, bids_root, source_search_roots=source_search_roots, spec=spec,
         )
 
     return None
@@ -626,7 +685,32 @@ def _row_to_task_mri(
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
         skip_residuals=skip_residuals,
+        companion_files=_parse_companion(row),
     )
+
+
+def _parse_companion(row: pd.Series) -> tuple[tuple[str, str], ...]:
+    """Parse the row's ``companion_files`` JSON column into (suffix, path) pairs.
+
+    Format: a JSON list of ``{"suffix": "events", "path": "/abs/file.tsv"}``.
+    Returns ``()`` on missing/malformed input.
+    """
+    raw = str(row.get("companion_files", "") or "").strip()
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return ()
+    out: list[tuple[str, str]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                suffix = str(item.get("suffix", "")).strip()
+                path = str(item.get("path", "")).strip()
+                if suffix and path:
+                    out.append((suffix, path))
+    return tuple(out)
 
 
 def _parse_entities_json(row: pd.Series) -> dict[str, str]:
@@ -649,6 +733,7 @@ def _row_to_task_eeg_meg(
     bids_root: Path,
     *,
     source_search_roots: tuple[Path, ...] = (),
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
     """Build a :class:`ConvertTask` for an EEG/MEG/iEEG/NIRS row.
 
@@ -730,13 +815,31 @@ def _row_to_task_eeg_meg(
     # extension — the backend collects whatever lands in the datatype dir.
     expected_outputs: tuple[str, ...] = (".json",)
 
-    # Per-row EEG/MEG knobs (if the user filled them in the TSV).
+    # Resolve EEG/MEG line_freq + montage. Precedence: the inventory cell
+    # wins; else the recording-metadata dataset default (resolved per row by
+    # source path); line_freq finally falls back to 50 Hz so
+    # PowerLineFrequency is always populated (preserves prior behaviour now
+    # that the dataset-wide --line-freq flag is gone).
+    eff_acq = resolve_effective(spec, source_file).acquisition if spec is not None else None
+
     line_freq_raw = str(row.get("line_freq", "")).strip()
     try:
         line_freq = float(line_freq_raw) if line_freq_raw else None
     except ValueError:
         line_freq = None
+    if line_freq is None and eff_acq is not None:
+        line_freq = eff_acq.power_line_freq
+    if line_freq is None:
+        line_freq = 50.0
+
     montage = str(row.get("montage", "")).strip() or None
+    if montage is None and eff_acq is not None:
+        montage = eff_acq.montage
+
+    # Per-row reference/ground overrides (the spec default applies in the
+    # enrichment fixup when these are blank).
+    eeg_reference = str(row.get("eeg_reference", "")).strip() or None
+    eeg_ground = str(row.get("eeg_ground", "")).strip() or None
 
     return ConvertTask(
         row_id=source_file,  # source path is unique per recording
@@ -754,6 +857,9 @@ def _row_to_task_eeg_meg(
         repetition_type=str(row.get("repetition_type", "")).strip(),
         line_freq=line_freq,
         montage=montage,
+        eeg_reference=eeg_reference,
+        eeg_ground=eeg_ground,
+        companion_files=_parse_companion(row),
     )
 
 
@@ -833,6 +939,7 @@ def _write_provenance(
     n_scans_tsv: int,
     *,
     dcm2niix_version: str,
+    n_enriched: int = 0,
 ) -> None:
     """Per-subject provenance at ``<target>/.bidsmgr/provenance.json``."""
     prov_dir = target / ".bidsmgr"
@@ -863,6 +970,7 @@ def _write_provenance(
         ],
         "intended_for_updated": n_intended_for,
         "scans_tsv_rewritten": n_scans_tsv,
+        "recording_sidecars_enriched": n_enriched,
     }
     (prov_dir / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
 
@@ -998,22 +1106,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Path to a specific dcm2niix binary (defaults to bundled).",
     )
     parser.add_argument(
-        "--line-freq", default=50.0, type=float,
+        "--recording-meta", default=None, type=Path,
         help=(
-            "Power-line frequency in Hz, written to PowerLineFrequency in "
-            "EEG/MEG/iEEG JSON sidecars (BIDS-required). Default 50; use 60 "
-            "in the Americas / parts of Asia. Pass --line-freq 0 to leave "
-            "unset and let the recording's own value apply."
-        ),
-    )
-    parser.add_argument(
-        "--montage", default=None,
-        help=(
-            "Apply a built-in mne montage to every EEG/MEG row before "
-            "writing (e.g. standard_1020, biosemi64, easycap-M1). Fills "
-            "electrodes.tsv + coordsystem.json. Use only if all rows in "
-            "the inventory share the same channel layout. See "
-            "`mne.channels.get_builtin_montages()` for the full list."
+            "Path to a recording-metadata JSON (EEG/MEG enrichment). Its "
+            "dataset defaults supply line_freq / montage for blank inventory "
+            "cells, and its richer fields fill sidecar reference / ground / "
+            "filters / device / institution, retype auxiliary channels, and "
+            "map event codes to labels. Optional; omitting it leaves "
+            "PowerLineFrequency=50 by default. Set per-row line_freq / montage "
+            "in the inventory TSV columns to override per recording."
         ),
     )
     parser.add_argument(
@@ -1053,8 +1154,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         dcm2niix_bin=args.dcm2niix,
-        line_freq=args.line_freq if args.line_freq > 0 else None,
-        montage=args.montage,
+        recording_meta=args.recording_meta,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
     )

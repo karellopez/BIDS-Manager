@@ -47,10 +47,17 @@ def run_metadata_cli(
     dataset_doi: Optional[str] = None,
     fill_todos: bool = False,
     write_report: bool = True,
+    participants_file: Optional[Path] = None,
+    phenotype_files: Optional[list[Path]] = None,
 ) -> int:
     """Run the metadata engine on every BIDS root under ``target``.
 
     Returns 0 if every root processed cleanly, 1 if any errored.
+
+    ``participants_file`` is an optional demographics spreadsheet whose
+    ``age`` / ``sex`` / ``handedness`` columns override the inventory; it is
+    applied to every BIDS root. ``phenotype_files`` are measure tables written
+    to ``phenotype/`` in each root.
     """
     target = Path(target)
     if not target.is_dir():
@@ -83,6 +90,8 @@ def run_metadata_cli(
                 dataset_meta=meta,
                 fill_todos=fill_todos,
                 write_report=write_report,
+                participants_file=participants_file,
+                phenotype_files=phenotype_files,
             )
         except Exception:
             log.exception("metadata engine failed on %s", bids_root)
@@ -202,6 +211,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--participants", default=None, type=Path, dest="participants_file",
+        help=(
+            "Optional participants spreadsheet (TSV/CSV/XLSX/ODS) keyed by a "
+            "'participant_id' column. Its 'age' / 'sex' / 'handedness' columns "
+            "override the inventory-derived demographics in participants.tsv."
+        ),
+    )
+    parser.add_argument(
+        "--phenotype", action="append", default=None, type=Path,
+        dest="phenotype_files",
+        help=(
+            "Phenotype measure table (TSV/CSV/XLSX/ODS) keyed by "
+            "'participant_id'. Repeat for each instrument; each is written to "
+            "phenotype/<measure>.tsv + .json."
+        ),
+    )
+    parser.add_argument(
         "--name", default=None,
         help="Dataset Name (defaults to the BIDS root directory name).",
     )
@@ -265,6 +291,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         dataset_doi=args.dataset_doi,
         fill_todos=args.fill_todos,
         write_report=args.write_report,
+        participants_file=args.participants_file,
+        phenotype_files=args.phenotype_files,
     )
 
 

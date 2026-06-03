@@ -20,6 +20,7 @@ Reference: ported from
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -38,7 +39,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Unified-TSV column group for EEG/MEG-specific fields.
 # Appended last in the unified-TSV column order:
-#   TSV(22) + BIDS_GUESS(8) + DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(9)
+#   TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4)
+#   + EXTENDED(3) + EEG_MEG(15) = 56
 # ---------------------------------------------------------------------------
 
 EEG_MEG_COLUMNS: tuple[str, ...] = (
@@ -63,6 +65,14 @@ EEG_MEG_COLUMNS: tuple[str, ...] = (
                        # before write_raw_bids → fills electrodes.tsv +
                        # coordsystem.json. Empty = leave positions to whatever the
                        # recording carries.
+    "eeg_reference",   # User-editable per-row override of the reference electrode
+                       # (e.g. "Cz", "average"). Written to EEGReference / iEEGReference
+                       # in the sidecar. Empty = use the recording-metadata default.
+    "eeg_ground",      # User-editable per-row override of the ground electrode.
+                       # Written to EEGGround / iEEGGround. Empty = use the default.
+    "montage_suggestion",  # Read-only scan suggestion: "<montage> (matched/total)"
+                       # by channel-name overlap. Surfaced in the GUI next to the
+                       # montage dropdown; the user picks the actual montage.
 )
 
 
@@ -108,6 +118,19 @@ class ProbeResult:
     datatype: str         # 'eeg' | 'meg' | 'ieeg' | 'nirs' | ''
     has_positions: bool
     fmt: str              # short label: 'EDF', 'FIF', 'BrainVision', ...
+    # Seeded enrichment facts read from the recording header (best-effort;
+    # rich for FIF/MEG, often empty for legacy EDF). These pre-fill the
+    # demographics columns and the recording-metadata scaffold so the user
+    # only supplies what the machine cannot read.
+    manufacturer: str = ""   # device manufacturer/type
+    model: str = ""          # device model
+    subj_sex: str = ""       # 'M' | 'F' | '' (only when a real birthday exists)
+    subj_age: str = ""       # integer years as a string, or ''
+    # Handedness is deliberately NOT extracted: file headers commonly default
+    # it (so reading it would be assuming data we do not have). The user
+    # enters it explicitly.
+    event_codes: tuple[str, ...] = ()  # distinct annotation/trigger labels
+    montage_suggestion: str = ""       # "name (matched/total)" for EEG/iEEG, else ""
 
 
 def _detect_datatype(raw) -> str:
@@ -223,6 +246,15 @@ def _probe(path: Path) -> Optional[ProbeResult]:
         except Exception:
             recording_time = str(meas_date)
 
+    manufacturer, model = _device_info(raw)
+    subj_sex, subj_age = _subject_info(raw, meas_date)
+    event_codes = _event_codes(raw)
+    datatype = _detect_datatype(raw)
+    # Best-matching montage is a SCAN-time suggestion (channel-name overlap)
+    # so the user can pick it while curating; not auto-applied. Montage is an
+    # EEG/iEEG concept (MEG carries intrinsic sensor geometry).
+    montage_suggestion = _best_montage(raw.ch_names) if datatype in ("eeg", "ieeg") else ""
+
     return ProbeResult(
         source=path,
         sfreq=sfreq,
@@ -230,10 +262,129 @@ def _probe(path: Path) -> Optional[ProbeResult]:
         n_times=n_times,
         duration_sec=duration_sec,
         recording_time=recording_time,
-        datatype=_detect_datatype(raw),
+        datatype=datatype,
         has_positions=_has_positions(raw),
         fmt=_format_label(path),
+        manufacturer=manufacturer,
+        model=model,
+        subj_sex=subj_sex,
+        subj_age=subj_age,
+        event_codes=event_codes,
+        montage_suggestion=montage_suggestion,
     )
+
+
+def _device_info(raw) -> tuple[str, str]:
+    """Best-effort (manufacturer, model) from ``raw.info['device_info']``."""
+    try:
+        dev = raw.info.get("device_info") or {}
+        return str(dev.get("type", "") or ""), str(dev.get("model", "") or "")
+    except Exception:
+        return "", ""
+
+
+# MNE FIFF subject sex codes -> BIDS-conventional letters.
+_SEX_MAP = {1: "M", 2: "F"}
+
+
+def _subject_info(raw, meas_date) -> tuple[str, str]:
+    """Best-effort (sex, age) from ``raw.info['subject_info']``.
+
+    Conservative on purpose: a real, non-placeholder ``birthday`` is required
+    as the signal that the record is genuine (anonymised FIF headers stamp
+    ``1900-01-01`` and often default the other fields too). When there is no
+    real birthday we seed nothing rather than assume. Handedness is never
+    auto-seeded (headers commonly default it). Returns ``("", "")`` when the
+    header carries nothing trustworthy.
+    """
+    try:
+        info = raw.info.get("subject_info") or {}
+    except Exception:
+        return "", ""
+    if meas_date is None:
+        return "", ""
+
+    birthday = info.get("birthday")
+    try:
+        by = (
+            birthday.year if hasattr(birthday, "year")
+            else int(birthday[0]) if birthday else None
+        )
+    except Exception:
+        by = None
+    # No real birthday (missing or the 1900 anonymisation placeholder) ->
+    # treat the whole record as untrustworthy and seed nothing.
+    if by is None or by <= 1900:
+        return "", ""
+
+    age = ""
+    try:
+        years = meas_date.year - by
+        if 0 < years <= 120:
+            age = str(years)
+    except Exception:
+        age = ""
+    sex = _SEX_MAP.get(info.get("sex"), "")
+    return sex, age
+
+
+@functools.lru_cache(maxsize=1)
+def _montage_chname_sets() -> dict[str, frozenset[str]]:
+    """Map each built-in MNE montage name to its normalised channel-name set.
+
+    Built once per process (montage construction is not free). Channel names
+    are lower-cased and stripped of non-alphanumerics so EDF padding (``Fc5.``)
+    matches the montage's ``FC5``.
+    """
+    out: dict[str, frozenset[str]] = {}
+    try:
+        import mne
+    except Exception:
+        return out
+    for name in mne.channels.get_builtin_montages():
+        try:
+            m = mne.channels.make_standard_montage(name)
+        except Exception:
+            continue
+        out[name] = frozenset(re.sub(r"[^a-z0-9]", "", c.lower()) for c in m.ch_names)
+    return out
+
+
+def _best_montage(ch_names) -> str:
+    """Return ``"<montage> (matched/total)"`` for the best channel-name overlap.
+
+    A scan-time *suggestion* only: the user confirms or changes it in the GUI.
+    Empty string when nothing matches (or MNE is unavailable).
+    """
+    sets = _montage_chname_sets()
+    if not sets:
+        return ""
+    cleaned = {re.sub(r"[^a-z0-9]", "", str(c).lower()) for c in ch_names}
+    cleaned.discard("")
+    if not cleaned:
+        return ""
+    best_name, best_n = "", 0
+    for name, mset in sets.items():
+        n = len(cleaned & mset)
+        if n > best_n:
+            best_n, best_name = n, name
+    if best_n == 0:
+        return ""
+    return f"{best_name} ({best_n}/{len(ch_names)})"
+
+
+def _event_codes(raw) -> tuple[str, ...]:
+    """Distinct annotation/trigger labels present in the recording."""
+    try:
+        descriptions = list(raw.annotations.description)
+    except Exception:
+        return ()
+    seen: list[str] = []
+    for d in descriptions:
+        s = str(d)
+        if s and s not in seen:
+            seen.append(s)
+    return tuple(sorted(seen))
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +713,22 @@ def scan_eeg_meg(
             "has_positions": int(probe.has_positions),
             "line_freq": "" if line_freq is None else line_freq,
             "montage": montage or "",
+            "eeg_reference": "",
+            "eeg_ground": "",
+            "montage_suggestion": probe.montage_suggestion,
+            # Demographics seeded only when the header is genuinely real
+            # (non-placeholder birthday); user-editable. Handedness is never
+            # auto-seeded (see _subject_info). Written to participants.tsv by
+            # the metadata engine.
+            "PatientSex": probe.subj_sex,
+            "Handedness": "",
+            "PatientAge": probe.subj_age,
+            # Internal scaffold seeds (leading underscore -> dropped from the
+            # final TSV by the unified column-order selection). Read by the
+            # scan verb to pre-populate the recording-metadata scaffold.
+            "_event_codes": json.dumps(list(probe.event_codes)),
+            "_manufacturer": probe.manufacturer,
+            "_model": probe.model,
             "dataset": dataset or "",
             # Surface the classifier-style columns so the inspector's
             # ``suffix`` and ``data`` columns show useful values for

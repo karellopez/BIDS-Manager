@@ -20,6 +20,7 @@ Shared helpers:
 """
 
 from .bids_tree import BADGE_ROLE, BidsTreeDelegate
+from .choice_delegate import ChoiceDelegate, builtin_montages
 from .inspection_cells import (
     PAYLOAD_ROLE,
     CellTextDelegate,
@@ -28,6 +29,7 @@ from .inspection_cells import (
 )
 from .row_state import (
     HIGHLIGHT_ROLE,
+    INHERITED_ROLE,
     ROW_STATE_ROLE,
     paint_highlight,
     paint_row_state,
@@ -36,9 +38,12 @@ from .row_state import (
 __all__ = [
     "BADGE_ROLE",
     "BidsTreeDelegate",
+    "ChoiceDelegate",
+    "builtin_montages",
     "CellTextDelegate",
     "CheckboxDelegate",
     "HIGHLIGHT_ROLE",
+    "INHERITED_ROLE",
     "PAYLOAD_ROLE",
     "ROW_STATE_ROLE",
     "StatusDelegate",

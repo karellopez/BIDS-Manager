@@ -33,7 +33,15 @@ import pandas as pd
 
 import bidsmgr
 from .. import schema as schema_mod
+from .demographics import (
+    load_participants_table,
+    merge_demographics,
+    normalize_handedness,
+    normalize_sex,
+)
+from .phenotype import write_phenotype
 from .types import DatasetMetadata, MetadataReport, SidecarFill, TodoFill
+from ..recording_meta import load_spec, scaffold_sidecar_path
 
 # The literal placeholder value written by ``--fill-todos`` for every
 # missing required / recommended field. Deliberately just the string
@@ -97,6 +105,8 @@ def run_metadata(
     fill_todos: bool = False,
     write_report: bool = True,
     generator_label: str = "bidsmgr",
+    participants_file: Optional[Path] = None,
+    phenotype_files: Optional[list[Path]] = None,
 ) -> MetadataReport:
     """Generate dataset-level metadata for the BIDS root at ``bids_root``.
 
@@ -123,6 +133,13 @@ def run_metadata(
         ``<bids_root>/.bidsmgr/metadata_report.json`` after every run.
     generator_label
         ``GeneratedBy.Name`` to record. Defaults to ``"bidsmgr"``.
+    participants_file
+        Optional participants spreadsheet (TSV/CSV/XLSX/ODS) keyed by
+        ``participant_id``. Its demographic columns (``age`` / ``sex`` /
+        ``handedness``) override the inventory-derived values.
+    phenotype_files
+        Optional list of phenotype measure tables. Each becomes
+        ``phenotype/<measure>.tsv`` + ``.json``.
 
     Returns
     -------
@@ -147,8 +164,14 @@ def run_metadata(
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
+    # Auto-discover phenotype tables from the inventory's recording-metadata
+    # scaffold when not explicitly provided (the GUI dialog stores them there).
+    if phenotype_files is None and inventory_tsv is not None:
+        phenotype_files = _phenotype_files_from_scaffold(inventory_tsv)
+
     _write_dataset_description(bids_root, meta, generator_label, report)
-    _write_participants(bids_root, inventory_tsv, report)
+    _write_participants(bids_root, inventory_tsv, report, participants_file=participants_file)
+    write_phenotype(bids_root, phenotype_files, report)
     _write_readme(bids_root, meta.name, report)
     _write_changes(bids_root, report)
     _refresh_scans_tsv(bids_root, report)
@@ -251,7 +274,8 @@ def _write_dataset_description(
 
 
 _PARTICIPANT_COLUMNS: tuple[str, ...] = (
-    "participant_id", "age", "sex", "given_name", "family_name", "patient_id",
+    "participant_id", "age", "sex", "handedness",
+    "given_name", "family_name", "patient_id",
 )
 
 
@@ -262,27 +286,69 @@ _PARTICIPANT_DESCRIPTIONS: dict[str, dict[str, object]] = {
         "Description": "Biological sex",
         "Levels": {"M": "male", "F": "female", "O": "other", "n/a": "not available"},
     },
+    "handedness": {
+        "Description": "Handedness of the participant",
+        "Levels": {"R": "right", "L": "left", "A": "ambidextrous", "n/a": "not available"},
+    },
     "given_name": {"Description": "Subject given name (kept for internal traceability)"},
     "family_name": {"Description": "Subject family name (kept for internal traceability)"},
     "patient_id": {"Description": "Original DICOM PatientID"},
 }
 
 
+def _phenotype_files_from_scaffold(inventory_tsv: Path) -> Optional[list[Path]]:
+    """Read phenotype table paths from the inventory's recording-meta scaffold.
+
+    The GUI dataset-metadata dialog stores phenotype file paths in
+    ``<inventory>.tsv.recording_meta.json``. Paths are resolved relative to the
+    inventory directory when not absolute. Returns ``None`` when there is no
+    scaffold or it lists no phenotype files.
+    """
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return None
+        spec = load_spec(scaffold)
+    except Exception:
+        return None
+    if not spec.phenotype_files:
+        return None
+    base = Path(inventory_tsv).parent
+    out: list[Path] = []
+    for p in spec.phenotype_files:
+        pp = Path(p)
+        out.append(pp if pp.is_absolute() else base / pp)
+    return out or None
+
+
 def _write_participants(
-    bids_root: Path, inventory_tsv: Optional[Path], report: MetadataReport,
+    bids_root: Path,
+    inventory_tsv: Optional[Path],
+    report: MetadataReport,
+    participants_file: Optional[Path] = None,
 ) -> None:
     subjects = sorted(p.name for p in bids_root.glob("sub-*") if p.is_dir())
     if not subjects:
         return
 
     demo_lookup = _load_demographics_from_inventory(inventory_tsv, report)
+    if participants_file is not None:
+        # A user-supplied participants spreadsheet is the authoritative
+        # demographic source: its non-empty cells override the inventory.
+        demo_lookup = merge_demographics(
+            demo_lookup, load_participants_table(Path(participants_file)),
+        )
 
     rows: list[dict[str, str]] = []
     for sid in subjects:
         row: dict[str, str] = {"participant_id": sid}
         extra = demo_lookup.get(sid, {})
-        for col in ("age", "sex", "given_name", "family_name", "patient_id"):
+        for col in ("age", "sex", "handedness", "given_name", "family_name", "patient_id"):
             v = extra.get(col, "")
+            if col == "sex":
+                v = normalize_sex(v)
+            elif col == "handedness":
+                v = normalize_handedness(v)
             row[col] = v if v else "n/a"
         rows.append(row)
 
@@ -366,6 +432,7 @@ def _load_demographics_from_inventory(
             "patient_id": str(head.get("PatientID", "") or ""),
             "age": str(head.get("PatientAge", "") or head.get("age", "") or ""),
             "sex": str(head.get("PatientSex", "") or head.get("sex", "") or ""),
+            "handedness": str(head.get("Handedness", "") or head.get("handedness", "") or ""),
         }
     return lookup
 

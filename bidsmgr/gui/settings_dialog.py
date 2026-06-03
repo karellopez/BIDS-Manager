@@ -218,15 +218,11 @@ class SettingsDialog(QDialog):
         self._scan_dataset.setPlaceholderText("(auto-derive from raw folder name)")
         form.addRow("Default dataset slug:", self._scan_dataset)
 
-        self._scan_line_freq = QDoubleSpinBox()
-        self._scan_line_freq.setRange(0.0, 100.0)
-        self._scan_line_freq.setDecimals(1)
-        self._scan_line_freq.setSingleStep(1.0)
-        form.addRow("EEG/MEG line frequency (Hz):", self._scan_line_freq)
-
-        self._scan_montage = QLineEdit()
-        self._scan_montage.setPlaceholderText("e.g. standard_1005, biosemi64")
-        form.addRow("EEG/MEG montage:", self._scan_montage)
+        # EEG/MEG line frequency + montage are no longer scan settings: they
+        # are recording metadata, edited as dropdowns per recording in the
+        # inspection table (montage / line_freq columns) and dataset-wide in
+        # the "Recording metadata" editor. Free-text fields here would have
+        # been a second, inconsistent way to set the same values.
 
         self._scan_probe = QCheckBox(
             "Enable --probe-convert (run dcm2niix per series to enrich "
@@ -616,8 +612,6 @@ class SettingsDialog(QDialog):
 
         self._scan_jobs.setValue(max(1, min(s.scan_n_jobs, cap)))
         self._scan_dataset.setText(s.dataset_slug)
-        self._scan_line_freq.setValue(s.scan_line_freq)
-        self._scan_montage.setText(s.scan_montage)
         self._scan_probe.setChecked(s.scan_probe_convert)
         self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
 
@@ -680,8 +674,6 @@ class SettingsDialog(QDialog):
 
         s.scan_n_jobs = self._scan_jobs.value()
         s.dataset_slug = self._scan_dataset.text().strip()
-        s.scan_line_freq = self._scan_line_freq.value()
-        s.scan_montage = self._scan_montage.text().strip()
         s.scan_probe_convert = self._scan_probe.isChecked()
         s.scan_skip_bids_guess = self._scan_skip_bids_guess.isChecked()
 

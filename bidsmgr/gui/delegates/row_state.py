@@ -30,6 +30,10 @@ from ..theme_manager import CUR, rgba
 ROW_STATE_ROLE: int = Qt.ItemDataRole.UserRole + 1
 # Bool role: ``True`` paints a purple tint on top of the row-state tint.
 HIGHLIGHT_ROLE: int = Qt.ItemDataRole.UserRole + 3
+# Bool role: ``True`` means the cell shows a value INHERITED from the dataset
+# default (no per-row override). Delegates paint it muted to distinguish it
+# from an explicit override.
+INHERITED_ROLE: int = Qt.ItemDataRole.UserRole + 4
 
 
 def paint_row_state(

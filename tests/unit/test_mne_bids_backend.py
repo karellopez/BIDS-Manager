@@ -288,16 +288,16 @@ class TestConvertSuccess:
         a montage name.
         """
         calls: list = []
-        # Backend-level default carries the EEG montage; the task itself
-        # doesn't set one. The MEG-datatype guard in the backend must
-        # short-circuit before _apply_standard_montage is reached.
-        b = MneBidsBackend(montage="standard_1005")
+        # The task carries an EEG montage. The MEG-datatype guard in the
+        # backend must short-circuit before _apply_standard_montage is
+        # reached, even when a montage name is present on the task.
+        b = MneBidsBackend()
         task = _make_task(
             tmp_path,
             datatype="meg",
             suffix="meg",
             basename="sub-001_task-rest_meg",
-        )
+        ).model_copy(update={"montage": "standard_1005"})
         _patch_mne_bids(monkeypatch, write_extensions=(".fif", ".json"))
 
         # Spy on _apply_standard_montage — it must NOT be called for MEG.

@@ -68,7 +68,9 @@ from .app_settings import AppSettings
 from .delegates import (
     CellTextDelegate,
     CheckboxDelegate,
+    ChoiceDelegate,
     StatusDelegate,
+    builtin_montages,
 )
 from .filter_pane import FilterPane
 from .models import COLUMNS, MANDATORY_COLUMN_KEYS, InventoryTableModel
@@ -298,6 +300,10 @@ class ConverterPanel(QWidget):
         self._update_status_chips()
         self._rebuild_bids_preview()
         self._update_stats_label()
+        self._update_meta_button_state()
+        # Seed the model's dataset-wide defaults so inheritance columns show
+        # the global value (muted) in rows that have no per-row override.
+        self._model.set_global_spec(self._load_global_spec())
         # Refresh chips + previews when the model edits a row.
         def _on_model_changed(*_a):
             self._update_status_chips()
@@ -472,6 +478,21 @@ class ConverterPanel(QWidget):
         )
         self._columns_btn.clicked.connect(self._open_column_manager)
 
+        # "Recording metadata" opens the dataset-level EEG/MEG enrichment
+        # editor (device, institution, reference/ground, event labels) shared
+        # across every recording. Per-row overrides live in the table itself.
+        self._meta_btn = QPushButton("  Dataset metadata…")
+        self._meta_btn.setObjectName("tb-btn")
+        self._meta_btn.setToolTip(
+            "Edit dataset-wide metadata grouped by destination: modality-agnostic "
+            "sections (events -> events.tsv, phenotype -> phenotype/) plus "
+            "EEG/MEG-specific acquisition defaults (-> the datatype sidecar). "
+            "Saved beside the inventory."
+        )
+        self._meta_btn.clicked.connect(self._open_recording_meta)
+        # Disabled until a scan loads EEG/MEG rows (it is EEG/MEG-only metadata).
+        self._meta_btn.setEnabled(False)
+
         # Busy spinner + status message — visible only while a worker
         # is running. Lives in the centre of the toolbar so it's hard
         # to miss when something's in flight.
@@ -549,6 +570,7 @@ class ConverterPanel(QWidget):
         fl.setSpacing(8)
         fl.addWidget(self._aborts_btn)
         fl.addStretch(1)
+        fl.addWidget(self._meta_btn)
         fl.addWidget(self._columns_btn)
         fl.addWidget(self._bulk_btn)
         v.addWidget(footer)
@@ -596,6 +618,18 @@ class ConverterPanel(QWidget):
                 t.setItemDelegateForColumn(col, CheckboxDelegate(t))
             elif spec.role == "status":
                 t.setItemDelegateForColumn(col, StatusDelegate(t))
+            elif spec.key == "montage":
+                # Dropdown-only: pick from the MNE built-in montages.
+                t.setItemDelegateForColumn(
+                    col, ChoiceDelegate(builtin_montages, role=spec.role,
+                                        blank_label="(none)", parent=t),
+                )
+            elif spec.key == "line_freq":
+                # Dropdown-only: the two electrical-grid conventions.
+                t.setItemDelegateForColumn(
+                    col, ChoiceDelegate(["50", "60"], role=spec.role,
+                                        blank_label="(blank)", parent=t),
+                )
             else:
                 t.setItemDelegateForColumn(col, CellTextDelegate(spec.role, t))
         return t
@@ -686,6 +720,63 @@ class ConverterPanel(QWidget):
         dlg = ColumnManagerDialog(dict(self._column_visible), self)
         if dlg.exec() == dlg.DialogCode.Accepted:
             self.set_columns_visible(dlg.result_visibility())
+
+    def _open_recording_meta(self) -> None:
+        """Open the dataset-level EEG/MEG recording-metadata editor.
+
+        Edits the scaffold beside the inventory TSV (the same file the scan
+        seeds and the convert verb auto-discovers). Requires a loaded scan so
+        there is an inventory to anchor the scaffold to.
+        """
+        if self._output_tsv is None:
+            QMessageBox.information(
+                self,
+                "Recording metadata",
+                "Run a scan first so the metadata can be saved beside the inventory.",
+            )
+            return
+        from ..recording_meta import scaffold_sidecar_path
+        from .recording_meta_dialog import RecordingMetaDialog
+
+        scaffold = scaffold_sidecar_path(self._output_tsv)
+        dlg = RecordingMetaDialog(scaffold, self._present_datatypes(), self)
+        if dlg.exec() and self._model is not None:
+            # Re-flow the saved dataset defaults into every inherited row.
+            self._model.set_global_spec(self._load_global_spec())
+
+    def _load_global_spec(self):
+        """Load the recording-metadata scaffold for the current inventory.
+
+        Falls back to a default spec (PowerLineFrequency=50) when no scaffold
+        exists yet, so inheritance always has a baseline.
+        """
+        from ..recording_meta import default_spec, load_spec, scaffold_sidecar_path
+        if self._output_tsv is not None:
+            path = scaffold_sidecar_path(self._output_tsv)
+            if path.exists():
+                try:
+                    return load_spec(path)
+                except Exception:
+                    pass
+        return default_spec()
+
+    def _present_datatypes(self) -> set[str]:
+        """The set of ``proposed_datatype`` values across the loaded model."""
+        if self._model is None:
+            return set()
+        df = self._model.dataframe()
+        if "proposed_datatype" not in df.columns:
+            return set()
+        return {str(v).strip().lower() for v in df["proposed_datatype"] if str(v).strip()}
+
+    def _update_meta_button_state(self) -> None:
+        """Enable the Dataset-metadata button whenever an inventory is loaded.
+
+        The dialog has modality-agnostic sections (events, phenotype) that
+        apply to any dataset; the EEG/MEG-specific sections inside it are gated
+        by the scanned datatypes.
+        """
+        self._meta_btn.setEnabled(self._model is not None and self._model.rowCount() > 0)
 
     # ------------------------------------------------------------------
     # Column order (drag-to-reorder, persisted via QSettings)
@@ -952,8 +1043,8 @@ class ConverterPanel(QWidget):
             self._raw_root,
             self._output_tsv,
             dataset=(s.dataset_slug or None),
-            line_freq=s.scan_line_freq if s.scan_line_freq else None,
-            montage=s.scan_montage or None,
+            # line_freq / montage are recording metadata now (per-row dropdown
+            # columns + the Recording-metadata editor), not scan settings.
             n_jobs=s.scan_n_jobs,
             probe_convert=s.scan_probe_convert,
             skip_bids_guess=s.scan_skip_bids_guess,
@@ -1035,8 +1126,6 @@ class ConverterPanel(QWidget):
             n_jobs=n_jobs,
             overwrite=self._app_settings.convert_overwrite,
             raw_root=self._raw_root,
-            line_freq=self._app_settings.scan_line_freq or None,
-            montage=self._app_settings.scan_montage or None,
             skip_residuals=self._app_settings.convert_skip_residuals,
             parent=self,
         )

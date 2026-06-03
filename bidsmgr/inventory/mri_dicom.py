@@ -54,14 +54,19 @@ PHASE_IMGTYPE = ["ORIGINAL", "PRIMARY", "P", "ND"]
 SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
 
 
-# v0.2.5 22-column TSV contract — keep this list in sync with the docstring.
+# Core TSV column contract — keep this list in sync with the docstring.
+# Originally 22 columns (the v0.2.5 contract). Added since: ``Handedness``
+# (participant demographic) and ``companion_files`` (per-row, any modality:
+# JSON list of already-curated sidecar companions - events / beh / stim - to
+# copy into the BIDS tree on convert).
 TSV_COLUMNS: tuple[str, ...] = (
     "subject", "BIDS_name", "session", "source_folder",
     "include", "sequence", "series_uid", "rep", "acq_time",
     "image_type", "modality", "modality_bids", "n_files",
     "GivenName", "FamilyName", "PatientID",
-    "PatientSex", "PatientAge", "StudyDescription",
+    "PatientSex", "PatientAge", "Handedness", "StudyDescription",
     "proposed_datatype", "proposed_basename", "Proposed BIDS name",
+    "companion_files",
 )
 
 # Extended columns added to support longitudinal session inference and

@@ -64,6 +64,12 @@ from ..inventory.mri_dicom import (
 )
 from ..inventory.probe_convert import ProbeFileStats
 from ..inventory.types import InventoryRow
+from ..recording_meta import (
+    AcquisitionSpec,
+    RecordingMetaSpec,
+    dump_spec,
+    scaffold_sidecar_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1150,11 +1156,69 @@ def _default_dataset_slug(dicom_root: Path) -> str:
     return slug or "dataset"
 
 
+def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
+    """Seed a recording-metadata scaffold from detected EEG/MEG header facts.
+
+    Reads the internal ``_event_codes`` / ``_manufacturer`` / ``_model``
+    columns (populated by the EEG/MEG scanner, dropped from the TSV itself),
+    aggregates them across the dataset, and writes a starter
+    :class:`RecordingMetaSpec` next to the inventory TSV. Event labels are left
+    blank for the user to fill; the enrichment step skips blank labels, so an
+    unedited scaffold is harmless. Returns the path written, or ``None`` when
+    there is nothing to seed (no EEG/MEG rows, or no detectable facts).
+
+    The scaffold is never overwritten if one already exists, so a re-scan does
+    not clobber labels the user has filled in.
+    """
+    if "source_file" not in merged.columns:
+        return None
+    eeg_rows = merged[merged["source_file"].astype(str).str.len() > 0]
+    if eeg_rows.empty:
+        return None
+
+    # Union of detected trigger/annotation codes across all recordings.
+    codes: list[str] = []
+    for raw in eeg_rows.get("_event_codes", pd.Series([], dtype=object)):
+        try:
+            for c in json.loads(raw) if isinstance(raw, str) and raw else []:
+                if c and c not in codes:
+                    codes.append(c)
+        except (ValueError, TypeError):
+            continue
+
+    def _most_common(col: str) -> str:
+        if col not in eeg_rows.columns:
+            return ""
+        vals = [str(v).strip() for v in eeg_rows[col] if str(v).strip()]
+        return max(set(vals), key=vals.count) if vals else ""
+
+    manufacturer = _most_common("_manufacturer")
+    model = _most_common("_model")
+
+    if not codes and not manufacturer and not model:
+        return None
+
+    scaffold_path = scaffold_sidecar_path(output_tsv)
+    if scaffold_path.exists():
+        # Preserve any labels/edits the user already made on a prior scan.
+        return None
+
+    spec = RecordingMetaSpec(
+        defaults=AcquisitionSpec(
+            manufacturer=manufacturer or None,
+            amplifier_model=model or None,
+        ),
+        event_maps={"*": {c: "" for c in sorted(codes)}} if codes else {},
+    )
+    scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
+    return scaffold_path
+
+
 def _unified_column_order(df: pd.DataFrame) -> list[str]:
     """Final unified TSV column order. Locked contract:
 
-    ``TSV(22) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
-    EXTENDED(3) + EEG_MEG(12) = 51``.
+    ``TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
+    EXTENDED(3) + EEG_MEG(15) = 56``.
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
@@ -1293,6 +1357,9 @@ def run_scan(
         _apply_user_exclusions(merged, exclusions)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
+        scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
+        if scaffold_path is not None:
+            print(f"Recording-metadata scaffold written to: {scaffold_path}")
         log.warning(
             "no DICOMs found; the inventory has only EEG/MEG rows. "
             "files_by_uid sidecar will not be written."
@@ -1373,6 +1440,13 @@ def run_scan(
         columns=_unified_column_order(merged),
     )
     print(f"Inventory written to: {output_tsv}")
+
+    # Seed a recording-metadata scaffold from facts detected in the EEG/MEG
+    # headers (event codes, device). The convert/metadata verbs auto-discover
+    # it; the user fills the human-only fields (event labels, reference, ...).
+    scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
+    if scaffold_path is not None:
+        print(f"Recording-metadata scaffold written to: {scaffold_path}")
 
     # Always write the per-UID DICOM file map next to the TSV. ``bidsmgr-convert``
     # reads this sidecar to find the source files for each MRI row's dcm2niix call.

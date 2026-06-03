@@ -61,14 +61,12 @@ def test_app_settings_save_and_reload(isolated_settings) -> None:
     s.theme = "light"
     s.scan_n_jobs = 8
     s.scan_probe_convert = True
-    s.scan_montage = "standard_1005"
     s.post_run_validate = False
     s.save()
     reloaded = AppSettings.load()
     assert reloaded.theme == "light"
     assert reloaded.scan_n_jobs == 8
     assert reloaded.scan_probe_convert is True
-    assert reloaded.scan_montage == "standard_1005"
     assert reloaded.post_run_validate is False
 
 

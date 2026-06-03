@@ -548,3 +548,69 @@ def test_model_renders_in_real_qtableview(qtbot) -> None:
     # If we got here, the model + delegates rendered with no Qt errors.
     assert view.model() is model
     assert view.model().rowCount() == 5
+
+
+# ---------------------------------------------------------------------------
+# Recording-metadata inheritance (global default <- per-row override)
+# ---------------------------------------------------------------------------
+
+
+def _eeg_inherit_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"BIDS_name": "sub-001", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+         "source_file": "a.edf", "proposed_basename": "sub-001_task-rest_eeg",
+         "entities": json.dumps({"subject": "001", "task": "rest"}),
+         "line_freq": "", "montage": "", "eeg_reference": "", "eeg_ground": "", "include": 1},
+        {"BIDS_name": "sub-002", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+         "source_file": "b.edf", "proposed_basename": "sub-002_task-rest_eeg",
+         "entities": json.dumps({"subject": "002", "task": "rest"}),
+         "line_freq": "60", "montage": "", "eeg_reference": "", "eeg_ground": "", "include": 1},
+    ])
+
+
+def _col_index(key: str) -> int:
+    return next(i for i, c in enumerate(COLUMNS) if c.key == key)
+
+
+def _spec(line_freq):
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    return RecordingMetaSpec(defaults=AcquisitionSpec(power_line_freq=line_freq))
+
+
+def test_inheritance_blank_cell_shows_global_default() -> None:
+    from bidsmgr.gui.delegates import INHERITED_ROLE
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_spec(50.0))
+    col = _col_index("line_freq")
+    idx0 = m.index(0, col)
+    assert m.data(idx0, Qt.ItemDataRole.DisplayRole) == "50"  # inherited from global
+    assert m.data(idx0, INHERITED_ROLE) is True
+    # Row 1 has an explicit override -> shown as-is, not inherited.
+    idx1 = m.index(1, col)
+    assert m.data(idx1, Qt.ItemDataRole.DisplayRole) == "60"
+    assert m.data(idx1, INHERITED_ROLE) is False
+
+
+def test_inheritance_set_equal_global_clears_override() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_spec(50.0))
+    col = _col_index("line_freq")
+    # Setting the global value clears the cell back to inherited.
+    m.setData(m.index(0, col), "50")
+    assert m.dataframe().at[0, "line_freq"] == ""
+    assert m.is_inherited(0, "line_freq") is True
+    # A differing value is stored as a real override.
+    m.setData(m.index(0, col), "60")
+    assert m.dataframe().at[0, "line_freq"] == "60"
+    assert m.is_inherited(0, "line_freq") is False
+
+
+def test_inheritance_global_change_reflows_inherited_rows() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_spec(50.0))
+    assert m.effective_value(0, "line_freq") == "50"
+    m.set_global_spec(_spec(60.0))
+    assert m.effective_value(0, "line_freq") == "60"  # inherited row re-flowed
+    # Inert without a spec.
+    m2 = InventoryTableModel(_eeg_inherit_df())
+    assert m2.effective_value(0, "line_freq") == ""

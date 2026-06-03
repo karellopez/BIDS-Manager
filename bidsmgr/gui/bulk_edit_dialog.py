@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import schema as schema_mod
+from .delegates import builtin_montages
 from .models import COLUMNS, InventoryTableModel
 
 
@@ -43,8 +44,22 @@ _COLUMN_DESCRIPTION: dict[str, str] = {
     "run":       "Run number.",
     "datatype":  "BIDS datatype (anat, func, dwi, …). Triggers a basename rebuild.",
     "suffix":    "BIDS suffix (T1w, bold, …). Triggers a basename rebuild.",
-    "line_freq": "EEG/MEG power-line frequency (Hz).",
-    "montage":   "EEG/MEG mne montage name.",
+    "line_freq": "EEG/MEG power-line frequency (Hz). Choose 50 or 60.",
+    "montage":   "EEG/MEG montage. Choose from the MNE built-in montages.",
+    "eeg_reference": "EEG/iEEG reference electrode (e.g. Cz, average).",
+    "eeg_ground":    "EEG/iEEG ground electrode.",
+    "PatientSex":    "Participant sex. Choose M / F / O.",
+    "PatientAge":    "Participant age in years.",
+    "Handedness":    "Participant handedness. Choose R / L / A.",
+}
+
+# Columns whose value must come from a fixed, non-editable dropdown (never
+# free-typed). datatype / suffix stay editable combos (schema-bounded but
+# large + interdependent); these are short, closed sets.
+_FIXED_CHOICES: dict[str, list[str]] = {
+    "line_freq": ["50", "60"],
+    "PatientSex": ["M", "F", "O"],
+    "Handedness": ["R", "L", "A"],
 }
 
 
@@ -126,6 +141,9 @@ class BulkEditDialog(QDialog):
         form.addRow("", self._value_combo)
         self._value_combo.setVisible(False)
         self._value_row_index = 1  # the row we toggle (line edit vs combo)
+        # Which editor is active. Tracked explicitly rather than via
+        # ``isVisible()`` (unreliable before the dialog is shown / in tests).
+        self._value_is_combo = False
 
         # Per-column description so the user knows what the apply will do.
         self._description = QLabel("")
@@ -182,8 +200,8 @@ class BulkEditDialog(QDialog):
 
         # Decide which editor to show.
         if key == "datatype":
-            options = sorted(schema_mod.list_datatypes())
-            self._show_value_combo(options)
+            # Schema-bounded but editable (large set, lets the user type).
+            self._show_value_combo(sorted(schema_mod.list_datatypes()), editable=True)
         elif key == "suffix":
             # ``suffix`` depends on datatype, but bulk-applying spans
             # rows that may differ. Offer the union of all datatypes'
@@ -192,24 +210,33 @@ class BulkEditDialog(QDialog):
                 s for dt in schema_mod.list_datatypes()
                 for s in schema_mod.list_suffixes(dt)
             })
-            self._show_value_combo(options)
+            self._show_value_combo(options, editable=True)
+        elif key == "montage":
+            # Dropdown-only: MNE built-in montages, never hand-typed.
+            self._show_value_combo(builtin_montages(), editable=False)
+        elif key in _FIXED_CHOICES:
+            # Short closed sets (line_freq / sex / handedness): dropdown-only.
+            self._show_value_combo(_FIXED_CHOICES[key], editable=False)
         else:
             self._show_value_lineedit()
 
-    def _show_value_combo(self, options: list[str]) -> None:
+    def _show_value_combo(self, options: list[str], *, editable: bool = False) -> None:
         self._value_combo.blockSignals(True)
         self._value_combo.clear()
+        self._value_combo.setEditable(editable)
         self._value_combo.addItems(options)
         self._value_combo.blockSignals(False)
         self._value_edit.setVisible(False)
         self._value_combo.setVisible(True)
+        self._value_is_combo = True
 
     def _show_value_lineedit(self) -> None:
         self._value_combo.setVisible(False)
         self._value_edit.setVisible(True)
+        self._value_is_combo = False
 
     def _read_value(self) -> str:
-        if self._value_combo.isVisible():
+        if self._value_is_combo:
             return self._value_combo.currentText().strip()
         return self._value_edit.text().strip()
 

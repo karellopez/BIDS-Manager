@@ -45,9 +45,21 @@ from ...project import (
     UserToggleInclude,
 )
 from ...project.types import ProjectState
-from ..delegates import HIGHLIGHT_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
+from ...recording_meta import RecordingMetaSpec
+from ..delegates import HIGHLIGHT_ROLE, INHERITED_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
 
 log = logging.getLogger(__name__)
+
+# Per-row columns whose value inherits from the dataset-wide recording-metadata
+# default when the cell is blank. Maps the TSV/df column -> the attribute on
+# ``RecordingMetaSpec.defaults`` that supplies the default. Editing a cell to a
+# value equal to the default clears it back to "inherited".
+_INHERITANCE_FIELDS: dict[str, str] = {
+    "line_freq": "power_line_freq",
+    "montage": "montage",
+    "eeg_reference": "eeg_reference",
+    "eeg_ground": "eeg_ground",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -106,13 +118,17 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("PatientID",    "PatientID",   "mono",  False, 100, df_column="PatientID",   default_visible=False),
     ColumnSpec("GivenName",    "GivenName",   "plain", False, 100, df_column="GivenName",   default_visible=False),
     ColumnSpec("FamilyName",   "FamilyName",  "plain", False, 100, df_column="FamilyName",  default_visible=False),
-    ColumnSpec("PatientSex",   "sex",         "mono",  False, 40,  df_column="PatientSex",  default_visible=False),
-    ColumnSpec("PatientAge",   "age",         "mono",  False, 50,  df_column="PatientAge",  default_visible=False),
+    ColumnSpec("PatientSex",   "sex",         "mono",  True,  40,  df_column="PatientSex",  default_visible=False),
+    ColumnSpec("PatientAge",   "age",         "mono",  True,  50,  df_column="PatientAge",  default_visible=False),
+    ColumnSpec("Handedness",   "hand",        "mono",  True,  50,  df_column="Handedness",  default_visible=False),
     ColumnSpec("n_channels",   "n_chan",      "mono",  False, 60,  df_column="n_channels",  default_visible=False),
     ColumnSpec("sfreq",        "sfreq",       "mono",  False, 70,  df_column="sfreq",       default_visible=False),
     ColumnSpec("duration_sec", "duration",    "mono",  False, 70,  df_column="duration_sec", default_visible=False),
     ColumnSpec("line_freq",    "line_freq",   "mono",  True,  60,  df_column="line_freq",   default_visible=False),
     ColumnSpec("montage",      "montage",     "plain", True,  100, df_column="montage",     default_visible=False),
+    ColumnSpec("eeg_reference","reference",   "plain", True,  90,  df_column="eeg_reference", default_visible=False),
+    ColumnSpec("eeg_ground",   "ground",      "plain", True,  90,  df_column="eeg_ground",  default_visible=False),
+    ColumnSpec("companion_files","companion", "plain", True,  140, df_column="companion_files", default_visible=False),
     ColumnSpec("probe_n_nifti","probe_nifti", "mono",  False, 80,  df_column="probe_n_nifti", default_visible=False),
     ColumnSpec("probe_n_vols", "probe_vols",  "mono",  False, 70,  df_column="probe_n_volumes", default_visible=False),
     ColumnSpec("repetition_type","repetition","plain", False, 110, df_column="repetition_type", default_visible=False),
@@ -149,13 +165,17 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "PatientID": "DICOM PatientID, a key part of subject identity.",
     "GivenName": "Patient given name from the header.",
     "FamilyName": "Patient family name from the header.",
-    "PatientSex": "Patient sex from the header.",
-    "PatientAge": "Patient age from the header.",
+    "PatientSex": "Participant sex (M/F/O). Seeded from the header; editable; written to participants.tsv.",
+    "PatientAge": "Participant age in years. Seeded from the header; editable; written to participants.tsv.",
+    "Handedness": "Participant handedness (R/L/A). Seeded from the recording header; editable.",
     "n_channels": "EEG / MEG channel count.",
     "sfreq":     "Sampling frequency (Hz) of the recording.",
     "duration_sec": "Recording duration in seconds.",
-    "line_freq": "Power-line frequency (Hz) written to the sidecar. Editable.",
-    "montage":   "EEG / MEG montage applied on conversion. Editable.",
+    "line_freq": "Power-line frequency (Hz) written to the sidecar. Dropdown (50 / 60); blank uses the dataset default.",
+    "montage":   "EEG / MEG montage applied on conversion. Dropdown of MNE built-in montages; blank leaves positions as-is.",
+    "eeg_reference": "Per-row EEG/iEEG reference electrode override (e.g. Cz). Blank uses the dataset default.",
+    "eeg_ground":    "Per-row EEG/iEEG ground electrode override. Blank uses the dataset default.",
+    "companion_files": "Already-curated companion files (events / beh / stim) linked to this row and copied into BIDS on convert. Edit via the Properties panel.",
     "probe_n_nifti": "NIfTI files dcm2niix actually produced in a --probe-convert run.",
     "probe_n_vols":  "Volumes dcm2niix actually produced in a --probe-convert run.",
     "repetition_type": "Repeat classification, e.g. suspected_abort (operator restart).",
@@ -195,6 +215,11 @@ class InventoryTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._df: pd.DataFrame = df.reset_index(drop=True).copy()
         self._project: Optional[Project] = project
+        # Dataset-wide recording-metadata defaults. Per-row cells in the
+        # inheritance fields show this value (muted) when blank; set via
+        # :meth:`set_global_spec` when the scan scaffold loads / the dataset
+        # metadata dialog saves.
+        self._global_spec: Optional[RecordingMetaSpec] = None
 
         # Populate the mirror cells (session / task / run) from each row's
         # ``entities`` JSON on load. A fresh ``bidsmgr-scan`` TSV carries the
@@ -225,6 +250,53 @@ class InventoryTableModel(QAbstractTableModel):
         # These rows are already auto-unchecked by the scan, but
         # highlighting helps the user spot them at a glance.
         self._highlight_aborts: bool = False
+
+    # ------------------------------------------------------------------
+    # Recording-metadata inheritance (dataset default <- per-row override)
+    # ------------------------------------------------------------------
+
+    def set_global_spec(self, spec: Optional[RecordingMetaSpec]) -> None:
+        """Set the dataset-wide recording-metadata defaults and refresh display.
+
+        Inherited cells (blank in an inheritance field) now show the new
+        default; the underlying DataFrame is untouched. Emits ``dataChanged``
+        so every row re-renders with the new inherited values.
+        """
+        self._global_spec = spec
+        if len(self._df) and len(self.COLUMNS):
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._df) - 1, len(self.COLUMNS) - 1),
+            )
+
+    def _global_default(self, df_col: str) -> str:
+        """The dataset default for an inheritance field, as a display string."""
+        attr = _INHERITANCE_FIELDS.get(df_col)
+        if attr is None or self._global_spec is None:
+            return ""
+        val = getattr(self._global_spec.defaults, attr, None)
+        if val is None:
+            return ""
+        if isinstance(val, float):
+            return str(int(val)) if val == int(val) else str(val)
+        return str(val)
+
+    def _raw_cell(self, row: int, df_col: str) -> str:
+        if df_col not in self._df.columns or not (0 <= row < len(self._df)):
+            return ""
+        v = self._df.at[row, df_col]
+        return "" if pd.isna(v) else str(v)
+
+    def is_inherited(self, row: int, df_col: str) -> bool:
+        """True when an inheritance-field cell is blank and a default exists."""
+        if df_col not in _INHERITANCE_FIELDS:
+            return False
+        return not self._raw_cell(row, df_col).strip() and bool(self._global_default(df_col))
+
+    def effective_value(self, row: int, df_col: str) -> str:
+        """The per-row override (cell) when set, else the inherited default."""
+        cell = self._raw_cell(row, df_col).strip()
+        return cell if cell else self._global_default(df_col)
 
     # ------------------------------------------------------------------
     # Qt model API
@@ -290,6 +362,17 @@ class InventoryTableModel(QAbstractTableModel):
                 return self._status_kind(row)
             return None
 
+        # Inheritance fields: a blank cell shows the dataset default (and the
+        # delegate paints it muted via INHERITED_ROLE).
+        if spec.df_column in _INHERITANCE_FIELDS:
+            if role == INHERITED_ROLE:
+                return self.is_inherited(row, spec.df_column)
+            if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+                eff = self.effective_value(row, spec.df_column)
+                if eff:
+                    return eff
+                return "—" if role == Qt.ItemDataRole.DisplayRole else ""
+
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_value(row, spec)
         if role == Qt.ItemDataRole.EditRole:
@@ -314,6 +397,11 @@ class InventoryTableModel(QAbstractTableModel):
         if df_col is None:
             return False
         new_str = "" if value is None else str(value)
+        # Inheritance fields: writing a value equal to the dataset default
+        # clears the cell back to "inherited" instead of storing a redundant
+        # per-row override (the convert/display layers re-resolve the default).
+        if df_col in _INHERITANCE_FIELDS and new_str == self._global_default(df_col):
+            new_str = ""
         old_str = "" if pd.isna(self._df.at[row, df_col]) else str(self._df.at[row, df_col])
         if new_str == old_str:
             return False
@@ -533,6 +621,12 @@ class InventoryTableModel(QAbstractTableModel):
         "suffix",
         "line_freq",
         "montage",
+        "eeg_reference",
+        "eeg_ground",
+        "PatientSex",
+        "PatientAge",
+        "Handedness",
+        "companion_files",
     )
 
     def bulk_set(

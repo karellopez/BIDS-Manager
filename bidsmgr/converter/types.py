@@ -58,11 +58,22 @@ class ConvertTask(BaseModel):
     # DWI ``.bval``/``.bvec``) is never affected. Set False to keep them.
     skip_residuals: bool = True
 
-    # EEG/MEG-specific: per-row knobs that the inventory TSV carries.
-    # Backends consult these when present; the CLI passes its own
-    # default so blank cells fall back to the dataset-wide value.
+    # EEG/MEG-specific: per-row knobs the inventory TSV carries. The CLI
+    # resolves these (cell, else recording-metadata default) before building
+    # the task. ``line_freq`` / ``montage`` are applied during the write;
+    # ``eeg_reference`` / ``eeg_ground`` are consumed by the post-write
+    # sidecar-enrichment fixup, where they override the spec value.
     line_freq: Optional[float] = None
     montage: Optional[str] = None
+    eeg_reference: Optional[str] = None
+    eeg_ground: Optional[str] = None
+
+    # Already-curated companion files to COPY into the BIDS tree on convert
+    # (not converted): ``((suffix, source_path), ...)`` where suffix is a
+    # BIDS companion suffix (events / beh / stim / physio / channels / ...).
+    # The file is named ``<entity_prefix>_<suffix><ext>`` next to the
+    # recording; an attached ``events`` replaces the auto-generated events.tsv.
+    companion_files: tuple[tuple[str, str], ...] = ()
 
     @model_validator(mode="before")
     @classmethod

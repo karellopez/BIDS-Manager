@@ -40,17 +40,17 @@ from bidsmgr.inventory.mri_dicom import (
 
 class TestUnifiedColumnContract:
     def test_full_unified_column_layout(self) -> None:
-        """Locked schema: TSV(22) + BIDS_GUESS(8) + ENTITIES(1) +
-        DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(12) = 51.
+        """Locked schema: TSV(24) + BIDS_GUESS(8) + ENTITIES(1) +
+        DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(15) = 56.
 
-        The new ``entities`` JSON column is the canonical source of
-        truth for the BIDS basename; ``proposed_basename`` and the
-        ``task``/``run``/``session`` mirror cells are derived from it
-        by ``bidsmgr-rebuild``.
+        TSV gained ``Handedness`` (demographics) + ``companion_files`` (per-row
+        curated-companion links); EEG_MEG gained ``eeg_reference`` /
+        ``eeg_ground`` (per-row overrides) and ``montage_suggestion`` (read-only
+        scan hint). The ``entities`` JSON column is the canonical basename source.
         """
         df = _empty_unified_dataframe()
         cols = _unified_column_order(df)
-        assert len(cols) == 22 + 8 + 1 + 1 + 4 + 3 + 12
+        assert len(cols) == 24 + 8 + 1 + 1 + 4 + 3 + 15
         # ``dataset`` comes after BidsGuess + the new ``entities`` column.
         ds_idx = cols.index("dataset")
         assert ds_idx == len(TSV_COLUMNS) + len(BIDS_GUESS_COLUMNS) + 1
@@ -101,6 +101,12 @@ class _StubProbe:
     datatype: str = "eeg"
     has_positions: bool = False
     fmt: str = "EDF"
+    manufacturer: str = ""
+    model: str = ""
+    subj_sex: str = ""
+    subj_age: str = ""
+    event_codes: tuple[str, ...] = ()
+    montage_suggestion: str = ""
 
 
 def _patch_eeg_probe(monkeypatch, *, datatype: str = "eeg") -> None:

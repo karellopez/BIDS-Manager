@@ -8,8 +8,11 @@ and don't need a real mne.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -29,18 +32,79 @@ from bidsmgr.inventory.eeg_meg import (
 
 
 def test_eeg_meg_columns_exact_order() -> None:
-    """The 12 EEG/MEG-specific columns are in the locked order.
+    """The 15 EEG/MEG-specific columns are in the locked order.
 
-    User-editable: ``task``, ``run``, ``line_freq``, ``montage``.
-    These four condition how the BIDS basename is built and what
-    metadata mne-bids writes.
+    User-editable: ``task``, ``run``, ``line_freq``, ``montage``,
+    ``eeg_reference``, ``eeg_ground``. ``montage_suggestion`` is a read-only
+    scan hint. These condition the BIDS basename + enrichment.
     """
     assert EEG_MEG_COLUMNS == (
         "task", "run", "format", "source_file",
         "n_channels", "sfreq", "duration_sec", "n_times",
         "recording_time", "has_positions",
-        "line_freq", "montage",
+        "line_freq", "montage", "eeg_reference", "eeg_ground",
+        "montage_suggestion",
     )
+
+
+def _fake_raw(info: dict, annotations=()):
+    return SimpleNamespace(
+        info=info, annotations=SimpleNamespace(description=list(annotations)),
+    )
+
+
+def test_subject_info_seeds_sex_age_with_real_birthday() -> None:
+    raw = _fake_raw({"subject_info": {"sex": 2, "hand": 2, "birthday": date(1990, 6, 1)}})
+    # (sex, age) only; handedness is never returned even though hand=2 is set.
+    assert eeg_meg_mod._subject_info(raw, date(2020, 1, 1)) == ("F", "30")
+
+
+def test_subject_info_seeds_nothing_for_1900_placeholder() -> None:
+    raw = _fake_raw({"subject_info": {"sex": 1, "hand": 1, "birthday": date(1900, 1, 1)}})
+    # The 1900 placeholder means the record is anonymised -> seed nothing.
+    assert eeg_meg_mod._subject_info(raw, date(2022, 1, 1)) == ("", "")
+
+
+def test_subject_info_seeds_nothing_without_birthday() -> None:
+    # A real sex but no birthday is not trusted (don't assume).
+    raw = _fake_raw({"subject_info": {"sex": 1}})
+    assert eeg_meg_mod._subject_info(raw, date(2022, 1, 1)) == ("", "")
+
+
+def test_subject_info_empty_when_absent() -> None:
+    assert eeg_meg_mod._subject_info(_fake_raw({}), date(2022, 1, 1)) == ("", "")
+
+
+def test_best_montage_suggests_by_overlap(monkeypatch) -> None:
+    # Stub the montage channel-name sets so the test is independent of MNE.
+    monkeypatch.setattr(
+        eeg_meg_mod, "_montage_chname_sets",
+        lambda: {"standard_1005": frozenset({"fp1", "fp2", "cz", "pz"}),
+                 "biosemi16": frozenset({"a1", "a2"})},
+    )
+    out = eeg_meg_mod._best_montage(["Fp1", "Fp2", "Cz", "Oz"])
+    assert out.startswith("standard_1005 (")
+    assert "3/4" in out  # Fp1, Fp2, Cz matched of 4 channels
+
+
+def test_best_montage_empty_when_no_overlap(monkeypatch) -> None:
+    monkeypatch.setattr(
+        eeg_meg_mod, "_montage_chname_sets",
+        lambda: {"standard_1005": frozenset({"fp1", "cz"})},
+    )
+    assert eeg_meg_mod._best_montage(["X1", "X2"]) == ""
+
+
+def test_device_info_extraction() -> None:
+    raw = _fake_raw({"device_info": {"type": "Elekta", "model": "TRIUX"}})
+    assert eeg_meg_mod._device_info(raw) == ("Elekta", "TRIUX")
+    assert eeg_meg_mod._device_info(_fake_raw({"device_info": None})) == ("", "")
+
+
+def test_event_codes_unique_sorted() -> None:
+    raw = _fake_raw({}, annotations=["T1", "T0", "T1", "T2"])
+    assert eeg_meg_mod._event_codes(raw) == ("T0", "T1", "T2")
+    assert eeg_meg_mod._event_codes(_fake_raw({})) == ()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +266,12 @@ class _StubProbe:
     datatype: str = "eeg"
     has_positions: bool = False
     fmt: str = "EDF"
+    manufacturer: str = ""
+    model: str = ""
+    subj_sex: str = ""
+    subj_age: str = ""
+    event_codes: tuple[str, ...] = ()
+    montage_suggestion: str = ""
 
 
 def _patch_probe(monkeypatch, *, datatype: str = "eeg") -> None:
@@ -244,6 +314,33 @@ class TestScanEegMeg:
         # Every row's modality and proposed_datatype are set.
         assert (df["modality"] == "eeg").all()
         assert (df["proposed_datatype"] == "eeg").all()
+
+    def test_seeds_demographics_and_event_codes_from_probe(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Header-derived sex/age fill the participant columns; the annotation
+        codes + device are stashed for the scaffold. Handedness is NEVER
+        auto-seeded (left blank for the user)."""
+        monkeypatch.setattr(eeg_meg_mod, "_HAS_MNE", True, raising=False)
+        monkeypatch.setattr(
+            eeg_meg_mod, "_probe",
+            lambda path: _StubProbe(
+                source=path, subj_sex="M", subj_age="25",
+                manufacturer="Elekta", model="TRIUX",
+                event_codes=("T0", "T1", "T2"),
+                montage_suggestion="standard_1005 (60/64)",
+            ),
+        )
+        (tmp_path / "S00.edf").write_bytes(b"x")
+        df = scan_eeg_meg(tmp_path)
+        row = df.iloc[0]
+        assert row["PatientSex"] == "M"
+        assert row["PatientAge"] == "25"
+        assert row["Handedness"] == ""  # never auto-seeded
+        assert row["eeg_reference"] == "" and row["eeg_ground"] == ""
+        assert row["montage_suggestion"] == "standard_1005 (60/64)"
+        assert json.loads(row["_event_codes"]) == ["T0", "T1", "T2"]
+        assert row["_manufacturer"] == "Elekta"
 
     def test_eeg_meg_rows_carry_bids_guess_suffix(
         self, tmp_path: Path, monkeypatch,
