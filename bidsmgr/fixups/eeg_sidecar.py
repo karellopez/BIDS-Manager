@@ -142,7 +142,12 @@ def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> i
     acq = eff.acquisition
     updates: dict = {}
 
-    # Common keys (every EEG/MEG/iEEG/NIRS sidecar).
+    # Common keys (every EEG/MEG/iEEG/NIRS sidecar). Each is written only when
+    # the user supplied it (truthy), so a blank value never clobbers what the
+    # backend already wrote. mne-bids DOES auto-fill Manufacturer for MEG, so the
+    # truthy guard is what preserves it when the user leaves manufacturer blank;
+    # ManufacturersModelName / SoftwareVersions / InstitutionName are mne-bids
+    # omissions, so writing them here only adds information.
     if acq.manufacturer:
         updates["Manufacturer"] = acq.manufacturer
     if acq.amplifier_model:
@@ -176,6 +181,17 @@ def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> i
             updates["iEEGReference"] = acq.eeg_reference
         if acq.eeg_ground:
             updates["iEEGGround"] = acq.eeg_ground
+    elif datatype == "meg":
+        # MEG-specific fields mne-bids cannot derive from the recording. The
+        # channel-derived ones (ContinuousHeadLocalization / DigitizedLandmarks
+        # / DigitizedHeadPoints / HeadCoilFrequency) are intentionally NOT
+        # written here - mne-bids already computes them correctly.
+        if acq.dewar_position:
+            updates["DewarPosition"] = acq.dewar_position
+        if acq.associated_empty_room:
+            updates["AssociatedEmptyRoom"] = acq.associated_empty_room
+        if acq.subject_artefact_description:
+            updates["SubjectArtefactDescription"] = acq.subject_artefact_description
 
     # Extras (non-required keys) for non-MEG datatypes.
     if acq.extras is not None and datatype != "meg":

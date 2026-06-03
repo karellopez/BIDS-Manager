@@ -165,11 +165,170 @@ def test_hidden_section_values_preserved_on_save(qtbot, tmp_path):
 
 
 def test_dialog_whole_is_scrollable(qtbot, tmp_path):
-    """The whole dialog scrolls (not just the inner table/list)."""
+    """Structural invariant: exactly ONE scroll area wraps the whole body, and
+    the intro label + button box live OUTSIDE it (so the scroll surface is the
+    whole metadata body, not an inner widget)."""
     from PyQt6.QtWidgets import QScrollArea
     dlg = RecordingMetaDialog(tmp_path / "inv.tsv.recording_meta.json")
     qtbot.addWidget(dlg)
-    assert dlg.findChildren(QScrollArea), "body should be wrapped in a scroll area"
-    # Inner widgets are bounded so the OUTER scroll engages for the overall layout.
-    assert 0 < dlg._events.maximumHeight() <= 200
+    areas = dlg.findChildren(QScrollArea)
+    assert len(areas) == 1, "the whole body should be one scroll surface"
+    # Inner widgets are bounded so they cannot stretch greedily to fill.
+    assert 0 < dlg._events.maximumHeight() <= 160
     assert 0 < dlg._phenotype.maximumHeight() <= 110
+
+
+@pytest.mark.parametrize(
+    "datatypes, expect_scroll",
+    [
+        ({"eeg"}, True),    # all sections stacked -> body taller than viewport
+        ({"meg"}, True),    # device + meg + agnostic sections overflow
+        ({"mri"}, True),    # institution + events + phenotype overflow too
+    ],
+)
+def test_dialog_whole_body_scrolls_not_inner_tables(qtbot, tmp_path, datatypes, expect_scroll):
+    """The OUTER scroll area moves the whole body; inner tables keep a natural
+    bounded height (they do not stretch to fill).
+
+    The user asked for a scrollable window rather than one that resizes to its
+    content or whose inner tables expand. Scroll engagement at the fixed default
+    size is deterministic per modality combination.
+    """
+    from PyQt6.QtWidgets import QScrollArea
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json", present_datatypes=datatypes)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    sa = dlg.findChild(QScrollArea)
+    overflows = sa.widget().sizeHint().height() > sa.viewport().height()
+    assert overflows is expect_scroll
+    # Tables keep a bounded natural height regardless of modality.
+    assert dlg._events.height() <= dlg._events.maximumHeight()
+    assert dlg._phenotype.height() <= dlg._phenotype.maximumHeight()
+
+
+def test_dialog_uses_shared_manufacturer_vocab(qtbot, tmp_path):
+    """The dialog's manufacturer dropdown is the one shared list (no duplicate)."""
+    from bidsmgr.recording_meta import COMMON_MANUFACTURERS
+    dlg = RecordingMetaDialog(tmp_path / "inv.tsv.recording_meta.json")
+    qtbot.addWidget(dlg)
+    items = [dlg._manufacturer.itemText(i) for i in range(dlg._manufacturer.count())]
+    assert items[0] == ""  # blank first entry
+    assert items[1:] == list(COMMON_MANUFACTURERS)
+
+
+def test_dialog_combined_modality_label(qtbot, tmp_path):
+    """A field shared by several present modalities is labelled with all of
+    them (e.g. 'EEG and MEG'); the device block names every electrophysiology
+    modality, the reference block only EEG/iEEG."""
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    dlg = RecordingMetaDialog(scaffold, present_datatypes={"eeg", "meg"})
+    qtbot.addWidget(dlg)
+    assert "EEG and MEG" in dlg._device_box.title()
+    # MEG has no scalp reference/montage -> that block is EEG-only here.
+    assert "EEG" in dlg._eeg_box.title() and "MEG" not in dlg._eeg_box.title()
+
+
+def test_dialog_region_header_hidden_for_mri_only(qtbot, tmp_path):
+    """An MRI-only dataset shows no modality-specific region (only agnostic)."""
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    dlg = RecordingMetaDialog(scaffold, present_datatypes={"mri"})
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    assert not dlg._specific_region.isVisible()
+    assert not dlg._device_box.isVisible()
+    assert not dlg._eeg_box.isVisible()
+    assert not dlg._meg_box.isVisible()
+
+
+def test_dialog_meg_group_visibility_and_roundtrip(qtbot, tmp_path):
+    """The MEG group shows only for MEG datasets and round-trips its manual
+    fields. Channel-derived MEG fields are NOT exposed (mne-bids fills them)."""
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    dlg = RecordingMetaDialog(scaffold, present_datatypes={"meg"})
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    assert dlg._meg_box.isVisible()
+    assert not dlg._eeg_box.isVisible()      # MEG has no scalp reference/montage
+    assert not hasattr(dlg, "_continuous_head_localization")  # auto -> not exposed
+    dlg._dewar_position.setCurrentText("supine")
+    dlg._associated_empty_room.setText("bids::sub-emptyroom")
+    acq = dlg.build_spec().defaults
+    assert acq.dewar_position == "supine"
+    assert acq.associated_empty_room == "bids::sub-emptyroom"
+
+
+def test_dialog_cap_is_editable_dropdown(qtbot, tmp_path):
+    from PyQt6.QtWidgets import QComboBox
+    from bidsmgr.recording_meta import COMMON_CAP_MANUFACTURERS
+    dlg = RecordingMetaDialog(tmp_path / "inv.tsv.recording_meta.json",
+                              present_datatypes={"eeg"})
+    qtbot.addWidget(dlg)
+    assert isinstance(dlg._cap_manufacturer, QComboBox)
+    assert dlg._cap_manufacturer.isEditable()
+    items = [dlg._cap_manufacturer.itemText(i) for i in range(dlg._cap_manufacturer.count())]
+    assert "EasyCap" in items
+    # A typed custom value flows through.
+    dlg._cap_manufacturer.setCurrentText("Custom Cap Co")
+    assert dlg.build_spec().defaults.cap_manufacturer == "Custom Cap Co"
+
+
+def test_dialog_fields_have_schema_tooltips(qtbot, tmp_path):
+    """Every metadata field carries an on-hover explanation from the schema."""
+    dlg = RecordingMetaDialog(tmp_path / "inv.tsv.recording_meta.json",
+                              present_datatypes={"eeg", "meg"})
+    qtbot.addWidget(dlg)
+    assert "Manufacturer" in dlg._manufacturer.toolTip()
+    assert dlg._line_freq.toolTip()           # PowerLineFrequency description
+    assert dlg._eeg_reference.toolTip()
+    assert dlg._dewar_position.toolTip()
+    assert dlg._cap_manufacturer.toolTip()
+
+
+def test_dialog_montage_suggestion_summary(qtbot, tmp_path):
+    """The scan montage suggestions surface in the global dialog as a summary."""
+    from PyQt6.QtWidgets import QLabel
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json", present_datatypes={"eeg"},
+        montage_suggestions=["standard_1005 (64/64)", "standard_1020 (19/19)"],
+    )
+    qtbot.addWidget(dlg)
+    hints = [w.text() for w in dlg.findChildren(QLabel)
+             if "scan suggests" in w.text() and "standard_1005 (64/64)" in w.text()]
+    assert hints
+
+
+def test_dialog_manufacturer_suggestion_summary(qtbot, tmp_path):
+    """The scan manufacturer suggestions surface in the global dialog too."""
+    from PyQt6.QtWidgets import QLabel
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json", present_datatypes={"meg"},
+        manufacturer_suggestions=["MEGIN / Elekta / Neuromag"],
+    )
+    qtbot.addWidget(dlg)
+    hints = [w.text() for w in dlg.findChildren(QLabel)
+             if "scan suggests" in w.text() and "MEGIN" in w.text()]
+    assert hints
+
+
+def test_dialog_institution_is_agnostic_not_in_device_group(qtbot, tmp_path):
+    """Institution is agnostic: it has its own group and shows even for an
+    MRI-only dataset (where the device/EEG/MEG groups are hidden)."""
+    from PyQt6.QtWidgets import QGroupBox
+    dlg = RecordingMetaDialog(tmp_path / "inv.tsv.recording_meta.json",
+                              present_datatypes={"mri"})
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    titles = [g.title() for g in dlg.findChildren(QGroupBox)]
+    inst = [t for t in titles if "Institution" in t]
+    assert inst and "any modality" in inst[0]
+    # The device group does NOT mention institution any more.
+    device = [t for t in titles if t.startswith("Acquisition system")]
+    assert device and "institution" not in device[0].lower()
+    # Institution fields are editable even on an MRI-only dataset.
+    dlg._institution_name.setText("Uni Oldenburg")
+    assert dlg.build_spec().defaults.institution_name == "Uni Oldenburg"

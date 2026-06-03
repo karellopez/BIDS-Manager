@@ -140,6 +140,43 @@ def test_load_inventory_does_not_overwrite_user_set_bids_output(qtbot, tmp_path:
     assert str(chosen) in panel._bids_pathbar.value()
 
 
+def _eeg_row() -> dict:
+    return {
+        "BIDS_name": "sub-001", "session": "", "include": 1, "modality": "eeg",
+        "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "entities": json.dumps({"subject": "001", "task": "rest"}, sort_keys=True),
+        "task": "rest", "run": "", "series_uid": "",
+        "source_file": "sub-001/rec.edf",
+        "montage": "", "line_freq": "", "eeg_reference": "", "eeg_ground": "",
+        "proposed_issues": "", "bids_guess_skip": False,
+    }
+
+
+def test_per_row_acq_override_persists_scaffold(qtbot, tmp_path: Path) -> None:
+    """A per-row device override is written to the scaffold beside the TSV so
+    the convert verb (which reloads it) sees the edit."""
+    import json as _json
+    from bidsmgr.recording_meta import (
+        AcquisitionSpec, RecordingMetaSpec, scaffold_sidecar_path,
+    )
+
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    out_tsv = tmp_path / "inv.tsv"
+    panel.load_inventory(pd.DataFrame([_eeg_row()]), output_tsv=out_tsv)
+
+    m = panel.model()
+    m.set_global_spec(RecordingMetaSpec(defaults=AcquisitionSpec(manufacturer="Brain Products")))
+    # Override the manufacturer for row 0 -> triggers recordingSpecChanged.
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+
+    scaffold = scaffold_sidecar_path(out_tsv)
+    assert scaffold.exists()
+    data = _json.loads(scaffold.read_text())
+    assert data["overrides"]["sub-001/rec.edf"]["manufacturer"] == "BioSemi"
+
+
 def test_bids_pathbar_change_button_is_enabled(qtbot) -> None:
     """The user must be able to pick the BIDS output before scanning."""
     panel = ConverterPanel()
@@ -172,6 +209,28 @@ def test_start_scan_on_empty_dir_finishes_and_loads_empty_model(qtbot, tmp_path:
     assert panel.model().rowCount() == 0
     assert panel._scan_btn.isEnabled(), "Scan button should re-enable on completion"
     assert out_tsv.exists()
+
+
+def test_fresh_scan_resets_stale_recording_meta_scaffold(qtbot, tmp_path: Path) -> None:
+    """A new scan must not inherit the previous dataset's metadata: the stale
+    scaffold at the output path is removed so it re-seeds from the new data."""
+    from bidsmgr.recording_meta import scaffold_sidecar_path
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    out_tsv = tmp_path / "inv.tsv"
+    # Simulate a leftover scaffold from a PREVIOUS (different) dataset.
+    stale = scaffold_sidecar_path(out_tsv)
+    stale.write_text('{"schema_version": 1, "defaults": {"manufacturer": "OldVendor"}}',
+                     encoding="utf-8")
+    with qtbot.waitSignal(panel.scan_finished, timeout=60_000):
+        worker = panel.start_scan(raw, out_tsv, n_jobs=1)
+    worker.wait()
+    qtbot.wait(50)
+    # The empty scan detects nothing to seed, so the stale scaffold is simply
+    # gone (not carried over).
+    assert not stale.exists()
 
 
 def test_scan_button_becomes_stop_and_locks_run_while_scan_runs(qtbot, tmp_path: Path) -> None:

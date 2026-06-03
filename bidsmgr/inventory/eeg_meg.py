@@ -73,6 +73,11 @@ EEG_MEG_COLUMNS: tuple[str, ...] = (
     "montage_suggestion",  # Read-only scan suggestion: "<montage> (matched/total)"
                        # by channel-name overlap. Surfaced in the GUI next to the
                        # montage dropdown; the user picks the actual montage.
+    "manufacturer_suggestion",  # Read-only scan suggestion: the manufacturer
+                       # detected from the recording header (EEG) or inferred
+                       # from the file format (MEG: .fif -> MEGIN, .ds -> CTF,
+                       # ...). Surfaced as a hint next to the manufacturer field;
+                       # NOT auto-applied (mne-bids fills MEG Manufacturer itself).
 )
 
 
@@ -246,10 +251,10 @@ def _probe(path: Path) -> Optional[ProbeResult]:
         except Exception:
             recording_time = str(meas_date)
 
-    manufacturer, model = _device_info(raw)
+    datatype = _detect_datatype(raw)
+    manufacturer, model = _device_info(raw, path, datatype)
     subj_sex, subj_age = _subject_info(raw, meas_date)
     event_codes = _event_codes(raw)
-    datatype = _detect_datatype(raw)
     # Best-matching montage is a SCAN-time suggestion (channel-name overlap)
     # so the user can pick it while curating; not auto-applied. Montage is an
     # EEG/iEEG concept (MEG carries intrinsic sensor geometry).
@@ -274,13 +279,37 @@ def _probe(path: Path) -> Optional[ProbeResult]:
     )
 
 
-def _device_info(raw) -> tuple[str, str]:
-    """Best-effort (manufacturer, model) from ``raw.info['device_info']``."""
+# MEG file format -> manufacturer (the format effectively identifies the
+# system, so the manufacturer is known even when the header carries no
+# device_info). Used as the estimate when device_info is empty.
+_MEG_FORMAT_MANUFACTURER: dict[str, str] = {
+    ".fif": "MEGIN / Elekta / Neuromag",
+    ".ds": "CTF",
+    ".con": "KIT / Yokogawa",
+    ".sqd": "KIT / Yokogawa",
+    ".kdf": "KRISS",
+}
+
+
+def _device_info(raw, path=None, datatype: str = "") -> tuple[str, str]:
+    """Best-effort (manufacturer, model) for a recording.
+
+    Reads ``raw.info['device_info']`` first; for MEG, when the header carries no
+    manufacturer, falls back to inferring it from the file format (``.fif`` ->
+    MEGIN, ``.ds`` -> CTF, ``.con/.sqd`` -> KIT, ``.kdf`` -> KRISS) since the
+    format identifies the system. This is an estimate the user can override.
+    """
+    manufacturer, model = "", ""
     try:
         dev = raw.info.get("device_info") or {}
-        return str(dev.get("type", "") or ""), str(dev.get("model", "") or "")
+        manufacturer = str(dev.get("type", "") or "")
+        model = str(dev.get("model", "") or "")
     except Exception:
-        return "", ""
+        pass
+    if not manufacturer and datatype == "meg" and path is not None:
+        suffix = Path(path).suffix.lower()
+        manufacturer = _MEG_FORMAT_MANUFACTURER.get(suffix, "")
+    return manufacturer, model
 
 
 # MNE FIFF subject sex codes -> BIDS-conventional letters.
@@ -716,6 +745,9 @@ def scan_eeg_meg(
             "eeg_reference": "",
             "eeg_ground": "",
             "montage_suggestion": probe.montage_suggestion,
+            # Read-only manufacturer suggestion (header for EEG, format for MEG);
+            # surfaced as a hint, not auto-applied.
+            "manufacturer_suggestion": probe.manufacturer,
             # Demographics seeded only when the header is genuinely real
             # (non-placeholder birthday); user-editable. Handedness is never
             # auto-seeded (see _subject_info). Written to participants.tsv by
@@ -723,12 +755,12 @@ def scan_eeg_meg(
             "PatientSex": probe.subj_sex,
             "Handedness": "",
             "PatientAge": probe.subj_age,
-            # Internal scaffold seeds (leading underscore -> dropped from the
-            # final TSV by the unified column-order selection). Read by the
-            # scan verb to pre-populate the recording-metadata scaffold.
+            # Internal scaffold seed (leading underscore -> dropped from the
+            # final TSV by the unified column-order selection). Read by the scan
+            # verb to pre-populate the recording-metadata scaffold's event map.
+            # Manufacturer is NOT seeded here - it is a read-only suggestion
+            # (manufacturer_suggestion) and mne-bids fills the MEG sidecar value.
             "_event_codes": json.dumps(list(probe.event_codes)),
-            "_manufacturer": probe.manufacturer,
-            "_model": probe.model,
             "dataset": dataset or "",
             # Surface the classifier-style columns so the inspector's
             # ``suffix`` and ``data`` columns show useful values for

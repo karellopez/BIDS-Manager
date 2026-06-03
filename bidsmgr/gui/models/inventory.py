@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
 
 from ... import schema as schema_mod
 from ...inventory.rebuild import rebuild_from_columns, rebuild_from_entities
@@ -45,7 +45,7 @@ from ...project import (
     UserToggleInclude,
 )
 from ...project.types import ProjectState
-from ...recording_meta import RecordingMetaSpec
+from ...recording_meta import AcquisitionSpec, RecordingMetaSpec
 from ..delegates import HIGHLIGHT_ROLE, INHERITED_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
 
 log = logging.getLogger(__name__)
@@ -59,6 +59,29 @@ _INHERITANCE_FIELDS: dict[str, str] = {
     "montage": "montage",
     "eeg_reference": "eeg_reference",
     "eeg_ground": "eeg_ground",
+}
+
+# Per-row recording-acquisition fields that live in the recording-metadata
+# scaffold's ``overrides[row_id]`` block rather than a TSV column (the convert
+# step's ``resolve_effective`` already layers them over the dataset defaults and
+# the enrichment fixup writes them into the EEG/MEG sidecar). These are the
+# device / institution values that can differ between subjects but are too
+# low-frequency to warrant a spreadsheet column. Maps the panel key -> the
+# attribute on ``AcquisitionSpec``. A blank override inherits the dataset
+# default; setting a value equal to the default clears the override.
+# Device fields are modality-specific (the EEG amplifier and the MEG system are
+# different devices); institution is agnostic and lives at dataset level in the
+# Dataset-metadata dialog, NOT here. MEG fields are only the ones mne-bids
+# cannot derive. All are string-valued.
+_ACQ_OVERRIDE_FIELDS: dict[str, str] = {
+    "manufacturer": "manufacturer",
+    "amplifier_model": "amplifier_model",
+    "software_versions": "software_versions",
+    "cap_manufacturer": "cap_manufacturer",
+    # MEG-specific (manual only)
+    "dewar_position": "dewar_position",
+    "associated_empty_room": "associated_empty_room",
+    "subject_artefact_description": "subject_artefact_description",
 }
 
 
@@ -206,6 +229,12 @@ class InventoryTableModel(QAbstractTableModel):
 
     COLUMNS: tuple[ColumnSpec, ...] = COLUMNS
 
+    # Emitted when a per-row acquisition override changes (set/cleared via
+    # :meth:`set_acq_override`). The controller (ConverterPanel) listens and
+    # persists the recording-metadata scaffold to disk so the convert verb,
+    # which reloads it, sees the edit.
+    recordingSpecChanged = pyqtSignal()
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -297,6 +326,90 @@ class InventoryTableModel(QAbstractTableModel):
         """The per-row override (cell) when set, else the inherited default."""
         cell = self._raw_cell(row, df_col).strip()
         return cell if cell else self._global_default(df_col)
+
+    # ------------------------------------------------------------------
+    # Per-row acquisition overrides (recording-metadata scaffold-backed)
+    # ------------------------------------------------------------------
+    #
+    # These device / institution fields are NOT TSV columns; they live in the
+    # scaffold's ``overrides[row_id]`` and inherit from ``defaults`` the same
+    # way the TSV-backed inheritance fields do. The convert step's
+    # ``resolve_effective`` already merges them and the enrichment fixup writes
+    # them into the EEG/MEG sidecar.
+
+    def global_spec(self) -> Optional[RecordingMetaSpec]:
+        """The live recording-metadata spec (defaults + per-row overrides)."""
+        return self._global_spec
+
+    def acq_default(self, field: str) -> str:
+        """The dataset default for an acquisition-override field, as a string."""
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        val = getattr(self._global_spec.defaults, attr, None)
+        return "" if val is None else str(val)
+
+    def _row_override(self, row: int) -> Optional[AcquisitionSpec]:
+        if self._global_spec is None:
+            return None
+        return self._global_spec.overrides.get(self.row_id(row))
+
+    def acq_override(self, row: int, field: str) -> str:
+        """The raw per-row override for an acquisition field (``""`` if unset)."""
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None:
+            return ""
+        over = self._row_override(row)
+        if over is None:
+            return ""
+        val = getattr(over, attr, None)
+        return "" if val is None else str(val)
+
+    def acq_effective(self, row: int, field: str) -> str:
+        """Per-row override when set, else the inherited dataset default."""
+        ov = self.acq_override(row, field)
+        return ov if ov else self.acq_default(field)
+
+    def acq_is_inherited(self, row: int, field: str) -> bool:
+        """True when no per-row override is set and a dataset default exists."""
+        return not self.acq_override(row, field) and bool(self.acq_default(field))
+
+    def set_acq_override(self, row: int, field: str, value: str) -> bool:
+        """Set or clear a per-row acquisition override in the scaffold spec.
+
+        Writing a value equal to the dataset default (or an empty value) clears
+        the override so the row inherits again. Mutates the live spec and emits
+        :attr:`recordingSpecChanged` (the controller persists the scaffold) plus
+        ``dataChanged`` for the row. Returns ``True`` if anything changed.
+        """
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None or not (0 <= row < len(self._df)):
+            return False
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        new_val = (value or "").strip()
+        # Equal to the dataset default -> inherit (store no override).
+        if new_val == self.acq_default(field):
+            new_val = ""
+
+        if new_val == self.acq_override(row, field):
+            return False
+
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.overrides)
+        current = overrides.get(rid) or AcquisitionSpec()
+        updated = current.model_copy(update={attr: (new_val or None)})
+
+        if updated == AcquisitionSpec():
+            overrides.pop(rid, None)
+        else:
+            overrides[rid] = updated
+        self._global_spec = self._global_spec.model_copy(update={"overrides": overrides})
+
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
 
     # ------------------------------------------------------------------
     # Qt model API

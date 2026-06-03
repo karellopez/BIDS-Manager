@@ -41,16 +41,17 @@ from bidsmgr.inventory.mri_dicom import (
 class TestUnifiedColumnContract:
     def test_full_unified_column_layout(self) -> None:
         """Locked schema: TSV(24) + BIDS_GUESS(8) + ENTITIES(1) +
-        DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(15) = 56.
+        DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(16) = 57.
 
         TSV gained ``Handedness`` (demographics) + ``companion_files`` (per-row
         curated-companion links); EEG_MEG gained ``eeg_reference`` /
-        ``eeg_ground`` (per-row overrides) and ``montage_suggestion`` (read-only
-        scan hint). The ``entities`` JSON column is the canonical basename source.
+        ``eeg_ground`` (per-row overrides) and the read-only scan hints
+        ``montage_suggestion`` + ``manufacturer_suggestion``. The ``entities``
+        JSON column is the canonical basename source.
         """
         df = _empty_unified_dataframe()
         cols = _unified_column_order(df)
-        assert len(cols) == 24 + 8 + 1 + 1 + 4 + 3 + 15
+        assert len(cols) == 24 + 8 + 1 + 1 + 4 + 3 + 16
         # ``dataset`` comes after BidsGuess + the new ``entities`` column.
         ds_idx = cols.index("dataset")
         assert ds_idx == len(TSV_COLUMNS) + len(BIDS_GUESS_COLUMNS) + 1

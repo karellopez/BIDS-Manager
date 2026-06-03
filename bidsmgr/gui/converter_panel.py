@@ -310,6 +310,11 @@ class ConverterPanel(QWidget):
             self._rebuild_bids_preview()
             self._update_stats_label()
         self._model.dataChanged.connect(_on_model_changed)
+        # Per-row acquisition overrides (device / institution) live in the
+        # recording-metadata scaffold, not a TSV column. Persist it whenever the
+        # model reports one changed so the convert verb (which reloads the
+        # scaffold) sees the edit.
+        self._model.recordingSpecChanged.connect(self._persist_recording_spec)
         # Default-select row 0 if any rows exist so the Properties panel
         # has something to show without the user having to click first.
         if self._model.rowCount() > 0:
@@ -359,6 +364,19 @@ class ConverterPanel(QWidget):
         self._raw_root = Path(dicom_root)
         self._output_tsv = Path(output_tsv)
         self._raw_pathbar.set_value(str(self._raw_root), ok=True)
+
+        # A fresh scan starts from clean metadata: drop any stale
+        # recording-metadata scaffold left at this output path by a PREVIOUS
+        # scan of different data (otherwise its defaults / event labels would
+        # leak onto the new dataset). The scan re-seeds the scaffold from the
+        # newly-detected event codes.
+        from ..recording_meta import scaffold_sidecar_path
+        stale = scaffold_sidecar_path(self._output_tsv)
+        try:
+            if stale.exists():
+                stale.unlink()
+        except OSError:
+            log.warning("could not remove stale recording-metadata scaffold %s", stale)
 
         self._spinner.set_busy(True, message=f"Scanning {self._raw_root.name}…")
         worker = ScanWorker(
@@ -739,7 +757,11 @@ class ConverterPanel(QWidget):
         from .recording_meta_dialog import RecordingMetaDialog
 
         scaffold = scaffold_sidecar_path(self._output_tsv)
-        dlg = RecordingMetaDialog(scaffold, self._present_datatypes(), self)
+        dlg = RecordingMetaDialog(
+            scaffold, self._present_datatypes(), self,
+            montage_suggestions=self._montage_suggestions(),
+            manufacturer_suggestions=self._manufacturer_suggestions(),
+        )
         if dlg.exec() and self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.
             self._model.set_global_spec(self._load_global_spec())
@@ -760,6 +782,28 @@ class ConverterPanel(QWidget):
                     pass
         return default_spec()
 
+    def _persist_recording_spec(self) -> None:
+        """Write the model's live recording-metadata spec to the scaffold.
+
+        Called when a per-row acquisition override changes. The scaffold sits
+        beside the inventory TSV (the same file the scan seeds, the dialog
+        edits, and the convert verb auto-discovers), so per-row device /
+        institution edits survive to conversion time. No-op without an
+        inventory anchor or a spec.
+        """
+        if self._model is None or self._output_tsv is None:
+            return
+        spec = self._model.global_spec()
+        if spec is None:
+            return
+        from ..recording_meta import dump_spec, scaffold_sidecar_path
+        try:
+            path = scaffold_sidecar_path(self._output_tsv)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(dump_spec(spec), encoding="utf-8")
+        except OSError:
+            log.warning("could not persist recording-metadata scaffold", exc_info=True)
+
     def _present_datatypes(self) -> set[str]:
         """The set of ``proposed_datatype`` values across the loaded model."""
         if self._model is None:
@@ -768,6 +812,35 @@ class ConverterPanel(QWidget):
         if "proposed_datatype" not in df.columns:
             return set()
         return {str(v).strip().lower() for v in df["proposed_datatype"] if str(v).strip()}
+
+    def _montage_suggestions(self) -> list[str]:
+        """Distinct per-recording montage suggestions found at scan (for the
+        dataset dialog's read-only summary). Order-preserving, deduplicated."""
+        if self._model is None:
+            return []
+        df = self._model.dataframe()
+        if "montage_suggestion" not in df.columns:
+            return []
+        return self._distinct_column("montage_suggestion")
+
+    def _manufacturer_suggestions(self) -> list[str]:
+        """Distinct per-recording manufacturer suggestions found at scan (header
+        for EEG, file-format inference for MEG), for the dialog's summary hint."""
+        return self._distinct_column("manufacturer_suggestion")
+
+    def _distinct_column(self, column: str) -> list[str]:
+        """Order-preserving distinct non-blank values of a model column."""
+        if self._model is None:
+            return []
+        df = self._model.dataframe()
+        if column not in df.columns:
+            return []
+        seen: list[str] = []
+        for v in df[column]:
+            s = str(v).strip()
+            if s and s.lower() not in ("nan", "none") and s not in seen:
+                seen.append(s)
+        return seen
 
     def _update_meta_button_state(self) -> None:
         """Enable the Dataset-metadata button whenever an inventory is loaded.

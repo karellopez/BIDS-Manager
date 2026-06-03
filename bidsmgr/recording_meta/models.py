@@ -25,6 +25,38 @@ from .schema_types import bids_channel_types, mne_channel_types
 # A trigger-code -> human-label mapping (e.g. {"S 20": "eyes_open"}).
 EventMap = dict[str, str]
 
+# Electrophysiology amplifier / system manufacturers, offered as an editable
+# dropdown in the dataset dialog and the per-row recording section (the user can
+# always type any other value). Grouped by modality but presented as one list.
+# Pure reference data - no Qt - so both GUI surfaces import the one list instead
+# of duplicating it.
+COMMON_MANUFACTURERS: tuple[str, ...] = (
+    # EEG amplifiers / systems
+    "Brain Products", "BioSemi", "EGI / Philips Neuro", "ANT Neuro",
+    "Compumedics Neuroscan", "g.tec", "Cognionics / CGX", "mBrainTrain",
+    "OpenBCI", "Wearable Sensing", "Neuroelectrics", "Bittium", "Nihon Kohden",
+    "Natus", "Nicolet", "Grass", "Cadwell", "Deymed", "Emotiv", "InteraXon",
+    "Advanced Brain Monitoring",
+    # MEG systems (BIDS Manufacturer convention)
+    "MEGIN / Elekta / Neuromag", "CTF", "4D Neuroimaging / BTi",
+    "KIT / Yokogawa", "ITAB", "KRISS",
+    # OPM-MEG
+    "FieldLine", "QuSpin", "Cerca Magnetics",
+    # iEEG / ECoG / sEEG acquisition + electrodes
+    "Blackrock Neurotech", "Ripple Neuro", "Tucker-Davis Technologies",
+    "Plexon", "Medtronic", "Ad-Tech", "PMT Corporation", "DIXI Medical",
+    # fNIRS
+    "NIRx", "Artinis", "Hitachi", "Shimadzu", "Gowerlabs", "Kernel",
+    "Cortivision",
+)
+
+# Common EEG/iEEG cap (electrode-holder) manufacturers. Editable dropdown too.
+COMMON_CAP_MANUFACTURERS: tuple[str, ...] = (
+    "EasyCap", "Brain Products", "BioSemi", "EGI", "ANT Neuro",
+    "Compumedics Neuroscan", "Electro-Cap International", "g.tec",
+    "Cognionics", "Greentek",
+)
+
 
 class _Model(BaseModel):
     """Shared config: forbid unknown keys so typos surface at load time."""
@@ -141,6 +173,15 @@ class AcquisitionSpec(_Model):
     cap_model: Optional[str] = None
     institution_name: Optional[str] = None
     institution_dept: Optional[str] = None
+    # MEG-specific sidecar fields (written only into the meg sidecar). Only the
+    # ones mne-bids CANNOT derive from the recording are exposed: dewar position
+    # (a physical setup fact), the associated empty-room link (a curation
+    # decision), and the subject-artefact note (free text). Channel-derived
+    # facts (ContinuousHeadLocalization, DigitizedLandmarks, DigitizedHeadPoints,
+    # HeadCoilFrequency, ...) are left to mne-bids - never duplicated here.
+    dewar_position: Optional[str] = None            # -> DewarPosition
+    associated_empty_room: Optional[str] = None     # -> AssociatedEmptyRoom
+    subject_artefact_description: Optional[str] = None  # -> SubjectArtefactDescription
     aux_channels: dict[str, AuxChannelSpec] = {}
     filters: list[FilterSpec] = []
     extras: Optional[ExtrasSpec] = None
@@ -168,6 +209,8 @@ class RecordingMetaSpec(_Model):
 
 __all__ = [
     "EventMap",
+    "COMMON_MANUFACTURERS",
+    "COMMON_CAP_MANUFACTURERS",
     "AcceptableImpedance",
     "LightingConditions",
     "ExtrasSpec",

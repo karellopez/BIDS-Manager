@@ -142,3 +142,38 @@ def test_per_row_override_applies(tmp_path):
     enrich_recording_sidecars(staging, [_task(row_id="r1")], spec)
     side = _read_json(staging / "eeg" / "sub-001_task-rest_eeg.json")
     assert side["EEGReference"] == "FCz"
+
+
+def test_meg_specific_fields_written(tmp_path):
+    """Only MEG fields mne-bids cannot derive are written here; the channel-
+    derived ones are left to mne-bids and never appear from the spec."""
+    staging = _stage_eeg(tmp_path, datatype="meg", basename="sub-001_task-rest_meg")
+    spec = RecordingMetaSpec(
+        defaults=AcquisitionSpec(
+            dewar_position="upright",
+            associated_empty_room="bids::sub-emptyroom/ses-x/meg/...",
+            subject_artefact_description="occasional jaw clench",
+        ),
+    )
+    enrich_recording_sidecars(
+        staging, [_task(datatype="meg", basename="sub-001_task-rest_meg")], spec,
+    )
+    side = _read_json(staging / "meg" / "sub-001_task-rest_meg.json")
+    assert side["DewarPosition"] == "upright"
+    assert side["AssociatedEmptyRoom"].startswith("bids::")
+    assert side["SubjectArtefactDescription"] == "occasional jaw clench"
+    # Channel-derived MEG facts are NOT written from the spec (mne-bids owns them).
+    assert "ContinuousHeadLocalization" not in side
+    assert "DigitizedLandmarks" not in side
+
+
+def test_meg_fields_not_written_for_eeg(tmp_path):
+    """MEG-only keys never leak into an EEG sidecar."""
+    staging = _stage_eeg(tmp_path)
+    spec = RecordingMetaSpec(
+        defaults=AcquisitionSpec(dewar_position="supine", eeg_reference="Cz"),
+    )
+    enrich_recording_sidecars(staging, [_task()], spec)
+    side = _read_json(staging / "eeg" / "sub-001_task-rest_eeg.json")
+    assert "DewarPosition" not in side
+    assert side["EEGReference"] == "Cz"

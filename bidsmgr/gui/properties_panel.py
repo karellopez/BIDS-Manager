@@ -53,7 +53,9 @@ import pandas as pd
 
 from .. import schema as schema_mod
 from ..project import Project
+from ..recording_meta import COMMON_CAP_MANUFACTURERS, COMMON_MANUFACTURERS
 from .delegates import builtin_montages
+from .metadata_help import tooltip_for
 from .models import InventoryTableModel
 from .theme_manager import CUR, scaled_px
 from .widgets import PaneHeader, ValMessage
@@ -61,6 +63,15 @@ from .widgets import PaneHeader, ValMessage
 # Datatypes that carry recording-metadata (the per-row section appears only
 # for these). MEG has no scalp montage / reference / ground concept.
 _EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
+
+# Human display names for the datatypes that carry a recording sidecar.
+_MODALITY_NAMES = {"eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS"}
+
+
+def _modality_label(datatype: str) -> str:
+    """Display name for a single datatype (``eeg`` -> ``EEG``)."""
+    return _MODALITY_NAMES.get(datatype, datatype.upper())
+
 
 log = logging.getLogger(__name__)
 
@@ -317,20 +328,27 @@ class PropertiesPanel(QWidget):
         for vmsg in self._build_validation_messages(datatype, suffix, entities):
             self._body_layout.addWidget(vmsg)
 
-        # 5. Per-row metadata, grouped by destination file. The participant
-        # section is modality-agnostic (every row, incl. MRI); the recording
-        # sidecar section only for EEG/MEG/iEEG/NIRS.
+        # 5. Per-row metadata, split into two clearly-separated regions:
+        # modality-agnostic (participant demographics + companion files, written
+        # for any modality incl. MRI) and modality-specific (the recording
+        # sidecar, EEG/MEG/iEEG/NIRS only). Sections within each region are
+        # labelled by their BIDS destination file.
+        self._append_metadata_title()
+        self._append_region_label("Modality-agnostic", agnostic=True)
         self._append_participant_section(row)
-        if datatype in _EEG_MEG_DATATYPES:
-            self._append_recording_section(row, datatype)
         self._append_companion_section(row)
+        if datatype in _EEG_MEG_DATATYPES:
+            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_recording_section(row, datatype)
 
         self._body_layout.addStretch(1)
 
     def _build_combo_row(self, label_text: str, value: str, *, options: list[str],
                          required: bool, slot) -> QWidget:
         row = QWidget()
-        row.setStyleSheet("background: transparent;")
+        # Scoped so the transparent bg does not cascade into the combo popup.
+        row.setObjectName("meta-row")
+        row.setStyleSheet("#meta-row { background: transparent; }")
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
@@ -540,12 +558,63 @@ class PropertiesPanel(QWidget):
     # Per-row metadata, grouped by destination file
     # ------------------------------------------------------------------
 
-    def _section_header(self, title: str, destination: str) -> QWidget:
-        """A section title plus a dim ``-> <destination file>`` annotation."""
+    def _region_label(self, text: str, *, agnostic: bool) -> QWidget:
+        """A bold, colour-coded region divider separating the two metadata
+        regions (modality-agnostic vs modality-specific)."""
         pal = CUR()
+        color = pal["teal"] if agnostic else pal["purple"]
         lbl = QLabel(
-            f'<span style="color:{pal["text"]};font-weight:600;">{title}</span>'
-            f'<span style="color:{pal["dim"]};"> &rarr; {destination}</span>'
+            f'<span style="color:{color};font-weight:800;'
+            f'letter-spacing:0.6px;">{text.upper()}</span>'
+        )
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setStyleSheet(
+            f"font-size: {scaled_px(10)}px; background: transparent; "
+            f"border-bottom: 1px solid {color}; padding-bottom: 2px;"
+        )
+        return lbl
+
+    def _append_region_label(self, text: str, *, agnostic: bool) -> None:
+        self._body_layout.addSpacing(10)
+        self._body_layout.addWidget(self._region_label(text, agnostic=agnostic))
+
+    def _append_metadata_title(self) -> None:
+        """Heading that frames the per-row metadata block as the minimal,
+        BIDS-recommended set (everything below is optional and inherits the
+        dataset defaults)."""
+        pal = CUR()
+        self._body_layout.addSpacing(12)
+        self._body_layout.addWidget(self._divider())
+        title = QLabel("MINIMAL METADATA")
+        title.setStyleSheet(
+            f"color: {pal['text']}; font-weight: 800; letter-spacing: 0.6px; "
+            f"font-size: {scaled_px(11)}px; background: transparent;"
+        )
+        self._body_layout.addWidget(title)
+        sub = QLabel(
+            "Essential BIDS fields for this recording. All optional; blank "
+            "fields inherit the dataset defaults set in Dataset metadata."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet(
+            f"color: {pal['dim']}; font-size: {scaled_px(9)}px; background: transparent;"
+        )
+        self._body_layout.addWidget(sub)
+
+    def _section_header(
+        self, title: str, destination: str, *, agnostic: bool, tag: str,
+    ) -> QWidget:
+        """A colour-coded section title plus a dim ``<tag> -> <destination>`` note.
+
+        ``agnostic`` colours the title; ``tag`` states which modalities the
+        section applies to (``any modality`` for agnostic sections, or the
+        recording's modality such as ``EEG``) so the destination is unambiguous.
+        """
+        pal = CUR()
+        color = pal["teal"] if agnostic else pal["purple"]
+        lbl = QLabel(
+            f'<span style="color:{color};font-weight:700;">{title}</span>'
+            f'<span style="color:{pal["dim"]};"> &middot; {tag} &rarr; {destination}</span>'
         )
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setStyleSheet(f"font-size: {scaled_px(10)}px; background: transparent;")
@@ -559,7 +628,8 @@ class PropertiesPanel(QWidget):
         """
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
-        self._body_layout.addWidget(self._section_header("PARTICIPANT", "participants.tsv"))
+        self._body_layout.addWidget(self._section_header(
+            "PARTICIPANT", "participants.tsv", agnostic=True, tag="any modality"))
         self._body_layout.addWidget(self._meta_combo_row(
             "sex", "PatientSex", ["", "M", "F", "O"], self._cell(row, "PatientSex"), "",
         ))
@@ -571,38 +641,140 @@ class PropertiesPanel(QWidget):
         ))
 
     def _append_recording_section(self, row: int, datatype: str) -> None:
-        """EEG/MEG/iEEG/NIRS sidecar fields -> sub-..._<datatype>.json.
+        """EEG/MEG/iEEG/NIRS recording-sidecar fields -> sub-..._<datatype>.json.
 
-        Inheritance fields show the EFFECTIVE value (per-row override, else the
-        dataset default); writing the default clears the override. Fields that
-        do not apply to the datatype are not shown (MEG has no scalp montage /
-        reference / ground).
+        Up to three BIDS-aligned sub-sections: an Acquisition block (device +
+        line frequency - shared by all electrophysiology sidecars), a Reference
+        & montage block (EEG/iEEG only - MEG and NIRS have no scalp
+        reference/ground/montage), and a MEG-acquisition block (MEG only).
+        Institution is agnostic and lives in the Dataset-metadata dialog, NOT
+        here. Inheritance fields show the EFFECTIVE value (per-row override, else
+        the dataset default); writing the default clears the override.
         """
+        mod = _modality_label(datatype)
+        show_montage = datatype in ("eeg", "ieeg")
+        show_ref_ground = datatype in ("eeg", "ieeg")
+        show_cap = datatype == "eeg"
+
+        # --- Acquisition: device + line frequency (the recording's hardware).
+        # Institution is agnostic (set once for the dataset in Dataset metadata),
+        # NOT here. Device overrides live in the scaffold's overrides[row_id]
+        # (not a TSV column); each inherits the dataset default until set, and
+        # clearing it (or matching the default) restores inheritance.
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "RECORDING", f"sub-..._{datatype}.json"))
-
-        show_montage = datatype in ("eeg", "ieeg", "nirs")
-        show_ref_ground = datatype in ("eeg", "ieeg")
-
-        if show_montage:
-            self._body_layout.addWidget(self._meta_combo_row(
-                "montage", "montage",
-                ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
-            ))
+            "ACQUISITION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
         lf = self._eff(row, "line_freq")
         lf = lf[:-2] if lf.endswith(".0") else lf
         self._body_layout.addWidget(self._meta_combo_row(
             "line_freq", "line_freq", ["(blank)", "50", "60"], lf, "(blank)",
         ))
-        if show_ref_ground:
-            self._body_layout.addWidget(self._meta_edit_row(
-                "reference", "eeg_reference", self._eff(row, "eeg_reference"),
+        self._body_layout.addWidget(self._meta_combo_row(
+            "manufacturer", "manufacturer",
+            [""] + list(COMMON_MANUFACTURERS), self._acq_eff(row, "manufacturer"), "",
+            setter=self._on_acq_field_changed, editable=True,
+        ))
+        # Scan-detected/inferred manufacturer, shown like the montage match (a
+        # read-only suggestion; not auto-applied - mne-bids fills MEG itself).
+        manuf_sugg = self._cell(row, "manufacturer_suggestion")
+        if manuf_sugg:
+            self._body_layout.addWidget(
+                self._scan_hint("manufacturer", "scan detected", manuf_sugg))
+        self._body_layout.addWidget(self._meta_edit_row(
+            "model", "amplifier_model", self._acq_eff(row, "amplifier_model"),
+            setter=self._on_acq_field_changed,
+        ))
+        self._body_layout.addWidget(self._meta_edit_row(
+            "software", "software_versions", self._acq_eff(row, "software_versions"),
+            setter=self._on_acq_field_changed,
+        ))
+
+        # --- Reference & montage: EEG/iEEG scalp fields only.
+        if show_montage or show_ref_ground:
+            self._body_layout.addSpacing(8)
+            self._body_layout.addWidget(self._divider())
+            self._body_layout.addWidget(self._section_header(
+                "REFERENCE & MONTAGE",
+                f"sub-..._{datatype}.json + electrodes.tsv",
+                agnostic=False, tag=mod))
+            if show_ref_ground:
+                self._body_layout.addWidget(self._meta_edit_row(
+                    "reference", "eeg_reference", self._eff(row, "eeg_reference"),
+                ))
+                self._body_layout.addWidget(self._meta_edit_row(
+                    "ground", "eeg_ground", self._eff(row, "eeg_ground"),
+                ))
+            if show_montage:
+                self._body_layout.addWidget(self._meta_combo_row(
+                    "montage", "montage",
+                    ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
+                ))
+                # Surface the scan's best channel-name match as a read-only hint
+                # so the user can pick the montage with confidence (the scan does
+                # not auto-fill it).
+                suggestion = self._cell(row, "montage_suggestion")
+                if suggestion:
+                    self._body_layout.addWidget(self._montage_hint(suggestion))
+            if show_cap:
+                self._body_layout.addWidget(self._meta_combo_row(
+                    "cap", "cap_manufacturer",
+                    [""] + list(COMMON_CAP_MANUFACTURERS),
+                    self._acq_eff(row, "cap_manufacturer"), "",
+                    setter=self._on_acq_field_changed, editable=True,
+                ))
+
+        # --- MEG-specific acquisition (MEG only). Only fields mne-bids cannot
+        # derive from the recording: dewar position, the empty-room link, and
+        # the artefact note. Channel-derived MEG facts (head localization,
+        # digitized landmarks/head points, ...) are filled by mne-bids.
+        if datatype == "meg":
+            self._body_layout.addSpacing(8)
+            self._body_layout.addWidget(self._divider())
+            self._body_layout.addWidget(self._section_header(
+                "MEG ACQUISITION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
+            self._body_layout.addWidget(self._meta_combo_row(
+                "dewar", "dewar_position", ["", "upright", "supine"],
+                self._acq_eff(row, "dewar_position"), "",
+                setter=self._on_acq_field_changed, editable=True,
             ))
             self._body_layout.addWidget(self._meta_edit_row(
-                "ground", "eeg_ground", self._eff(row, "eeg_ground"),
+                "empty room", "associated_empty_room",
+                self._acq_eff(row, "associated_empty_room"),
+                setter=self._on_acq_field_changed,
             ))
+            self._body_layout.addWidget(self._meta_edit_row(
+                "artefacts", "subject_artefact_description",
+                self._acq_eff(row, "subject_artefact_description"),
+                setter=self._on_acq_field_changed,
+            ))
+
+    def _montage_hint(self, suggestion: str) -> QWidget:
+        return self._scan_hint("montage", "best montage match (from scan)", suggestion)
+
+    def _scan_hint(self, field_key: str, prefix: str, value: str) -> QWidget:
+        """A read-only scan-suggestion hint row (e.g. montage match, detected
+        manufacturer). Aligned under the field column; not auto-applied. Carries
+        an explicit QToolTip background so it never renders transparent."""
+        pal = CUR()
+        lbl = QLabel(
+            f'<span style="color:{pal["dim"]};">{prefix}: </span>'
+            f'<span style="color:{pal["teal"]};font-weight:700;">{value}</span>'
+        )
+        lbl.setObjectName("scan-hint")
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setWordWrap(True)
+        # Scoped (objectName) so the transparent background does not leak into
+        # this label's tooltip; the tooltip then uses the app QToolTip styling.
+        lbl.setStyleSheet(
+            f"#scan-hint {{ font-size: {scaled_px(10)}px; background: transparent; "
+            "margin-left: 84px; }"
+        )
+        lbl.setToolTip(
+            "Suggestion computed at scan; not applied automatically. Pick it in "
+            "the field above if appropriate."
+        )
+        return lbl
 
     def _append_companion_section(self, row: int) -> None:
         """Link already-curated companion files (events/beh/stim/...) for a row.
@@ -613,7 +785,8 @@ class PropertiesPanel(QWidget):
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "COMPANION FILES", "events / beh / stim (copied into BIDS)"))
+            "COMPANION FILES", "events / beh / stim (copied into BIDS)",
+            agnostic=True, tag="any modality"))
 
         self._companion_list = QListWidget()
         self._companion_list.setMaximumHeight(72)
@@ -622,11 +795,13 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._companion_list)
 
         ctl = QWidget()
-        ctl.setStyleSheet("background: transparent;")
+        ctl.setObjectName("companion-ctl")
+        ctl.setStyleSheet("#companion-ctl { background: transparent; }")
         h = QHBoxLayout(ctl)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
         self._companion_suffix = QComboBox()
+        self._companion_suffix.setObjectName("ent-input")  # opaque popup styling
         self._companion_suffix.addItems(
             ["events", "beh", "stim", "physio", "channels", "electrodes"]
         )
@@ -682,20 +857,32 @@ class PropertiesPanel(QWidget):
             self._write_companions(row, items)
 
     def _meta_combo_row(self, label: str, key: str, options: list[str],
-                        current: str, blank_label: str) -> QWidget:
+                        current: str, blank_label: str, *,
+                        setter=None, editable: bool = False) -> QWidget:
         row_w = QWidget()
-        row_w.setStyleSheet("background: transparent;")
+        # Scope the transparent background to THIS container only (objectName
+        # selector) so it does not cascade into child combo popups / tooltips
+        # and make them transparent. Those then use the app theme styling.
+        row_w.setObjectName("meta-row")
+        row_w.setStyleSheet("#meta-row { background: transparent; }")
         h = QHBoxLayout(row_w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
+        tip = tooltip_for(key)
         lbl = QLabel(label)
         lbl.setMinimumWidth(76)
         lbl.setMaximumWidth(76)
         lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        if tip:
+            lbl.setToolTip(tip)
         h.addWidget(lbl)
 
+        on_change = setter or self._on_meta_field_changed
         combo = QComboBox()
         combo.setObjectName("ent-input")
+        if tip:
+            combo.setToolTip(tip)
+        combo.setEditable(editable)
         combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         combo.addItems(options)
         cur = current.strip()
@@ -707,27 +894,44 @@ class PropertiesPanel(QWidget):
             combo.setCurrentText(cur)
         combo.activated.connect(
             lambda _i, c=combo, k=key, bl=blank_label:
-            self._on_meta_field_changed(k, "" if c.currentText() == bl else c.currentText())
+            on_change(k, "" if c.currentText() == bl else c.currentText())
         )
+        if editable:
+            # An editable combo also commits a free-typed value on focus loss.
+            combo.lineEdit().editingFinished.connect(
+                lambda c=combo, k=key, bl=blank_label:
+                on_change(k, "" if c.currentText() == bl else c.currentText().strip())
+            )
         h.addWidget(combo, 1)
         return row_w
 
-    def _meta_edit_row(self, label: str, key: str, current: str) -> QWidget:
+    def _meta_edit_row(self, label: str, key: str, current: str, *,
+                       setter=None) -> QWidget:
         row_w = QWidget()
-        row_w.setStyleSheet("background: transparent;")
+        # Scope the transparent background to THIS container only (objectName
+        # selector) so it does not cascade into child combo popups / tooltips
+        # and make them transparent. Those then use the app theme styling.
+        row_w.setObjectName("meta-row")
+        row_w.setStyleSheet("#meta-row { background: transparent; }")
         h = QHBoxLayout(row_w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
+        tip = tooltip_for(key)
         lbl = QLabel(label)
         lbl.setMinimumWidth(76)
         lbl.setMaximumWidth(76)
         lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        if tip:
+            lbl.setToolTip(tip)
         h.addWidget(lbl)
+        on_change = setter or self._on_meta_field_changed
         edit = QLineEdit(current)
         edit.setObjectName("ent-input")
         edit.setPlaceholderText("—")
+        if tip:
+            edit.setToolTip(tip)
         edit.editingFinished.connect(
-            lambda e=edit, k=key: self._on_meta_field_changed(k, e.text().strip())
+            lambda e=edit, k=key: on_change(k, e.text().strip())
         )
         h.addWidget(edit, 1)
         return row_w
@@ -737,6 +941,12 @@ class PropertiesPanel(QWidget):
         if self._model is None:
             return ""
         return self._model.effective_value(row, col)
+
+    def _acq_eff(self, row: int, field: str) -> str:
+        """Effective per-row acquisition value (scaffold override else default)."""
+        if self._model is None:
+            return ""
+        return self._model.acq_effective(row, field)
 
     def _cell(self, row: int, col: str) -> str:
         if self._model is None:
@@ -754,6 +964,12 @@ class PropertiesPanel(QWidget):
         if self._suppress_writeback or self._model is None or self._row is None:
             return
         self._model.bulk_set([self._row], key, value)
+
+    def _on_acq_field_changed(self, key: str, value: str) -> None:
+        """Commit a per-row device / institution override into the scaffold spec."""
+        if self._suppress_writeback or self._model is None or self._row is None:
+            return
+        self._model.set_acq_override(self._row, key, value)
 
     def _on_model_data_changed(self, top_left, bottom_right, _roles=()) -> None:
         if self._model is None or self._row is None:

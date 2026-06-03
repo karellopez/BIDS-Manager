@@ -38,6 +38,33 @@ def test_default_spec_preserves_50hz_default():
     assert spec.defaults.power_line_freq == 50.0
 
 
+def test_common_manufacturers_exported_pure_data():
+    from bidsmgr.recording_meta import COMMON_CAP_MANUFACTURERS, COMMON_MANUFACTURERS
+    assert isinstance(COMMON_MANUFACTURERS, tuple)
+    assert "Brain Products" in COMMON_MANUFACTURERS
+    assert "MEGIN / Elekta / Neuromag" in COMMON_MANUFACTURERS
+    assert "CTF" in COMMON_MANUFACTURERS              # MEG
+    assert "NIRx" in COMMON_MANUFACTURERS             # fNIRS
+    assert "EasyCap" in COMMON_CAP_MANUFACTURERS
+
+
+def test_meg_fields_on_acquisition_spec():
+    # Only the manual MEG fields exist; channel-derived ones are mne-bids's job.
+    acq = AcquisitionSpec(
+        dewar_position="supine",
+        associated_empty_room="bids::sub-x",
+        subject_artefact_description="movement",
+    )
+    assert acq.dewar_position == "supine"
+    assert acq.associated_empty_room == "bids::sub-x"
+    # The auto-derived MEG fields are NOT part of the model.
+    assert not hasattr(acq, "continuous_head_localization")
+    assert not hasattr(acq, "digitized_landmarks")
+    # Additive: round-trips through JSON by attr name.
+    dumped = dump_spec(RecordingMetaSpec(defaults=acq))
+    assert "dewar_position" in dumped
+
+
 def test_aux_channel_bids_type_validated_against_schema():
     # A real BIDS channel type passes.
     ok = AuxChannelSpec(mne_type="ecg", bids_type="ECG", units="mV")

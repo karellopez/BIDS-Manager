@@ -65,7 +65,6 @@ from ..inventory.mri_dicom import (
 from ..inventory.probe_convert import ProbeFileStats
 from ..inventory.types import InventoryRow
 from ..recording_meta import (
-    AcquisitionSpec,
     RecordingMetaSpec,
     dump_spec,
     scaffold_sidecar_path,
@@ -1157,18 +1156,22 @@ def _default_dataset_slug(dicom_root: Path) -> str:
 
 
 def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
-    """Seed a recording-metadata scaffold from detected EEG/MEG header facts.
+    """Seed a recording-metadata scaffold from detected EEG/MEG event codes.
 
-    Reads the internal ``_event_codes`` / ``_manufacturer`` / ``_model``
-    columns (populated by the EEG/MEG scanner, dropped from the TSV itself),
-    aggregates them across the dataset, and writes a starter
-    :class:`RecordingMetaSpec` next to the inventory TSV. Event labels are left
-    blank for the user to fill; the enrichment step skips blank labels, so an
-    unedited scaffold is harmless. Returns the path written, or ``None`` when
-    there is nothing to seed (no EEG/MEG rows, or no detectable facts).
+    Reads the internal ``_event_codes`` column (populated by the EEG/MEG
+    scanner, dropped from the TSV itself), unions the codes across recordings,
+    and writes a starter :class:`RecordingMetaSpec` with an event map of blank
+    labels next to the inventory TSV. Event labels are left blank for the user
+    to fill; the enrichment step skips blank labels, so an unedited scaffold is
+    harmless. Returns the path written, or ``None`` when there is nothing to
+    seed (no EEG/MEG rows, or no event codes).
 
-    The scaffold is never overwritten if one already exists, so a re-scan does
-    not clobber labels the user has filled in.
+    Device fields are intentionally NOT seeded: the manufacturer is a read-only
+    suggestion (``manufacturer_suggestion`` column) and mne-bids fills the MEG
+    sidecar Manufacturer itself, so seeding a default here would wrongly
+    overwrite it. The scaffold is never overwritten if one already exists, so a
+    CLI re-scan does not clobber labels the user has filled in (the GUI resets a
+    stale scaffold when it starts a fresh scan).
     """
     if "source_file" not in merged.columns:
         return None
@@ -1186,16 +1189,7 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
         except (ValueError, TypeError):
             continue
 
-    def _most_common(col: str) -> str:
-        if col not in eeg_rows.columns:
-            return ""
-        vals = [str(v).strip() for v in eeg_rows[col] if str(v).strip()]
-        return max(set(vals), key=vals.count) if vals else ""
-
-    manufacturer = _most_common("_manufacturer")
-    model = _most_common("_model")
-
-    if not codes and not manufacturer and not model:
+    if not codes:
         return None
 
     scaffold_path = scaffold_sidecar_path(output_tsv)
@@ -1204,11 +1198,7 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
         return None
 
     spec = RecordingMetaSpec(
-        defaults=AcquisitionSpec(
-            manufacturer=manufacturer or None,
-            amplifier_model=model or None,
-        ),
-        event_maps={"*": {c: "" for c in sorted(codes)}} if codes else {},
+        event_maps={"*": {c: "" for c in sorted(codes)}},
     )
     scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
     return scaffold_path
@@ -1218,7 +1208,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
     """Final unified TSV column order. Locked contract:
 
     ``TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
-    EXTENDED(3) + EEG_MEG(15) = 56``.
+    EXTENDED(3) + EEG_MEG(16) = 57``.
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the

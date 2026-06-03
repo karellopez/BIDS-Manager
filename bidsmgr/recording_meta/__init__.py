@@ -14,6 +14,8 @@ The enrichment is *applied* to written BIDS files by
 from __future__ import annotations
 
 from .models import (
+    COMMON_CAP_MANUFACTURERS,
+    COMMON_MANUFACTURERS,
     AcceptableImpedance,
     AcquisitionSpec,
     AuxChannelSpec,
@@ -36,6 +38,8 @@ from .serialize import (
 )
 
 __all__ = [
+    "COMMON_MANUFACTURERS",
+    "COMMON_CAP_MANUFACTURERS",
     "AcceptableImpedance",
     "AcquisitionSpec",
     "AuxChannelSpec",

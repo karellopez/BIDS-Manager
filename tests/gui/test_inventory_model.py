@@ -614,3 +614,86 @@ def test_inheritance_global_change_reflows_inherited_rows() -> None:
     # Inert without a spec.
     m2 = InventoryTableModel(_eeg_inherit_df())
     assert m2.effective_value(0, "line_freq") == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-row acquisition overrides (scaffold overrides[row_id]; not TSV columns)
+# ---------------------------------------------------------------------------
+
+
+def _device_spec(**defaults):
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    return RecordingMetaSpec(defaults=AcquisitionSpec(**defaults))
+
+
+def test_acq_override_inherits_dataset_default() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products", amplifier_model="actiCHamp"))
+    # No per-row override yet -> effective is the dataset default, flagged inherited.
+    assert m.acq_effective(0, "manufacturer") == "Brain Products"
+    assert m.acq_override(0, "manufacturer") == ""
+    assert m.acq_is_inherited(0, "manufacturer") is True
+    assert m.acq_effective(0, "amplifier_model") == "actiCHamp"
+
+
+def test_acq_override_set_stores_in_spec_and_emits(qtbot) -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    with qtbot.waitSignal(m.recordingSpecChanged, timeout=500):
+        assert m.set_acq_override(0, "manufacturer", "BioSemi") is True
+    assert m.acq_override(0, "manufacturer") == "BioSemi"
+    assert m.acq_is_inherited(0, "manufacturer") is False
+    # Stored under the row_id (the EEG source path), not a TSV column.
+    assert m.global_spec().overrides["a.edf"].manufacturer == "BioSemi"
+    assert "manufacturer" not in m.dataframe().columns
+
+
+def test_acq_override_equal_default_clears_to_inherited() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+    # Re-set to the dataset default -> override cleared, row inherits again.
+    assert m.set_acq_override(0, "manufacturer", "Brain Products") is True
+    assert m.acq_override(0, "manufacturer") == ""
+    assert m.acq_is_inherited(0, "manufacturer") is True
+    assert "a.edf" not in m.global_spec().overrides  # empty override dropped
+
+
+def test_acq_override_blank_clears_and_keeps_other_fields() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec())
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+    m.set_acq_override(0, "amplifier_model", "actiCHamp")
+    # Clearing one field keeps the override entry alive for the other.
+    assert m.set_acq_override(0, "manufacturer", "") is True
+    over = m.global_spec().overrides["a.edf"]
+    assert over.manufacturer is None
+    assert over.amplifier_model == "actiCHamp"
+
+
+def test_acq_override_keyed_per_row() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+    # Row 1 (source b.edf) is untouched -> still inherits the default.
+    assert m.acq_effective(1, "manufacturer") == "Brain Products"
+    assert m.acq_override(1, "manufacturer") == ""
+
+
+def test_acq_override_noop_returns_false() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    # Setting the inherited value again is a no-op.
+    assert m.set_acq_override(0, "manufacturer", "Brain Products") is False
+
+
+def test_acq_override_meg_string_field() -> None:
+    """MEG manual fields (dewar position) round-trip through the override path."""
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec())
+    m.set_acq_override(0, "dewar_position", "supine")
+    assert m.global_spec().overrides["a.edf"].dewar_position == "supine"
+    assert m.acq_effective(0, "dewar_position") == "supine"
+    # Clear -> override dropped (back to unset).
+    assert m.set_acq_override(0, "dewar_position", "") is True
+    assert "a.edf" not in m.global_spec().overrides

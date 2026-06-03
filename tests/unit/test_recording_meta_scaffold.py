@@ -38,8 +38,10 @@ def test_scaffold_written_with_blank_event_labels(tmp_path):
     spec = load_spec(out)
     # Codes seeded sorted, labels blank for the user to fill.
     assert spec.event_maps["*"] == {"T0": "", "T1": "", "T2": ""}
-    assert spec.defaults.manufacturer == "Elekta"
-    assert spec.defaults.amplifier_model == "TRIUX"
+    # Device fields are NOT seeded - manufacturer is a read-only suggestion and
+    # mne-bids fills the MEG sidecar value, so seeding would wrongly overwrite it.
+    assert spec.defaults.manufacturer is None
+    assert spec.defaults.amplifier_model is None
 
 
 def test_scaffold_not_overwritten(tmp_path):
@@ -64,10 +66,10 @@ def test_no_scaffold_for_mri_only(tmp_path):
     assert _write_recording_meta_scaffold(mri, tsv) is None
 
 
-def test_manufacturer_only_still_seeds(tmp_path):
+def test_manufacturer_alone_does_not_seed(tmp_path):
+    """A manufacturer with no event codes seeds NOTHING (manufacturer is a
+    read-only suggestion now, not a scaffold default)."""
     tsv = tmp_path / "inv.tsv"
     out = _write_recording_meta_scaffold(_eeg_df([], manufacturer="BrainProducts"), tsv)
-    assert out is not None
-    spec = load_spec(out)
-    assert spec.defaults.manufacturer == "BrainProducts"
-    assert spec.event_maps == {}
+    assert out is None
+    assert not scaffold_sidecar_path(tsv).exists()

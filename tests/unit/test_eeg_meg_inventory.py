@@ -32,18 +32,18 @@ from bidsmgr.inventory.eeg_meg import (
 
 
 def test_eeg_meg_columns_exact_order() -> None:
-    """The 15 EEG/MEG-specific columns are in the locked order.
+    """The 16 EEG/MEG-specific columns are in the locked order.
 
     User-editable: ``task``, ``run``, ``line_freq``, ``montage``,
-    ``eeg_reference``, ``eeg_ground``. ``montage_suggestion`` is a read-only
-    scan hint. These condition the BIDS basename + enrichment.
+    ``eeg_reference``, ``eeg_ground``. ``montage_suggestion`` and
+    ``manufacturer_suggestion`` are read-only scan hints.
     """
     assert EEG_MEG_COLUMNS == (
         "task", "run", "format", "source_file",
         "n_channels", "sfreq", "duration_sec", "n_times",
         "recording_time", "has_positions",
         "line_freq", "montage", "eeg_reference", "eeg_ground",
-        "montage_suggestion",
+        "montage_suggestion", "manufacturer_suggestion",
     )
 
 
@@ -99,6 +99,20 @@ def test_device_info_extraction() -> None:
     raw = _fake_raw({"device_info": {"type": "Elekta", "model": "TRIUX"}})
     assert eeg_meg_mod._device_info(raw) == ("Elekta", "TRIUX")
     assert eeg_meg_mod._device_info(_fake_raw({"device_info": None})) == ("", "")
+
+
+def test_meg_manufacturer_inferred_from_format() -> None:
+    """When the MEG header carries no manufacturer, infer it from the file
+    format (the format identifies the system). Estimate only - user overridable."""
+    raw = _fake_raw({"device_info": None})
+    from pathlib import Path
+    assert eeg_meg_mod._device_info(raw, Path("rec.fif"), "meg")[0] == "MEGIN / Elekta / Neuromag"
+    assert eeg_meg_mod._device_info(raw, Path("rec.ds"), "meg")[0] == "CTF"
+    assert eeg_meg_mod._device_info(raw, Path("rec.con"), "meg")[0] == "KIT / Yokogawa"
+    # Not inferred for EEG, and a present header manufacturer always wins.
+    assert eeg_meg_mod._device_info(raw, Path("rec.fif"), "eeg")[0] == ""
+    raw2 = _fake_raw({"device_info": {"type": "CTF", "model": "x"}})
+    assert eeg_meg_mod._device_info(raw2, Path("rec.fif"), "meg")[0] == "CTF"
 
 
 def test_event_codes_unique_sorted() -> None:
@@ -339,8 +353,8 @@ class TestScanEegMeg:
         assert row["Handedness"] == ""  # never auto-seeded
         assert row["eeg_reference"] == "" and row["eeg_ground"] == ""
         assert row["montage_suggestion"] == "standard_1005 (60/64)"
+        assert row["manufacturer_suggestion"] == "Elekta"  # read-only hint
         assert json.loads(row["_event_codes"]) == ["T0", "T1", "T2"]
-        assert row["_manufacturer"] == "Elekta"
 
     def test_eeg_meg_rows_carry_bids_guess_suffix(
         self, tmp_path: Path, monkeypatch,
