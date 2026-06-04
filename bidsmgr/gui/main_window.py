@@ -72,6 +72,7 @@ from ..project import Project
 from .converter_panel import ConverterPanel
 from .editor_panel import EditorPanel
 from .theme_manager import ThemeManager
+from .welcome_panel import WelcomePanel
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +143,9 @@ class _TopHeader(QFrame):
         # View pills — Converter | Editor. The button group keeps the
         # two checkable buttons mutually exclusive; ``idClicked`` fires
         # whichever was just selected so we can re-emit a typed signal.
+        self._welcome_btn = QPushButton("Home")
+        self._welcome_btn.setObjectName("view-pill")
+        self._welcome_btn.setCheckable(True)
         self._converter_btn = QPushButton("Converter")
         self._converter_btn.setObjectName("view-pill")
         self._converter_btn.setCheckable(True)
@@ -151,9 +155,11 @@ class _TopHeader(QFrame):
         self._editor_btn.setCheckable(True)
         self._pill_group = QButtonGroup(self)
         self._pill_group.setExclusive(True)
+        self._pill_group.addButton(self._welcome_btn, 2)
         self._pill_group.addButton(self._converter_btn, 0)
         self._pill_group.addButton(self._editor_btn, 1)
         self._pill_group.idClicked.connect(self._on_pill_clicked)
+        h.addWidget(self._welcome_btn)
         h.addWidget(self._converter_btn)
         h.addWidget(self._editor_btn)
 
@@ -189,11 +195,15 @@ class _TopHeader(QFrame):
 
     def set_active_view(self, view: str) -> None:
         """Programmatically toggle the pills (no signal emitted)."""
-        target = self._editor_btn if view == "editor" else self._converter_btn
+        target = {
+            "welcome": self._welcome_btn,
+            "editor": self._editor_btn,
+        }.get(view, self._converter_btn)
         target.setChecked(True)
 
     def _on_pill_clicked(self, idx: int) -> None:
-        self.view_changed.emit("editor" if idx == 1 else "converter")
+        view = {2: "welcome", 1: "editor"}.get(idx, "converter")
+        self.view_changed.emit(view)
 
     def _on_toggle(self) -> None:
         from .app_settings import AppSettings
@@ -327,19 +337,26 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.converter = ConverterPanel(project=project)
         self.editor = EditorPanel()
+        self.welcome = WelcomePanel()
         self.stack.addWidget(self.converter)   # index 0 → "converter"
         self.stack.addWidget(self.editor)      # index 1 → "editor"
+        self.stack.addWidget(self.welcome)     # index 2 → "welcome"
         v.addWidget(self.stack, 1)
 
         self._header.view_changed.connect(self._on_view_changed)
         self._header.about_requested.connect(self._show_about_dialog)
         self._header.settings_requested.connect(self._open_settings)
+        self.welcome.project_opened.connect(self._on_project_opened)
 
-        # Restore the user's last view. Pills are syncronised silently
-        # so we don't fire a redundant ``view_changed`` on startup.
+        # Land on the Welcome (Home) tab when no project is bound (the
+        # project-first entry point). When a project was passed in (the
+        # ``--project`` path) restore the user's last Converter/Editor view.
         from .app_settings import AppSettings
         settings = AppSettings.load()
-        self._apply_active_view(settings.active_view, persist=False)
+        if self._project is not None:
+            self._apply_active_view(settings.active_view, persist=False)
+        else:
+            self._apply_active_view("welcome", persist=False)
 
         # Status bar — forwards the Converter's log messages so the
         # user sees scan / convert progress. The bottom-right corner
@@ -420,13 +437,34 @@ class MainWindow(QMainWindow):
 
     def _apply_active_view(self, view: str, *, persist: bool) -> None:
         """Switch the stacked widget and (optionally) persist the choice."""
-        if view not in ("converter", "editor"):
+        if view not in ("welcome", "converter", "editor"):
             view = "converter"
-        self.stack.setCurrentIndex(1 if view == "editor" else 0)
+        index = {"welcome": 2, "editor": 1}.get(view, 0)
+        self.stack.setCurrentIndex(index)
         self._header.set_active_view(view)
-        if persist:
+        # Only the working views are persisted; "welcome" is a transient
+        # landing, not a remembered preference.
+        if persist and view in ("converter", "editor"):
             from .app_settings import AppSettings
             AppSettings.remember_active_view(view)
+
+    def _on_project_opened(self, project: Project, bids_root: Path) -> None:
+        """Bind the project the user created/opened on Welcome and switch in.
+
+        The Converter's output is locked to ``bids_root`` (soft lock) and the
+        Editor is pointed at the same root so both views work inside the project.
+        """
+        self._project = project
+        self.converter.set_project(project, Path(bids_root))
+        # Point the Editor at the same root so both views work inside the
+        # project. ``_set_root`` is the Editor's open-root primitive.
+        set_root = getattr(self.editor, "_set_root", None)
+        if callable(set_root):
+            try:
+                set_root(Path(bids_root), persist=False)
+            except Exception as exc:  # never block entering the project
+                log.warning("editor could not open %s: %s", bids_root, exc)
+        self._apply_active_view("converter", persist=True)
 
     def _on_palette_changed(self, pal: dict) -> None:
         """Re-render every widget that holds palette-baked styling.
@@ -450,6 +488,8 @@ class MainWindow(QMainWindow):
             self.converter.repaint_for_palette(pal)
         if hasattr(self, "editor"):
             self.editor.repaint_for_palette(pal)
+        if hasattr(self, "welcome"):
+            self.welcome.repaint_for_palette(pal)
         # Force a viewport repaint on every delegate-driven view in
         # the window so cells / badges / row tints pick up new colors.
         for view in self.findChildren(QAbstractItemView):

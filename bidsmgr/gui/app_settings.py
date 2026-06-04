@@ -63,6 +63,9 @@ KEYS = {
     # "default" → ``assets/logo.png`` (monochrome, palette-inverted on dark).
     # "app_icon" → ``assets/macos/AppIcon128.png`` (full-color BIDS-Manager logo).
     "header_logo": "ui/header_logo",
+    # Recently opened/created project dataset roots (JSON list, most-recent
+    # first), shown on the Welcome tab.
+    "recent_projects": "project/recent",
 }
 
 
@@ -147,6 +150,9 @@ class AppSettings:
     # exclusion: {"pattern", "target": "sequence"|"path", "match_mode"}
     user_hints: list = field(default_factory=list)
     scan_exclusions: list = field(default_factory=list)
+
+    # Recently opened/created project dataset roots (most-recent first).
+    recent_projects: list = field(default_factory=list)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -272,6 +278,7 @@ class AppSettings:
             out.header_logo = "default"
         out.user_hints = _as_json_list(s.value(KEYS["user_hints"]), [])
         out.scan_exclusions = _as_json_list(s.value(KEYS["scan_exclusions"]), [])
+        out.recent_projects = _as_json_list(s.value(KEYS["recent_projects"]), [])
         return out
 
     def save(self) -> None:
@@ -308,6 +315,7 @@ class AppSettings:
         # Scan rules as JSON blobs.
         s.setValue(KEYS["user_hints"], json.dumps(self.user_hints))
         s.setValue(KEYS["scan_exclusions"], json.dumps(self.scan_exclusions))
+        s.setValue(KEYS["recent_projects"], json.dumps(self.recent_projects))
         s.sync()
 
     # ------------------------------------------------------------------
@@ -336,6 +344,27 @@ class AppSettings:
         cls._settings().setValue(
             KEYS["highlight_aborts"], "1" if enabled else "0",
         )
+
+    @classmethod
+    def remember_recent_project(cls, path: Path, *, cap: int = 10) -> None:
+        """Push a project dataset root to the front of the recent list.
+
+        De-duplicates (most-recent-first) and caps the list length so the
+        Welcome tab stays tidy.
+        """
+        s = cls._settings()
+        existing = cls.load().recent_projects
+        p = str(path)
+        out = [p] + [x for x in existing if x != p]
+        s.setValue(KEYS["recent_projects"], json.dumps(out[:cap]))
+
+    @classmethod
+    def forget_recent_project(cls, path: Path) -> None:
+        """Drop a project from the recent list (does not touch the dataset)."""
+        s = cls._settings()
+        p = str(path)
+        out = [x for x in cls.load().recent_projects if x != p]
+        s.setValue(KEYS["recent_projects"], json.dumps(out))
 
     @classmethod
     def remember_theme(cls, theme: str) -> None:

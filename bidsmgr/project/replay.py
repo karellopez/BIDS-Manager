@@ -61,6 +61,7 @@ def replay(events: Iterable[Event]) -> ProjectState:
     name: "str | None" = None
     description: "str | None" = None
     inventory_tsv: "str | None" = None
+    raw_root: "str | None" = None
     row_ids: tuple[str, ...] = ()
 
     for ev in events:
@@ -73,6 +74,7 @@ def replay(events: Iterable[Event]) -> ProjectState:
             description = ev.description
         elif isinstance(ev, ScanImported):
             inventory_tsv = ev.inventory_tsv
+            raw_root = ev.raw_root
             row_ids = ev.row_ids
         elif isinstance(ev, UserSetEntity):
             entity_overrides.setdefault(ev.row_id, {})[ev.entity] = ev.value
@@ -94,6 +96,7 @@ def replay(events: Iterable[Event]) -> ProjectState:
         name=name,
         description=description,
         inventory_tsv=inventory_tsv,
+        raw_root=raw_root,
         row_ids=row_ids,
         entity_overrides=entity_overrides,
         cell_overrides=cell_overrides,

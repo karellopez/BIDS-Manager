@@ -34,6 +34,7 @@ Signals:
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,7 @@ import pandas as pd
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -104,6 +106,18 @@ class ConverterPanel(QWidget):
         self._raw_root: Optional[Path] = None
         self._output_tsv: Optional[Path] = None
         self._bids_parent: Optional[Path] = None
+        # Set when an explicit project is bound (Welcome -> Open/Create). The
+        # output is then locked to this dataset root and the inventory lives in
+        # the project bundle. ``None`` keeps the free-path (pick-output) flow.
+        self._bids_root: Optional[Path] = None
+        # The scan version currently loaded/active (``.bidsmgr/project/scans/
+        # <version>/``). Each scan of a source folder is its own version with an
+        # isolated curation history; ``self._project`` is that version's bundle.
+        self._active_version_dir: Optional[Path] = None
+        # In-memory redo stack for the active version: events popped by Undo,
+        # re-appended by Redo. Cleared when a new edit diverges the timeline or
+        # a different version is loaded (not persisted across reopen).
+        self._redo_stack: list = []
         # Persistent settings — loaded fresh each construction so a
         # Settings dialog save propagates on the next open of this panel.
         self._app_settings: AppSettings = AppSettings.load()
@@ -267,6 +281,197 @@ class ConverterPanel(QWidget):
         """Return the active model (``None`` before the first scan)."""
         return self._model
 
+    def set_project(self, project: Project, bids_root: Path) -> None:
+        """Bind an open project and lock the output to its dataset root.
+
+        Soft lock: the BIDS-output bar shows the dataset root and its
+        ``change…`` button is disabled with a tooltip pointing at the Home tab,
+        rather than a free folder picker (so the user cannot scatter subjects
+        outside the project). The inventory + recording-metadata scaffold then
+        live in the project bundle and the dataset name is the folder name.
+        """
+        self._project = project
+        self._bids_root = Path(bids_root)
+        self._bids_parent = self._bids_root.parent
+        self._properties.set_project(project)
+
+        self._bids_pathbar.set_value(str(self._bids_root), ok=True)
+        self._bids_pathbar.change_button.setEnabled(False)
+        self._bids_pathbar.change_button.setToolTip(
+            "Working inside this project. Use the Home tab to open or create a "
+            "different dataset."
+        )
+        self._output_pane.set_root(self._bids_root)
+
+        # Resume: if this project already holds a scan, reload its inventory and
+        # replay the curation edits so the user lands back in their table.
+        self._resume_from_project()
+
+    def _resume_from_project(self) -> None:
+        """Resume the project's most recent scan version (curation resume).
+
+        No-op when the project has no scan yet. Each scan of a source folder is
+        its own version with an isolated curation bundle; this loads the latest
+        and refreshes the version picker. Older versions stay reachable via the
+        toolbar Scan picker.
+        """
+        if self._bids_root is None:
+            return
+        from ..project import workspace
+        versions = workspace.list_versions(self._bids_root)
+        if versions:
+            self._load_version(versions[-1])
+        self._refresh_scans_combo()
+
+    def _load_version(self, version, *, clear_redo: bool = True) -> None:
+        """Open one scan version: load its inventory + replay its edit history.
+
+        ``clear_redo`` is False only for the same-version reloads that Undo / Redo
+        trigger, so the redo stack survives across them; switching to a different
+        version (or a fresh scan) clears it.
+        """
+        from ..project import Project
+        if clear_redo:
+            self._redo_stack.clear()
+        try:
+            proj = Project.open(version.dir)
+            df = pd.read_csv(version.inventory, sep="\t", dtype=str).fillna("")
+        except Exception as exc:  # never block; leave the current view in place
+            self.log_message.emit(
+                f"Could not load scan '{version.version_id}': {exc}"
+            )
+            return
+        self._project = proj
+        self._properties.set_project(proj)
+        self._active_version_dir = Path(version.dir)
+        if version.raw_root:
+            self._raw_root = Path(version.raw_root)
+            raw_ok = Path(version.raw_root).exists()
+            self._raw_pathbar.set_value(version.raw_root, ok=raw_ok)
+            if not raw_ok:
+                # Moved-data detection: the table still loads (curation can
+                # continue), but convert will need the source. Point the user at
+                # the fix instead of failing silently later.
+                self.log_message.emit(
+                    f"Source folder for scan '{version.version_id}' is no longer "
+                    f"at {version.raw_root}. Use 'change…' on Raw input to relocate "
+                    f"it (or re-scan) before converting."
+                )
+        # The model is rebuilt with this version's project, so its event overlay
+        # (cell / entity / include edits) replays automatically.
+        self.load_inventory(df, output_tsv=version.inventory)
+        self.log_message.emit(f"Resumed scan '{version.version_id}'")
+
+    def _refresh_scans_combo(self) -> None:
+        """Repopulate the toolbar scan-version picker (project mode only)."""
+        combo = getattr(self, "_scans_combo", None)
+        if combo is None:
+            return
+        in_project = self._bids_root is not None
+        # In project mode the free-path TSV-filename field is irrelevant.
+        self._tsv_label.setVisible(not in_project)
+        self._tsv_filename_edit.setVisible(not in_project)
+
+        # Undo / Redo are project-mode curation actions (act on the active
+        # version's event log); show them once a table is loaded.
+        show_edit = in_project and self._model is not None
+        self._undo_btn.setVisible(show_edit)
+        self._redo_btn.setVisible(show_edit)
+        self._redo_btn.setEnabled(bool(self._redo_stack))
+
+        if not in_project:
+            self._scans_label.setVisible(False)
+            combo.setVisible(False)
+            return
+
+        from ..project import workspace
+        versions = workspace.list_versions(self._bids_root)
+        combo.blockSignals(True)
+        combo.clear()
+        active = 0
+        for i, v in enumerate(versions):
+            combo.addItem(v.version_id, userData=str(v.dir))
+            if self._active_version_dir is not None and \
+                    Path(v.dir) == Path(self._active_version_dir):
+                active = i
+        if versions:
+            combo.setCurrentIndex(active)
+        combo.blockSignals(False)
+        has = bool(versions)
+        self._scans_label.setVisible(has)
+        combo.setVisible(has)
+
+    def _on_scans_combo_activated(self, idx: int) -> None:
+        data = self._scans_combo.itemData(idx)
+        if not data:
+            return
+        version_dir = Path(data)
+        if self._active_version_dir is not None and \
+                version_dir == Path(self._active_version_dir):
+            return  # already showing this version
+        from ..project import workspace
+        for v in workspace.list_versions(self._bids_root):
+            if Path(v.dir) == version_dir:
+                self._load_version(v)
+                self._refresh_scans_combo()
+                break
+
+    def _on_undo(self) -> None:
+        """Undo the last curation edit; stash it for Redo."""
+        if self._project is None:
+            self.log_message.emit("Nothing to undo")
+            return
+        event = self._project.undo_last_user_edit()
+        if event is not None:
+            self._redo_stack.append(event)
+            self._reload_active_version()
+            self.log_message.emit("Undid last edit")
+        else:
+            self.log_message.emit("Nothing to undo")
+        self._update_undo_redo()
+
+    def _on_redo(self) -> None:
+        """Re-apply the most recently undone edit."""
+        if self._project is None or not self._redo_stack:
+            return
+        event = self._redo_stack.pop()
+        self._project.append(event)
+        self._reload_active_version()
+        self.log_message.emit("Redid edit")
+        self._update_undo_redo()
+
+    def _on_user_edited(self) -> None:
+        """A fresh edit diverges the timeline: previously-undone edits are gone."""
+        if self._redo_stack:
+            self._redo_stack.clear()
+        self._update_undo_redo()
+
+    def _update_undo_redo(self) -> None:
+        """Sync the Redo button's enabled state with the redo stack."""
+        if hasattr(self, "_redo_btn"):
+            self._redo_btn.setEnabled(bool(self._redo_stack))
+
+    def _reload_active_version(self) -> None:
+        """Reload the active version so the model reflects the truncated log."""
+        if self._active_version_dir is None or self._bids_root is None:
+            return
+        from ..project import workspace
+        for v in workspace.list_versions(self._bids_root):
+            if Path(v.dir) == Path(self._active_version_dir):
+                # Preserve the redo stack across the undo/redo reload.
+                self._load_version(v, clear_redo=False)
+                self._refresh_scans_combo()
+                return
+
+    def load_inventory(self, df: pd.DataFrame, output_tsv: Optional[Path] = None) -> None:
+        """Swap in a fresh DataFrame as the table's data source.
+
+        Called by :meth:`_on_scan_finished` and by tests / controllers
+        that want to skip the scan worker (e.g. by loading a
+        pre-generated TSV from disk).
+        """
+        self._model = InventoryTableModel(df, project=self._project, parent=self)
+
     def load_inventory(self, df: pd.DataFrame, output_tsv: Optional[Path] = None) -> None:
         """Swap in a fresh DataFrame as the table's data source.
 
@@ -310,6 +515,8 @@ class ConverterPanel(QWidget):
             self._rebuild_bids_preview()
             self._update_stats_label()
         self._model.dataChanged.connect(_on_model_changed)
+        # A fresh user edit invalidates the redo stack (timeline diverged).
+        self._model.userEdited.connect(self._on_user_edited)
         # Per-row acquisition overrides (device / institution) live in the
         # recording-metadata scaffold, not a TSV column. Persist it whenever the
         # model reports one changed so the convert verb (which reloads the
@@ -423,9 +630,9 @@ class ConverterPanel(QWidget):
         # so the inventory ends up next to the converted BIDS tree, not
         # cluttering the raw data folder. Filename only; ``<bids_parent>``
         # is set independently via the path bar below.
-        tsv_label = QLabel("TSV:")
-        tsv_label.setObjectName("tb-mini-label")
-        lay.addWidget(tsv_label)
+        self._tsv_label = QLabel("TSV:")
+        self._tsv_label.setObjectName("tb-mini-label")
+        lay.addWidget(self._tsv_label)
         self._tsv_filename_edit = QLineEdit()
         self._tsv_filename_edit.setObjectName("tb-input")
         self._tsv_filename_edit.setPlaceholderText("inventory.tsv")
@@ -433,6 +640,42 @@ class ConverterPanel(QWidget):
         self._tsv_filename_edit.setMaximumWidth(150)
         self._tsv_filename_edit.editingFinished.connect(self._on_tsv_filename_edited)
         lay.addWidget(self._tsv_filename_edit)
+
+        # Scan-version picker (project mode): switch between scans of different
+        # source folders within this dataset. Hidden until a project has >=1
+        # scan; replaces the free-path TSV filename field in project mode.
+        self._scans_label = QLabel("Scan:")
+        self._scans_label.setObjectName("tb-mini-label")
+        self._scans_label.setVisible(False)
+        lay.addWidget(self._scans_label)
+        self._scans_combo = QComboBox()
+        self._scans_combo.setObjectName("tb-input")
+        self._scans_combo.setMinimumWidth(190)
+        self._scans_combo.setToolTip("Switch between scans in this project")
+        self._scans_combo.setVisible(False)
+        self._scans_combo.activated.connect(self._on_scans_combo_activated)
+        lay.addWidget(self._scans_combo)
+
+        # Undo the last curation edit (project mode). Rides the active version's
+        # event log so it reverts one cell / entity / include edit.
+        self._undo_btn = QPushButton("  Undo")
+        self._undo_btn.setObjectName("tb-btn-ghost")
+        self._undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.apply_button(self._undo_btn, "undo")
+        self._undo_btn.setToolTip("Undo the last edit")
+        self._undo_btn.setVisible(False)
+        self._undo_btn.clicked.connect(self._on_undo)
+        lay.addWidget(self._undo_btn)
+
+        self._redo_btn = QPushButton("  Redo")
+        self._redo_btn.setObjectName("tb-btn-ghost")
+        self._redo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.apply_button(self._redo_btn, "redo")
+        self._redo_btn.setToolTip("Redo the last undone edit")
+        self._redo_btn.setVisible(False)
+        self._redo_btn.setEnabled(False)
+        self._redo_btn.clicked.connect(self._on_redo)
+        lay.addWidget(self._redo_btn)
 
         lay.addWidget(VSep())
 
@@ -1101,21 +1344,35 @@ class ConverterPanel(QWidget):
                 return
         # 3. Compute the scan-TSV path from the filename input + the
         # BIDS output folder.
-        filename = self._tsv_filename_edit.text().strip() or "inventory.tsv"
-        if not filename.lower().endswith(".tsv"):
-            filename += ".tsv"
-        self._output_tsv = self._bids_parent / filename
-        # 4. Pick up the latest persisted settings on every scan so a
-        # user who changed defaults in the Settings dialog without
-        # restarting still gets the new values. The scan stamps every
-        # row's ``dataset`` column with a slug derived from the raw
-        # folder name; the user partitions rows across datasets by
-        # editing that column in the inspector after the scan.
+        # 3. Pick up the latest persisted settings on every scan so a user who
+        # changed defaults in the Settings dialog without restarting still gets
+        # the new values.
         s = AppSettings.load()
+        # 4. Compute the scan-TSV path + dataset name. With a project open the
+        # inventory lives in the project bundle and the dataset name is the
+        # project's folder name (output is locked to the project root). The
+        # free-path case keeps the toolbar filename + chosen BIDS-output folder
+        # and the user partitions datasets by editing the ``dataset`` column.
+        if self._bids_root is not None:
+            # Scan into a fresh staging dir; on success it is promoted to a new
+            # version under .bidsmgr/project/scans/ (so a second source scan
+            # never overwrites the first). A failed scan just leaves staging to
+            # be cleared by the next run.
+            staging = self._bids_root / ".bidsmgr" / "project" / ".scan_staging"
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
+            self._output_tsv = staging / "inventory.tsv"
+            dataset = self._bids_root.name
+        else:
+            filename = self._tsv_filename_edit.text().strip() or "inventory.tsv"
+            if not filename.lower().endswith(".tsv"):
+                filename += ".tsv"
+            self._output_tsv = self._bids_parent / filename
+            dataset = (s.dataset_slug or None)
         self.start_scan(
             self._raw_root,
             self._output_tsv,
-            dataset=(s.dataset_slug or None),
+            dataset=dataset,
             # line_freq / montage are recording metadata now (per-row dropdown
             # columns + the Recording-metadata editor), not scan settings.
             n_jobs=s.scan_n_jobs,
@@ -1145,6 +1402,19 @@ class ConverterPanel(QWidget):
         self._raw_root = Path(d)
         self._raw_pathbar.set_value(str(self._raw_root), ok=True)
         AppSettings.remember_raw_root(self._raw_root)
+        # Relocate: if a scan version is active, persist the new source location
+        # to its descriptor so the move sticks across reopen (moved-data
+        # recovery for EEG/MEG, whose source paths are relative to this root).
+        if self._active_version_dir is not None:
+            from ..project import workspace
+            meta = workspace.read_version_meta(self._active_version_dir)
+            workspace.write_version_meta(
+                self._active_version_dir,
+                source_label=meta.get("source_label") or self._active_version_dir.name,
+                raw_root=str(self._raw_root),
+                status=meta.get("status") or "curating",
+            )
+            self.log_message.emit(f"Relocated source for the active scan to {d}")
         # Live preview of the picked folder before any scan runs.
         self._raw_pane.set_root(self._raw_root)
 
@@ -1494,12 +1764,17 @@ class ConverterPanel(QWidget):
         # signal — the dispatcher's per-row writes already trigger them.
 
     def _on_scan_finished(self, df: pd.DataFrame, output_tsv: Path) -> None:
+        # Project mode: promote the staged scan to a new version with its own
+        # isolated curation bundle, and make it the active project.
+        if self._bids_root is not None:
+            output_tsv = self._promote_scan_to_version(Path(output_tsv))
         self.load_inventory(df, output_tsv)
         if self._project is not None:
             row_ids = self._collect_row_ids(df)
             self._project.append(ScanImported(
                 inventory_tsv=str(output_tsv),
                 row_ids=tuple(row_ids),
+                raw_root=str(self._raw_root) if self._raw_root else None,
             ))
             self._project.append(StageCompleted(
                 stage="scan",
@@ -1510,7 +1785,52 @@ class ConverterPanel(QWidget):
                     "rows": int(len(df)),
                 },
             ))
+        self._refresh_scans_combo()
         self.scan_finished.emit(df, output_tsv)
+
+    def _promote_scan_to_version(self, staged_tsv: Path) -> Path:
+        """Move a freshly-staged scan into a new version dir; bind it as active.
+
+        Creates ``.bidsmgr/project/scans/<NNNN>__<slug>/`` (its own Project
+        bundle), moves the inventory + recording-meta scaffold + files_by_uid
+        sidecar into it, records the version descriptor, and points
+        ``self._project`` / ``self._output_tsv`` at the new version. Returns the
+        inventory path inside the version dir.
+        """
+        from ..project import Project, workspace
+        from ..recording_meta import scaffold_sidecar_path
+
+        staged_tsv = Path(staged_tsv)
+        source_label = self._raw_root.name if self._raw_root else "scan"
+        version_dir = workspace.allocate_version_dir(self._bids_root, source_label)
+        proj = Project.create(version_dir, name=self._bids_root.name)
+
+        dest_inv = workspace.version_inventory(version_dir)
+        self._move_if_exists(staged_tsv, dest_inv)
+        self._move_if_exists(
+            scaffold_sidecar_path(staged_tsv), scaffold_sidecar_path(dest_inv),
+        )
+        self._move_if_exists(
+            Path(str(staged_tsv) + ".files_by_uid.json.gz"),
+            Path(str(dest_inv) + ".files_by_uid.json.gz"),
+        )
+        workspace.write_version_meta(
+            version_dir,
+            source_label=source_label,
+            raw_root=str(self._raw_root) if self._raw_root else None,
+            status="curating",
+        )
+        self._project = proj
+        self._properties.set_project(proj)
+        self._active_version_dir = version_dir
+        return dest_inv
+
+    @staticmethod
+    def _move_if_exists(src: Path, dst: Path) -> None:
+        src, dst = Path(src), Path(dst)
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
 
     @staticmethod
     def _collect_row_ids(df: pd.DataFrame) -> list[str]:

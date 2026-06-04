@@ -908,3 +908,71 @@ QLabel#busy-spinner-message {
     color: $dim;
     font-size: 11px;
 }
+
+/* ------------------------------------------------------------------
+ * Welcome (Home) tab - the project-first landing.
+ * Every surface keys off a theme token so a dark<->light swap repaints
+ * cleanly (combined with WelcomePanel.repaint_for_palette).
+ * ------------------------------------------------------------------ */
+QWidget#welcome-panel,
+QScrollArea#welcome-scroll,
+QWidget#welcome-body,
+QWidget#welcome-col,
+QWidget#welcome-hero { background: $bg; }
+QScrollArea#welcome-scroll { border: none; }
+
+QLabel#welcome-title {
+    color: $text;
+    font-size: 23px;
+    font-weight: 700;
+}
+QLabel#welcome-subtitle {
+    color: $dim;
+    font-size: 12px;
+}
+
+QFrame#welcome-card {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 10px;
+}
+QLabel#welcome-section {
+    color: $text;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#welcome-section-desc {
+    color: $dim;
+    font-size: 11px;
+}
+
+QLineEdit#welcome-input {
+    background: $surface3;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 6px 9px;
+    font-size: 12px;
+    selection-background-color: $accent;
+    selection-color: $primary_btn_text;
+}
+QLineEdit#welcome-input:focus { border-color: $accent; }
+QLineEdit#welcome-input:read-only { color: $dim; }
+
+QListWidget#welcome-recent {
+    background: $surface2;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 4px;
+    font-size: 12px;
+}
+QListWidget#welcome-recent::item {
+    padding: 6px 8px;
+    border-radius: 4px;
+}
+QListWidget#welcome-recent::item:hover { background: $surface3; }
+QListWidget#welcome-recent::item:selected {
+    background: $accent_bg;
+    color: $accent;
+}

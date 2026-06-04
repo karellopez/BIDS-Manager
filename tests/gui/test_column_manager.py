@@ -76,6 +76,29 @@ def test_set_columns_visible_applies_and_forces_mandatory(qtbot, isolated_settin
     assert panel._table.columnWidth(idx_pid) > 0      # revealed with a width
 
 
+def test_studydescription_is_hidden_toggleable_column(qtbot, isolated_settings) -> None:
+    # Registered, read-only, hidden by default, and described - so it appears in
+    # Manage columns as an off-by-default toggle the user can switch on.
+    spec = next((c for c in COLUMNS if c.key == "StudyDescription"), None)
+    assert spec is not None
+    assert spec.default_visible is False
+    assert spec.editable is False
+    assert COLUMN_DESCRIPTIONS.get("StudyDescription")
+    assert "StudyDescription" not in MANDATORY_COLUMN_KEYS
+
+    # The user can reveal it from Manage columns, and it shows the value.
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    df = _df()
+    df["StudyDescription"] = "PPMI"
+    panel.load_inventory(df, None)
+    mapping = {c.key: c.default_visible for c in COLUMNS}
+    mapping["StudyDescription"] = True
+    panel.set_columns_visible(mapping)
+    idx = next(i for i, c in enumerate(COLUMNS) if c.key == "StudyDescription")
+    assert not panel._table.isColumnHidden(idx)
+
+
 def test_all_columns_are_user_resizable(qtbot) -> None:
     """Every column is Interactive (independently resizable); the table uses
     stretch-last-section + horizontal scroll instead of a greedy stretch

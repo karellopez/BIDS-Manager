@@ -80,6 +80,8 @@ NAMES: dict[str, tuple[str, str]] = {
     "bulk_edit":    ("mdi6.pencil-outline",           "text"),
     "columns":      ("mdi6.view-column-outline",      "text"),
     "highlight":    ("mdi6.flag-outline",             "warning"),
+    "undo":         ("mdi6.undo-variant",             "text"),
+    "redo":         ("mdi6.redo-variant",             "text"),
 
     # ---- Converter bottom tabs ----
     "log":          ("mdi6.text-box-outline",         "text"),

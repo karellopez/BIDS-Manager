@@ -138,6 +138,7 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("acq_time",     "acq_time",    "mono",  False, 80,  df_column="acq_time",    default_visible=False),
     ColumnSpec("image_type",   "image_type",  "mono",  False, 120, df_column="image_type",  default_visible=False),
     ColumnSpec("study_date",   "study_date",  "mono",  False, 90,  df_column="study_date",  default_visible=False),
+    ColumnSpec("StudyDescription", "study name", "plain", False, 160, df_column="StudyDescription", default_visible=False),
     ColumnSpec("PatientID",    "PatientID",   "mono",  False, 100, df_column="PatientID",   default_visible=False),
     ColumnSpec("GivenName",    "GivenName",   "plain", False, 100, df_column="GivenName",   default_visible=False),
     ColumnSpec("FamilyName",   "FamilyName",  "plain", False, 100, df_column="FamilyName",  default_visible=False),
@@ -185,6 +186,7 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "acq_time":  "Acquisition time from the DICOM / recording header.",
     "image_type": "DICOM ImageType (ORIGINAL / DERIVED, MAGNITUDE / PHASE, ...).",
     "study_date": "Study date, used to cluster longitudinal sessions.",
+    "StudyDescription": "DICOM StudyDescription (the study / protocol name). Read-only, MRI only. Not a BIDS entity; shown for awareness. Multiple distinct values in one scan raise a warning.",
     "PatientID": "DICOM PatientID, a key part of subject identity.",
     "GivenName": "Patient given name from the header.",
     "FamilyName": "Patient family name from the header.",
@@ -234,6 +236,10 @@ class InventoryTableModel(QAbstractTableModel):
     # persists the recording-metadata scaffold to disk so the convert verb,
     # which reloads it, sees the edit.
     recordingSpecChanged = pyqtSignal()
+    # Emitted whenever the user makes a curation edit (cell / entity / include).
+    # The converter uses it to invalidate its redo stack: a fresh edit diverges
+    # the timeline, so previously-undone edits can no longer be redone.
+    userEdited = pyqtSignal()
 
     def __init__(
         self,
@@ -520,15 +526,14 @@ class InventoryTableModel(QAbstractTableModel):
             return False
 
         # Order: record the event first (durable), then mutate.
-        if self._project is not None:
-            self._project.append(
-                UserSetCell(
-                    row_id=self.row_id(row),
-                    column=df_col,
-                    value=new_str,
-                    previous=old_str,
-                )
+        self._record_edit(
+            UserSetCell(
+                row_id=self.row_id(row),
+                column=df_col,
+                value=new_str,
+                previous=old_str,
             )
+        )
         self._df.at[row, df_col] = new_str
 
         # Mirror cells (session / task / run) feed the entities JSON.
@@ -582,6 +587,12 @@ class InventoryTableModel(QAbstractTableModel):
             return {}
         return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
+    def _record_edit(self, event) -> None:
+        """Append a user-edit event to the project (if any) and signal it."""
+        if self._project is not None:
+            self._project.append(event)
+        self.userEdited.emit()
+
     def set_entity(
         self,
         row: int,
@@ -612,15 +623,14 @@ class InventoryTableModel(QAbstractTableModel):
         if new_value == previous:
             return False
 
-        if self._project is not None:
-            self._project.append(
-                UserSetEntity(
-                    row_id=self.row_id(row),
-                    entity=entity,
-                    value=new_value or None,
-                    previous=previous or None,
-                )
+        self._record_edit(
+            UserSetEntity(
+                row_id=self.row_id(row),
+                entity=entity,
+                value=new_value or None,
+                previous=previous or None,
             )
+        )
 
         if new_value:
             current[entity] = new_value
@@ -832,15 +842,14 @@ class InventoryTableModel(QAbstractTableModel):
             new = str(val)
             if new == old:
                 continue
-            if self._project is not None:
-                self._project.append(
-                    UserSetCell(
-                        row_id=self.row_id(row),
-                        column=col,
-                        value=new,
-                        previous=old,
-                    )
+            self._record_edit(
+                UserSetCell(
+                    row_id=self.row_id(row),
+                    column=col,
+                    value=new,
+                    previous=old,
                 )
+            )
             self._df.at[row, col] = new
             changed = True
         if changed:
@@ -884,13 +893,37 @@ class InventoryTableModel(QAbstractTableModel):
         save. Unknown row_ids are ignored (the inventory may have been
         rescanned, dropping rows the project remembers).
         """
-        if not state.cell_overrides and not state.include_overrides:
+        if (
+            not state.cell_overrides
+            and not state.include_overrides
+            and not state.entity_overrides
+        ):
             return
 
         # Build row_id → df_index map once.
         index_for_rid: dict[str, int] = {
             self.row_id(i): i for i in range(len(self._df))
         }
+
+        # Entity edits first (e.g. subject renames, task / session / run, and
+        # mirror-less entities like acquisition / direction). Mirrors
+        # ``set_entity`` without re-emitting events: update the entities JSON,
+        # keep ``BIDS_name`` in sync with ``subject``, then rebuild mirror cells.
+        if "entities" in self._df.columns:
+            for rid, ents in state.entity_overrides.items():
+                r = index_for_rid.get(rid)
+                if r is None:
+                    continue
+                current = self.entities(r)
+                for ent, val in ents.items():
+                    if val:
+                        current[ent] = val
+                    else:
+                        current.pop(ent, None)
+                    if ent == "subject" and "BIDS_name" in self._df.columns:
+                        self._df.at[r, "BIDS_name"] = f"sub-{val}" if val else ""
+                self._df.at[r, "entities"] = json.dumps(current, sort_keys=True)
+                self._rebuild_one_row(r, direction="entities")
 
         for rid, cells in state.cell_overrides.items():
             r = index_for_rid.get(rid)
@@ -949,10 +982,9 @@ class InventoryTableModel(QAbstractTableModel):
 
     def _set_include(self, row: int, included: bool) -> None:
         """Persist a new include flag (event first, then DataFrame)."""
-        if self._project is not None:
-            self._project.append(
-                UserToggleInclude(row_id=self.row_id(row), include=included)
-            )
+        self._record_edit(
+            UserToggleInclude(row_id=self.row_id(row), include=included)
+        )
         if "include" not in self._df.columns:
             self._df["include"] = 1
         self._df.at[row, "include"] = 1 if included else 0
