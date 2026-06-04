@@ -145,7 +145,7 @@ class TestHappyPath:
         # Staging cleaned up.
         assert not (bids_parent / "study_a" / ".tmp_bidsmgr").exists()
 
-    def test_dataset_description_appends_on_rerun(
+    def test_dataset_description_generatedby_is_idempotent_on_rerun(
         self, tmp_path: Path, patch_subprocess,
     ) -> None:
         dicoms = _make_dicoms(tmp_path, "T1")
@@ -163,7 +163,30 @@ class TestHappyPath:
             (bids_parent / "study_a" / "dataset_description.json").read_text()
         )
         assert isinstance(dd["GeneratedBy"], list)
-        assert len(dd["GeneratedBy"]) == 2  # one entry per run
+        # Re-running convert into the same dataset (the incremental-conversion
+        # case) must NOT pile up duplicate identical bidsmgr stamps.
+        bidsmgr_entries = [g for g in dd["GeneratedBy"] if g.get("Name") == "bidsmgr"]
+        assert len(bidsmgr_entries) == 1
+
+    def test_dataset_description_uses_schema_bids_version(
+        self, tmp_path: Path, patch_subprocess,
+    ) -> None:
+        from bidsmgr.schema import bids_version as schema_bids_version
+
+        dicoms = _make_dicoms(tmp_path, "T1")
+        tsv = _write_inventory(
+            tmp_path,
+            [_row(series_uid="UID1", basename="sub-001_T1w")],
+            {"UID1": [str(p) for p in dicoms]},
+        )
+        bids_parent = tmp_path / "out"
+        run_convert(tsv, bids_parent, n_jobs=1)
+
+        dd = json.loads(
+            (bids_parent / "study_a" / "dataset_description.json").read_text()
+        )
+        # No hardcoded version: stamped value tracks the bundled schema.
+        assert dd["BIDSVersion"] == schema_bids_version()
 
     def test_provenance_has_dcm2niix_version(
         self, tmp_path: Path, patch_subprocess,

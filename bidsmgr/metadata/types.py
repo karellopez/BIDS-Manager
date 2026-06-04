@@ -13,6 +13,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..schema import bids_version as _schema_bids_version
+
 
 class DatasetMetadata(BaseModel):
     """Caller-supplied fields for ``dataset_description.json``.
@@ -25,7 +27,10 @@ class DatasetMetadata(BaseModel):
     model_config = ConfigDict(frozen=False)
 
     name: str = "Untitled BIDS Dataset"
-    bids_version: str = "1.10.0"
+    # Sourced from the bundled BIDS schema so the stamped version always
+    # matches the rules the rest of the tool validates against (no hardcoded
+    # version to drift out of date).
+    bids_version: str = Field(default_factory=_schema_bids_version)
     dataset_type: str = "raw"  # 'raw' | 'derivative'
     license: Optional[str] = None
     authors: list[str] = Field(default_factory=list)

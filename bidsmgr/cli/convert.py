@@ -71,6 +71,7 @@ from ..recording_meta import (
 )
 from ..util.cancel import OperationCancelled, is_cancelled
 from ..util.paths import long_path, safe_path_component
+from ._scaffold import ensure_bidsignore, ensure_dataset_description
 
 log = logging.getLogger(__name__)
 
@@ -213,7 +214,14 @@ def run_convert(
         bids_root = bids_parent / str(dataset_name)
         if not dry_run:
             bids_root.mkdir(parents=True, exist_ok=True)
-            _ensure_dataset_description(bids_root, dcm2niix_version)
+            ensure_dataset_description(bids_root, generated_by={
+                "Name": "bidsmgr",
+                "Version": bidsmgr.__version__,
+                "Description": "dcm2niix-direct backend",
+                "Container": {"Type": "binary", "Tag": dcm2niix_version},
+            })
+            # Keep .bidsmgr/ + .tmp_bidsmgr/ out of the official bids-validator.
+            ensure_bidsignore(bids_root)
 
         for subject, subject_df in dataset_df.groupby("BIDS_name", sort=True):
             # Stop here if the user requested it. Subjects committed before
@@ -900,35 +908,6 @@ def _load_files_by_uid_sidecar(
 # ---------------------------------------------------------------------------
 # Provenance + error log
 # ---------------------------------------------------------------------------
-
-
-def _ensure_dataset_description(bids_root: Path, dcm2niix_version: str) -> None:
-    """Create or append-update ``dataset_description.json`` ``GeneratedBy``."""
-    p = bids_root / "dataset_description.json"
-    if p.exists():
-        try:
-            data = json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = {}
-    else:
-        data = {}
-
-    data.setdefault("Name", bids_root.name)
-    data.setdefault("BIDSVersion", "1.10.0")
-    data.setdefault("DatasetType", "raw")
-
-    generated_by = data.get("GeneratedBy")
-    if not isinstance(generated_by, list):
-        generated_by = []
-    generated_by.append({
-        "Name": "bidsmgr",
-        "Version": bidsmgr.__version__,
-        "Description": "dcm2niix-direct backend",
-        "Container": {"Type": "binary", "Tag": dcm2niix_version},
-    })
-    data["GeneratedBy"] = generated_by
-
-    p.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def _write_provenance(

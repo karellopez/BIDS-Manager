@@ -1266,6 +1266,84 @@ def _write_files_by_uid_sidecar(output_tsv: Path, files_by_uid: dict[str, list[s
     return sidecar
 
 
+# Marker prepended to ``proposed_issues`` for a row whose scan pooled multiple
+# distinct DICOM StudyDescriptions. This routes the heads-up through the
+# existing severity system: the GUI inventory model classifies any non-error
+# ``proposed_issues`` note as a ``warn`` row, so these rows count toward the
+# "warnings" chip and appear in the Issues dialog. Awareness-only: the row is
+# NOT excluded or altered, and it still converts. The wording deliberately
+# avoids the error-token substrings the model treats as fatal
+# (``required`` / ``missing`` / ``build_basename`` / ``suspected_abort``).
+MIXED_STUDY_ISSUE_TOKEN = "multiple studies in scan"
+
+
+def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
+    """Flag rows (and log) when one scan pooled multiple DICOM StudyDescriptions.
+
+    Several distinct StudyDescriptions in a single scanned source usually mean
+    two studies were pooled together, or the protocol changed mid-acquisition.
+    StudyDescription is not a BIDS entity and is deliberately not shown as a GUI
+    column, so the heads-up is surfaced two ways instead: a one-line summary on
+    the ``bidsmgr.cli.scan`` logger (the CLI surface, also the GUI Log dock), and
+    a non-fatal note appended to each affected row's ``proposed_issues`` so the
+    rows read as ``warn`` in the inventory table, count toward the warnings chip,
+    and list in the Issues dialog (the GUI surface the user already knows).
+    Nothing is excluded or rewritten. EEG/MEG rows have no StudyDescription and
+    are ignored.
+    """
+    if "StudyDescription" not in df.columns:
+        return
+    studies = df["StudyDescription"].astype(str).str.strip()
+    present = studies != ""
+    if not present.any():
+        return
+    distinct = sorted(studies[present].unique())
+    if len(distinct) <= 1:
+        return
+
+    # CLI / Log-dock surface: one summary line.
+    counts = studies[present].value_counts()
+    summary = ", ".join(f"'{name}' ({int(counts[name])} series)" for name in distinct)
+    log.warning(
+        "Multiple distinct DICOM StudyDescriptions found in this scan: %s. "
+        "This usually means two studies were pooled or the protocol changed. "
+        "If these are separate studies, scan each into its own dataset.",
+        summary,
+    )
+
+    # GUI severity-system surface: append a per-row warning note so each affected
+    # row shows up in the warnings chip + Issues dialog.
+    if "proposed_issues" in df.columns:
+        for df_idx in df.index[present]:
+            this_study = studies.at[df_idx]
+            others = ", ".join(f"'{s}'" for s in distinct if s != this_study)
+            note = (
+                f"{MIXED_STUDY_ISSUE_TOKEN}: this series is '{this_study}'; "
+                f"scan also contains {others}"
+            )
+            existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
+            df.at[df_idx, "proposed_issues"] = (
+                f"{existing} | {note}" if existing else note
+            )
+
+    # The strongest signal is a single subject spanning more than one study.
+    if "BIDS_name" in df.columns:
+        sub = df.loc[present, ["BIDS_name", "StudyDescription"]].copy()
+        sub["BIDS_name"] = sub["BIDS_name"].astype(str).str.strip()
+        sub = sub[sub["BIDS_name"] != ""]
+        for name, grp in sub.groupby("BIDS_name"):
+            subj_studies = sorted(
+                grp["StudyDescription"].astype(str).str.strip().unique()
+            )
+            if len(subj_studies) > 1:
+                log.warning(
+                    "  subject %s spans %d StudyDescriptions: %s",
+                    name,
+                    len(subj_studies),
+                    ", ".join(f"'{s}'" for s in subj_studies),
+                )
+
+
 def run_scan(
     dicom_root: Path,
     output_tsv: Path,
@@ -1424,6 +1502,12 @@ def run_scan(
     # EEG/MEG rows and stamp the same proposed_issues cell after non-image
     # flagging (mutates in place; reversible).
     _apply_user_exclusions(merged, exclusions)
+
+    # Heads-up (warnings chip + Issues dialog + log) if the scan pooled
+    # multiple DICOM studies. Runs after non-image flagging + user exclusions
+    # so it only appends to proposed_issues and never downgrades a more severe
+    # row state.
+    _flag_mixed_study_descriptions(merged)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,

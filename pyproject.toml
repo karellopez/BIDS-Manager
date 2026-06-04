@@ -109,6 +109,7 @@ Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 # ``import sklearn``).
 [project.scripts]
 bidsmgr           = "bidsmgr.main:main"
+bidsmgr-create    = "bidsmgr.cli.create:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"

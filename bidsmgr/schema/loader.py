@@ -28,7 +28,7 @@ def get_schema(version: Optional[str] = None) -> Namespace:
     Parameters
     ----------
     version
-        Schema version to load (e.g. ``"1.10.0"``). Currently ignored; we
+        Schema version to load (e.g. ``"1.11.1"``). Currently ignored; we
         always load the version that ships with the installed
         ``bidsschematools``. Will be honoured against ``bundled/`` once the
         per-project pinning policy lands.

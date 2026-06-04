@@ -124,6 +124,32 @@ class TestDatasetDescription:
         assert dd["Funding"] == ["NIH-12345"]
         assert dd["DatasetDOI"] == "10.1234/x"
 
+    def test_metadata_preserves_existing_name_without_explicit_name(
+        self, tmp_path: Path,
+    ) -> None:
+        # A Name set by `bidsmgr create` / hand-edit must survive a metadata run
+        # that did not pass an explicit name (no clobber to the folder name).
+        root = _make_minimal_bids(tmp_path)  # folder is named "study"
+        p = root / "dataset_description.json"
+        data = json.loads(p.read_text())
+        data["Name"] = "Human Chosen Name"
+        p.write_text(json.dumps(data))
+
+        run_metadata(root)  # no dataset_meta, no name
+
+        assert json.loads(p.read_text())["Name"] == "Human Chosen Name"
+
+    def test_metadata_falls_back_to_folder_name_when_none_on_disk(
+        self, tmp_path: Path,
+    ) -> None:
+        # Fresh dataset with no Name on disk + no explicit name => folder name.
+        root = tmp_path / "my_dataset"
+        (root / "sub-001" / "anat").mkdir(parents=True)
+        _write_pair(root / "sub-001" / "anat", "sub-001_T1w", sidecar={})
+        run_metadata(root)
+        dd = json.loads((root / "dataset_description.json").read_text())
+        assert dd["Name"] == "my_dataset"
+
     def test_user_edits_not_clobbered(self, tmp_path: Path) -> None:
         """A field added by the user is preserved across a metadata rerun."""
         root = _make_minimal_bids(tmp_path)

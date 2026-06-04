@@ -152,11 +152,15 @@ def run_metadata(
     if not bids_root.is_dir():
         raise FileNotFoundError(f"BIDS root not found: {bids_root}")
 
-    meta = dataset_meta or DatasetMetadata(name=bids_root.name)
-    if meta.name == "Untitled BIDS Dataset":
-        # Caller supplied an empty DatasetMetadata; use the directory name
-        # so dataset_description.json reads sensibly.
-        meta = meta.model_copy(update={"name": bids_root.name})
+    meta = dataset_meta or DatasetMetadata()
+    # Resolve the dataset Name without clobbering one already on disk. An
+    # explicit caller-supplied Name wins; otherwise preserve an existing
+    # dataset_description.json Name (set by ``bidsmgr create`` or hand-edited);
+    # else fall back to the folder name. A metadata run with no ``--name`` must
+    # not overwrite a Name the user already chose.
+    if meta.name in (None, "", "Untitled BIDS Dataset"):
+        resolved = _existing_dataset_name(bids_root) or bids_root.name
+        meta = meta.model_copy(update={"name": resolved})
 
     report = MetadataReport(
         bidsmgr_version=str(getattr(bidsmgr, "__version__", "0.0.0")),
@@ -187,6 +191,23 @@ def run_metadata(
 # ---------------------------------------------------------------------------
 # dataset_description.json
 # ---------------------------------------------------------------------------
+
+
+def _existing_dataset_name(bids_root: Path) -> Optional[str]:
+    """Return the ``Name`` from an existing ``dataset_description.json``, if any.
+
+    Used so a metadata run with no explicit ``--name`` preserves a Name the user
+    already set (via ``bidsmgr create`` or by hand) instead of overwriting it.
+    """
+    p = bids_root / "dataset_description.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    name = data.get("Name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name.strip() else None
 
 
 def _write_dataset_description(

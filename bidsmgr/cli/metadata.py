@@ -36,7 +36,7 @@ def run_metadata_cli(
     dataset: Optional[str] = None,
     inventory_tsv: Optional[Path] = None,
     name: Optional[str] = None,
-    bids_version: str = "1.10.0",
+    bids_version: Optional[str] = None,
     license: Optional[str] = None,
     authors: Optional[list[str]] = None,
     acknowledgements: Optional[str] = None,
@@ -72,8 +72,13 @@ def run_metadata_cli(
     n_failed = 0
     for bids_root in bids_roots:
         meta = DatasetMetadata(
-            name=name or bids_root.name,
-            bids_version=bids_version,
+            # Omit name when unset so the engine preserves an existing
+            # dataset_description Name (e.g. from `bidsmgr create`) instead of
+            # overwriting it with the folder name.
+            **({"name": name} if name else {}),
+            # Omit when unset so DatasetMetadata's schema-sourced default
+            # applies (no hardcoded BIDS version anywhere).
+            **({"bids_version": bids_version} if bids_version else {}),
             license=license,
             authors=list(authors or []),
             acknowledgements=acknowledgements,
@@ -231,7 +236,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--name", default=None,
         help="Dataset Name (defaults to the BIDS root directory name).",
     )
-    parser.add_argument("--bids-version", default="1.10.0")
+    parser.add_argument(
+        "--bids-version", default=None,
+        help="BIDS version for dataset_description.json (defaults to the "
+             "bundled schema's version).",
+    )
     parser.add_argument("--license", default=None)
     parser.add_argument(
         "--author", action="append", dest="authors", default=None,
