@@ -299,10 +299,12 @@ class TestFilteringAndDryRun:
 # ---------------------------------------------------------------------------
 
 
-class TestAtomicCommit:
-    def test_skip_when_target_exists_no_overwrite(
+class TestMergeCommit:
+    def test_merge_adds_new_files_keeps_existing_no_overwrite(
         self, tmp_path: Path, patch_subprocess,
     ) -> None:
+        # Incremental: an existing subject is merged into, not skipped. New files
+        # (anat/) are added; non-colliding existing content is left untouched.
         dicoms = _make_dicoms(tmp_path, "T1")
         tsv = _write_inventory(
             tmp_path,
@@ -310,17 +312,16 @@ class TestAtomicCommit:
             {"UID1": [str(p) for p in dicoms]},
         )
         bids_parent = tmp_path / "out"
-        # Pre-create the target.
-        (bids_parent / "study_a" / "sub-001").mkdir(parents=True)
-        (bids_parent / "study_a" / "sub-001" / "PRE-EXISTING").write_text("x")
+        sub = bids_parent / "study_a" / "sub-001"
+        sub.mkdir(parents=True)
+        (sub / "PRE-EXISTING").write_text("x")
 
         rc = run_convert(tsv, bids_parent, n_jobs=1)
         assert rc == 0
-        # Pre-existing content untouched; no anat/ written.
-        assert (bids_parent / "study_a" / "sub-001" / "PRE-EXISTING").exists()
-        assert not (bids_parent / "study_a" / "sub-001" / "anat").exists()
+        assert (sub / "PRE-EXISTING").read_text() == "x"     # kept
+        assert (sub / "anat" / "sub-001_T1w.nii.gz").exists()  # new file merged in
 
-    def test_overwrite_backs_up_existing(
+    def test_merge_keeps_colliding_file_without_overwrite(
         self, tmp_path: Path, patch_subprocess,
     ) -> None:
         dicoms = _make_dicoms(tmp_path, "T1")
@@ -330,19 +331,41 @@ class TestAtomicCommit:
             {"UID1": [str(p) for p in dicoms]},
         )
         bids_parent = tmp_path / "out"
-        old_target = bids_parent / "study_a" / "sub-001"
-        old_target.mkdir(parents=True)
-        (old_target / "OLD").write_text("preserved")
+        anat = bids_parent / "study_a" / "sub-001" / "anat"
+        anat.mkdir(parents=True)
+        (anat / "sub-001_T1w.nii.gz").write_text("ORIGINAL")  # collides
+
+        run_convert(tsv, bids_parent, n_jobs=1)  # no overwrite
+        # Existing file is preserved; nothing backed up.
+        assert (anat / "sub-001_T1w.nii.gz").read_text() == "ORIGINAL"
+        assert not (bids_parent / "study_a" / ".bidsmgr" / "backup").exists()
+
+    def test_overwrite_backs_up_only_colliding_files(
+        self, tmp_path: Path, patch_subprocess,
+    ) -> None:
+        dicoms = _make_dicoms(tmp_path, "T1")
+        tsv = _write_inventory(
+            tmp_path,
+            [_row(series_uid="UID1", basename="sub-001_T1w")],
+            {"UID1": [str(p) for p in dicoms]},
+        )
+        bids_parent = tmp_path / "out"
+        sub = bids_parent / "study_a" / "sub-001"
+        (sub / "anat").mkdir(parents=True)
+        (sub / "anat" / "sub-001_T1w.nii.gz").write_text("OLD-T1")  # collides
+        (sub / "OTHER-SESSION-FILE").write_text("keep me")          # no collision
 
         run_convert(tsv, bids_parent, n_jobs=1, overwrite=True)
 
-        # New tree present.
-        assert (old_target / "anat" / "sub-001_T1w.nii.gz").exists()
-        # Old content moved to backup.
-        backup_root = bids_parent / "study_a" / ".bidsmgr" / "backup"
-        backups = list(backup_root.glob("sub-001_*"))
+        # Colliding file replaced; non-colliding existing content untouched.
+        # (The converted .nii.gz is gzipped binary, so compare bytes.)
+        assert (sub / "anat" / "sub-001_T1w.nii.gz").read_bytes() != b"OLD-T1"
+        assert (sub / "OTHER-SESSION-FILE").read_text() == "keep me"
+        # Only the colliding file is in the backup.
+        backups = list((sub.parent / ".bidsmgr" / "backup").glob("sub-001_*"))
         assert len(backups) == 1
-        assert (backups[0] / "OLD").read_text() == "preserved"
+        assert (backups[0] / "anat" / "sub-001_T1w.nii.gz").read_bytes() == b"OLD-T1"
+        assert not (backups[0] / "OTHER-SESSION-FILE").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -13,8 +13,10 @@ Pipeline per (dataset, subject, session)::
               - fixups.scans_tsv.update_scans_tsv (no-op today)
               - fixups.intended_for.populate_intended_for
 
-    Phase 3   sequential per-subject atomic commit:
-              os.rename(<staging>/sub-<id>, <bids_root>/sub-<id>)
+    Phase 3   sequential per-subject merge commit:
+              new subject  -> os.rename(<staging>/sub-<id>, <bids_root>/sub-<id>)
+              existing subject -> merge staged files in (add new ses/datatype;
+              keep or, with --overwrite, back-up-and-replace colliding files)
 
 Failure handling: per-series failures don't abort the subject; per-subject
 post-conv or atomic-commit failures write a JSON error log to
@@ -322,7 +324,7 @@ def _convert_subject(
         # built for the staging dir so the commit target name is
         # consistent across OSes.
         target = bids_root / subj_segment
-        _atomic_commit(staging, target, overwrite=overwrite)
+        _merge_commit(staging, target, overwrite=overwrite)
         _write_provenance(
             target, results, rename_map, n_intended_for, n_scans_tsv,
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
@@ -509,31 +511,54 @@ def _prune_empty_dirs(root: Path) -> None:
                 pass
 
 
-def _atomic_commit(staging_subject: Path, target: Path, *, overwrite: bool) -> None:
-    """Move ``staging_subject`` onto ``target`` atomically.
+def _merge_commit(staging_subject: Path, target: Path, *, overwrite: bool) -> None:
+    """Commit a staged subject into the dataset, merging into an existing one.
 
-    POSIX ``os.rename`` is atomic within a filesystem and refuses to
-    overwrite a non-empty target. When the target exists:
+    A brand-new subject is moved in wholesale via the atomic ``os.rename`` fast
+    path. When the subject already exists, the staged tree is merged FILE BY FILE
+    so adding a new session or datatype lands beside the existing data instead of
+    replacing the whole subject (the incremental-conversion case):
 
-    * ``overwrite=False`` → log + skip (staging gets wiped by caller).
-    * ``overwrite=True``  → move existing target aside to
-      ``<bids_root>/.bidsmgr/backup/sub-<id>_<utcstamp>/`` then rename.
+    * a staged file with no counterpart on disk is always moved in (the add);
+    * a staged file that collides with an existing one is left untouched when
+      ``overwrite`` is False (existing data is never overwritten), or backed up to
+      ``<bids_root>/.bidsmgr/backup/<sub>_<utcstamp>/<relpath>`` and replaced when
+      ``overwrite`` is True.
+
+    Atomicity drops from subject-level to per-file on the merge path; any replaced
+    file is backed up first, so an interrupted merge can be reconstructed.
     """
-    if target.exists():
-        if not overwrite:
-            log.warning(
-                "target %s already exists; skipping subject (use --overwrite to replace)",
-                target,
-            )
-            return
-        backup_root = target.parent / ".bidsmgr" / "backup"
-        backup_root.mkdir(parents=True, exist_ok=True)
-        backup = backup_root / f"{target.name}_{_utc_stamp()}"
-        shutil.move(str(target), str(backup))
-        log.info("backed up existing %s to %s", target, backup)
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(staging_subject, target)
+        return
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    os.rename(staging_subject, target)
+    backup_dir = target.parent / ".bidsmgr" / "backup" / f"{target.name}_{_utc_stamp()}"
+    added = replaced = kept = 0
+    for src in sorted(staging_subject.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(staging_subject)
+        dst = target / rel
+        if dst.exists():
+            if overwrite:
+                bdst = backup_dir / rel
+                bdst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dst), str(bdst))
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                replaced += 1
+            else:
+                kept += 1  # existing file wins; staged copy dropped with staging
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            added += 1
+    log.info(
+        "merged into existing %s: %d added, %d replaced, %d kept%s",
+        target, added, replaced, kept,
+        "" if not kept else " (use --overwrite to replace the kept files)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1072,8 +1097,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--overwrite", action="store_true",
         help=(
-            "Replace existing sub-<id>/ folders. Existing content is moved "
-            "to <bids_root>/.bidsmgr/backup/ before the new tree lands."
+            "When a subject already exists, replace colliding files (each is "
+            "backed up to <bids_root>/.bidsmgr/backup/ first). Without this, an "
+            "existing subject is merged into: new sessions/datatypes are added "
+            "and colliding files are kept untouched."
         ),
     )
     parser.add_argument(
