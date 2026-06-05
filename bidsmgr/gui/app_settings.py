@@ -42,7 +42,8 @@ KEYS = {
     "scan_skip_bids_guess": "scan/skip_bids_guess",
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
-    "convert_overwrite":  "convert/overwrite",
+    "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
+    "convert_on_existing": "convert/on_existing",    # skip|update|replace|error
     "convert_skip_residuals": "convert/skip_residuals",
     # Scan rules (user-extensible classifier hints + series exclusions).
     # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
@@ -114,7 +115,11 @@ class AppSettings:
 
     # Convert defaults
     convert_n_jobs: int = 1
-    convert_overwrite: bool = False
+    convert_overwrite: bool = False  # legacy; migrated into convert_on_existing
+    # Policy when an incoming subject already exists during convert:
+    # skip (default, keep existing) | update (replace changed) | replace
+    # (back up + replace colliding) | error (abort on any collision).
+    convert_on_existing: str = "skip"
     # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
     # ``..._bold``). Default on: they are derived duplicates, not real images.
     convert_skip_residuals: bool = True
@@ -247,6 +252,14 @@ class AppSettings:
         out.convert_n_jobs = _as_int(s.value(KEYS["convert_n_jobs"]), out.convert_n_jobs)
         out.convert_overwrite = _as_bool(s.value(KEYS["convert_overwrite"]),
                                           out.convert_overwrite)
+        # Migrate the legacy overwrite checkbox: if no explicit policy is stored
+        # but overwrite was on, default the policy to "replace".
+        out.convert_on_existing = _as_str(
+            s.value(KEYS["convert_on_existing"]),
+            "replace" if out.convert_overwrite else "skip",
+        )
+        if out.convert_on_existing not in ("skip", "update", "replace", "error"):
+            out.convert_on_existing = "skip"
         out.convert_skip_residuals = _as_bool(
             s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
         )
@@ -309,6 +322,7 @@ class AppSettings:
             ("editor_strict_validate",   self.editor_strict_validate),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
+        s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["skipped_update_version"], self.skipped_update_version)
         s.setValue(KEYS["font_scale"], float(self.font_scale))
         s.setValue(KEYS["header_logo"], self.header_logo)

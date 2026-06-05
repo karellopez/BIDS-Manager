@@ -28,7 +28,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QLabel,
@@ -97,8 +97,32 @@ def _is_folder_recording(name: str) -> bool:
     return name.lower().endswith(_FOLDER_RECORDING_SUFFIXES)
 
 
-def _walk(folder: Path, parent_item: QTreeWidgetItem, *, depth: int) -> None:
-    """Populate ``parent_item`` with the contents of ``folder``."""
+def _norm_path(p) -> str:
+    """Resolve a path to a comparable string.
+
+    Resolving both sides means macOS ``/private/var/...`` vs ``/var/...``
+    symlink differences between the tree paths and the validation report paths
+    don't cause spurious badge misses.
+    """
+    try:
+        return str(Path(p).resolve())
+    except OSError:
+        return str(Path(p))
+
+
+def _walk(
+    folder: Path,
+    parent_item: QTreeWidgetItem,
+    *,
+    depth: int,
+    dirs: Optional[list[str]] = None,
+) -> None:
+    """Populate ``parent_item`` with the contents of ``folder``.
+
+    When ``dirs`` is supplied, every directory recursed into is appended to it
+    so the caller can register them with a ``QFileSystemWatcher`` for live
+    refresh (mirrors the Converter's output tree).
+    """
     if depth >= _MAX_DEPTH:
         return
     try:
@@ -127,7 +151,9 @@ def _walk(folder: Path, parent_item: QTreeWidgetItem, *, depth: int) -> None:
         parent_item.addChild(item)
         # Recurse only into real directories that are not folder-recordings.
         if is_dir and not _is_folder_recording(entry.name):
-            _walk(Path(entry.path), item, depth=depth + 1)
+            if dirs is not None:
+                dirs.append(entry.path)
+            _walk(Path(entry.path), item, depth=depth + 1, dirs=dirs)
 
 
 class BidsTreePane(QWidget):
@@ -144,6 +170,22 @@ class BidsTreePane(QWidget):
         super().__init__(parent)
         self.setObjectName("pane")
         self._root: Optional[Path] = None
+        # Remember the last severity badges so a live (watcher-driven) refresh
+        # re-applies them onto the freshly-walked items instead of dropping
+        # them. Keyed by normalised absolute path string.
+        self._last_badges: dict[str, str] = {}
+
+        # Live refresh: every visible directory is registered with a
+        # ``QFileSystemWatcher`` so files created / deleted / renamed under the
+        # BIDS root update the tree without a manual reopen (parity with the
+        # Converter's output tree). Bursts of events (e.g. a conversion writing
+        # into the open dataset) are coalesced through a 500 ms debounce.
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(self._on_fs_changed)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(500)
+        self._refresh_timer.timeout.connect(self.refresh)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -189,36 +231,153 @@ class BidsTreePane(QWidget):
     def set_root(self, path: Optional[Path]) -> None:
         """Switch the tree to a new BIDS root (or clear it with ``None``).
 
-        Repopulates synchronously. Datasets are small enough that the
-        walk completes well under a frame on any modern disk; if that
-        ever stops being true we can swap to the threadpool pattern
-        ``OutputFsPane`` uses.
+        Re-setting the SAME root (e.g. the editor re-opening the dataset it is
+        already showing) preserves the user's expansion / selection by routing
+        through :meth:`refresh`, exactly like the Converter's output tree. Only
+        a genuinely new root forgets badges + expansion and opens to depth 2.
+
+        Repopulates synchronously. Datasets are small enough that the walk
+        completes well under a frame on any modern disk; if that ever stops
+        being true we can swap to the threadpool pattern ``OutputFsPane`` uses.
         """
+        if (
+            path is not None
+            and self._root is not None
+            and Path(path) == self._root
+            and self._tree.topLevelItemCount() > 0
+        ):
+            # Same root, already rendered -> in-place refresh (keep the view).
+            self.refresh()
+            return
+
+        self._clear_watcher()
         self._tree.clear()
         if path is None or not path.exists() or not path.is_dir():
             self._root = None
+            self._last_badges = {}
             self._stack.setCurrentIndex(0)
             return
 
         self._root = path
+        self._last_badges = {}  # new root -> stale badges no longer apply
+        dirs = self._populate(path)
+        self._watch(dirs)
+        self._tree.expandToDepth(2)
+        self._stack.setCurrentIndex(1)
+
+    def refresh(self) -> None:
+        """Re-walk the current root, preserving the user's view.
+
+        Unlike :meth:`set_root`, this keeps whatever the user had expanded /
+        selected (and the scroll position) and re-applies the last severity
+        badges, so a live filesystem change does not collapse the tree or wipe
+        validation markers. No-op if no root is set.
+        """
+        if self._root is None:
+            return
+        snap = self._snapshot_state()
+        self._clear_watcher()
+        # Block selection signals so re-selecting the same row after the rebuild
+        # does not spuriously reload the center viewer on every disk tick.
+        self._tree.blockSignals(True)
+        try:
+            self._tree.clear()
+            if not self._root.exists() or not self._root.is_dir():
+                self._root = None
+                self._stack.setCurrentIndex(0)
+                return
+            dirs = self._populate(self._root)
+            self._watch(dirs)
+            self._restore_state(snap)
+        finally:
+            self._tree.blockSignals(False)
+        # Re-apply badges from the cache (validation has not re-run, but the
+        # markers are still valid for files that survived the change).
+        if self._last_badges:
+            self._apply_badge_map(self._last_badges)
+
+    def _populate(self, path: Path) -> list[str]:
+        """Build the tree under ``path`` and return the dirs to watch."""
+        pal = CUR()
         # Top-level item carries the dataset name. We do NOT colour it
         # as a directory — the dataset root is the user's anchor, so
         # we paint it in the default text token.
-        pal = CUR()
         top = QTreeWidgetItem([path.name or str(path)])
         top.setData(0, PATH_ROLE, str(path))
         top.setData(0, COLOR_TOKEN_ROLE, "text")
         top.setForeground(0, QColor(pal["text"]))
         top.setIcon(0, icons.icon_for_path(path.name or str(path), is_dir=True))
         self._tree.addTopLevelItem(top)
-        _walk(path, top, depth=0)
-        self._tree.expandToDepth(2)
+        dirs: list[str] = [str(path)]
+        _walk(path, top, depth=0, dirs=dirs)
         self._stack.setCurrentIndex(1)
+        return dirs
 
-    def refresh(self) -> None:
-        """Re-walk the current root from disk. No-op if no root is set."""
-        if self._root is not None:
-            self.set_root(self._root)
+    # ------------------------------------------------------------------
+    # Live refresh (QFileSystemWatcher)
+    # ------------------------------------------------------------------
+
+    def _watch(self, dirs: list[str]) -> None:
+        if dirs:
+            self._watcher.addPaths(dirs)
+
+    def _clear_watcher(self) -> None:
+        existing = self._watcher.directories()
+        if existing:
+            self._watcher.removePaths(existing)
+
+    def _on_fs_changed(self, _path: str) -> None:
+        """A watched directory changed — schedule one debounced refresh."""
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    # ------------------------------------------------------------------
+    # View-state preservation across an in-place refresh
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _item_key(item: QTreeWidgetItem) -> str:
+        """Stable identity for a row across rebuilds (its absolute path)."""
+        return str(item.data(0, PATH_ROLE) or "")
+
+    def _snapshot_state(self) -> dict:
+        """Capture expanded paths + current selection + scroll position."""
+        snap: dict = {
+            "expanded": set(),
+            "selected": None,
+            "scroll": self._tree.verticalScrollBar().value(),
+        }
+        cur = self._tree.currentItem()
+        if cur is not None:
+            snap["selected"] = self._item_key(cur)
+
+        def _walk_items(item: QTreeWidgetItem) -> None:
+            if item.isExpanded():
+                snap["expanded"].add(self._item_key(item))
+            for i in range(item.childCount()):
+                _walk_items(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            _walk_items(self._tree.topLevelItem(i))
+        return snap
+
+    def _restore_state(self, snap: dict) -> None:
+        """Re-apply expansion / selection / scroll captured by a snapshot."""
+        expanded: set = snap["expanded"]
+        selected = snap["selected"]
+
+        def _walk_items(item: QTreeWidgetItem) -> None:
+            key = self._item_key(item)
+            if key in expanded:
+                item.setExpanded(True)
+            if selected is not None and key == selected:
+                self._tree.setCurrentItem(item)
+            for i in range(item.childCount()):
+                _walk_items(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            _walk_items(self._tree.topLevelItem(i))
+        self._tree.verticalScrollBar().setValue(snap["scroll"])
 
     def set_badges(self, severities: dict[Path, str]) -> None:
         """Stamp per-row severity badges from a path → severity map.
@@ -229,17 +388,15 @@ class BidsTreePane(QWidget):
         their visible descendants.
         """
         # Build a normalised lookup (string form) so we don't have to
-        # construct ``Path`` for every tree item. We resolve every key
-        # so macOS ``/private/var/...`` vs ``/var/...`` symlink
-        # differences between the tree paths and the report paths
-        # don't cause spurious misses.
-        def _norm(p) -> str:
-            try:
-                return str(Path(p).resolve())
-            except OSError:
-                return str(Path(p))
+        # construct ``Path`` for every tree item.
+        leaf_map = {_norm_path(p): s for p, s in severities.items()}
+        # Remember so a live (watcher-driven) refresh can re-stamp the rebuilt
+        # tree without re-running validation.
+        self._last_badges = dict(leaf_map)
+        self._apply_badge_map(leaf_map)
 
-        leaf_map = {_norm(p): s for p, s in severities.items()}
+    def _apply_badge_map(self, leaf_map: dict[str, str]) -> None:
+        """Stamp a normalised path -> severity map onto the current tree."""
 
         def visit(item: QTreeWidgetItem) -> str | None:
             """Set this item's badge; return the rolled-up severity for
@@ -259,7 +416,7 @@ class BidsTreePane(QWidget):
             else:
                 # Leaf: look up by absolute path (normalised).
                 path_str = item.data(0, PATH_ROLE)
-                badge = leaf_map.get(_norm(path_str)) if path_str else None
+                badge = leaf_map.get(_norm_path(path_str)) if path_str else None
             if badge:
                 item.setData(0, BADGE_ROLE, badge)
             else:
@@ -272,7 +429,8 @@ class BidsTreePane(QWidget):
         self._tree.viewport().update()
 
     def clear_badges(self) -> None:
-        """Remove every badge from the tree."""
+        """Remove every badge from the tree (and forget the cached map)."""
+        self._last_badges = {}
         def visit(item: QTreeWidgetItem) -> None:
             item.setData(0, BADGE_ROLE, None)
             for i in range(item.childCount()):

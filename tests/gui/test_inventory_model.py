@@ -107,6 +107,13 @@ def _physio_row(**overrides) -> dict:
         BIDS_name="sub-002",
         session="ses-post",
         task="mb",
+        # func/physio requires a task entity; keep the entities JSON in sync
+        # with the mirror cells so live validation reads the row as valid
+        # (status "phys") rather than flagging a missing task.
+        entities=json.dumps(
+            {"subject": "002", "session": "post", "task": "mb"},
+            sort_keys=True,
+        ),
         **overrides,
     )
 
@@ -294,6 +301,83 @@ def test_status_kind_noimg_for_nonimage_series() -> None:
     model = InventoryTableModel(df)
     status_col = next(i for i, c in enumerate(COLUMNS) if c.key == "status")
     assert model.data(model.index(0, status_col), PAYLOAD_ROLE) == "noimg"
+
+
+# ---------------------------------------------------------------------------
+# Live entity-validation (recomputed on every edit)
+# ---------------------------------------------------------------------------
+
+
+def _task_col() -> int:
+    return next(i for i, c in enumerate(COLUMNS) if c.key == "task")
+
+
+def _func_row_missing_task(**overrides) -> dict:
+    """A func/bold row whose entities lack the required task entity."""
+    row = _func_row(**overrides)
+    row["entities"] = json.dumps({"subject": "001", "session": "pre"}, sort_keys=True)
+    row["task"] = ""
+    return row
+
+
+def test_live_validation_flags_func_bold_missing_task() -> None:
+    """A func/bold row whose entities lack the required task reads as err
+    at load (live validation runs on construction, not just on edit)."""
+    df = make_df([_func_row_missing_task()])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "err"
+
+
+def test_live_validation_clears_error_when_user_supplies_task() -> None:
+    """Editing the missing task to a real value re-validates the row to
+    valid (the chips track the fix)."""
+    df = make_df([_func_row_missing_task()])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "err"
+    assert model.setData(model.index(0, _task_col()), "rest") is True
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == ""
+
+
+def test_live_validation_introduces_error_when_user_clears_task() -> None:
+    """Clearing a required task on a valid row flips it back to err."""
+    df = make_df([_func_row()])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == ""
+    assert model.setData(model.index(0, _task_col()), "") is True
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "err"
+
+
+def test_revalidate_all_recomputes_states_after_external_change() -> None:
+    """``revalidate_all`` picks up a change made directly to the DataFrame
+    (an edit path that bypassed setData) -- the Re-validate button's engine."""
+    df = make_df([_func_row()])
+    model = InventoryTableModel(df)
+    assert model.row_state(0) == ""
+    # Mutate the underlying frame directly (no setData / refresh_row).
+    model.dataframe().at[0, "task"] = ""
+    model.dataframe().at[0, "entities"] = json.dumps(
+        {"subject": "001", "session": "pre"}, sort_keys=True,
+    )
+    assert model.row_state(0) == ""  # still stale (no recompute yet)
+    model.revalidate_all()
+    assert model.row_state(0) == "err"  # now reflects the missing task
+
+
+def test_live_validation_preserves_static_scan_notes() -> None:
+    """Recomputing the validation segment must not drop static scan notes
+    (suspected_abort, B0 reroute, collision hints, ...)."""
+    note = "rerouted to fmap/epi: SeriesDescription contains a B0 marker"
+    row = _func_row_missing_task()
+    row["proposed_issues"] = note
+    df = make_df([row])
+    model = InventoryTableModel(df)
+    # Loaded: static note + fresh "task required" error coexist.
+    issues = model.dataframe().at[0, "proposed_issues"]
+    assert note in issues and "required" in issues.lower()
+    # After the user supplies the task, only the static note remains.
+    model.setData(model.index(0, _task_col()), "rest")
+    issues = model.dataframe().at[0, "proposed_issues"]
+    assert issues == note
 
 
 def test_tooltip_surfaces_proposed_issues() -> None:

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import filecmp
 import gzip
 import json
 import logging
@@ -95,6 +96,7 @@ def run_convert(
     dataset: Optional[str] = None,
     n_jobs: int = 1,
     overwrite: bool = False,
+    on_existing: Optional[str] = None,
     dry_run: bool = False,
     dcm2niix_bin: Optional[Path] = None,
     recording_meta: Optional[Path] = None,
@@ -119,6 +121,17 @@ def run_convert(
     """
     tsv = Path(tsv)
     bids_parent = Path(bids_parent)
+
+    # Resolve the existing-subject policy. ``--overwrite`` is the back-compat
+    # alias for ``replace``; the default is the safe-by-default ``skip`` (merge
+    # new files, never touch existing ones).
+    if on_existing is None:
+        on_existing = "replace" if overwrite else "skip"
+    if on_existing not in ("skip", "update", "replace", "error"):
+        raise ValueError(
+            f"invalid on_existing {on_existing!r}; "
+            "expected skip / update / replace / error"
+        )
 
     # One-line version banner so a user's conversion log unambiguously
     # records which copy of the package executed (matters when the same
@@ -205,6 +218,9 @@ def run_convert(
     dcm2niix_version = _dcm2niix_version_string(primary.binary)
 
     n_failed = 0
+    n_new = 0
+    n_merged = 0
+    n_collision = 0
     cancelled = False
     for dataset_name, dataset_df in df.groupby("dataset"):
         if cancelled:
@@ -224,6 +240,9 @@ def run_convert(
             })
             # Keep .bidsmgr/ + .tmp_bidsmgr/ out of the official bids-validator.
             ensure_bidsignore(bids_root)
+            # Pre-convert collision summary: which incoming subjects already
+            # exist on disk (incremental add into an existing dataset).
+            _log_existing_subject_summary(bids_root, dataset_df, on_existing)
 
         for subject, subject_df in dataset_df.groupby("BIDS_name", sort=True):
             # Stop here if the user requested it. Subjects committed before
@@ -249,21 +268,44 @@ def run_convert(
                 _print_tasks(tasks)
                 continue
 
+            # Target dir derives from the task's subject entity (e.g. "001"),
+            # the same way _convert_subject builds subj_segment.
+            existed = (
+                bids_root / f"sub-{safe_path_component(tasks[0].subject)}"
+            ).exists()
             try:
                 _convert_subject(
                     tasks, bids_root, backends,
-                    n_jobs=n_jobs, overwrite=overwrite,
+                    n_jobs=n_jobs, on_existing=on_existing,
                     dcm2niix_version=dcm2niix_version,
                     cancel_check=cancel_check,
                     spec=spec,
                 )
+                if existed:
+                    n_merged += 1
+                else:
+                    n_new += 1
             except OperationCancelled:
                 log.warning("conversion stopped by user (sub-%s not committed)", subject)
                 cancelled = True
                 break
+            except CollisionAbort as exc:
+                # Expected stop under on_existing="error": clean message, no
+                # forensic traceback. Counts as a failure so rc is non-zero.
+                log.warning("collision: %s", exc)
+                n_collision += 1
+                n_failed += 1
             except Exception:
                 log.exception("subject %s failed during conversion", subject)
                 n_failed += 1
+
+    # Results summary.
+    parts = [f"{n_new} new", f"{n_merged} merged into existing"]
+    if n_collision:
+        parts.append(f"{n_collision} collision(s)")
+    if n_failed:
+        parts.append(f"{n_failed} failed")
+    log.info("convert summary: %s", ", ".join(parts))
 
     if cancelled:
         log.warning("conversion stopped by user before all subjects were processed")
@@ -282,7 +324,7 @@ def _convert_subject(
     backends: list,
     *,
     n_jobs: int,
-    overwrite: bool,
+    on_existing: str,
     dcm2niix_version: str,
     cancel_check=None,
     spec: Optional[RecordingMetaSpec] = None,
@@ -324,7 +366,7 @@ def _convert_subject(
         # built for the staging dir so the commit target name is
         # consistent across OSes.
         target = bids_root / subj_segment
-        _merge_commit(staging, target, overwrite=overwrite)
+        _merge_commit(staging, target, on_existing=on_existing)
         _write_provenance(
             target, results, rename_map, n_intended_for, n_scans_tsv,
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
@@ -335,6 +377,11 @@ def _convert_subject(
         # User Stop, not a failure: no forensic error log. The ``finally``
         # wipes staging so this subject leaves nothing half-written; the
         # caller (run_convert) stops the subject loop.
+        raise
+    except CollisionAbort:
+        # on_existing="error" tripped: collision detected before anything was
+        # moved, so the target is intact. Not a crash; re-raise without a
+        # forensic error log (the caller logs the message).
         raise
     except Exception as exc:
         # Determine which phase blew up: results being non-empty means
@@ -511,54 +558,121 @@ def _prune_empty_dirs(root: Path) -> None:
                 pass
 
 
-def _merge_commit(staging_subject: Path, target: Path, *, overwrite: bool) -> None:
+class CollisionAbort(Exception):
+    """Raised by :func:`_merge_commit` under ``on_existing="error"`` when the
+    staged subject has files that already exist on disk. The caller logs the
+    message (no forensic error log) and counts the subject as failed.
+    """
+
+
+_ON_EXISTING_VERB = {
+    "skip": "merge new files, keep existing",
+    "update": "merge, replace changed files",
+    "replace": "merge, replace colliding files (backed up)",
+    "error": "abort on any file collision",
+}
+
+
+def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str) -> None:
+    """Pre-convert heads-up: which incoming subjects already exist on disk.
+
+    Awareness for incremental conversion: a subject already on disk will be
+    merged into per ``on_existing``. Informational only (the per-subject merge
+    counts + the final summary report the actual outcome). ``BIDS_name`` values
+    (``sub-XXX``) match the on-disk subject dir names for the common case.
+    """
+    if "BIDS_name" not in dataset_df.columns:
+        return
+    incoming = sorted({str(s).strip() for s in dataset_df["BIDS_name"] if str(s).strip()})
+    on_disk = {p.name for p in bids_root.glob("sub-*") if p.is_dir()}
+    if not incoming or not on_disk:
+        return  # brand-new dataset (or no subjects): nothing to flag
+    already = [s for s in incoming if s in on_disk]
+    new = [s for s in incoming if s not in on_disk]
+    msg = (
+        f"converting into existing dataset '{bids_root.name}' "
+        f"({len(on_disk)} subject(s) present): {len(new)} new"
+    )
+    if already:
+        shown = ", ".join(already[:8]) + ("" if len(already) <= 8 else " ...")
+        msg += (
+            f", {len(already)} already present ({shown}) "
+            f"-> {_ON_EXISTING_VERB[on_existing]}"
+        )
+    log.info(msg)
+
+
+def _merge_commit(
+    staging_subject: Path, target: Path, *, on_existing: str,
+) -> tuple[int, int, int]:
     """Commit a staged subject into the dataset, merging into an existing one.
 
     A brand-new subject is moved in wholesale via the atomic ``os.rename`` fast
     path. When the subject already exists, the staged tree is merged FILE BY FILE
     so adding a new session or datatype lands beside the existing data instead of
-    replacing the whole subject (the incremental-conversion case):
+    replacing the whole subject (the incremental-conversion case). Returns
+    ``(added, replaced, kept)`` file counts.
 
-    * a staged file with no counterpart on disk is always moved in (the add);
-    * a staged file that collides with an existing one is left untouched when
-      ``overwrite`` is False (existing data is never overwritten), or backed up to
-      ``<bids_root>/.bidsmgr/backup/<sub>_<utcstamp>/<relpath>`` and replaced when
-      ``overwrite`` is True.
+    ``on_existing`` governs a staged file that collides with one already on disk:
 
-    Atomicity drops from subject-level to per-file on the merge path; any replaced
-    file is backed up first, so an interrupted merge can be reconstructed.
+    * ``"skip"``    keep the existing file (default; existing data never lost);
+    * ``"update"``  replace it only if the content differs (identical files kept);
+    * ``"replace"`` always back it up then replace it;
+    * ``"error"``   abort the whole subject (commit nothing) if ANY file collides.
+
+    A replaced file is first moved to
+    ``<bids_root>/.bidsmgr/backup/<sub>_<utcstamp>/<relpath>``, so the merge path
+    is reconstructable even though atomicity drops from subject- to file-level.
     """
+    staged = [p for p in sorted(staging_subject.rglob("*")) if p.is_file()]
+
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
         os.rename(staging_subject, target)
-        return
+        return (len(staged), 0, 0)
+
+    colliding = [p for p in staged if (target / p.relative_to(staging_subject)).exists()]
+    if colliding and on_existing == "error":
+        rels = ", ".join(str(p.relative_to(staging_subject)) for p in colliding[:5])
+        more = "" if len(colliding) <= 5 else f" (+{len(colliding) - 5} more)"
+        raise CollisionAbort(
+            f"{target.name}: {len(colliding)} file(s) already exist ({rels}{more}); "
+            f"aborted (use --on-existing skip/update/replace to proceed)"
+        )
 
     backup_dir = target.parent / ".bidsmgr" / "backup" / f"{target.name}_{_utc_stamp()}"
     added = replaced = kept = 0
-    for src in sorted(staging_subject.rglob("*")):
-        if not src.is_file():
-            continue
+    for src in staged:
         rel = src.relative_to(staging_subject)
         dst = target / rel
-        if dst.exists():
-            if overwrite:
-                bdst = backup_dir / rel
-                bdst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dst), str(bdst))
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
-                replaced += 1
-            else:
-                kept += 1  # existing file wins; staged copy dropped with staging
-        else:
+        if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
             added += 1
-    log.info(
-        "merged into existing %s: %d added, %d replaced, %d kept%s",
-        target, added, replaced, kept,
-        "" if not kept else " (use --overwrite to replace the kept files)",
-    )
+            continue
+        # Colliding file.
+        if on_existing == "skip":
+            kept += 1
+            continue
+        if on_existing == "update" and filecmp.cmp(str(src), str(dst), shallow=False):
+            kept += 1  # identical content; leave the existing file in place
+            continue
+        bdst = backup_dir / rel
+        bdst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(dst), str(bdst))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        replaced += 1
+    if added or replaced or kept:
+        tail = (
+            " (use --on-existing replace to overwrite the kept files)"
+            if kept and on_existing == "skip" else ""
+        )
+        log.info(
+            "merged into existing %s: %d added, %d replaced, %d kept%s",
+            target, added, replaced, kept, tail,
+        )
+    return (added, replaced, kept)
 
 
 # ---------------------------------------------------------------------------
@@ -1097,10 +1211,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--overwrite", action="store_true",
         help=(
-            "When a subject already exists, replace colliding files (each is "
-            "backed up to <bids_root>/.bidsmgr/backup/ first). Without this, an "
-            "existing subject is merged into: new sessions/datatypes are added "
-            "and colliding files are kept untouched."
+            "Alias for --on-existing replace: when a subject already exists, back "
+            "up and replace colliding files (new sessions/datatypes still merge in)."
+        ),
+    )
+    parser.add_argument(
+        "--on-existing", choices=("skip", "update", "replace", "error"),
+        default=None,
+        help=(
+            "Policy when an incoming subject already exists on disk. New "
+            "sessions/datatypes always merge in; this governs colliding files: "
+            "'skip' keep existing (default), 'update' replace only changed files, "
+            "'replace' back up + replace colliding files, 'error' abort the "
+            "subject if anything would collide. --overwrite is an alias for replace."
         ),
     )
     parser.add_argument(
@@ -1158,6 +1281,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         dataset=args.dataset,
         n_jobs=args.jobs,
         overwrite=args.overwrite,
+        on_existing=args.on_existing,
         dry_run=args.dry_run,
         dcm2niix_bin=args.dcm2niix,
         recording_meta=args.recording_meta,

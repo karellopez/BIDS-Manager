@@ -691,6 +691,18 @@ class EditorPanel(QWidget):
 
     # ------------------------------------------------------------------
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Refresh the tree when the Editor becomes visible.
+
+        A conversion (or any external change) may have written into the open
+        dataset while the user was in the Converter tab. ``refresh`` re-walks
+        the root while preserving the user's expand / selection state, so the
+        editor reflects the current disk contents the moment it is shown (and
+        the live ``QFileSystemWatcher`` keeps it current thereafter).
+        """
+        super().showEvent(event)
+        self._tree_pane.refresh()
+
     def repaint_for_palette(self, pal: dict) -> None:
         self._tree_pane.repaint_for_palette(pal)
         self._sidecar_form.repaint_for_palette(pal)

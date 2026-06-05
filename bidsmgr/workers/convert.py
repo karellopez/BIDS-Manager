@@ -80,6 +80,7 @@ class ConvertWorker(QThread):
         *,
         n_jobs: int = 1,
         overwrite: bool = False,
+        on_existing: Optional[str] = None,
         dry_run: bool = False,
         recording_meta: Optional[Path] = None,
         raw_root: Optional[Path] = None,
@@ -92,6 +93,7 @@ class ConvertWorker(QThread):
         self._bids_parent = Path(bids_parent)
         self._n_jobs = n_jobs
         self._overwrite = overwrite
+        self._on_existing = on_existing
         self._dry_run = dry_run
         self._recording_meta = Path(recording_meta) if recording_meta is not None else None
         self._raw_root = Path(raw_root) if raw_root is not None else None
@@ -131,6 +133,7 @@ class ConvertWorker(QThread):
                 self._bids_parent,
                 n_jobs=self._n_jobs,
                 overwrite=self._overwrite,
+                on_existing=self._on_existing,
                 dry_run=self._dry_run,
                 recording_meta=self._recording_meta,
                 raw_root=self._raw_root,

@@ -16,14 +16,15 @@ recomputes every card's colours (no stale white/black patches).
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 import shutil
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPixmap
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -36,6 +37,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStyle,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -43,8 +46,130 @@ from PyQt6.QtWidgets import (
 from ..cli._scaffold import slugify_name
 from ..cli.create import open_or_create_workspace
 from .app_settings import AppSettings
+from .theme_manager import CUR
 
 log = logging.getLogger(__name__)
+
+# Recent-list item roles: the path lives at ``UserRole`` (handlers read it);
+# the dataset display name + a missing flag ride alongside for the delegate.
+_RECENT_PATH_ROLE = Qt.ItemDataRole.UserRole
+_RECENT_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
+_RECENT_MISSING_ROLE = Qt.ItemDataRole.UserRole + 2
+
+# Static resource links surfaced in the "Getting started" card. Texts are
+# friendly labels; the raw URLs never show. Theme-aware: rendered as rich-text
+# anchors that read ``QPalette.Link`` (set by the theme manager).
+_RESOURCE_LINKS: tuple[tuple[str, str], ...] = (
+    ("Documentation website", "https://ancplaboldenburg.github.io/bids_manager_documentation/"),
+    ("Tutorial walkthrough", "https://ancplaboldenburg.github.io/bids_manager_documentation/tutorial.html"),
+    ("Source code on GitHub", "https://github.com/ANCPLabOldenburg/BIDS-Manager"),
+)
+# Sample datasets (hosted on the UOL cloud) the docs offer for trying the tool.
+_SAMPLE_DATASETS: tuple[tuple[str, str], ...] = (
+    ("MRI walkthrough dataset", "https://cloud.uol.de/s/g9gMPpwL7Xg49y9/download"),
+    ("EEG motor-imagery dataset", "https://cloud.uol.de/s/T66zc5mN4eeZPGK/download"),
+    ("MEG Elekta sample dataset", "https://cloud.uol.de/s/btGeke5NNkDcs6G/download"),
+    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/ZxaZCtHJPLjtDbR/download"),
+)
+
+
+def _parse_qcolor(value: str) -> QColor:
+    """Build a QColor from a palette token, including CSS ``rgba()`` strings.
+
+    The palette carries translucent tints as ``rgba(r,g,b,a)`` strings, which
+    ``QColor(str)`` cannot parse (it returns an invalid/black colour). This
+    parses both ``rgba()`` / ``rgb()`` and plain hex so theme-driven tints
+    render correctly (the recent-list selection was painting black otherwise).
+    """
+    s = str(value).strip()
+    if s.startswith("rgba(") or s.startswith("rgb("):
+        inner = s[s.index("(") + 1: s.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        try:
+            r, g, b = (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
+            a = int(round(float(parts[3]) * 255)) if len(parts) > 3 else 255
+            return QColor(r, g, b, a)
+        except (ValueError, IndexError):
+            return QColor(0, 0, 0, 0)
+    return QColor(s)
+
+
+def _dataset_display_name(bids_root: Path) -> str:
+    """Dataset Name from ``dataset_description.json``, else the folder name."""
+    dd = Path(bids_root) / "dataset_description.json"
+    if dd.exists():
+        try:
+            data = json.loads(dd.read_text(encoding="utf-8"))
+            name = str(data.get("Name", "")).strip()
+            if name:
+                return name
+        except (OSError, ValueError):
+            pass
+    return Path(bids_root).name
+
+
+class _RecentItemDelegate(QStyledItemDelegate):
+    """Paint a recent-project row as a coloured dataset name above its path.
+
+    Palette tokens are read fresh on every paint (via :func:`CUR`), so a theme
+    swap recolours the rows once the list viewport repaints.
+    """
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        pal = CUR()
+        name = str(index.data(_RECENT_NAME_ROLE) or "")
+        path = str(index.data(_RECENT_PATH_ROLE) or "")
+        missing = bool(index.data(_RECENT_MISSING_ROLE))
+
+        painter.save()
+        # Theme-aware selection / hover backgrounds. The palette stores these
+        # as ``rgba()`` strings, so parse them properly (a bare QColor(str)
+        # would render black and the selection looked black in every theme).
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, _parse_qcolor(pal["accent_bg"]))
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, _parse_qcolor(pal["surface3"]))
+
+        rect = option.rect.adjusted(10, 5, -10, -5)
+        half = rect.height() // 2
+
+        # Dataset name (accent, bold) — muted when the folder is gone.
+        name_font = QFont(option.font)
+        name_font.setBold(True)
+        painter.setFont(name_font)
+        painter.setPen(QColor(pal["dim"] if missing else pal["accent"]))
+        label = f"{name}   (missing)" if missing else name
+        painter.drawText(
+            QRect(rect.x(), rect.y(), rect.width(), half),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            label,
+        )
+
+        # Path (dim, just one step smaller than the name and middle-elided).
+        # The app font is sized in PIXELS, so ``pointSizeF()`` is -1; derive the
+        # smaller size from pixelSize instead or it collapses to a tiny 7pt.
+        path_font = QFont(option.font)
+        px = option.font.pixelSize()
+        if px > 0:
+            path_font.setPixelSize(max(11, px - 1))
+        else:
+            path_font.setPointSizeF(max(10.0, option.font.pointSizeF() - 0.5))
+        painter.setFont(path_font)
+        painter.setPen(QColor(pal["dim"]))
+        path_rect = QRect(rect.x(), rect.y() + half, rect.width(), rect.height() - half)
+        elided = painter.fontMetrics().elidedText(
+            path, Qt.TextElideMode.ElideMiddle, path_rect.width(),
+        )
+        painter.drawText(
+            path_rect,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            elided,
+        )
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802
+        s = super().sizeHint(option, index)
+        return QSize(s.width(), 50)
 
 
 def _section_card(title: str, description: str) -> tuple[QFrame, QVBoxLayout]:
@@ -118,6 +243,7 @@ class WelcomePanel(QWidget):
         left = QVBoxLayout()
         left.setSpacing(16)
         left.addWidget(self._build_create_card())
+        left.addWidget(self._build_resources_card())
         left.addStretch(1)
         right = QVBoxLayout()
         right.setSpacing(16)
@@ -210,13 +336,45 @@ class WelcomePanel(QWidget):
         )
         btn_row = QHBoxLayout()
         self._open_btn = QPushButton("Open dataset folder…")
-        self._open_btn.setObjectName("tb-btn-ghost")
+        # Blue (accent) text — see ``QPushButton#welcome-open-btn`` in theme.qss.
+        self._open_btn.setObjectName("welcome-open-btn")
         self._open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._open_btn.clicked.connect(self._on_open_clicked)
         btn_row.addWidget(self._open_btn)
         btn_row.addStretch(1)
         lay.addLayout(btn_row)
         return card
+
+    def _build_resources_card(self) -> QFrame:
+        card, lay = _section_card(
+            "Getting started",
+            "Documentation, tutorial, source code, and sample datasets to "
+            "try the full scan to validate workflow.",
+        )
+        for text, url in _RESOURCE_LINKS:
+            lay.addWidget(self._link_label(text, url))
+
+        sample = QLabel("Sample datasets")
+        sample.setObjectName("welcome-subsection")
+        lay.addWidget(sample)
+        for text, url in _SAMPLE_DATASETS:
+            lay.addWidget(self._link_label(text, url))
+        return card
+
+    @staticmethod
+    def _link_label(text: str, url: str) -> QLabel:
+        """A clickable rich-text link (opens in the system browser).
+
+        No explicit anchor colour, so it inherits ``QPalette.Link`` (accent)
+        and recolours on a theme swap. ``text-decoration:none`` keeps it tidy.
+        """
+        lbl = QLabel(f'<a style="text-decoration:none" href="{url}">{text}</a>')
+        lbl.setObjectName("welcome-link")
+        lbl.setOpenExternalLinks(True)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        lbl.setToolTip(url)
+        return lbl
 
     def _build_recent_card(self) -> QFrame:
         card, lay = _section_card(
@@ -226,6 +384,8 @@ class WelcomePanel(QWidget):
         self._recent = QListWidget()
         self._recent.setObjectName("welcome-recent")
         self._recent.setMinimumHeight(160)
+        self._recent.setMouseTracking(True)  # hover state for the delegate
+        self._recent.setItemDelegate(_RecentItemDelegate(self._recent))
         self._recent.itemActivated.connect(self._on_recent_activated)
         self._recent.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._recent.customContextMenuRequested.connect(self._on_recent_menu)
@@ -243,14 +403,21 @@ class WelcomePanel(QWidget):
     # ------------------------------------------------------------------
 
     def refresh_recent(self) -> None:
-        """Repopulate the recent-projects list from AppSettings."""
+        """Repopulate the recent-projects list from AppSettings.
+
+        Each row carries the dataset name (painted in accent by the delegate)
+        and its full path (dim, beneath). Missing folders are kept but muted
+        and disabled.
+        """
         self._recent.clear()
         recents = AppSettings.load().recent_projects
         for p in recents:
-            item = QListWidgetItem(p)
-            item.setData(Qt.ItemDataRole.UserRole, p)
-            if not Path(p).exists():
-                item.setText(f"{p}   (missing)")
+            exists = Path(p).exists()
+            item = QListWidgetItem()
+            item.setData(_RECENT_PATH_ROLE, p)
+            item.setData(_RECENT_NAME_ROLE, _dataset_display_name(Path(p)) if exists else Path(p).name)
+            item.setData(_RECENT_MISSING_ROLE, not exists)
+            if not exists:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self._recent.addItem(item)
         has = bool(recents)
@@ -298,6 +465,21 @@ class WelcomePanel(QWidget):
     def _on_inline_create(self) -> None:
         name = self._name_edit.text().strip()
         if not name:
+            self._name_edit.setFocus()
+            return
+        # No spaces in dataset names (cleaner BIDS paths + cross-platform
+        # safety). Make the user aware and offer the underscore form instead
+        # of silently rewriting it.
+        if " " in name:
+            suggested = "_".join(name.split())
+            QMessageBox.information(
+                self,
+                "Spaces are not allowed",
+                "Dataset names cannot contain spaces, for cleaner BIDS paths "
+                "and cross-platform safety. Please use underscores instead.\n\n"
+                f"Suggested name: {suggested}",
+            )
+            self._name_edit.setText(suggested)
             self._name_edit.setFocus()
             return
         parent = self._location_edit.text().strip() or str(Path.home())
@@ -399,6 +581,16 @@ class WelcomePanel(QWidget):
             style.unpolish(w)
             style.polish(w)
             w.update()
+        # Rich-text anchors bake the link colour into their layout at parse
+        # time, so a bare update() keeps the old colour. Re-set the text to
+        # force a re-parse against the new ``QPalette.Link``.
+        for lbl in self.findChildren(QLabel):
+            if lbl.objectName() == "welcome-link":
+                lbl.setText(lbl.text())
+        # The recent-list delegate reads palette tokens at paint time; nudge
+        # the viewport so the rows recolour immediately.
+        if hasattr(self, "_recent"):
+            self._recent.viewport().update()
 
 
 __all__ = ["WelcomePanel"]

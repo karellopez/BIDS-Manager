@@ -300,6 +300,9 @@ class ThemeManager:
         p.setColor(QPalette.ColorRole.ButtonText,      QColor(pal['text']))
         p.setColor(QPalette.ColorRole.Highlight,       QColor(pal['accent']))
         p.setColor(QPalette.ColorRole.HighlightedText, QColor(pal['primary_btn_text']))
+        # Rich-text ``<a href>`` links (welcome-panel resources) read this role,
+        # so theme swaps recolour them automatically.
+        p.setColor(QPalette.ColorRole.Link,            QColor(pal['accent']))
         p.setColor(QPalette.ColorRole.ToolTipBase,     QColor(pal['surface2']))
         p.setColor(QPalette.ColorRole.ToolTipText,     QColor(pal['text']))
         self._app.setPalette(p)

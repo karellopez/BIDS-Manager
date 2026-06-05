@@ -120,6 +120,33 @@ def test_load_inventory_updates_status_chips(qtbot, tmp_path: Path) -> None:
     assert "1 skipped" in panel._chip_skip.text()
 
 
+def test_revalidate_button_enables_after_scan_and_refreshes_chips(
+    qtbot, tmp_path: Path,
+) -> None:
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    # Disabled before any scan.
+    assert not panel._revalidate_btn.isEnabled()
+
+    # A func/bold row missing its required task -> err.
+    row = _func_row()
+    row["entities"] = json.dumps({"subject": "001", "session": "pre"}, sort_keys=True)
+    row["task"] = ""
+    panel.load_inventory(pd.DataFrame([row]), output_tsv=tmp_path / "inv.tsv")
+    assert panel._revalidate_btn.isEnabled()  # available after scan
+    assert "1 error" in panel._chip_err.text()
+
+    # Simulate a fix that bypassed setData (edit elsewhere), then re-validate:
+    df = panel.model().dataframe()
+    df.at[0, "task"] = "rest"
+    df.at[0, "entities"] = json.dumps(
+        {"subject": "001", "session": "pre", "task": "rest"}, sort_keys=True,
+    )
+    panel._on_revalidate_clicked()
+    assert "0 error" in panel._chip_err.text()
+    assert "1 valid" in panel._chip_valid.text()
+
+
 def test_load_inventory_does_not_overwrite_user_set_bids_output(qtbot, tmp_path: Path) -> None:
     """BIDS output stays whatever the user set (or '(not set)' if unset).
 

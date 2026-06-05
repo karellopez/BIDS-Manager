@@ -83,12 +83,15 @@ def test_bulk_set_subject_updates_bids_name_and_basename() -> None:
         assert json.loads(ent)["subject"] == "099"
 
 
-def test_bulk_set_dataset_applies_to_every_row() -> None:
+def test_bulk_set_dataset_is_blocked() -> None:
+    # The dataset column is owned by the project / locked output folder and is
+    # read-only; bulk-editing it must be a no-op (nothing changed).
     df = make_df([_row(series_uid=str(i)) for i in range(3)])
     model = InventoryTableModel(df)
+    assert "dataset" not in model.BULK_EDITABLE_KEYS
     n = model.bulk_set([0, 1, 2], "dataset", "other_study")
-    assert n == 3
-    assert (model.dataframe()["dataset"] == "other_study").all()
+    assert n == 0
+    assert (model.dataframe()["dataset"] == "study").all()  # unchanged
 
 
 def test_bulk_set_task_rebuilds_basename() -> None:
@@ -146,16 +149,17 @@ def test_dialog_apply_writes_through_bulk_set(qtbot) -> None:
 
     dlg = BulkEditDialog(model, rows=[0, 1, 2])
     qtbot.addWidget(dlg)
-    # Pick the dataset column from the dropdown (find by user data).
+    # Pick the task column from the dropdown (find by user data). The dataset
+    # column is intentionally not offered (read-only / project-owned).
     for i in range(dlg._col_combo.count()):
-        if dlg._col_combo.itemData(i) == "dataset":
+        if dlg._col_combo.itemData(i) == "task":
             dlg._col_combo.setCurrentIndex(i)
             break
-    dlg._value_edit.setText("other_study")
+    dlg._value_edit.setText("memory")
     dlg._on_apply()
 
     assert dlg.changed_count() == 3
-    assert (model.dataframe()["dataset"] == "other_study").all()
+    assert (model.dataframe()["task"] == "memory").all()
 
 
 def test_dialog_blank_value_is_a_noop(qtbot) -> None:

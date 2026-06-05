@@ -139,6 +139,94 @@ def test_theme_swap_repaints_welcome(qapp, isolated_settings, monkeypatch) -> No
     assert len(calls) == 2
 
 
+def test_resources_card_lists_links(qtbot, isolated_settings) -> None:
+    from PyQt6.QtWidgets import QLabel
+
+    panel = WelcomePanel()
+    qtbot.addWidget(panel)
+    links = [
+        l for l in panel.findChildren(QLabel) if l.objectName() == "welcome-link"
+    ]
+    # 3 resource links + 4 sample datasets = 7 clickable links, all external.
+    assert len(links) == 7
+    assert all(l.openExternalLinks() for l in links)
+    hrefs = " ".join(l.text() for l in links)
+    assert "bids_manager_documentation" in hrefs       # docs site
+    assert "github.com/ANCPLabOldenburg" in hrefs       # source
+    assert "cloud.uol.de" in hrefs                       # sample data
+    # Raw URLs never show as the visible text — friendly labels only.
+    assert ">Documentation website<" in hrefs
+    assert ">MEG Elekta sample dataset<" in hrefs
+
+
+def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> None:
+    from bidsmgr.gui.welcome_panel import (
+        _RECENT_MISSING_ROLE,
+        _RECENT_NAME_ROLE,
+        _RECENT_PATH_ROLE,
+    )
+
+    panel = WelcomePanel()
+    qtbot.addWidget(panel)
+    # A real project (named) plus a now-missing one.
+    root = panel.create_project(tmp_path, "Fancy Name")
+    AppSettings.remember_recent_project(tmp_path / "gone")
+    panel.refresh_recent()
+
+    by_path = {
+        panel._recent.item(i).data(_RECENT_PATH_ROLE): panel._recent.item(i)
+        for i in range(panel._recent.count())
+    }
+    real = by_path[str(root)]
+    assert real.data(_RECENT_NAME_ROLE) == "Fancy Name"      # dataset Name, not slug
+    assert real.data(_RECENT_MISSING_ROLE) is False
+    missing = by_path[str(tmp_path / "gone")]
+    assert missing.data(_RECENT_MISSING_ROLE) is True
+
+
+def test_open_button_is_accent_styled(qtbot, isolated_settings) -> None:
+    panel = WelcomePanel()
+    qtbot.addWidget(panel)
+    # The blue-font open button keeps its dedicated object name (styled in QSS).
+    assert panel._open_btn.objectName() == "welcome-open-btn"
+
+
+def test_create_blocks_spaces_and_suggests_underscores(
+    qtbot, isolated_settings, tmp_path, monkeypatch,
+) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    shown: list = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *a, **k: shown.append(a),
+    )
+    panel = WelcomePanel()
+    qtbot.addWidget(panel)
+    created: list = []
+    panel.project_opened.connect(lambda p, r: created.append(r))
+
+    panel._location_edit.setText(str(tmp_path))
+    panel._name_edit.setText("My Study")
+    panel._on_inline_create()
+
+    # Nothing created; user was warned; the field is pre-filled with underscores.
+    assert created == []
+    assert shown, "expected an information dialog about spaces"
+    assert panel._name_edit.text() == "My_Study"
+    assert not (tmp_path / "My Study").exists()
+
+
+def test_parse_qcolor_handles_rgba_and_hex() -> None:
+    from bidsmgr.gui.welcome_panel import _parse_qcolor
+
+    c = _parse_qcolor("rgba(88,166,255,0.12)")
+    assert c.isValid()
+    assert (c.red(), c.green(), c.blue()) == (88, 166, 255)
+    assert c.alpha() == int(round(0.12 * 255))  # not 0/black
+    h = _parse_qcolor("#11161d")
+    assert (h.red(), h.green(), h.blue()) == (0x11, 0x16, 0x1d)
+
+
 def test_home_pill_returns_to_welcome(qapp, isolated_settings) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")

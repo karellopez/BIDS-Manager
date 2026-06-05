@@ -959,6 +959,36 @@ QLineEdit#welcome-input {
 QLineEdit#welcome-input:focus { border-color: $accent; }
 QLineEdit#welcome-input:read-only { color: $dim; }
 
+/* Open-dataset button: ghost styling but blue (accent) text. */
+QPushButton#welcome-open-btn {
+    color: $accent;
+    background: transparent;
+    border: 1px solid $accent_border;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#welcome-open-btn:hover {
+    background: $accent_bg;
+    border-color: $accent;
+}
+
+/* "Sample datasets" sub-heading inside the Getting-started card. */
+QLabel#welcome-subsection {
+    color: $text;
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 4px;
+}
+
+/* Resource / sample-data links. Colour comes from QPalette.Link (accent),
+ * set by the theme manager, so it follows dark/light automatically. */
+QLabel#welcome-link {
+    font-size: 12px;
+    padding: 1px 0;
+}
+
 QListWidget#welcome-recent {
     background: $surface2;
     color: $text;

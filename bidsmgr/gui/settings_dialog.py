@@ -511,11 +511,25 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Parallel workers (-j):", self._convert_jobs)
 
-        self._convert_overwrite = QCheckBox(
-            "Overwrite existing subjects in the BIDS output (otherwise "
-            "the convert verb refuses to clobber)"
+        # Policy for a subject that already exists in the dataset (incremental
+        # conversion). New sessions/datatypes always merge in; this governs
+        # files that collide with existing ones. Replaces the old overwrite
+        # checkbox (which mapped only to "replace").
+        self._convert_on_existing = QComboBox()
+        for value, label in (
+            ("skip",    "Skip: keep existing files, add only new (safe default)"),
+            ("update",  "Update: replace only files whose content changed"),
+            ("replace", "Replace: back up and replace colliding files"),
+            ("error",   "Error: abort a subject if any file would be overwritten"),
+        ):
+            self._convert_on_existing.addItem(label, userData=value)
+        self._convert_on_existing.setToolTip(
+            "What to do when a subject already exists in the dataset. Adding a "
+            "new session or datatype always merges in; this only governs files "
+            "that collide with existing ones. Existing data is never lost on the "
+            "default (Skip)."
         )
-        form.addRow("Overwrite:", self._convert_overwrite)
+        form.addRow("Existing subjects:", self._convert_on_existing)
 
         self._convert_skip_residuals = QCheckBox(
             "Skip residual volumes (drop dcm2niix secondary duplicates such "
@@ -616,7 +630,8 @@ class SettingsDialog(QDialog):
         self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
 
         self._convert_jobs.setValue(max(1, min(s.convert_n_jobs, cap)))
-        self._convert_overwrite.setChecked(s.convert_overwrite)
+        idx = self._convert_on_existing.findData(s.convert_on_existing)
+        self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
         self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
@@ -678,7 +693,9 @@ class SettingsDialog(QDialog):
         s.scan_skip_bids_guess = self._scan_skip_bids_guess.isChecked()
 
         s.convert_n_jobs = self._convert_jobs.value()
-        s.convert_overwrite = self._convert_overwrite.isChecked()
+        s.convert_on_existing = self._convert_on_existing.currentData() or "skip"
+        # Keep the legacy flag in sync for any old reader.
+        s.convert_overwrite = (s.convert_on_existing == "replace")
         s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
 
         s.post_run_metadata = self._post_run_metadata.isChecked()

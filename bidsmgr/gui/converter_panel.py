@@ -84,6 +84,35 @@ from .widgets import BusySpinner, Chip, PaneHeader, PanelFrame, PathBar, VSep
 log = logging.getLogger(__name__)
 
 
+def _repolish_combo(combo: QComboBox) -> None:
+    """Force a ``QComboBox`` (and its popup view) to re-read the stylesheet.
+
+    A global ``QApplication.setStyleSheet`` swap (the theme toggle) does not
+    re-polish already-shown widgets, and a combo's drop-down view is a separate
+    top-level widget that Qt never re-polishes at all. Without the unpolish /
+    polish dance below, the closed combo and (worse) its popup keep stale
+    dark-theme colours after switching to light, and vice versa.
+
+    GENERAL RULE: any ``QComboBox`` whose colours come from QSS must be run
+    through this on every palette swap (call it from the owner's
+    ``repaint_for_palette``). Re-tinting icons is not enough.
+    """
+    if combo is None:
+        return
+    style = combo.style()
+    targets = [combo]
+    view = combo.view()
+    if view is not None:
+        targets.append(view)
+        viewport = view.viewport()
+        if viewport is not None:
+            targets.append(viewport)
+    for w in targets:
+        style.unpolish(w)
+        style.polish(w)
+        w.update()
+
+
 class ConverterPanel(QWidget):
     """The pre-conversion Inspector layout.
 
@@ -290,6 +319,12 @@ class ConverterPanel(QWidget):
         outside the project). The inventory + recording-metadata scaffold then
         live in the project bundle and the dataset name is the folder name.
         """
+        # Switching datasets must NOT leak the previous project's rows / raw
+        # input / metadata into the new tab. Clear the converter to its empty
+        # state first; the resume below repopulates only if THIS project has a
+        # scan of its own.
+        self._reset_inventory_view()
+
         self._project = project
         self._bids_root = Path(bids_root)
         self._bids_parent = self._bids_root.parent
@@ -306,6 +341,38 @@ class ConverterPanel(QWidget):
         # Resume: if this project already holds a scan, reload its inventory and
         # replay the curation edits so the user lands back in their table.
         self._resume_from_project()
+
+    def _reset_inventory_view(self) -> None:
+        """Return the converter to its pre-scan empty state.
+
+        Called when binding a new project so one dataset's inventory, raw
+        input, recording-metadata scaffold and curation history never bleed
+        into another's tab. The output path bar is set by :meth:`set_project`
+        right after this.
+        """
+        self._model = None
+        self._active_version_dir = None
+        self._raw_root = None
+        self._output_tsv = None
+        self._redo_stack.clear()
+        # Detach the model from every dependent view.
+        self._table.setModel(None)
+        self._properties.bind_model(None)
+        self._filter_pane.bind_model(None)
+        self._raw_pane.bind_model(None)
+        self._raw_pane.set_root(None)
+        # Raw input bar back to "nothing picked".
+        self._raw_pathbar.set_value("(no folder selected)", ok=False)
+        # Inspection back to the placeholder; clear previews + chips + stats.
+        self._inspection_stack.setCurrentIndex(0)
+        self._bids_preview.clear()
+        self._chip_valid.setText("0 valid")
+        self._chip_warn.setText("0 warnings")
+        self._chip_err.setText("0 error")
+        self._chip_skip.setText("0 skipped")
+        self._update_stats_label()
+        self._run_btn.setEnabled(False)
+        self._revalidate_btn.setEnabled(False)
 
     def _resume_from_project(self) -> None:
         """Resume the project's most recent scan version (curation resume).
@@ -341,6 +408,14 @@ class ConverterPanel(QWidget):
                 f"Could not load scan '{version.version_id}': {exc}"
             )
             return
+        # Keep the dataset column in lock-step with the actual (possibly
+        # renamed-on-disk) project folder. Conversion writes into
+        # ``<bids_parent>/<dataset>``; if the user renamed the dataset folder
+        # outside the app, the stored value would be stale and convert would
+        # target the wrong folder. The column is read-only in the GUI, so this
+        # is the single source of truth.
+        if self._bids_root is not None and "dataset" in df.columns:
+            df["dataset"] = self._bids_root.name
         self._project = proj
         self._properties.set_project(proj)
         self._active_version_dir = Path(version.dir)
@@ -524,7 +599,10 @@ class ConverterPanel(QWidget):
         self._model.recordingSpecChanged.connect(self._persist_recording_spec)
         # Default-select row 0 if any rows exist so the Properties panel
         # has something to show without the user having to click first.
-        if self._model.rowCount() > 0:
+        has_rows = self._model.rowCount() > 0
+        # Re-validate is available once a scan has populated the inventory.
+        self._revalidate_btn.setEnabled(has_rows)
+        if has_rows:
             self._table.selectRow(0)
             self._run_btn.setEnabled(True)
             self._run_btn.setToolTip("Run conversion on the included rows")
@@ -644,14 +722,17 @@ class ConverterPanel(QWidget):
         # Scan-version picker (project mode): switch between scans of different
         # source folders within this dataset. Hidden until a project has >=1
         # scan; replaces the free-path TSV filename field in project mode.
-        self._scans_label = QLabel("Scan:")
+        self._scans_label = QLabel("Scan table:")
         self._scans_label.setObjectName("tb-mini-label")
         self._scans_label.setVisible(False)
         lay.addWidget(self._scans_label)
         self._scans_combo = QComboBox()
         self._scans_combo.setObjectName("tb-input")
-        self._scans_combo.setMinimumWidth(190)
-        self._scans_combo.setToolTip("Switch between scans in this project")
+        self._scans_combo.setMinimumWidth(210)
+        self._scans_combo.setToolTip(
+            "Load a previous scan table in this project. Each scan of a source "
+            "folder is its own version; pick one to resume curating it."
+        )
         self._scans_combo.setVisible(False)
         self._scans_combo.activated.connect(self._on_scans_combo_activated)
         lay.addWidget(self._scans_combo)
@@ -696,6 +777,23 @@ class ConverterPanel(QWidget):
         self._chip_warn.clicked.connect(lambda: self._open_issues_dialog("warn"))
         self._chip_err.clicked.connect(lambda: self._open_issues_dialog("err"))
         self._chip_skip.clicked.connect(lambda: self._open_issues_dialog("skip"))
+
+        # Re-validate: force a full recompute of every row's valid / warning /
+        # error state + the chip tallies. Edits update these live, but this is
+        # the explicit, guaranteed-current control the user asked for. Enabled
+        # only once a scan has populated the model.
+        self._revalidate_btn = QPushButton("  Re-validate")
+        self._revalidate_btn.setObjectName("tb-btn-ghost")
+        self._revalidate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.apply_button(self._revalidate_btn, "revalidate")
+        self._revalidate_btn.setToolTip(
+            "Recompute the valid / warning / error tallies for every row "
+            "against the BIDS schema (after editing entities, tasks, includes, "
+            "etc.)."
+        )
+        self._revalidate_btn.setEnabled(False)
+        self._revalidate_btn.clicked.connect(self._on_revalidate_clicked)
+        lay.addWidget(self._revalidate_btn)
 
         # Toggle: highlight suspected-abort rows with a purple tint.
         # Aborts are already auto-deselected by the scanner; highlighting
@@ -1467,7 +1565,7 @@ class ConverterPanel(QWidget):
             self._output_tsv,
             bids_parent,
             n_jobs=n_jobs,
-            overwrite=self._app_settings.convert_overwrite,
+            on_existing=self._app_settings.convert_on_existing,
             raw_root=self._raw_root,
             skip_residuals=self._app_settings.convert_skip_residuals,
             parent=self,
@@ -1490,9 +1588,13 @@ class ConverterPanel(QWidget):
                 success=(rc == 0),
                 summary={"bids_parent": str(bids_parent), "returncode": int(rc)},
             ))
-        # Re-walk the output tree so the user sees the just-converted
-        # files appear in the lower half of col 1.
-        self._output_pane.set_root(bids_parent)
+        # Re-walk the output tree so the user sees the just-converted files.
+        # In project mode keep the tree rooted at the DATASET (not its parent),
+        # matching what set_project showed; only the free-path flow shows the
+        # parent (which holds one folder per dataset slug).
+        self._output_pane.set_root(
+            self._bids_root if self._bids_root is not None else bids_parent
+        )
         self.convert_finished.emit(rc, bids_parent)
 
         # Post-convert chain. Only kicks off when convert succeeded
@@ -1672,6 +1774,12 @@ class ConverterPanel(QWidget):
         icons.apply_button(self._aborts_btn, "highlight")
         icons.apply_button(self._bulk_btn, "bulk_edit")
         icons.apply_button(self._columns_btn, "columns")
+        if hasattr(self, "_undo_btn"):
+            icons.apply_button(self._undo_btn, "undo")
+        if hasattr(self, "_redo_btn"):
+            icons.apply_button(self._redo_btn, "redo")
+        if hasattr(self, "_revalidate_btn"):
+            icons.apply_button(self._revalidate_btn, "revalidate")
         icons.apply_button(
             self._run_btn,
             "stop" if convert_running else "run",
@@ -1682,6 +1790,13 @@ class ConverterPanel(QWidget):
         if hasattr(self, "_right_tabs"):
             icons.apply_tab(self._right_tabs, 0, "preview")
             icons.apply_tab(self._right_tabs, 1, "statistics")
+        # The scan-table dropdown (and any QComboBox) does not re-read the
+        # re-applied stylesheet on a global ``setStyleSheet`` swap on its own:
+        # its popup view is a separate top-level widget Qt does not re-polish.
+        # Run the unpolish/polish dance on the combo + its view so no stale
+        # dark/light patch survives. See ``_repolish_combo``.
+        if hasattr(self, "_scans_combo"):
+            _repolish_combo(self._scans_combo)
 
     def _on_aborts_toggled(self, checked: bool) -> None:
         """Apply the toggle to the active model + persist for next launch."""
@@ -1768,6 +1883,10 @@ class ConverterPanel(QWidget):
         # isolated curation bundle, and make it the active project.
         if self._bids_root is not None:
             output_tsv = self._promote_scan_to_version(Path(output_tsv))
+            # Heads-up: flag scanned rows whose subject id already exists in the
+            # dataset (a fresh scan adding to an existing dataset). Resume does
+            # not pass through here, so existing-version rows are never flagged.
+            self._flag_existing_subject_rows(df)
         self.load_inventory(df, output_tsv)
         if self._project is not None:
             row_ids = self._collect_row_ids(df)
@@ -1831,6 +1950,74 @@ class ConverterPanel(QWidget):
         if src.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
+
+    def _flag_existing_subject_rows(self, df: pd.DataFrame) -> None:
+        """(Re)compute the incremental-collision warning for every scanned row.
+
+        Idempotent: any prior collision note (tagged with
+        ``dataset_identity.EXISTING_SUBJECT_TOKEN``) is stripped from every row
+        first, then a fresh note is added only to rows whose CURRENT id is still
+        on disk. This is what lets the warning clear after the user renames a
+        clashing subject (e.g. sub-001 -> sub-002) and clicks Re-validate -- the
+        stale "sub-001 ... DIFFERENT subject" note no longer lingers.
+
+        Routes through the warnings system (a non-fatal proposed_issues note ->
+        warn row -> warnings chip / Issues dialog). When participants.tsv carries
+        identity (PatientID / names), the note is precise -- same subject (and
+        whether this is a new session), a possible match (one field coincides),
+        or a different subject reusing the id (with a suggested free id) --
+        otherwise it degrades to a generic heads-up. The merge-aware commit keeps
+        existing data safe regardless.
+        """
+        if "proposed_issues" not in df.columns:
+            return
+        from ..inventory import dataset_identity as di
+
+        token = di.EXISTING_SUBJECT_TOKEN
+
+        # 1) Strip any stale collision note from EVERY row so a rename / re-scan
+        #    starts from a clean slate (the note bakes in the old id).
+        for i in df.index:
+            cur = str(df.at[i, "proposed_issues"] or "")
+            if token not in cur:
+                continue
+            kept = [
+                seg.strip() for seg in cur.split(" | ")
+                if seg.strip() and not seg.strip().startswith(token)
+            ]
+            df.at[i, "proposed_issues"] = " | ".join(kept)
+
+        if self._bids_root is None or "BIDS_name" not in df.columns:
+            return
+        existing = {p.name for p in self._bids_root.glob("sub-*") if p.is_dir()}
+        if not existing:
+            return
+        identities = di.read_existing_identities(self._bids_root)
+        next_free = di.next_free_subject_id(self._bids_root)
+        sessions_cache: dict[str, set] = {}
+
+        def _cell(idx, col: str) -> str:
+            return str(df.at[idx, col]).strip() if col in df.columns else ""
+
+        # 2) Re-add a fresh, tagged note to rows whose current id is on disk.
+        for i in df.index:
+            name = _cell(i, "BIDS_name")
+            if not name or name not in existing:
+                continue
+            scanned = {
+                "patient_id": _cell(i, "PatientID"),
+                "given_name": _cell(i, "GivenName"),
+                "family_name": _cell(i, "FamilyName"),
+            }
+            session = _cell(i, "session")
+            if name not in sessions_cache:
+                sessions_cache[name] = di.existing_sessions(self._bids_root, name)
+            note = f"{token}: " + di.classify(
+                name, scanned, session, identities.get(name),
+                sessions_cache[name], next_free,
+            )
+            cur = str(df.at[i, "proposed_issues"] or "").strip()
+            df.at[i, "proposed_issues"] = f"{cur} | {note}" if cur else note
 
     @staticmethod
     def _collect_row_ids(df: pd.DataFrame) -> list[str]:
@@ -1907,6 +2094,24 @@ class ConverterPanel(QWidget):
     # ------------------------------------------------------------------
     # Status chips
     # ------------------------------------------------------------------
+
+    def _on_revalidate_clicked(self) -> None:
+        """Force a full re-validation of the inventory and refresh the tallies."""
+        if self._model is None:
+            return
+        # Recompute the incremental-collision warnings against the CURRENT row
+        # ids + on-disk subjects (so a rename like sub-001 -> sub-002 clears the
+        # stale "already on disk / DIFFERENT subject" note). This mutates the
+        # model's live DataFrame; revalidate_all then rebuilds row states from it.
+        self._flag_existing_subject_rows(self._model.dataframe())
+        self._model.revalidate_all()
+        # ``revalidate_all`` emits dataChanged (which the listeners below also
+        # react to), but call them directly so the refresh is immediate and
+        # self-contained even if a listener was ever detached.
+        self._update_status_chips()
+        self._rebuild_bids_preview()
+        self._update_stats_label()
+        self.log_message.emit("Re-validated inventory against the BIDS schema")
 
     def _update_status_chips(self) -> None:
         """Recount severities from the active model and refresh chips."""

@@ -86,6 +86,48 @@ _ACQ_OVERRIDE_FIELDS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Live entity-validation (re-runs on every user edit)
+# ---------------------------------------------------------------------------
+#
+# ``proposed_issues`` carries two kinds of note. *Static* notes describe the
+# source and cannot change once scanned (suspected_abort, B0 reroute, fmap
+# multi-output, non-image series, user-excluded, mixed-study / collision
+# hints). *Managed* notes are the schema entity-validation issues derived from
+# (entities, datatype, suffix); these DO change when the user edits a row, so
+# the model recomputes them on every edit and splices them back in, leaving the
+# static notes untouched. That keeps the valid / warning / error chips live.
+
+# Prefixes (the part before ``": "``) of a managed entity-validation issue.
+# Mirror ``schema.validate_entity_set`` rule_ids plus the scan's
+# ``build_basename: <exc>`` note. Kept narrow so a static note never matches.
+_MANAGED_ISSUE_PREFIXES: tuple[str, ...] = (
+    "datatype.",
+    "suffix.",
+    "entity.",
+    "basename.",
+    "build_basename",
+)
+# Managed notes that carry no ``": "`` separator.
+_MANAGED_ISSUE_EXACT: frozenset[str] = frozenset({"BIDS_name missing"})
+
+# Sentinel values the scan inserts for a missing required entity (see
+# ``cli/scan._placeholder_for_entity``). Live validation treats them as still
+# missing so a freshly-scanned row stays flagged until the user supplies a real
+# value, and reverts to valid the moment they do.
+_ENTITY_PLACEHOLDERS: dict[str, str] = {"task": "TASK", "subject": "TBD"}
+_DEFAULT_PLACEHOLDER = "TBD"
+
+
+def _is_managed_issue(token: str) -> bool:
+    """True when ``token`` is a recomputable entity-validation issue."""
+    t = token.strip()
+    if t in _MANAGED_ISSUE_EXACT:
+        return True
+    head = t.split(":", 1)[0].strip()
+    return head.startswith(_MANAGED_ISSUE_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
 # Column specification
 # ---------------------------------------------------------------------------
 
@@ -121,7 +163,10 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("status",    "",                       "status",   False, 28),
     ColumnSpec("id",        "id",                     "mono",     False, 50, df_column="BIDS_name"),
     # Default-visible curated set.
-    ColumnSpec("dataset",   "dataset",                "plain",    True,  100, df_column="dataset"),
+    # Read-only: the dataset name is owned by the project (the locked output
+    # folder). Editing it by hand would point conversion at the wrong folder,
+    # so it is informative only and excluded from bulk edits.
+    ColumnSpec("dataset",   "dataset",                "plain",    False, 100, df_column="dataset"),
     ColumnSpec("ses",       "ses",                    "mono",     True,  50, df_column="session"),
     ColumnSpec("mod",       "mod",                    "plain",    False, 38, df_column="modality"),
     ColumnSpec("datatype",  "data",                   "plain",    True,  50, df_column="proposed_datatype"),
@@ -272,6 +317,14 @@ class InventoryTableModel(QAbstractTableModel):
 
         if project is not None:
             self._apply_project_overlay(project.state())
+
+        # Normalise ``proposed_issues`` to the live entity-validation state so a
+        # freshly-loaded TSV and a user-edited one read identically (load ==
+        # edit). Static scan notes are preserved; only the schema-validation
+        # segment is recomputed. Pure DataFrame mutation, no signals (we build
+        # the row-state cache from the result immediately below).
+        for i in range(len(self._df)):
+            self._revalidate_row(i)
 
         # Cache per-row state so delegates don't re-derive on every paint.
         # Invalidated for one row by :meth:`refresh_row`.
@@ -736,7 +789,8 @@ class InventoryTableModel(QAbstractTableModel):
     # targets (subject, dataset, task) come first.
     BULK_EDITABLE_KEYS: tuple[str, ...] = (
         "id",        # → subject entity + BIDS_name
-        "dataset",
+        # "dataset" is intentionally excluded: it is owned by the project /
+        # locked output folder and must never be changed by hand (see ColumnSpec).
         "ses",
         "task",
         "run",
@@ -861,16 +915,40 @@ class InventoryTableModel(QAbstractTableModel):
         """Re-derive cached state for ``row`` and notify the view.
 
         Call after any mutation that could affect row state (include
-        toggle, entity edit). Emits ``dataChanged`` for every column of
-        the row so per-row tints, badges, and mirror-cell text refresh
-        together.
+        toggle, entity edit). Re-runs live entity-validation first so the
+        warn / err / valid state reflects the edit, then emits
+        ``dataChanged`` for every column of the row so per-row tints,
+        badges, and mirror-cell text refresh together.
         """
         if not (0 <= row < len(self._df)):
             return
+        self._revalidate_row(row)
         self._row_states[row] = self._derive_row_state(row)
         left = self.index(row, 0)
         right = self.index(row, self.columnCount() - 1)
         self.dataChanged.emit(left, right)
+
+    def revalidate_all(self) -> None:
+        """Recompute every row's validation issues + state, then repaint.
+
+        Forces a full live re-validation: for each row the schema entity checks
+        run against its current entities / datatype / suffix, the managed
+        segment of ``proposed_issues`` is refreshed (static scan notes kept),
+        and the cached row state is rebuilt. Emits one ``dataChanged`` over the
+        whole table so delegates repaint and the controller's chip / preview /
+        stats listeners recompute. Backs the Converter's "Re-validate" button so
+        the valid / warning / error tallies are guaranteed current after any
+        batch of edits, no matter which edit path produced them.
+        """
+        if self.rowCount() == 0:
+            return
+        for i in range(len(self._df)):
+            self._revalidate_row(i)
+            self._row_states[i] = self._derive_row_state(i)
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(self.rowCount() - 1, self.columnCount() - 1),
+        )
 
     def dataframe(self) -> pd.DataFrame:
         """Return the live working DataFrame.
@@ -1059,6 +1137,80 @@ class InventoryTableModel(QAbstractTableModel):
         # ".97" — no leading zero, two decimal places.
         s = f"{v:.2f}"
         return s[1:] if s.startswith("0.") else s
+
+    # -------- live entity-validation --------
+
+    def _live_entity_issues(self, row: int) -> list[str]:
+        """Schema entity-validation issues for the row's *current* entities.
+
+        Returns the same ``"<rule_id>: <message>"`` strings the scan emits, so
+        they slot straight back into ``proposed_issues``. Skipped rows and rows
+        without a datatype/suffix produce none. Placeholder sentinels are
+        treated as missing (see :data:`_ENTITY_PLACEHOLDERS`).
+        """
+        if not (0 <= row < len(self._df)):
+            return []
+        if not self._read_include(row):
+            return []
+        # A row the scanner marked skip is not converted; don't validate it.
+        if "bids_guess_skip" in self._df.columns:
+            v = self._df.at[row, "bids_guess_skip"]
+            if isinstance(v, str):
+                if v.strip() in ("1", "true", "True"):
+                    return []
+            elif not pd.isna(v) and bool(v):
+                return []
+
+        datatype, suffix = self.datatype_suffix(row)
+        if not datatype or not suffix:
+            return []
+        # Derivatives use a bespoke path that the schema entity validator
+        # rejects wholesale; leave their notes to the scanner.
+        if datatype == "derivatives":
+            return []
+
+        ents = self.entities(row)
+        cleaned = {
+            k: v
+            for k, v in ents.items()
+            if v and v != _ENTITY_PLACEHOLDERS.get(k, _DEFAULT_PLACEHOLDER)
+        }
+        try:
+            verdicts = schema_mod.validate_entity_set(cleaned, datatype, suffix)
+        except Exception:  # pragma: no cover - schema lookups are defensive
+            log.debug("live entity validation failed for row %d", row, exc_info=True)
+            return []
+        return [
+            f"{v.rule_id}: {v.message}"
+            for v in verdicts
+            if v.severity is schema_mod.Severity.ERROR
+        ]
+
+    def _revalidate_row(self, row: int) -> bool:
+        """Recompute the managed (entity-validation) segment of ``proposed_issues``.
+
+        Static scan notes are preserved verbatim; only the schema-validation
+        issues are replaced with a fresh recompute of the row's current
+        entities. Mutates the DataFrame in place (no signal) and returns
+        ``True`` when the cell changed. Callers emit ``dataChanged`` via
+        :meth:`refresh_row`.
+        """
+        if not (0 <= row < len(self._df)):
+            return False
+        if "proposed_issues" not in self._df.columns:
+            return False
+        old_val = "" if pd.isna(self._df.at[row, "proposed_issues"]) else str(
+            self._df.at[row, "proposed_issues"]
+        )
+        existing = [t.strip() for t in old_val.split(" | ") if t.strip()]
+        static = [t for t in existing if not _is_managed_issue(t)]
+        fresh = self._live_entity_issues(row)
+        # Validation issues first (matches the scan's ordering), then static.
+        new_val = " | ".join(fresh + static)
+        if new_val == old_val:
+            return False
+        self._df.at[row, "proposed_issues"] = new_val
+        return True
 
     # -------- per-row state --------
 

@@ -221,6 +221,80 @@ def test_relocate_source_persists_to_version_meta(
     assert workspace.read_version_meta(vdir)["raw_root"] == str(new_raw)
 
 
+def test_fresh_scan_flags_rows_whose_subject_already_exists(
+    qtbot, isolated_settings, tmp_path,
+):
+    root = tmp_path / "ds"
+    proj = open_or_create_workspace(root)
+    (root / "sub-001").mkdir()  # already converted on disk
+    panel = ConverterPanel(project=proj)
+    qtbot.addWidget(panel)
+    panel.set_project(proj, root)
+
+    df = pd.DataFrame([
+        {"BIDS_name": "sub-001", "proposed_issues": ""},  # collides with on-disk
+        {"BIDS_name": "sub-002", "proposed_issues": ""},  # new
+    ])
+    panel._flag_existing_subject_rows(df)
+    # No participants.tsv identity -> generic heads-up, tagged with the token.
+    assert "already in the dataset" in df.iloc[0]["proposed_issues"]
+    assert "existing-subject" in df.iloc[0]["proposed_issues"]
+    assert df.iloc[1]["proposed_issues"] == ""  # new subject not flagged
+
+
+def test_flag_existing_subject_rows_is_idempotent_after_rename(
+    qtbot, isolated_settings, tmp_path,
+):
+    # Renaming a clashing subject must clear the stale collision note (it bakes
+    # in the old id); re-flagging the same frame is the engine behind Re-validate.
+    root = tmp_path / "ds"
+    proj = open_or_create_workspace(root)
+    (root / "sub-001").mkdir()
+    panel = ConverterPanel(project=proj)
+    qtbot.addWidget(panel)
+    panel.set_project(proj, root)
+
+    df = pd.DataFrame([{"BIDS_name": "sub-001", "proposed_issues": ""}])
+    panel._flag_existing_subject_rows(df)
+    assert "existing-subject" in df.iloc[0]["proposed_issues"]
+
+    # User renames to a free id, then re-flags: the warning is gone (no double).
+    df.at[0, "BIDS_name"] = "sub-002"
+    panel._flag_existing_subject_rows(df)
+    assert df.iloc[0]["proposed_issues"] == ""
+
+
+def test_revalidate_clears_collision_after_bulk_rename(
+    qtbot, isolated_settings, tmp_path,
+):
+    # Full flow the user hit: convert sub-001, scan a second source that also
+    # lands on sub-001 (warn), rename to sub-002, click Re-validate -> warning
+    # clears (no lingering "sub-001 ... DIFFERENT subject" note).
+    root = tmp_path / "ds"
+    proj = open_or_create_workspace(root)
+    (root / "sub-001").mkdir()  # subject already on disk
+    _add_version(root, "raw", _inventory_df(subject="001", uid="X1"), str(tmp_path / "raw"))
+    panel = ConverterPanel(project=proj)
+    qtbot.addWidget(panel)
+    panel.set_project(proj, root)
+
+    # Flag collisions as the scan-complete path would.
+    panel._flag_existing_subject_rows(panel._model.dataframe())
+    panel._model.revalidate_all()
+    assert panel._model.row_state(0) == "warn"  # collides with on-disk sub-001
+
+    # Rename via the bulk-edit code path (id -> subject entity + BIDS_name).
+    panel._model.bulk_set([0], "id", "002")
+    # Live edit alone leaves the stale note (manual revalidation is by design).
+    assert panel._model.row_state(0) == "warn"
+
+    # Re-validate recomputes the collision against the new id + disk -> cleared.
+    panel._on_revalidate_clicked()
+    assert panel._model.row_state(0) == ""
+    issues = panel._model.dataframe().at[0, "proposed_issues"]
+    assert "existing-subject" not in issues and "sub-001" not in issues
+
+
 def test_set_project_without_scan_is_noop(qtbot, isolated_settings, tmp_path):
     root = tmp_path / "fresh"
     proj = open_or_create_workspace(root)
@@ -229,3 +303,44 @@ def test_set_project_without_scan_is_noop(qtbot, isolated_settings, tmp_path):
     panel.set_project(proj, root)
     assert panel._model is None
     assert panel._scans_combo.isHidden()  # no versions -> picker hidden
+
+
+def test_binding_new_empty_project_clears_previous(qtbot, isolated_settings, tmp_path):
+    # Project A with a scan -> the converter shows its rows.
+    root_a = tmp_path / "A"
+    proj_a = open_or_create_workspace(root_a)
+    _add_version(root_a, "raw", _inventory_df(), str(tmp_path / "rawA"))
+    panel = ConverterPanel(project=proj_a)
+    qtbot.addWidget(panel)
+    panel.set_project(proj_a, root_a)
+    assert panel._model is not None
+
+    # Switching to a fresh, empty project B must reset the converter so A's rows
+    # / raw input / active version never leak across datasets.
+    root_b = tmp_path / "B"
+    proj_b = open_or_create_workspace(root_b)
+    panel.set_project(proj_b, root_b)
+    assert panel._model is None
+    assert panel._raw_root is None
+    assert panel._active_version_dir is None
+    assert panel._scans_combo.isHidden()
+    assert panel._bids_root == root_b
+
+
+def test_open_existing_syncs_dataset_column_to_folder(
+    qtbot, isolated_settings, tmp_path,
+):
+    # The dataset folder was renamed on disk, so the stored inventory's dataset
+    # column is stale. Opening the project must re-sync it to the folder name so
+    # conversion writes into the (renamed) locked root.
+    root = tmp_path / "renamed_ds"
+    proj = open_or_create_workspace(root)
+    df = _inventory_df()
+    df["dataset"] = "old_folder_name"
+    _add_version(root, "raw", df, str(tmp_path / "raw"))
+
+    panel = ConverterPanel(project=proj)
+    qtbot.addWidget(panel)
+    panel.set_project(proj, root)
+
+    assert (panel._model.dataframe()["dataset"] == "renamed_ds").all()
