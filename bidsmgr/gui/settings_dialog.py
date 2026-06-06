@@ -542,6 +542,17 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Residuals:", self._convert_skip_residuals)
 
+        self._convert_force_edf = QCheckBox(
+            "Force EDF for EEG / iEEG (re-encode recordings to EDF on convert)"
+        )
+        self._convert_force_edf.setToolTip(
+            "Re-encode EEG / iEEG recordings to EDF instead of keeping the "
+            "source format. Harmonises a study to one BIDS-native format, and "
+            "makes a non-BIDS-native but mne-readable source (GDF, EGI, ...) "
+            "convertible. MEG / NIRS are unaffected."
+        )
+        form.addRow("Force EDF:", self._convert_force_edf)
+
         v.addWidget(convert)
 
         # Post-convert chain laid out as an indented hierarchy: each step is
@@ -633,6 +644,7 @@ class SettingsDialog(QDialog):
         idx = self._convert_on_existing.findData(s.convert_on_existing)
         self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
         self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
+        self._convert_force_edf.setChecked(s.convert_force_edf)
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
         self._post_metadata_fill_todos.setChecked(s.post_metadata_fill_todos)
@@ -697,6 +709,7 @@ class SettingsDialog(QDialog):
         # Keep the legacy flag in sync for any old reader.
         s.convert_overwrite = (s.convert_on_existing == "replace")
         s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
+        s.convert_force_edf = self._convert_force_edf.isChecked()
 
         s.post_run_metadata = self._post_run_metadata.isChecked()
         s.post_metadata_fill_todos = self._post_metadata_fill_todos.isChecked()

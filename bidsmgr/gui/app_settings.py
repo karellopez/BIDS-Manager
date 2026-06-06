@@ -45,6 +45,7 @@ KEYS = {
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
     "convert_on_existing": "convert/on_existing",    # skip|update|replace|error
     "convert_skip_residuals": "convert/skip_residuals",
+    "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
     # Scan rules (user-extensible classifier hints + series exclusions).
     # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
     "user_hints":         "classifier/user_hints",
@@ -123,6 +124,8 @@ class AppSettings:
     # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
     # ``..._bold``). Default on: they are derived duplicates, not real images.
     convert_skip_residuals: bool = True
+    # Re-encode EEG / iEEG recordings to EDF on convert (mne-bids format="EDF").
+    convert_force_edf: bool = False
 
     # Post-convert chain
     post_run_metadata: bool = True
@@ -263,6 +266,9 @@ class AppSettings:
         out.convert_skip_residuals = _as_bool(
             s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
         )
+        out.convert_force_edf = _as_bool(
+            s.value(KEYS["convert_force_edf"]), out.convert_force_edf,
+        )
 
         out.post_run_metadata = _as_bool(s.value(KEYS["post_run_metadata"]),
                                          out.post_run_metadata)
@@ -314,6 +320,7 @@ class AppSettings:
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
             ("convert_skip_residuals",   self.convert_skip_residuals),
+            ("convert_force_edf",        self.convert_force_edf),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),

@@ -40,6 +40,27 @@ def _measure_name(stem: str) -> str:
     return name or "measure"
 
 
+def load_sidecar_dictionary(table_path: Path) -> dict:
+    """Load an optional user-authored data dictionary (codebook) for a table.
+
+    For a measure / participants table ``foo.tsv`` (or ``.csv`` / ``.xlsx``), a
+    sibling ``foo.json`` lets the user supply real column descriptions, ``Levels``,
+    and ``Units`` (plus, for phenotype, a ``MeasurementToolMetadata`` block) - a
+    codebook expressed as the BIDS data dictionary itself.
+    Returns ``{}`` when there is no sibling JSON or it cannot be parsed.
+    """
+    path = Path(table_path)
+    sidecar = path.with_suffix(".json")
+    if sidecar == path or not sidecar.exists():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("could not read codebook %s: %s", sidecar, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def write_phenotype(
     bids_root: Path,
     phenotype_files: Optional[Sequence[Path]],
@@ -78,15 +99,31 @@ def write_phenotype(
         df.to_csv(tsv_out, sep="\t", index=False)
         report.files_written.append(tsv_out)
 
+        # Data dictionary: merge any user-authored codebook (sibling JSON) so
+        # real Descriptions / Levels / Units (and an optional
+        # MeasurementToolMetadata block) flow through; auto-fill the rest with
+        # the bare column name. The codebook entry wins where present.
+        codebook = load_sidecar_dictionary(path)
         json_out = pheno_dir / f"{measure}.json"
-        data_dict = {
-            str(col): {"Description": str(col)}
-            for col in df.columns
-            if col != "participant_id"
-        }
+        data_dict: dict = {}
+        tool_meta = codebook.get("MeasurementToolMetadata")
+        if isinstance(tool_meta, dict) and tool_meta:
+            data_dict["MeasurementToolMetadata"] = tool_meta
+        for col in df.columns:
+            if col == "participant_id":
+                continue
+            entry = codebook.get(str(col))
+            if isinstance(entry, dict) and entry:
+                data_dict[str(col)] = entry
+            else:
+                data_dict[str(col)] = {"Description": str(col)}
         json_out.write_text(json.dumps(data_dict, indent=2) + "\n", encoding="utf-8")
         report.files_written.append(json_out)
-        log.info("phenotype: wrote %s (%d rows, %d columns)", tsv_out.name, len(df), len(df.columns))
+        log.info(
+            "phenotype: wrote %s (%d rows, %d columns%s)",
+            tsv_out.name, len(df), len(df.columns),
+            "; codebook merged" if codebook else "",
+        )
 
 
-__all__ = ["write_phenotype"]
+__all__ = ["write_phenotype", "load_sidecar_dictionary"]

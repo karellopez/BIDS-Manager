@@ -458,3 +458,59 @@ class TestScanEegMeg:
         df = scan_eeg_meg(tmp_path, dataset="study")
         assert df.iloc[0]["line_freq"] == ""
         assert df.iloc[0]["montage"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Unsupported / non-BIDS-native format detection (gap #3)
+# ---------------------------------------------------------------------------
+
+
+class TestUnsupportedFormats:
+    def test_unreadable_recognised_file_is_flagged_not_skipped(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A recognised EEG/MEG extension mne cannot read becomes a visible,
+        excluded row (not silently dropped)."""
+        monkeypatch.setattr(eeg_meg_mod, "_HAS_MNE", True, raising=False)
+        monkeypatch.setattr(eeg_meg_mod, "_probe", lambda path: None)
+
+        (tmp_path / "901flankers.cnt").write_bytes(b"not really a cnt")
+        df = scan_eeg_meg(tmp_path, dataset="study")
+
+        assert len(df) == 1  # the file is surfaced, not skipped
+        row = df.iloc[0]
+        assert str(row["include"]) in ("0", "False", "false")
+        assert row["format"] == "CNT"
+        assert eeg_meg_mod.UNSUPPORTED_FORMAT_TOKEN in row["proposed_issues"]
+        # No half-built BIDS name for an unconvertible row.
+        assert row["proposed_basename"] == ""
+
+    def test_nonnative_readable_format_gets_warning_note(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A format mne CAN read but mne-bids cannot write natively (e.g. GDF)
+        stays included but carries a non-native warning note."""
+        monkeypatch.setattr(eeg_meg_mod, "_HAS_MNE", True, raising=False)
+
+        def fake_probe(path: Path):
+            return _StubProbe(source=path, datatype="eeg", fmt="GDF")
+
+        monkeypatch.setattr(eeg_meg_mod, "_probe", fake_probe)
+
+        (tmp_path / "rec.gdf").write_bytes(b"x")
+        df = scan_eeg_meg(tmp_path, dataset="study")
+
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert str(row["include"]) in ("1", "True", "true")  # still convertible
+        assert eeg_meg_mod.NONNATIVE_FORMAT_TOKEN in row["proposed_issues"]
+        assert row["proposed_basename"]  # has a real BIDS name
+
+    def test_native_format_has_no_note(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """An EDF (BIDS-native) row carries no format warning."""
+        _patch_probe(monkeypatch)  # stub fmt defaults to EDF
+        (tmp_path / "a.edf").write_bytes(b"x")
+        df = scan_eeg_meg(tmp_path, dataset="study")
+        assert df.iloc[0]["proposed_issues"] == ""

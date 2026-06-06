@@ -39,7 +39,7 @@ from .demographics import (
     normalize_handedness,
     normalize_sex,
 )
-from .phenotype import write_phenotype
+from .phenotype import load_sidecar_dictionary, write_phenotype
 from .types import DatasetMetadata, MetadataReport, SidecarFill, TodoFill
 from ..recording_meta import load_spec, scaffold_sidecar_path
 
@@ -168,10 +168,13 @@ def run_metadata(
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
-    # Auto-discover phenotype tables from the inventory's recording-metadata
-    # scaffold when not explicitly provided (the GUI dialog stores them there).
+    # Auto-discover phenotype tables + participants spreadsheet from the
+    # inventory's recording-metadata scaffold when not explicitly provided (the
+    # GUI dataset-metadata dialog stores them there).
     if phenotype_files is None and inventory_tsv is not None:
         phenotype_files = _phenotype_files_from_scaffold(inventory_tsv)
+    if participants_file is None and inventory_tsv is not None:
+        participants_file = _participants_file_from_scaffold(inventory_tsv)
 
     _write_dataset_description(bids_root, meta, generator_label, report)
     _write_participants(bids_root, inventory_tsv, report, participants_file=participants_file)
@@ -342,6 +345,27 @@ def _phenotype_files_from_scaffold(inventory_tsv: Path) -> Optional[list[Path]]:
     return out or None
 
 
+def _participants_file_from_scaffold(inventory_tsv: Path) -> Optional[Path]:
+    """Read the participants spreadsheet path from the recording-meta scaffold.
+
+    The GUI dataset-metadata dialog stores it in
+    ``<inventory>.tsv.recording_meta.json``. Resolved relative to the inventory
+    directory when not absolute. Returns ``None`` when unset.
+    """
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return None
+        spec = load_spec(scaffold)
+    except Exception:
+        return None
+    raw = (spec.participants_file or "").strip()
+    if not raw:
+        return None
+    pp = Path(raw)
+    return pp if pp.is_absolute() else Path(inventory_tsv).parent / pp
+
+
 def _write_participants(
     bids_root: Path,
     inventory_tsv: Optional[Path],
@@ -353,12 +377,27 @@ def _write_participants(
         return
 
     demo_lookup = _load_demographics_from_inventory(inventory_tsv, report)
+    participant_codebook: dict = {}
     if participants_file is not None:
         # A user-supplied participants spreadsheet is the authoritative
         # demographic source: its non-empty cells override the inventory.
         demo_lookup = merge_demographics(
             demo_lookup, load_participants_table(Path(participants_file)),
         )
+        # Optional sibling JSON codebook (descriptions / levels / units for the
+        # spreadsheet's columns) -> participants.json.
+        participant_codebook = load_sidecar_dictionary(Path(participants_file))
+
+    # Any column the participants spreadsheet carries beyond the known
+    # demographics is preserved verbatim: it flows into participants.tsv and is
+    # described in participants.json. Order is the first-seen order across
+    # subjects for a stable, readable table.
+    known = set(_PARTICIPANT_COLUMNS)
+    extra_cols: list[str] = []
+    for sid in subjects:
+        for col in demo_lookup.get(sid, {}):
+            if col and col not in known and col not in extra_cols:
+                extra_cols.append(col)
 
     rows: list[dict[str, str]] = []
     for sid in subjects:
@@ -371,9 +410,12 @@ def _write_participants(
             elif col == "handedness":
                 v = normalize_handedness(v)
             row[col] = v if v else "n/a"
+        for col in extra_cols:
+            v = str(extra.get(col, "") or "").strip()
+            row[col] = v if v else "n/a"
         rows.append(row)
 
-    df_new = pd.DataFrame(rows, columns=list(_PARTICIPANT_COLUMNS))
+    df_new = pd.DataFrame(rows, columns=list(_PARTICIPANT_COLUMNS) + extra_cols)
 
     out_tsv = bids_root / "participants.tsv"
     df_existing: Optional[pd.DataFrame] = None
@@ -402,11 +444,20 @@ def _write_participants(
     report.files_written.append(out_tsv)
 
     out_json = bids_root / "participants.json"
-    json_payload = {
-        col: _PARTICIPANT_DESCRIPTIONS[col]
-        for col in df_out.columns
-        if col in _PARTICIPANT_DESCRIPTIONS
-    }
+    json_payload: dict = {}
+    for col in df_out.columns:
+        if col in _PARTICIPANT_DESCRIPTIONS:
+            json_payload[col] = _PARTICIPANT_DESCRIPTIONS[col]
+        elif col == "participant_id":
+            continue
+        else:
+            # Extra spreadsheet column: use the user's codebook entry if any,
+            # else a minimal Description = the column name.
+            entry = participant_codebook.get(str(col))
+            json_payload[col] = (
+                entry if isinstance(entry, dict) and entry
+                else {"Description": str(col)}
+            )
     out_json.write_text(json.dumps(json_payload, indent=2) + "\n", encoding="utf-8")
     report.files_written.append(out_json)
 

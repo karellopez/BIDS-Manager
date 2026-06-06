@@ -1568,6 +1568,7 @@ class ConverterPanel(QWidget):
             on_existing=self._app_settings.convert_on_existing,
             raw_root=self._raw_root,
             skip_residuals=self._app_settings.convert_skip_residuals,
+            force_edf=self._app_settings.convert_force_edf,
             parent=self,
         )
         worker.progress.connect(self._on_progress)

@@ -205,6 +205,12 @@ class RecordingMetaSpec(_Model):
     # participant_id). Written to ``phenotype/<measure>.tsv`` + ``.json`` by the
     # metadata engine. Agnostic: applies to any modality.
     phenotype_files: list[str] = []
+    # Optional participants spreadsheet (TSV/CSV/XLSX/ODS keyed by
+    # participant_id). Its demographic columns override the inventory-derived
+    # values and any extra columns are carried into participants.tsv (described
+    # in participants.json, optionally via a sibling ``.json`` codebook).
+    # Agnostic: applies to any modality.
+    participants_file: str = ""
 
 
 __all__ = [

@@ -147,6 +147,7 @@ class RecordingMetaDialog(QDialog):
         bl.addWidget(self._region_label("Modality-agnostic", agnostic=True))
         bl.addWidget(self._build_institution_group())
         bl.addWidget(self._build_event_group())
+        bl.addWidget(self._build_participants_group())
         bl.addWidget(self._build_phenotype_group())
         bl.addStretch(1)
         scroll = QScrollArea()
@@ -372,6 +373,42 @@ class RecordingMetaDialog(QDialog):
         for r in rows:
             self._events.removeRow(r)
 
+    def _build_participants_group(self) -> QGroupBox:
+        box = QGroupBox("Participants spreadsheet  ·  modality-agnostic  →  participants.tsv")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(4)
+        hint = QLabel(
+            "Optional table keyed by participant_id. Its age / sex / handedness "
+            "override the inventory; any extra columns (group, IQ, ...) are added "
+            "to participants.tsv. A sibling <name>.json supplies column "
+            "descriptions / Levels / Units."
+        )
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+        row = QHBoxLayout()
+        self._participants_file = QLineEdit()
+        self._participants_file.setObjectName("ent-input")
+        self._participants_file.setReadOnly(True)
+        self._participants_file.setPlaceholderText("(none)")
+        browse = QPushButton("Choose…")
+        browse.clicked.connect(self._choose_participants_file)
+        clear = QPushButton("Clear")
+        clear.clicked.connect(lambda: self._participants_file.clear())
+        row.addWidget(self._participants_file, 1)
+        row.addWidget(browse)
+        row.addWidget(clear)
+        v.addLayout(row)
+        return box
+
+    def _choose_participants_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select participants spreadsheet", "",
+            "Tables (*.tsv *.csv *.xlsx *.ods);;All files (*)",
+        )
+        if path:
+            self._participants_file.setText(path)
+
     def _build_phenotype_group(self) -> QGroupBox:
         box = QGroupBox("Phenotype tables  ·  modality-agnostic  →  phenotype/")
         v = QVBoxLayout(box)
@@ -455,6 +492,8 @@ class RecordingMetaDialog(QDialog):
         self._phenotype.clear()
         for p in self._spec.phenotype_files:
             self._phenotype.addItem(str(p))
+
+        self._participants_file.setText(self._spec.participants_file or "")
 
     @staticmethod
     def _set_combo(combo: QComboBox, value: Optional[str], blank: str) -> None:
@@ -573,6 +612,7 @@ class RecordingMetaDialog(QDialog):
             "defaults": acq,
             "event_maps": event_maps,
             "phenotype_files": phenotype_files,
+            "participants_file": self._participants_file.text().strip(),
         })
 
     def _on_save(self) -> None:

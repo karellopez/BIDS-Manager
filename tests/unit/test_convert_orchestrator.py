@@ -466,3 +466,37 @@ class TestFailureHandling:
         anat = bids_parent / "study_a" / "sub-001" / "anat"
         assert (anat / "sub-001_T2w.nii.gz").exists()
         assert not (anat / "sub-001_T1w.nii.gz").exists()
+
+
+def _eeg_row(**over):
+    base = {
+        "source_file": "sub-01_task-rest.edf",
+        "series_uid": "",
+        "BIDS_name": "sub-001",
+        "session": "",
+        "proposed_datatype": "eeg",
+        "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "entities": json.dumps({"subject": "001", "task": "rest"}),
+        "task": "rest",
+        "run": "",
+        "line_freq": "",
+        "montage": "",
+        "eeg_reference": "",
+        "eeg_ground": "",
+        "dataset": "ds",
+        "companion_files": "",
+    }
+    base.update(over)
+    return pd.Series(base)
+
+
+def test_force_edf_flag_threads_onto_eeg_task(tmp_path):
+    """``--force-edf`` reaches the EEG ConvertTask; default leaves it off."""
+    row = _eeg_row()
+    t_off = convert_mod._row_to_task_eeg_meg(row, tmp_path)
+    assert t_off is not None and t_off.force_edf is False
+
+    t_on = convert_mod._row_to_task_eeg_meg(row, tmp_path, force_edf=True)
+    assert t_on is not None and t_on.force_edf is True
+    assert t_on.datatype == "eeg"

@@ -605,3 +605,44 @@ class TestInferDatatypeSuffix:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}")
         assert _infer_datatype_suffix(target, root) == expected
+
+
+class TestParticipantsExtraColumns:
+    def test_spreadsheet_extra_columns_carried_with_codebook(self, tmp_path):
+        """Columns beyond the known demographics flow into participants.tsv and
+        are described in participants.json (rs-bidsify-style), using a sibling
+        codebook when present."""
+        root = _make_minimal_bids(tmp_path)
+        participants = tmp_path / "subjects.csv"
+        participants.write_text(
+            "participant_id,age,sex,group,iq\nsub-001,30,female,patient,118\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "subjects.json").write_text(json.dumps({
+            "group": {"Description": "Study group", "Levels": {"patient": "clinical"}},
+            "iq": {"Description": "Full-scale IQ", "Units": "points"},
+        }), encoding="utf-8")
+
+        run_metadata(root, participants_file=participants)
+
+        tsv = (root / "participants.tsv").read_text()
+        header = tsv.splitlines()[0].split("\t")
+        assert "group" in header and "iq" in header
+        assert "patient" in tsv and "118" in tsv
+
+        pj = json.loads((root / "participants.json").read_text())
+        assert pj["group"]["Levels"]["patient"] == "clinical"
+        assert pj["iq"]["Units"] == "points"
+        # Known demographic columns keep their built-in descriptions.
+        assert pj["sex"]["Levels"]["F"] == "female"
+
+    def test_extra_column_without_codebook_gets_default_description(self, tmp_path):
+        root = _make_minimal_bids(tmp_path)
+        participants = tmp_path / "subjects.tsv"
+        participants.write_text(
+            "participant_id\tcohort\nsub-001\twave1\n", encoding="utf-8",
+        )
+        run_metadata(root, participants_file=participants)
+        pj = json.loads((root / "participants.json").read_text())
+        assert pj["cohort"] == {"Description": "cohort"}
+        assert "cohort" in (root / "participants.tsv").read_text().splitlines()[0]

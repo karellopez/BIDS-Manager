@@ -118,7 +118,15 @@ def _patch_mne_bids(
             raise raw_exception
         return _FakeRaw()
 
-    def fake_write_raw_bids(raw, bids_path, *, overwrite=False, format="auto", verbose=None):
+    def fake_write_raw_bids(
+        raw, bids_path, *, overwrite=False, format="auto",
+        allow_preload=False, verbose=None,
+    ):
+        # Record the format / allow_preload the backend chose so tests can
+        # assert force-EDF behaviour. The real mne-bids accepts these kwargs.
+        fake_mne_bids.last_write_kwargs = {
+            "format": format, "allow_preload": allow_preload,
+        }
         if write_exception is not None:
             raise write_exception
         sub_dir = Path(bids_path.root) / f"sub-{bids_path.subject}"
@@ -517,3 +525,39 @@ class TestCoerceRun:
     ])
     def test_run_coercion(self, value, expected) -> None:
         assert _coerce_run(value) == expected
+
+
+class TestForceEdf:
+    def _eeg_task(self, tmp_path, *, datatype="eeg", force_edf=False):
+        return ConvertTask(
+            row_id="r1", series_uid="", source_files=(_make_source(tmp_path),),
+            dataset="study", bids_root=tmp_path / "bids" / "study",
+            subject="001", session=None, datatype=datatype, suffix=datatype,
+            entities={"task": "rest"}, basename=f"sub-001_task-rest_{datatype}",
+            expected_outputs=(".edf", ".json"), force_edf=force_edf,
+        )
+
+    def test_force_edf_passes_edf_format_for_eeg(self, tmp_path, monkeypatch):
+        _patch_mne_bids(monkeypatch, write_extensions=(".edf", ".json"))
+        import mne_bids
+        b = MneBidsBackend()
+        staging = tmp_path / ".tmp_bidsmgr" / "sub-001"; staging.mkdir(parents=True)
+        b.convert(self._eeg_task(tmp_path, force_edf=True), staging)
+        assert mne_bids.last_write_kwargs == {"format": "EDF", "allow_preload": True}
+
+    def test_default_keeps_auto_format(self, tmp_path, monkeypatch):
+        _patch_mne_bids(monkeypatch, write_extensions=(".edf", ".json"))
+        import mne_bids
+        b = MneBidsBackend()
+        staging = tmp_path / ".tmp_bidsmgr" / "sub-001"; staging.mkdir(parents=True)
+        b.convert(self._eeg_task(tmp_path, force_edf=False), staging)
+        assert mne_bids.last_write_kwargs == {"format": "auto", "allow_preload": False}
+
+    def test_force_edf_ignored_for_meg(self, tmp_path, monkeypatch):
+        """EDF is not a MEG format; force_edf must not touch MEG rows."""
+        _patch_mne_bids(monkeypatch, write_extensions=(".fif", ".json"))
+        import mne_bids
+        b = MneBidsBackend()
+        staging = tmp_path / ".tmp_bidsmgr" / "sub-001"; staging.mkdir(parents=True)
+        b.convert(self._eeg_task(tmp_path, datatype="meg", force_edf=True), staging)
+        assert mne_bids.last_write_kwargs["format"] == "auto"

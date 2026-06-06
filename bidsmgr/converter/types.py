@@ -68,6 +68,13 @@ class ConvertTask(BaseModel):
     eeg_reference: Optional[str] = None
     eeg_ground: Optional[str] = None
 
+    # When True, EEG / iEEG recordings are re-encoded to EDF on write
+    # (``mne_bids.write_raw_bids(format="EDF")``) instead of kept in their
+    # source format. Lets a study harmonise to a single BIDS-native format,
+    # and is the way a non-BIDS-native but mne-readable source (GDF, EGI, ...)
+    # becomes convertible. MEG / NIRS ignore it (EDF is an EEG / iEEG format).
+    force_edf: bool = False
+
     # Already-curated companion files to COPY into the BIDS tree on convert
     # (not converted): ``((suffix, source_path), ...)`` where suffix is a
     # BIDS companion suffix (events / beh / stim / physio / channels / ...).

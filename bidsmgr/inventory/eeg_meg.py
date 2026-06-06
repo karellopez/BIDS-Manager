@@ -95,6 +95,41 @@ _RECOGNISED_EXTS: tuple[str, ...] = (
 # Folder-shaped recordings (CTF MEG, EGI MFF). Treated as single candidates.
 _DIR_FORMATS: tuple[str, ...] = (".ds", ".mff")
 
+# Extensions mne-bids can write to BIDS natively (copy, or native re-encode).
+# A recording in any OTHER recognised format (Neuroscan ``.cnt``, ``.gdf``,
+# EGI ``.egi``/``.mff``, Nihon Kohden ``.eeg`` ...) needs conversion to a
+# BIDS-allowed format. For EEG / iEEG that is EDF, available behind the
+# Force-EDF option; the scan flags such rows so the user is not surprised.
+_BIDS_NATIVE_EXTS: frozenset[str] = frozenset({
+    # MEG (all recognised MEG formats are BIDS-native)
+    ".fif", ".fif.gz", ".ds", ".con", ".sqd", ".kdf", ".pdf",
+    # EEG / iEEG
+    ".vhdr", ".edf", ".bdf", ".set", ".mef", ".nwb",
+    # NIRS
+    ".snirf",
+})
+
+# Tokens prepended to a row's ``proposed_issues`` so the GUI surfaces the
+# reason (warnings chip / Issues dialog / tooltip) and the CLI logs it. Kept
+# free of the model's error-token substrings (``required`` / ``missing`` /
+# ``build_basename`` / ``suspected_abort``) so the row reads as warn / skip,
+# not a hard error.
+UNSUPPORTED_FORMAT_TOKEN = "unsupported format"
+NONNATIVE_FORMAT_TOKEN = "non-native format"
+
+
+def _full_ext(path: Path) -> str:
+    """Lower-case extension, preserving the ``.fif.gz`` double suffix."""
+    name = path.name.lower()
+    if name.endswith(".fif.gz"):
+        return ".fif.gz"
+    # Folder-shaped recordings (.ds / .mff) report the dir suffix.
+    return path.suffix.lower()
+
+
+def _is_bids_native(path: Path) -> bool:
+    return _full_ext(path) in _BIDS_NATIVE_EXTS
+
 
 # ``mne`` is heavy; lazy-import so the module is cheap to import in
 # environments without mne (e.g. fresh venv, unit tests that mock probes).
@@ -650,10 +685,6 @@ def scan_eeg_meg(
     bids_id_for_subject: dict[str, str] = {}
 
     for path in candidates:
-        probe = _probe(path)
-        if probe is None:
-            continue
-
         sub_hint, ses_hint, task_hint, run_hint = guess_subject_session_task(path, root)
         sub_token = sub_hint or _bids_id_from_filename(path.parent.name)
         if not sub_token:
@@ -663,6 +694,23 @@ def scan_eeg_meg(
             bids_counter += 1
             bids_id_for_subject[sub_token] = f"sub-{bids_counter:03d}"
         bids_name = bids_id_for_subject[sub_token]
+
+        probe = _probe(path)
+        if probe is None:
+            # A recognised EEG/MEG extension we could not read. Surface it as
+            # an excluded row with a clear reason instead of silently dropping
+            # it, so the user sees the file and why it was skipped.
+            fmt = _format_label(path)
+            note = (
+                f"{UNSUPPORTED_FORMAT_TOKEN}: this {fmt} recording could not be "
+                f"read by mne's generic reader and is excluded from conversion. "
+                f"If it is a valid recording, convert it to EDF / BrainVision "
+                f"with the vendor's tools (or mne's format-specific reader) "
+                f"first, then re-scan."
+            )
+            log.warning("EEG/MEG scan: %s (%s)", note, path)
+            rows.append(_unsupported_row(path, root, dataset, bids_name, sub_token, fmt, note))
+            continue
 
         datatype = probe.datatype or "eeg"
         # Build the BIDS basename via the schema engine so the row's
@@ -707,6 +755,19 @@ def scan_eeg_meg(
         except ValueError:
             rel_source = str(path)
 
+        # The recording read fine, but its format is not one mne-bids writes
+        # natively (e.g. Neuroscan .cnt, GDF, EGI). Such a row still converts,
+        # but only by re-encoding to EDF (EEG / iEEG). Flag it so the user
+        # knows to enable Force EDF; the note is non-fatal (warn), the row
+        # stays included.
+        nonnative_note = ""
+        if not _is_bids_native(path):
+            nonnative_note = (
+                f"{NONNATIVE_FORMAT_TOKEN}: {probe.fmt} is not a BIDS-native "
+                f"format; conversion re-encodes it to EDF (enable Force EDF for "
+                f"EEG / iEEG)."
+            )
+
         # The canonical entities dict — same one used to build the
         # basename, JSON-encoded for the TSV's ``entities`` column.
         # This is the **source of truth**: ``bidsmgr-rebuild`` and the
@@ -729,6 +790,7 @@ def scan_eeg_meg(
             "proposed_datatype": datatype,
             "proposed_basename": basename,
             "Proposed BIDS name": f"{basename}",
+            "proposed_issues": nonnative_note,
             "entities": json.dumps(entities_for_tsv, sort_keys=True),
             "task": task_hint,
             "run": run_hint,
@@ -865,6 +927,72 @@ def _splice_session_into_basename(basename: str, session_label: str) -> str:
         return f"{session_label}_{basename}"
     parts.insert(1, session_label)
     return "_".join(parts)
+
+
+def _unsupported_row(
+    path: Path,
+    root: Path,
+    dataset: Optional[str],
+    bids_name: str,
+    sub_token: str,
+    fmt: str,
+    note: str,
+) -> dict:
+    """Build a complete, excluded inventory row for an unreadable recording.
+
+    Mirrors the shape of a normal EEG/MEG row (so the unified TSV stays
+    rectangular) but with ``include=0`` + ``bids_guess_skip=True`` + the
+    ``unsupported format`` note, no probe-derived metadata, and an empty
+    proposed basename. The user sees the file and the reason; conversion skips
+    it.
+    """
+    try:
+        rel_source = path.relative_to(root).as_posix()
+    except ValueError:
+        rel_source = str(path)
+    return {
+        "subject": sub_token,
+        "BIDS_name": bids_name,
+        "session": "",
+        "source_folder": str(path.parent.relative_to(root))
+            if path.parent != root else "",
+        "include": 0,
+        "modality": "eeg",            # best-effort; we could not probe channels
+        "modality_bids": "eeg",
+        "proposed_datatype": "eeg",
+        "proposed_basename": "",
+        "Proposed BIDS name": "",
+        "proposed_issues": note,
+        "entities": json.dumps({"subject": bids_name[len("sub-"):]
+                                if bids_name.startswith("sub-") else bids_name},
+                               sort_keys=True),
+        "task": "",
+        "run": "",
+        "format": fmt,
+        "source_file": rel_source,
+        "n_channels": "",
+        "sfreq": "",
+        "duration_sec": "",
+        "n_times": "",
+        "recording_time": "",
+        "has_positions": "",
+        "line_freq": "",
+        "montage": "",
+        "eeg_reference": "",
+        "eeg_ground": "",
+        "montage_suggestion": "",
+        "manufacturer_suggestion": "",
+        "PatientSex": "",
+        "Handedness": "",
+        "PatientAge": "",
+        "_event_codes": json.dumps([]),
+        "dataset": dataset or "",
+        "bids_guess_classifier": "eeg_meg_scanner",
+        "bids_guess_datatype": "eeg",
+        "bids_guess_suffix": "eeg",
+        "bids_guess_confidence": "0.00",
+        "bids_guess_skip": True,
+    }
 
 
 def _empty_dataframe() -> pd.DataFrame:

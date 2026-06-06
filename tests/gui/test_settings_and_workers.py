@@ -149,12 +149,14 @@ def test_mandatory_columns_cannot_be_hidden(isolated_settings, qtbot) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dataset_column_is_editable_in_inspector() -> None:
-    """The ``dataset`` column partitions the convert queue per-row, so it
-    must be user-editable from the table without needing a global toolbar
-    input."""
+def test_dataset_column_is_read_only_in_inspector() -> None:
+    """The ``dataset`` column is owned by the project / locked output folder
+    (it determines the conversion target dir), so it is read-only and excluded
+    from bulk edits to prevent accidental misrouting."""
+    from bidsmgr.gui.models.inventory import InventoryTableModel
     dataset = next(c for c in COLUMNS if c.key == "dataset")
-    assert dataset.editable is True
+    assert dataset.editable is False
+    assert "dataset" not in InventoryTableModel.BULK_EDITABLE_KEYS
 
 
 def test_tsv_filename_input_seeded_from_settings(isolated_settings, qtbot) -> None:

@@ -102,6 +102,7 @@ def run_convert(
     recording_meta: Optional[Path] = None,
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
+    force_edf: bool = False,
     cancel_check=None,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
@@ -259,6 +260,7 @@ def run_convert(
                 subject_df, bids_root, files_by_uid,
                 source_search_roots=source_search_roots,
                 skip_residuals=skip_residuals,
+                force_edf=force_edf,
                 spec=spec,
             )
             if not tasks:
@@ -701,6 +703,7 @@ def _build_tasks_for_subject(
     *,
     source_search_roots: tuple[Path, ...] = (),
     skip_residuals: bool = True,
+    force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> list[ConvertTask]:
     tasks: list[ConvertTask] = []
@@ -709,6 +712,7 @@ def _build_tasks_for_subject(
             row, bids_root, files_by_uid,
             source_search_roots=source_search_roots,
             skip_residuals=skip_residuals,
+            force_edf=force_edf,
             spec=spec,
         )
         if task is not None:
@@ -723,6 +727,7 @@ def _row_to_task(
     *,
     source_search_roots: tuple[Path, ...] = (),
     skip_residuals: bool = True,
+    force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
     """Detect MRI vs EEG/MEG row shape and dispatch to the right builder.
@@ -740,7 +745,8 @@ def _row_to_task(
     source_file = str(row.get("source_file", "")).strip()
     if source_file:
         return _row_to_task_eeg_meg(
-            row, bids_root, source_search_roots=source_search_roots, spec=spec,
+            row, bids_root, source_search_roots=source_search_roots,
+            force_edf=force_edf, spec=spec,
         )
 
     return None
@@ -880,6 +886,7 @@ def _row_to_task_eeg_meg(
     bids_root: Path,
     *,
     source_search_roots: tuple[Path, ...] = (),
+    force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
     """Build a :class:`ConvertTask` for an EEG/MEG/iEEG/NIRS row.
@@ -1006,6 +1013,7 @@ def _row_to_task_eeg_meg(
         montage=montage,
         eeg_reference=eeg_reference,
         eeg_ground=eeg_ground,
+        force_edf=force_edf,
         companion_files=_parse_companion(row),
     )
 
@@ -1267,6 +1275,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--force-edf", action="store_true",
+        help=(
+            "Re-encode EEG / iEEG recordings to EDF on write instead of "
+            "keeping the source format. Harmonises a study to one BIDS-native "
+            "format, and makes a non-BIDS-native but mne-readable source "
+            "(GDF, EGI, ...) convertible. MEG / NIRS are unaffected."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -1287,6 +1304,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         recording_meta=args.recording_meta,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
+        force_edf=args.force_edf,
     )
 
 

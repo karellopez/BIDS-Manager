@@ -117,6 +117,16 @@ def test_dialog_phenotype_round_trip(qtbot, tmp_path):
     assert load_spec(scaffold).phenotype_files == ["/data/edinburgh.tsv", "/data/bdi.csv"]
 
 
+def test_dialog_participants_file_round_trip(qtbot, tmp_path):
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    dlg = RecordingMetaDialog(scaffold)
+    qtbot.addWidget(dlg)
+    dlg._participants_file.setText("/data/subjects.csv")
+    assert dlg.build_spec().participants_file == "/data/subjects.csv"
+    dlg._on_save()
+    assert load_spec(scaffold).participants_file == "/data/subjects.csv"
+
+
 def test_dialog_acquisition_hidden_for_mri_only(qtbot, tmp_path):
     scaffold = tmp_path / "inv.tsv.recording_meta.json"
     dlg = RecordingMetaDialog(scaffold, present_datatypes={"anat", "func"})

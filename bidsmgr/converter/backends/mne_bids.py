@@ -161,6 +161,18 @@ class MneBidsBackend:
                 root=str(bids_root_for_mne),
             )
 
+            # Output format. Default "auto" keeps the source format where
+            # mne-bids supports BIDS I/O. With force_edf set (EEG / iEEG only;
+            # EDF is not a MEG/NIRS format), re-encode to EDF: this both
+            # harmonises a study to one format AND makes a non-BIDS-native but
+            # mne-readable source (GDF, EGI, ...) convertible. EDF conversion
+            # needs the data, so allow mne-bids to preload.
+            out_format = "auto"
+            allow_preload = False
+            if getattr(task, "force_edf", False) and task.datatype in {"eeg", "ieeg"}:
+                out_format = "EDF"
+                allow_preload = True
+
             try:
                 # ``overwrite=True`` lets sibling tasks for the same
                 # subject share metadata files (coordsystem.json,
@@ -174,7 +186,8 @@ class MneBidsBackend:
                     raw,
                     bids_path,
                     overwrite=True,
-                    format="auto",
+                    format=out_format,
+                    allow_preload=allow_preload,
                     verbose="ERROR",
                 )
             except Exception as exc:

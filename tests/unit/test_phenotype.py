@@ -95,3 +95,37 @@ def test_phenotype_auto_discovered_from_scaffold(tmp_path):
     run_metadata(bids_root, inventory_tsv=inv, write_report=False)
     assert (bids_root / "phenotype" / "edinburgh.tsv").exists()
     assert (bids_root / "phenotype" / "edinburgh.json").exists()
+
+
+def test_codebook_sidecar_merges_into_measure_json(tmp_path):
+    """A sibling <measure>.json codebook supplies real Descriptions / Levels /
+    Units (and MeasurementToolMetadata); auto-fill covers the rest."""
+    bids_root = tmp_path / "ds"
+    bids_root.mkdir()
+    src = tmp_path / "bdi.tsv"
+    src.write_text(
+        "participant_id\tbdi_total\tseverity\nsub-001\t24\tmoderate\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bdi.json").write_text(json.dumps({
+        "MeasurementToolMetadata": {"Description": "Beck Depression Inventory II"},
+        "bdi_total": {"Description": "BDI-II total score", "Units": "points"},
+        "severity": {"Description": "band", "Levels": {"moderate": "20-28"}},
+    }), encoding="utf-8")
+
+    write_phenotype(bids_root, [src], _report())
+
+    dd = json.loads((bids_root / "phenotype" / "bdi.json").read_text())
+    assert dd["MeasurementToolMetadata"]["Description"] == "Beck Depression Inventory II"
+    assert dd["bdi_total"]["Units"] == "points"
+    assert dd["severity"]["Levels"]["moderate"] == "20-28"
+
+
+def test_no_codebook_falls_back_to_column_name(tmp_path):
+    bids_root = tmp_path / "ds"
+    bids_root.mkdir()
+    src = tmp_path / "stai.tsv"
+    src.write_text("participant_id\tstai_state\nsub-001\t40\n", encoding="utf-8")
+    write_phenotype(bids_root, [src], _report())
+    dd = json.loads((bids_root / "phenotype" / "stai.json").read_text())
+    assert dd["stai_state"] == {"Description": "stai_state"}  # auto-filled
