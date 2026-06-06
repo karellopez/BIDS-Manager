@@ -302,6 +302,14 @@ class ConverterPanel(QWidget):
         if self._bids_parent is not None:
             self._output_pane.set_root(self._bids_parent)
 
+        # Project-first gate: with no active project the Converter starts reset
+        # and locked (raw input / BIDS output / Scan disabled with a reason) so
+        # a stale path or table from a previous session is never acted on. A
+        # project passed to the constructor (the --project launch) is bound by
+        # MainWindow via set_project, which un-gates.
+        if self._project is None:
+            self._set_no_project_state()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -309,6 +317,47 @@ class ConverterPanel(QWidget):
     def model(self) -> Optional[InventoryTableModel]:
         """Return the active model (``None`` before the first scan)."""
         return self._model
+
+    _NO_PROJECT_HINT = (
+        "Open or create a dataset on the Home tab to start.\n\n"
+        "The Converter always works inside a project: scanning, the raw input, "
+        "and the locked BIDS output are enabled once a dataset is open."
+    )
+    _NO_PROJECT_TOOLTIP = (
+        "Open or create a dataset on the Home tab first. The Converter works "
+        "inside a project so nothing is scanned or written outside it."
+    )
+
+    def _set_no_project_state(self) -> None:
+        """Gate the Converter until a project is opened/created.
+
+        The project-first entry point: with no active project the Converter is
+        reset to empty and the raw-input / BIDS-output / Scan controls are
+        disabled (with a reason), so a stale path or table from a previous
+        session can never be acted on. ``set_project`` re-enables them. The
+        Editor is intentionally NOT gated (it doubles as a free viewer).
+        """
+        self._project = None
+        self._bids_root = None
+        self._bids_parent = None
+        self._raw_root = None
+        self._reset_inventory_view()
+        # Path bars: clear + lock, with a reason on the buttons.
+        self._raw_pathbar.set_value("(open or create a dataset first)", ok=False)
+        self._raw_pathbar.change_button.setEnabled(False)
+        self._raw_pathbar.change_button.setToolTip(self._NO_PROJECT_TOOLTIP)
+        self._bids_pathbar.set_value("(locked to the dataset you open)", ok=False)
+        self._bids_pathbar.change_button.setEnabled(False)
+        self._bids_pathbar.change_button.setToolTip(self._NO_PROJECT_TOOLTIP)
+        # Scan needs a destination project; disable it too.
+        self._scan_btn.setEnabled(False)
+        self._scan_btn.setToolTip(self._NO_PROJECT_TOOLTIP)
+        # Output tree shows nothing until a project is bound.
+        self._output_pane.set_root(None)
+        # Inspection placeholder explains the gate.
+        if hasattr(self, "_inspection_empty"):
+            self._inspection_empty.setText(self._NO_PROJECT_HINT)
+        self._refresh_scans_combo()
 
     def set_project(self, project: Project, bids_root: Path) -> None:
         """Bind an open project and lock the output to its dataset root.
@@ -337,6 +386,18 @@ class ConverterPanel(QWidget):
             "different dataset."
         )
         self._output_pane.set_root(self._bids_root)
+
+        # Un-gate the project-mode controls: raw input is modifiable (you pick
+        # what to scan), Scan is enabled, and the placeholder reverts to the
+        # normal prompt. The BIDS-output bar stays locked above.
+        self._raw_pathbar.change_button.setEnabled(True)
+        self._raw_pathbar.change_button.setToolTip("")
+        self._scan_btn.setEnabled(True)
+        self._scan_btn.setToolTip("")
+        if hasattr(self, "_inspection_empty"):
+            self._inspection_empty.setText(
+                "Pick a raw-data folder and click Scan… to populate."
+            )
 
         # Resume: if this project already holds a scan, reload its inventory and
         # replay the curation edits so the user lands back in their table.
@@ -910,6 +971,8 @@ class ConverterPanel(QWidget):
         empty = QLabel("Pick a raw-data folder and click Scan… to populate.")
         empty.setObjectName("pane-hint")
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setWordWrap(True)
+        self._inspection_empty = empty
         self._inspection_stack.addWidget(empty)
 
         self._table = self._build_table()
@@ -1881,19 +1944,32 @@ class ConverterPanel(QWidget):
 
     def _on_scan_finished(self, df: pd.DataFrame, output_tsv: Path) -> None:
         # Project mode: promote the staged scan to a new version with its own
-        # isolated curation bundle, and make it the active project.
+        # isolated curation bundle (+ ScanImported / StageCompleted events), and
+        # make it the active project. The shared, Qt-free orchestration is the
+        # same engine ``bidsmgr-scan --project`` uses.
         if self._bids_root is not None:
-            output_tsv = self._promote_scan_to_version(Path(output_tsv))
+            from ..project import Project
+            from ..project.orchestration import import_scan_as_version
+            version = import_scan_as_version(
+                self._bids_root, Path(output_tsv),
+                raw_root=self._raw_root,
+                row_ids=tuple(self._collect_row_ids(df)),
+                n_rows=len(df),
+            )
+            self._project = Project.open(version.dir)
+            self._properties.set_project(self._project)
+            self._active_version_dir = Path(version.dir)
+            output_tsv = version.inventory
             # Heads-up: flag scanned rows whose subject id already exists in the
-            # dataset (a fresh scan adding to an existing dataset). Resume does
-            # not pass through here, so existing-version rows are never flagged.
+            # dataset (a fresh scan adding to an existing dataset).
             self._flag_existing_subject_rows(df)
         self.load_inventory(df, output_tsv)
-        if self._project is not None:
-            row_ids = self._collect_row_ids(df)
+        # Legacy standalone-bundle mode (a Project passed to the constructor
+        # without a locked dataset root): still log the scan to that bundle.
+        if self._bids_root is None and self._project is not None:
             self._project.append(ScanImported(
                 inventory_tsv=str(output_tsv),
-                row_ids=tuple(row_ids),
+                row_ids=tuple(self._collect_row_ids(df)),
                 raw_root=str(self._raw_root) if self._raw_root else None,
             ))
             self._project.append(StageCompleted(
@@ -1907,50 +1983,6 @@ class ConverterPanel(QWidget):
             ))
         self._refresh_scans_combo()
         self.scan_finished.emit(df, output_tsv)
-
-    def _promote_scan_to_version(self, staged_tsv: Path) -> Path:
-        """Move a freshly-staged scan into a new version dir; bind it as active.
-
-        Creates ``.bidsmgr/project/scans/<NNNN>__<slug>/`` (its own Project
-        bundle), moves the inventory + recording-meta scaffold + files_by_uid
-        sidecar into it, records the version descriptor, and points
-        ``self._project`` / ``self._output_tsv`` at the new version. Returns the
-        inventory path inside the version dir.
-        """
-        from ..project import Project, workspace
-        from ..recording_meta import scaffold_sidecar_path
-
-        staged_tsv = Path(staged_tsv)
-        source_label = self._raw_root.name if self._raw_root else "scan"
-        version_dir = workspace.allocate_version_dir(self._bids_root, source_label)
-        proj = Project.create(version_dir, name=self._bids_root.name)
-
-        dest_inv = workspace.version_inventory(version_dir)
-        self._move_if_exists(staged_tsv, dest_inv)
-        self._move_if_exists(
-            scaffold_sidecar_path(staged_tsv), scaffold_sidecar_path(dest_inv),
-        )
-        self._move_if_exists(
-            Path(str(staged_tsv) + ".files_by_uid.json.gz"),
-            Path(str(dest_inv) + ".files_by_uid.json.gz"),
-        )
-        workspace.write_version_meta(
-            version_dir,
-            source_label=source_label,
-            raw_root=str(self._raw_root) if self._raw_root else None,
-            status="curating",
-        )
-        self._project = proj
-        self._properties.set_project(proj)
-        self._active_version_dir = version_dir
-        return dest_inv
-
-    @staticmethod
-    def _move_if_exists(src: Path, dst: Path) -> None:
-        src, dst = Path(src), Path(dst)
-        if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
 
     def _flag_existing_subject_rows(self, df: pd.DataFrame) -> None:
         """(Re)compute the incremental-collision warning for every scanned row.

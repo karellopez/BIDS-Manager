@@ -200,8 +200,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
-        "target",
-        help="BIDS root, or a parent containing one or more BIDS roots.",
+        "target", nargs="?", default=None,
+        help="BIDS root, or a parent containing one or more BIDS roots "
+             "(omit when using --project).",
+    )
+    parser.add_argument(
+        "--project", default=None, type=Path,
+        help=(
+            "Run on a project dataset folder: the target is the project root "
+            "and the inventory is resolved from its active scan version "
+            "(so demographics / phenotype / participants flow through). "
+            "Supersedes the positional target."
+        ),
+    )
+    parser.add_argument(
+        "--version", default=None,
+        help=(
+            "With --project, take the inventory from a specific scan version "
+            "instead of the latest (version id or index; see bidsmgr-project)."
+        ),
     )
     parser.add_argument(
         "--dataset", default=None,
@@ -284,10 +301,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
+    target = args.target
+    inventory_tsv = args.inventory_tsv
+    if args.project is not None:
+        # Project mode: target is the project root; inventory is a scan
+        # version (so demographics + the scaffold's phenotype / participants
+        # files are auto-discovered relative to it).
+        from ..project.orchestration import find_version, latest_version
+        bids_root = Path(args.project)
+        target = bids_root
+        if inventory_tsv is None:
+            version = (
+                find_version(bids_root, args.version) if args.version
+                else latest_version(bids_root)
+            )
+            if args.version and version is None:
+                parser.error(
+                    f"no scan version {args.version!r} in {bids_root} "
+                    f"(see `bidsmgr-project {bids_root}`)"
+                )
+            if version is not None:
+                inventory_tsv = version.inventory
+    elif not target:
+        parser.error("provide a target directory, or use --project <dataset>")
+
     return run_metadata_cli(
-        Path(args.target),
+        Path(target),
         dataset=args.dataset,
-        inventory_tsv=args.inventory_tsv,
+        inventory_tsv=inventory_tsv,
         name=args.name,
         bids_version=args.bids_version,
         license=args.license,

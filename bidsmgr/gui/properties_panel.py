@@ -379,6 +379,34 @@ class PropertiesPanel(QWidget):
         h.addWidget(combo, 1)
         return row
 
+    # Source recording extensions, longest-first so ``.fif.gz`` wins over ``.fif``.
+    _RECORDING_EXTS: tuple[str, ...] = (
+        ".fif.gz", ".vhdr", ".edf", ".bdf", ".gdf", ".set", ".cnt", ".fif",
+        ".con", ".sqd", ".ds", ".mff", ".snirf", ".nwb", ".mef",
+    )
+    # Fallback BIDS extension per non-MRI datatype when the source path is blank.
+    _DATATYPE_DEFAULT_EXT: dict[str, str] = {
+        "meg": ".fif", "eeg": ".edf", "ieeg": ".edf", "nirs": ".snirf",
+    }
+
+    def _preview_extension(self, row: int, datatype: str, suffix: str) -> str:
+        """Pick the extension shown in the predicted-path preview.
+
+        MRI datatypes render ``.nii.gz``; physio renders ``.tsv.gz``; EEG / MEG /
+        iEEG / NIRS render the source recording's own extension (what mne-bids
+        keeps by default) with a per-datatype fallback. Fixes the preview always
+        showing ``.nii.gz`` for electrophysiology rows.
+        """
+        if suffix == "physio":
+            return ".tsv.gz"
+        if datatype in ("eeg", "ieeg", "meg", "nirs"):
+            src = self._cell(row, "source_file").lower()
+            for ext in self._RECORDING_EXTS:
+                if src.endswith(ext):
+                    return ext
+            return self._DATATYPE_DEFAULT_EXT.get(datatype, "")
+        return ".nii.gz"
+
     def _build_path_preview(
         self, row: int, datatype: str, suffix: str, entities: dict[str, str],
     ) -> QWidget:
@@ -395,7 +423,8 @@ class PropertiesPanel(QWidget):
         if datatype and suffix and entities.get("subject"):
             try:
                 rel = str(schema_mod.build_relative_path(
-                    entities, datatype, suffix, ".nii.gz",
+                    entities, datatype, suffix,
+                    self._preview_extension(row, datatype, suffix),
                 ))
                 # Insert a newline between the directory part and the
                 # basename so the preview wraps clearly.

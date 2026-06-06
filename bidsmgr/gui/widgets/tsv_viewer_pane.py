@@ -114,6 +114,9 @@ class TsvViewerPane(QWidget):
     # Emitted whenever the dirty state flips (after a commit, save,
     # revert, or set_file). ``True`` means there are unsaved edits.
     dirty_changed = pyqtSignal(bool)
+    # Emitted whenever the undo/redo availability changes, so the Editor
+    # toolbar can sync its Undo/Redo buttons.
+    history_changed = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -130,6 +133,11 @@ class TsvViewerPane(QWidget):
         # Suppress dirty bookkeeping while we're populating the model.
         self._suppress_dirty = False
         self._dirty = False
+        # Undo/redo of in-memory table edits (snapshot = (header, rows)).
+        # ``_pre_edit`` holds the committed state so the next edit records it.
+        from .edit_history import SnapshotHistory
+        self._history = SnapshotHistory()
+        self._pre_edit: Optional[tuple] = None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -260,6 +268,8 @@ class TsvViewerPane(QWidget):
         """Bind the pane to a TSV (or ``None`` to clear)."""
         self._current_file = path
         self._current_root = root
+        # A new file resets the edit history.
+        self._history.clear()
         if path is None:
             self._reset_model()
             self._original_header = []
@@ -274,6 +284,8 @@ class TsvViewerPane(QWidget):
             self._footer_summary.setText("")
             self._edit_toolbar.setVisible(False)
             self._refresh_dirty_ui()
+            self._pre_edit = self._snapshot()
+            self.history_changed.emit()
             return
 
         header, rows, total = _read_tsv(path)
@@ -296,6 +308,8 @@ class TsvViewerPane(QWidget):
         # when there's something to save.
         self._edit_toolbar.setVisible(True)
         self._refresh_dirty_ui()
+        self._pre_edit = self._snapshot()
+        self.history_changed.emit()
 
     def save(self) -> bool:
         """Flush the model to disk. Returns ``True`` on success or
@@ -475,9 +489,54 @@ class TsvViewerPane(QWidget):
         self._mark_dirty()
 
     def _mark_dirty(self) -> None:
+        # Record the pre-edit state for undo (a fresh edit clears redo).
+        if self._pre_edit is not None:
+            self._history.record(self._pre_edit)
+        self._pre_edit = self._snapshot()
         if not self._dirty:
             self._dirty = True
         self._refresh_dirty_ui()
+        self.history_changed.emit()
+
+    # ----------------------------------------------------------------------
+    # Undo / redo (snapshot-based, in-memory; disk write still via Save)
+    # ----------------------------------------------------------------------
+
+    def _snapshot(self) -> tuple[list[str], list[list[str]]]:
+        return (self._current_header(), self._current_rows())
+
+    def _restore(self, snap: tuple[list[str], list[list[str]]]) -> None:
+        header, rows = snap
+        self._populate_model(list(header), [list(r) for r in rows])
+        self._stack.setCurrentIndex(1 if (header or rows) else 0)
+        # Dirty iff the restored state differs from what is on disk.
+        self._dirty = (
+            list(header) != list(self._original_header)
+            or [list(r) for r in rows] != [list(r) for r in self._original_rows]
+        )
+        self._pre_edit = self._snapshot()
+        self._refresh_dirty_ui()
+        self.history_changed.emit()
+
+    def can_undo(self) -> bool:
+        return self._current_file is not None and self._history.can_undo
+
+    def can_redo(self) -> bool:
+        return self._current_file is not None and self._history.can_redo
+
+    def undo(self) -> None:
+        if self._current_file is None:
+            return
+        snap = self._history.undo(self._snapshot())
+        if snap is not None:
+            self._restore(snap)
+
+    def redo(self) -> None:
+        if self._current_file is None:
+            return
+        snap = self._history.redo(self._snapshot())
+        if snap is not None:
+            self._restore(snap)
 
     def _refresh_dirty_ui(self) -> None:
         has_file = self._current_file is not None

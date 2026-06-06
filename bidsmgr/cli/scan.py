@@ -1543,7 +1543,20 @@ def run_scan(
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="bidsmgr-scan", description=__doc__.split("\n")[0])
     parser.add_argument("dicom_root", help="Directory containing DICOM files (any depth)")
-    parser.add_argument("output_tsv", help="Destination TSV file")
+    parser.add_argument(
+        "output_tsv", nargs="?", default=None,
+        help="Destination TSV file (omit when using --project)",
+    )
+    parser.add_argument(
+        "--project", default=None, type=Path,
+        help=(
+            "Scan INTO a project dataset folder (created by bidsmgr-create or "
+            "the GUI; created/adopted if absent). The inventory is saved as a "
+            "new versioned scan under <project>/.bidsmgr/project/scans/ instead "
+            "of a loose TSV, so it is resumable in the GUI and never overwrites "
+            "an earlier scan. --dataset defaults to the project folder name."
+        ),
+    )
     parser.add_argument(
         "--jobs", "-j",
         type=int,
@@ -1644,6 +1657,41 @@ def main(argv: Optional[list[str]] = None) -> int:
                 err = user_rules_module.validate_regex(r.pattern)
                 if err:
                     parser.error(f"--rules-file: bad exclusion regex {r.pattern!r}: {err}")
+
+    if args.project is None and not args.output_tsv:
+        parser.error("provide an output_tsv path, or use --project <dataset>")
+
+    if args.project is not None:
+        # Project mode: scan into a new versioned bundle under the project.
+        from ..cli.create import open_or_create_workspace
+        from ..project import workspace
+        from ..project.orchestration import import_scan_as_version, row_id
+
+        bids_root = Path(args.project)
+        open_or_create_workspace(bids_root)  # ensure scaffold + project bundle
+        staging = workspace.scans_dir(bids_root).parent / ".scan_staging"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        staged_tsv = staging / "inventory.tsv"
+        df = run_scan(
+            Path(args.dicom_root), staged_tsv,
+            n_jobs=args.jobs, skip_bids_guess=args.no_bids_guess,
+            probe_convert=args.probe_convert,
+            dataset=args.dataset or bids_root.name,
+            line_freq=args.line_freq, montage=args.montage,
+            user_hints=user_hints, exclusions=exclusions,
+        )
+        version = import_scan_as_version(
+            bids_root, staged_tsv, raw_root=Path(args.dicom_root),
+            row_ids=tuple(row_id(df, i) for i in range(len(df))),
+            n_rows=len(df),
+        )
+        print(
+            f"Scan saved as version '{version.version_id}' in project "
+            f"{bids_root} ({len(df)} rows)."
+        )
+        return 0
 
     run_scan(
         Path(args.dicom_root),

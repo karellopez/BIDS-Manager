@@ -60,12 +60,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QStackedWidget,
     QStatusBar,
     QTreeWidget,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from ..project import Project
@@ -98,6 +100,44 @@ class _ClickableLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class _ProjectMenuRow(QWidget):
+    """A two-line row (dataset name + path) for the project-switcher menu.
+
+    Used both for the current project (display only) and for each recent
+    project (clickable -> switch). Emits :pyattr:`clicked` on release when
+    clickable. Styling is QSS-driven (object names ``proj-menu-*``).
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, name: str, path: str, *, current: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("proj-menu-row-current" if current else "proj-menu-row")
+        self._clickable = not current
+        # A plain QWidget paints a QSS ``background`` (and its ``:hover``
+        # variant) only with WA_StyledBackground; WA_Hover delivers the hover
+        # events. Together they give the brighten-on-hover effect the home
+        # recents have.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 6, 14, 6)
+        lay.setSpacing(1)
+        n = QLabel(name)
+        n.setObjectName("proj-menu-name")
+        p = QLabel(path)
+        p.setObjectName("proj-menu-path")
+        lay.addWidget(n)
+        lay.addWidget(p)
+        if self._clickable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class _TopHeader(QFrame):
     """Brand header with a Converter/Editor pill switcher and theme toggle.
 
@@ -112,6 +152,8 @@ class _TopHeader(QFrame):
     view_changed = pyqtSignal(str)  # "converter" | "editor"
     about_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    # A recent project was chosen from the project-switcher dropdown (Path).
+    project_switch_requested = pyqtSignal(object)
 
     def __init__(self, theme: ThemeManager, parent=None) -> None:
         super().__init__(parent)
@@ -163,6 +205,32 @@ class _TopHeader(QFrame):
         h.addWidget(self._converter_btn)
         h.addWidget(self._editor_btn)
 
+        # Project switcher (PyCharm-style), set apart from the Editor pill.
+        # Shows the current dataset name + a project icon; its dropdown lists
+        # the current project (name + path) and recent projects you can switch
+        # to. Hidden until a project is open.
+        h.addSpacing(18)
+        from . import icons as _icons
+        self._project_btn = QPushButton("(no project)")
+        self._project_btn.setObjectName("project-switcher")
+        self._project_btn.setToolTip("Current project. Click to switch.")
+        _icons.apply_button(self._project_btn, "project")
+        self._project_menu = QMenu(self)
+        self._project_menu.setObjectName("project-menu")
+        # Frameless + translucent so the QSS border-radius renders rounded
+        # corners cleanly (no square OS background / shadow behind them).
+        self._project_menu.setWindowFlags(
+            self._project_menu.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self._project_menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._project_menu.aboutToShow.connect(self._rebuild_project_menu)
+        self._project_btn.setMenu(self._project_menu)
+        self._project_btn.setVisible(False)
+        self._active_project_root: Optional[Path] = None
+        h.addWidget(self._project_btn)
+
         h.addStretch(1)
 
         self._theme = theme
@@ -204,6 +272,80 @@ class _TopHeader(QFrame):
     def _on_pill_clicked(self, idx: int) -> None:
         view = {2: "welcome", 1: "editor"}.get(idx, "converter")
         self.view_changed.emit(view)
+
+    # ------------------------------------------------------------------
+    # Project switcher
+    # ------------------------------------------------------------------
+
+    def set_active_project(self, name: str, root: Path) -> None:
+        """Show the switcher with ``name`` as the current project."""
+        self._active_project_root = Path(root)
+        self._project_btn.setText(name)
+        self._project_btn.setToolTip(f"{name}\n{root}\n\nClick to switch projects.")
+        self._project_btn.setVisible(True)
+
+    def clear_active_project(self) -> None:
+        """Hide the switcher (no project open)."""
+        self._active_project_root = None
+        self._project_btn.setVisible(False)
+
+    def _rebuild_project_menu(self) -> None:
+        """Repopulate the dropdown: current project header + recent projects."""
+        from .app_settings import AppSettings
+        from .welcome_panel import _dataset_display_name
+
+        menu = self._project_menu
+        menu.clear()
+
+        # Current project header (display only).
+        if self._active_project_root is not None:
+            cur = self._active_project_root
+            header = _ProjectMenuRow(
+                _dataset_display_name(cur), str(cur), current=True, parent=menu,
+            )
+            wa = QWidgetAction(menu)
+            wa.setDefaultWidget(header)
+            wa.setEnabled(False)
+            menu.addAction(wa)
+            menu.addSeparator()
+
+        # Recent projects (excluding the current one).
+        recents = [
+            p for p in AppSettings.load().recent_projects
+            if self._active_project_root is None
+            or Path(p) != self._active_project_root
+        ]
+        if recents:
+            label = QLabel("Recent projects")
+            label.setObjectName("proj-menu-section")
+            la = QWidgetAction(menu)
+            la.setDefaultWidget(label)
+            la.setEnabled(False)
+            menu.addAction(la)
+            for p in recents:
+                exists = Path(p).exists()
+                name = _dataset_display_name(Path(p)) if exists else Path(p).name
+                row = _ProjectMenuRow(
+                    name + ("   (missing)" if not exists else ""),
+                    str(p), current=False, parent=menu,
+                )
+                wa = QWidgetAction(menu)
+                wa.setDefaultWidget(row)
+                wa.setEnabled(exists)
+                if exists:
+                    row.clicked.connect(
+                        lambda _=False, path=Path(p): self._on_recent_chosen(path)
+                    )
+                menu.addAction(wa)
+            menu.addSeparator()
+
+        # Always offer the Home tab (open / create another).
+        open_act = menu.addAction("Open or create another… (Home)")
+        open_act.triggered.connect(lambda: self.view_changed.emit("welcome"))
+
+    def _on_recent_chosen(self, path: Path) -> None:
+        self._project_menu.close()
+        self.project_switch_requested.emit(path)
 
     def _on_toggle(self) -> None:
         from .app_settings import AppSettings
@@ -294,6 +436,7 @@ class _TopHeader(QFrame):
         self._apply_logo_pixmap(pal)
         from . import icons
         icons.apply_button(self._settings_btn, "settings")
+        icons.apply_button(self._project_btn, "project")
         icons.apply_button(
             self._theme_btn,
             "sun" if self._theme.name == "dark" else "moon",
@@ -347,6 +490,9 @@ class MainWindow(QMainWindow):
         self._header.about_requested.connect(self._show_about_dialog)
         self._header.settings_requested.connect(self._open_settings)
         self.welcome.project_opened.connect(self._on_project_opened)
+        # Project-switcher dropdown: opening a recent reuses the Welcome
+        # open-project flow (which re-emits project_opened -> _on_project_opened).
+        self._header.project_switch_requested.connect(self._on_switch_project)
 
         # Land on the Welcome (Home) tab when no project is bound (the
         # project-first entry point). When a project was passed in (the
@@ -464,7 +610,23 @@ class MainWindow(QMainWindow):
                 set_root(Path(bids_root), persist=False)
             except Exception as exc:  # never block entering the project
                 log.warning("editor could not open %s: %s", bids_root, exc)
+        # Reveal + label the header project switcher.
+        from .welcome_panel import _dataset_display_name
+        self._header.set_active_project(
+            _dataset_display_name(Path(bids_root)), Path(bids_root),
+        )
         self._apply_active_view("converter", persist=True)
+
+    def _on_switch_project(self, path: Path) -> None:
+        """A recent project was chosen from the header switcher.
+
+        Reuse the Welcome open-project flow so the bundle is opened/adopted and
+        ``project_opened`` re-binds both views (and re-labels the switcher).
+        """
+        try:
+            self.welcome.open_project(Path(path))
+        except Exception as exc:
+            log.warning("could not switch to project %s: %s", path, exc)
 
     def _on_palette_changed(self, pal: dict) -> None:
         """Re-render every widget that holds palette-baked styling.

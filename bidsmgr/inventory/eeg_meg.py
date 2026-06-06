@@ -82,9 +82,16 @@ EEG_MEG_COLUMNS: tuple[str, ...] = (
 
 
 # Extensions mne-bids accepts as raw inputs.
+# NOTE: ``.pdf`` is deliberately NOT here. It is the 4D / BTi "processed data
+# file" label, but that collides with Adobe PDF documents (consent forms,
+# reports, READMEs) which routinely sit in a data folder - the scanner must
+# never try to read those. 4D/BTi data is a directory (``c,rfDC`` + ``config``
+# + ``hs_file``) anyway and ``mne.io.read_raw`` does not dispatch a bare
+# ``.pdf``, so nothing real is lost; genuine 4D support would key on the
+# directory structure instead.
 _RECOGNISED_EXTS: tuple[str, ...] = (
     # MEG
-    ".fif", ".fif.gz", ".con", ".sqd", ".pdf",
+    ".fif", ".fif.gz", ".con", ".sqd",
     # EEG
     ".vhdr", ".edf", ".bdf", ".gdf", ".set", ".cnt", ".eeg", ".egi", ".mff",
     # iEEG
@@ -102,7 +109,7 @@ _DIR_FORMATS: tuple[str, ...] = (".ds", ".mff")
 # Force-EDF option; the scan flags such rows so the user is not surprised.
 _BIDS_NATIVE_EXTS: frozenset[str] = frozenset({
     # MEG (all recognised MEG formats are BIDS-native)
-    ".fif", ".fif.gz", ".ds", ".con", ".sqd", ".kdf", ".pdf",
+    ".fif", ".fif.gz", ".ds", ".con", ".sqd", ".kdf",
     # EEG / iEEG
     ".vhdr", ".edf", ".bdf", ".set", ".mef", ".nwb",
     # NIRS
@@ -240,8 +247,6 @@ def _format_label(path: Path) -> str:
         return "Nihon Kohden"
     if name.endswith((".sqd", ".con")):
         return "KIT"
-    if name.endswith(".pdf"):
-        return "4D"
     if name.endswith(".ds"):
         return "CTF"
     if name.endswith(".mef"):

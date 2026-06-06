@@ -5,10 +5,10 @@ Usage::
     bidsmgr [--theme dark|light] [--project PATH]
 
 * ``--theme``  selects the initial palette (defaults to ``dark``).
-* ``--project`` opens or creates a ``*.bidsmgr`` project bundle. If the
-  path doesn't exist, a fresh project is created at that location;
-  otherwise it is opened and any prior overrides are applied to the
-  inventory when one is loaded.
+* ``--project`` opens (or creates / adopts) a BIDS dataset project at the
+  given directory and lands in the Converter bound to it - the same
+  project-first flow as the Welcome tab's Open / Create. The output is locked
+  to the dataset and the header project switcher appears.
 
 The CLI side of the workflow stays available — ``bidsmgr-scan``,
 ``-rebuild``, ``-convert``, ``-metadata``, ``-validate`` are unchanged.
@@ -39,8 +39,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--project", type=Path, default=None,
         help=(
-            "Open (or create if absent) a `.bidsmgr` project bundle. "
-            "Edits made in the GUI append to its event log."
+            "Open (or create / adopt) a BIDS dataset project at this directory "
+            "and land in the Converter bound to it (same as the Welcome tab's "
+            "Open / Create). The output is locked to the dataset."
         ),
     )
     parser.add_argument(
@@ -62,20 +63,21 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     from .gui.main_window import MainWindow
     from .gui.theme_manager import ThemeManager
-    from .project import Project, ProjectError
 
+    # ``--project`` is a BIDS dataset directory (the project-first model). Open
+    # or create/adopt the project bundle nested at <dir>/.bidsmgr/project, then
+    # bind it through the same flow the Welcome tab uses (set below, after the
+    # window exists).
     project = None
+    bids_root = None
     if args.project is not None:
-        path = args.project
-        if path.exists():
-            try:
-                project = Project.open(path)
-            except ProjectError as exc:
-                print(f"could not open project {path}: {exc}", file=sys.stderr)
-                return 2
-        else:
-            project = Project.create(path, name=path.stem)
-            print(f"created new project at {path}")
+        from .cli.create import open_or_create_workspace
+        bids_root = Path(args.project)
+        try:
+            project = open_or_create_workspace(bids_root)
+        except Exception as exc:
+            print(f"could not open project {bids_root}: {exc}", file=sys.stderr)
+            return 2
 
     app = QApplication(sys.argv)
     # QSettings keys these to find the right per-user config file on
@@ -104,7 +106,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     theme = ThemeManager(app, font_scale=persisted.font_scale)
     theme.apply(initial_theme)
 
-    win = MainWindow(theme, project=project)
+    win = MainWindow(theme)
+    # Bind the --project dataset through the standard open-project flow so the
+    # Converter is set_project'd (output locked), the Editor points at the root,
+    # and the header project switcher appears - identical to a Welcome open.
+    if project is not None and bids_root is not None:
+        win._on_project_opened(project, bids_root)
     win.show()
     return app.exec()
 

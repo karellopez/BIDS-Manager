@@ -488,3 +488,37 @@ def test_binary_file_does_not_crash_set_file(
     # Belt + suspenders: pointing the helper at the same binary file
     # also returns None instead of raising.
     assert _load_json_ordered(nii_path) is None
+
+
+def test_sidecar_undo_redo(qapp, tmp_path: Path) -> None:
+    from bidsmgr.gui.widgets.sidecar_form_pane import SidecarFormPane
+    js = tmp_path / "sub-01_task-x_bold.json"
+    js.write_text(json.dumps({"TaskName": "rest", "RepetitionTime": 2.0}), encoding="utf-8")
+    pane = SidecarFormPane()
+    pane.set_file(js, tmp_path, None)
+    assert not pane.can_undo()  # nothing to undo at load
+
+    pane._on_field_committed("TaskName", "memory", "str")
+    assert pane.can_undo()
+    assert pane._json_cache["TaskName"] == "memory"
+
+    pane.undo()
+    assert pane._json_cache["TaskName"] == "rest"
+    assert pane.can_redo()
+
+    pane.redo()
+    assert pane._json_cache["TaskName"] == "memory"
+    assert not pane.can_redo()
+
+
+def test_sidecar_revert_clears_history(qapp, tmp_path: Path) -> None:
+    from bidsmgr.gui.widgets.sidecar_form_pane import SidecarFormPane
+    js = tmp_path / "s.json"
+    js.write_text(json.dumps({"TaskName": "rest"}), encoding="utf-8")
+    pane = SidecarFormPane()
+    pane.set_file(js, tmp_path, None)
+    pane._on_field_committed("TaskName", "memory", "str")
+    assert pane.can_undo()
+    pane.revert()
+    assert pane._json_cache["TaskName"] == "rest"
+    assert not pane.can_undo() and not pane.can_redo()  # history reset on revert

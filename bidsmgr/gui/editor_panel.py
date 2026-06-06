@@ -108,6 +108,10 @@ class EditorPanel(QWidget):
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
+        # Undo/redo toolbar buttons follow the active editable pane.
+        self._sidecar_form.history_changed.connect(self._sync_undo_redo)
+        self._tsv_viewer.history_changed.connect(self._sync_undo_redo)
+        self._center_stack.currentChanged.connect(self._sync_undo_redo)
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
         # The BIDS tree folds to the left, the validation pane to the right,
@@ -239,6 +243,27 @@ class EditorPanel(QWidget):
         icons.apply_button(self._open_btn, "open_folder")
         self._open_btn.clicked.connect(self._on_change_root)
         lay.addWidget(self._open_btn)
+
+        lay.addWidget(VSep())
+
+        # Undo / Redo for in-memory edits to the active center pane (JSON
+        # sidecar + TSV table). They delegate to whichever editable pane is
+        # showing; disabled when nothing is undoable (or a NIfTI is shown).
+        self._undo_btn = QPushButton("  Undo")
+        self._undo_btn.setObjectName("tb-btn-ghost")
+        icons.apply_button(self._undo_btn, "undo")
+        self._undo_btn.setToolTip("Undo the last edit (JSON / TSV)")
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.clicked.connect(self._on_editor_undo)
+        lay.addWidget(self._undo_btn)
+
+        self._redo_btn = QPushButton("  Redo")
+        self._redo_btn.setObjectName("tb-btn-ghost")
+        icons.apply_button(self._redo_btn, "redo")
+        self._redo_btn.setToolTip("Redo the last undone edit")
+        self._redo_btn.setEnabled(False)
+        self._redo_btn.clicked.connect(self._on_editor_redo)
+        lay.addWidget(self._redo_btn)
 
         lay.addWidget(VSep())
 
@@ -691,6 +716,33 @@ class EditorPanel(QWidget):
 
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Undo / redo (delegates to the active editable center pane)
+    # ------------------------------------------------------------------
+
+    def _active_history_pane(self):
+        """The current center pane if it supports undo/redo, else None."""
+        w = self._center_stack.currentWidget()
+        if w in (self._sidecar_form, self._tsv_viewer):
+            return w
+        return None
+
+    def _sync_undo_redo(self, *args) -> None:
+        del args
+        pane = self._active_history_pane()
+        self._undo_btn.setEnabled(bool(pane) and pane.can_undo())
+        self._redo_btn.setEnabled(bool(pane) and pane.can_redo())
+
+    def _on_editor_undo(self) -> None:
+        pane = self._active_history_pane()
+        if pane is not None:
+            pane.undo()
+
+    def _on_editor_redo(self) -> None:
+        pane = self._active_history_pane()
+        if pane is not None:
+            pane.redo()
+
     def showEvent(self, event) -> None:  # noqa: N802
         """Refresh the tree when the Editor becomes visible.
 
@@ -714,6 +766,8 @@ class EditorPanel(QWidget):
         # Re-tint toolbar icons after the icon cache is cleared in
         # ``MainWindow._on_palette_changed``.
         icons.apply_button(self._open_btn, "open_folder")
+        icons.apply_button(self._undo_btn, "undo")
+        icons.apply_button(self._redo_btn, "redo")
         icons.apply_button(self._validate_dataset_btn, "dataset")
         icons.apply_button(self._strict_btn, "strict")
         # The two partial-validate buttons get their tint from the

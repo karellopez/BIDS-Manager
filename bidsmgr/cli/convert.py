@@ -1199,12 +1199,32 @@ def main(argv: Optional[list[str]] = None) -> int:
             "sibling BIDS root under <bids_parent>."
         ),
     )
-    parser.add_argument("tsv", help="Inventory TSV produced by `bidsmgr-scan`")
     parser.add_argument(
-        "bids_parent",
+        "tsv", nargs="?", default=None,
+        help="Inventory TSV produced by `bidsmgr-scan` (omit when using --project)",
+    )
+    parser.add_argument(
+        "bids_parent", nargs="?", default=None,
         help=(
             "Parent directory; each `dataset` value becomes a sibling BIDS "
-            "root underneath."
+            "root underneath. Omit when using --project (output is the project)."
+        ),
+    )
+    parser.add_argument(
+        "--project", default=None, type=Path,
+        help=(
+            "Convert the project dataset's active (latest) scan version into "
+            "its locked root. Resolves the inventory + output + recording "
+            "metadata from <project>/.bidsmgr/project, replaying the curation "
+            "edits recorded in the GUI. Supersedes the positional tsv / "
+            "bids_parent."
+        ),
+    )
+    parser.add_argument(
+        "--version", default=None,
+        help=(
+            "With --project, convert a specific scan version instead of the "
+            "latest. Accepts the version id or its index (see bidsmgr-project)."
         ),
     )
     parser.add_argument(
@@ -1291,6 +1311,53 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+
+    if args.project is not None:
+        # Project mode: convert a scan version into the locked root.
+        from ..project.orchestration import (
+            find_version, latest_version, version_dataframe,
+        )
+
+        bids_root = Path(args.project)
+        if args.version:
+            version = find_version(bids_root, args.version)
+            if version is None:
+                parser.error(
+                    f"no scan version {args.version!r} in {bids_root} "
+                    f"(see `bidsmgr-project {bids_root}`)"
+                )
+        else:
+            version = latest_version(bids_root)
+        if version is None:
+            parser.error(
+                f"no scans in project {bids_root}; run `bidsmgr-scan "
+                f"<raw> --project {bids_root}` first"
+            )
+        # Replay the GUI curation edits onto the inventory, keep the dataset
+        # column in lock-step with the (possibly renamed) folder, and bake it
+        # back into the version inventory so dcm2niix's files_by_uid sidecar
+        # (which sits next to it) stays aligned.
+        df = version_dataframe(version, apply_edits=True)
+        if "dataset" in df.columns:
+            df["dataset"] = bids_root.name
+        df.to_csv(version.inventory, sep="\t", index=False)
+        return run_convert(
+            version.inventory,
+            bids_root.parent,
+            dataset=bids_root.name,
+            n_jobs=args.jobs,
+            overwrite=args.overwrite,
+            on_existing=args.on_existing,
+            dry_run=args.dry_run,
+            dcm2niix_bin=args.dcm2niix,
+            recording_meta=args.recording_meta,
+            raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
+            skip_residuals=not args.keep_residuals,
+            force_edf=args.force_edf,
+        )
+
+    if not args.tsv or not args.bids_parent:
+        parser.error("provide tsv and bids_parent, or use --project <dataset>")
 
     return run_convert(
         Path(args.tsv),

@@ -227,6 +227,36 @@ def test_parse_qcolor_handles_rgba_and_hex() -> None:
     assert (h.red(), h.green(), h.blue()) == (0x11, 0x16, 0x1d)
 
 
+def test_project_switcher_shows_and_switches(qapp, isolated_settings, tmp_path) -> None:
+    theme = ThemeManager(qapp)
+    theme.apply("dark")
+    win = MainWindow(theme)
+    qapp.processEvents()
+
+    # Hidden until a project is open.
+    assert win._header._project_btn.isHidden()
+
+    a = open_or_create_workspace(tmp_path / "StudyA", name="Study A")
+    AppSettings.remember_recent_project(tmp_path / "StudyA")
+    b = open_or_create_workspace(tmp_path / "StudyB", name="Study B")
+    AppSettings.remember_recent_project(tmp_path / "StudyB")
+
+    win._on_project_opened(a, tmp_path / "StudyA")
+    qapp.processEvents()
+    assert not win._header._project_btn.isHidden()
+    assert "Study A" in win._header._project_btn.text()
+
+    # The dropdown lists the current project header + the other recent.
+    win._header._rebuild_project_menu()
+    assert len(win._header._project_menu.actions()) >= 3
+
+    # Switching to a recent rebinds both views + relabels the switcher.
+    win._on_switch_project(tmp_path / "StudyB")
+    qapp.processEvents()
+    assert "Study B" in win._header._project_btn.text()
+    assert win.converter._bids_root == tmp_path / "StudyB"
+
+
 def test_home_pill_returns_to_welcome(qapp, isolated_settings) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")

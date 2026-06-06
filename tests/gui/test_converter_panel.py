@@ -40,9 +40,12 @@ def test_panel_constructs_without_a_project(qtbot) -> None:
     qtbot.addWidget(panel)
     # No model until the first scan.
     assert panel.model() is None
-    # Scan button is enabled at start; Run-conversion is gated.
-    assert panel._scan_btn.isEnabled()
+    # Project-first gate: with no active project, Scan / Run / the raw + BIDS
+    # change buttons are all disabled until a dataset is opened on Home.
+    assert not panel._scan_btn.isEnabled()
     assert not panel._run_btn.isEnabled()
+    assert not panel._raw_pathbar.change_button.isEnabled()
+    assert not panel._bids_pathbar.change_button.isEnabled()
 
 
 def test_panel_renders_under_offscreen_qpa(qtbot) -> None:
@@ -204,11 +207,25 @@ def test_per_row_acq_override_persists_scaffold(qtbot, tmp_path: Path) -> None:
     assert data["overrides"]["sub-001/rec.edf"]["manufacturer"] == "BioSemi"
 
 
-def test_bids_pathbar_change_button_is_enabled(qtbot) -> None:
-    """The user must be able to pick the BIDS output before scanning."""
+def test_no_project_gate_blocks_then_set_project_ungates(qtbot, tmp_path) -> None:
+    """With no project the raw/BIDS/Scan controls are blocked; opening a project
+    un-gates raw input + Scan and locks the BIDS output to the project root."""
+    from bidsmgr.cli.create import open_or_create_workspace
     panel = ConverterPanel()
     qtbot.addWidget(panel)
-    assert panel._bids_pathbar.change_button.isEnabled()
+    # Gated before any project.
+    assert not panel._raw_pathbar.change_button.isEnabled()
+    assert not panel._bids_pathbar.change_button.isEnabled()
+    assert not panel._scan_btn.isEnabled()
+
+    root = tmp_path / "ds"
+    proj = open_or_create_workspace(root)
+    panel.set_project(proj, root)
+    # Raw input + Scan enabled; BIDS output locked to the project (disabled).
+    assert panel._raw_pathbar.change_button.isEnabled()
+    assert panel._scan_btn.isEnabled()
+    assert not panel._bids_pathbar.change_button.isEnabled()
+    assert str(root) in panel._bids_pathbar.value()
 
 
 # ---------------------------------------------------------------------------

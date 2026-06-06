@@ -549,3 +549,36 @@ def test_root_swap_clears_tsv_viewer(
     panel._set_root(other, persist=False)
     assert panel._tsv_viewer.current_file() is None
     assert panel._center_stack.currentWidget() is panel._sidecar_form
+
+
+def test_tsv_undo_redo(qapp, bids_root: Path) -> None:
+    pane = TsvViewerPane()
+    events = bids_root / "sub-01" / "ses-01" / "func" / "sub-01_ses-01_task-x_events.tsv"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    events.write_text("onset\tduration\n0\t1\n", encoding="utf-8")
+    pane.set_file(events, bids_root)
+    assert not pane.can_undo()  # nothing to undo at load
+
+    pane._model.item(0, 0).setText("5")  # edit a cell
+    assert pane.can_undo() and pane.is_dirty()
+    assert pane._model.item(0, 0).text() == "5"
+
+    pane.undo()
+    assert pane._model.item(0, 0).text() == "0"
+    assert not pane.is_dirty() and pane.can_redo()
+
+    pane.redo()
+    assert pane._model.item(0, 0).text() == "5"
+    assert pane.is_dirty()
+
+
+def test_tsv_new_edit_clears_redo(qapp, bids_root: Path) -> None:
+    pane = TsvViewerPane()
+    events = bids_root / "e.tsv"
+    events.write_text("a\tb\n1\t2\n", encoding="utf-8")
+    pane.set_file(events, bids_root)
+    pane._model.item(0, 0).setText("x")
+    pane.undo()
+    assert pane.can_redo()
+    pane._model.item(0, 1).setText("y")  # a fresh edit diverges the timeline
+    assert not pane.can_redo()

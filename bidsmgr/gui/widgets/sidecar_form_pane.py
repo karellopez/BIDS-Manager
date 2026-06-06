@@ -283,10 +283,17 @@ class SidecarFormPane(QWidget):
     # commit, save, revert, or set_file). Allows the toolbar / window
     # title / status bar to react.
     dirty_changed = pyqtSignal(int)  # number of fields changed since load
+    # Emitted when undo/redo availability changes (Editor toolbar syncs).
+    history_changed = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pane-dark")
+
+        # Undo/redo of in-memory JSON edits (snapshot = deep-copied cache).
+        from .edit_history import SnapshotHistory
+        self._history = SnapshotHistory()
+        self._pre_edit: Optional[OrderedDict[str, Any]] = None
 
         # Bound state — kept so the form can be rebuilt on file change.
         self._current_file: Optional[Path] = None
@@ -498,6 +505,9 @@ class SidecarFormPane(QWidget):
             self._tree_view.set_data(None)
             self._update_footer(None, None, None)
             self._refresh_dirty_ui()
+            self._history.clear()
+            self._pre_edit = None
+            self.history_changed.emit()
             return
 
         # Seed the JSON cache from disk so subsequent saves preserve
@@ -533,6 +543,9 @@ class SidecarFormPane(QWidget):
         )
         self._update_footer(path, root, verdict)
         self._refresh_dirty_ui()
+        self._history.clear()
+        self._pre_edit = self._snapshot()
+        self.history_changed.emit()
 
     def repaint_for_palette(self, pal: dict) -> None:
         """Force Qt to re-evaluate the global QSS for every widget here.
@@ -706,7 +719,53 @@ class SidecarFormPane(QWidget):
         if current == parsed_value:
             return
         self._json_cache[key] = parsed_value
+        self._after_edit()
+
+    # ----------------------------------------------------------------------
+    # Undo / redo (snapshot-based, in-memory; disk write still via Save)
+    # ----------------------------------------------------------------------
+
+    def _snapshot(self) -> Optional[OrderedDict]:
+        return copy.deepcopy(self._json_cache) if self._json_cache is not None else None
+
+    def _after_edit(self) -> None:
+        """Record the pre-edit cache for undo, then refresh the dirty UI.
+
+        Called at every in-memory mutation site (field commit + tree edits)
+        in place of a bare ``_refresh_dirty_ui`` so each edit is undoable.
+        """
+        if self._pre_edit is not None:
+            self._history.record(self._pre_edit)
+        self._pre_edit = self._snapshot()
         self._refresh_dirty_ui()
+        self.history_changed.emit()
+
+    def _restore(self, snap: Optional[OrderedDict]) -> None:
+        self._json_cache = copy.deepcopy(snap) if snap is not None else None
+        self._sync_active_view()
+        self._pre_edit = self._snapshot()
+        self._refresh_dirty_ui()
+        self.history_changed.emit()
+
+    def can_undo(self) -> bool:
+        return self._json_cache is not None and self._history.can_undo
+
+    def can_redo(self) -> bool:
+        return self._json_cache is not None and self._history.can_redo
+
+    def undo(self) -> None:
+        if self._json_cache is None:
+            return
+        snap = self._history.undo(self._snapshot())
+        if snap is not None:
+            self._restore(snap)
+
+    def redo(self) -> None:
+        if self._json_cache is None:
+            return
+        snap = self._history.redo(self._snapshot())
+        if snap is not None:
+            self._restore(snap)
 
     # ----------------------------------------------------------------------
     # View-mode toggle + tree handlers
@@ -948,7 +1007,7 @@ class SidecarFormPane(QWidget):
         for k, v in new_dict.items():
             if k not in self._json_cache:
                 self._json_cache[k] = v
-        self._refresh_dirty_ui()
+        self._after_edit()
 
     # ----------------------------------------------------------------------
     # Save / Revert / dirty introspection
@@ -1031,6 +1090,11 @@ class SidecarFormPane(QWidget):
             self._json_cache, levels=self._levels_from_fields(fields),
         )
         self._refresh_dirty_ui()
+        # Revert discards unsaved edits, so the undo history of those edits is
+        # no longer meaningful: reset it to the just-restored state.
+        self._history.clear()
+        self._pre_edit = self._snapshot()
+        self.history_changed.emit()
 
     def _dirty_count(self) -> int:
         """Number of keys whose value differs between cache and disk."""

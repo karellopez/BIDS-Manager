@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.2.0"
+version = "1.2.1"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -110,6 +110,7 @@ Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 [project.scripts]
 bidsmgr           = "bidsmgr.main:main"
 bidsmgr-create    = "bidsmgr.cli.create:main"
+bidsmgr-project   = "bidsmgr.cli.project:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"

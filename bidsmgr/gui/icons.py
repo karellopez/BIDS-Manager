@@ -83,6 +83,7 @@ NAMES: dict[str, tuple[str, str]] = {
     "undo":         ("mdi6.undo-variant",             "text"),
     "redo":         ("mdi6.redo-variant",             "text"),
     "revalidate":   ("mdi6.refresh",                  "accent"),
+    "project":      ("mdi6.folder-multiple-outline",  "accent"),
 
     # ---- Converter bottom tabs ----
     "log":          ("mdi6.text-box-outline",         "text"),

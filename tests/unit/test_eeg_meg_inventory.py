@@ -514,3 +514,15 @@ class TestUnsupportedFormats:
         (tmp_path / "a.edf").write_bytes(b"x")
         df = scan_eeg_meg(tmp_path, dataset="study")
         assert df.iloc[0]["proposed_issues"] == ""
+
+
+def test_pdf_documents_are_never_scanned(tmp_path):
+    """Adobe PDF documents (consent forms, reports) sitting in a data folder
+    must never be treated as EEG/MEG recordings (the '.pdf' 4D collision)."""
+    (tmp_path / "consent_form.pdf").write_bytes(b"%PDF-1.7\n...")
+    (tmp_path / "report.pdf").write_bytes(b"%PDF-1.4\n...")
+    cands = candidate_paths(tmp_path)
+    assert all(not str(p).lower().endswith(".pdf") for p in cands)
+    # A full scan yields no rows at all (and no "unsupported format" rows).
+    df = scan_eeg_meg(tmp_path, dataset="study")
+    assert df.empty

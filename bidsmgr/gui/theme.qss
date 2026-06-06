@@ -119,6 +119,54 @@ QPushButton#theme-toggle {
 }
 QPushButton#theme-toggle:hover { background: $border; }
 
+/* ---------- Project switcher (header, PyCharm-style) ---------- */
+/* Blue (accent) "current project" anchor; same size + shape as the view
+ * pills (matches the checked-pill look), works in both themes. Content is
+ * centred with symmetric padding; the right side leaves room for the caret. */
+QPushButton#project-switcher {
+    background: $accent_bg;
+    color: $accent;
+    border: 1px solid $accent_border;
+    border-radius: 5px;
+    padding: 5px 22px;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+}
+QPushButton#project-switcher:hover { background: $accent_border; color: $text; }
+QPushButton#project-switcher::menu-indicator {
+    subcontrol-position: right center;
+    subcontrol-origin: padding;
+    right: 7px;
+    width: 10px;
+}
+/* Rounded dropdown (combined with the frameless + translucent window the
+ * header sets on this menu so the corners render cleanly). */
+QMenu#project-menu {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu#project-menu::separator { height: 1px; background: $border; margin: 4px 8px; }
+QMenu#project-menu::item {
+    padding: 7px 12px;
+    border-radius: 5px;
+    color: $text;
+}
+QMenu#project-menu::item:selected { background: $accent_bg; color: $accent; }
+QLabel#proj-menu-name { color: $accent; font-size: 12px; font-weight: 600; }
+QLabel#proj-menu-path { color: $dim; font-size: 10px; }
+QLabel#proj-menu-section {
+    color: $dim; font-size: 10px; font-weight: 700;
+    padding: 6px 12px 2px 12px;
+}
+QWidget#proj-menu-row { background: transparent; border-radius: 5px; }
+QWidget#proj-menu-row:hover { background: $accent_bg; }
+QWidget#proj-menu-row-current { background: $surface3; border-radius: 5px; }
+QWidget#proj-menu-row-current:hover { background: $accent_bg; }
+QLabel#proj-menu-name, QLabel#proj-menu-path { background: transparent; }
+
 /* ---------- Toolbar ---------- */
 QFrame#toolbar {
     background: $surface2;

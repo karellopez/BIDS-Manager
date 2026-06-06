@@ -606,16 +606,12 @@ class InventoryTableModel(QAbstractTableModel):
         """Return a stable per-row identifier used in project events.
 
         Prefers ``series_uid`` (MRI) → ``source_file`` (EEG/MEG) →
-        ``f"row-{row}"``. The fallback is purely positional so it
-        survives reopen only when the row order does; in practice
-        every real row carries one of the first two identifiers.
+        ``f"row-{row}"``. Delegates to the shared, Qt-free
+        :func:`bidsmgr.project.orchestration.row_id` so GUI-recorded edits
+        replay identically in the CLI (``--project``).
         """
-        for col in ("series_uid", "source_file"):
-            if col in self._df.columns:
-                v = self._df.at[row, col]
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return f"row-{row}"
+        from ...project.orchestration import row_id as _row_id
+        return _row_id(self._df, row)
 
     def entities(self, row: int) -> dict[str, str]:
         """Return the row's parsed entities dict, or empty if malformed.
@@ -965,60 +961,14 @@ class InventoryTableModel(QAbstractTableModel):
     def _apply_project_overlay(self, state: ProjectState) -> None:
         """Apply a ``ProjectState`` overlay to the working DataFrame.
 
-        Reverses the on-save semantics: for each row whose ``row_id``
-        appears in ``state``, the saved overrides are written back into
-        the DataFrame so the view shows the same thing as before the
-        save. Unknown row_ids are ignored (the inventory may have been
-        rescanned, dropping rows the project remembers).
+        Replays the saved curation edits (entity / cell / include overrides)
+        onto the table so reopening a project shows the same thing as before.
+        Delegates to the shared, Qt-free
+        :func:`bidsmgr.project.orchestration.apply_project_state` so the CLI
+        (``--project``) replays edits identically.
         """
-        if (
-            not state.cell_overrides
-            and not state.include_overrides
-            and not state.entity_overrides
-        ):
-            return
-
-        # Build row_id → df_index map once.
-        index_for_rid: dict[str, int] = {
-            self.row_id(i): i for i in range(len(self._df))
-        }
-
-        # Entity edits first (e.g. subject renames, task / session / run, and
-        # mirror-less entities like acquisition / direction). Mirrors
-        # ``set_entity`` without re-emitting events: update the entities JSON,
-        # keep ``BIDS_name`` in sync with ``subject``, then rebuild mirror cells.
-        if "entities" in self._df.columns:
-            for rid, ents in state.entity_overrides.items():
-                r = index_for_rid.get(rid)
-                if r is None:
-                    continue
-                current = self.entities(r)
-                for ent, val in ents.items():
-                    if val:
-                        current[ent] = val
-                    else:
-                        current.pop(ent, None)
-                    if ent == "subject" and "BIDS_name" in self._df.columns:
-                        self._df.at[r, "BIDS_name"] = f"sub-{val}" if val else ""
-                self._df.at[r, "entities"] = json.dumps(current, sort_keys=True)
-                self._rebuild_one_row(r, direction="entities")
-
-        for rid, cells in state.cell_overrides.items():
-            r = index_for_rid.get(rid)
-            if r is None:
-                continue
-            for col, val in cells.items():
-                if col in self._df.columns:
-                    self._df.at[r, col] = val
-            # Force a rebuild for the row so derived cells stay consistent.
-            self._rebuild_one_row(r)
-
-        if "include" in self._df.columns:
-            for rid, inc in state.include_overrides.items():
-                r = index_for_rid.get(rid)
-                if r is None:
-                    continue
-                self._df.at[r, "include"] = 1 if inc else 0
+        from ...project.orchestration import apply_project_state
+        apply_project_state(self._df, state)
 
     def _rebuild_one_row(self, row: int, *, direction: str = "columns") -> None:
         """Reconcile ``entities`` ↔ display cells for a single row.
