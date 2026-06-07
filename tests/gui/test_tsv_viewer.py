@@ -16,12 +16,30 @@ import io
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import Qt
 
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.tsv_viewer_pane import TsvViewerPane, _read_tsv
 
 
 pytestmark = pytest.mark.gui
+
+
+# ---------------------------------------------------------------------------
+# Model helpers (the table model is a lazy QAbstractTableModel now, not a
+# QStandardItemModel, so cells are read/written via the model index API).
+# ---------------------------------------------------------------------------
+def _cell(pane, r, c):
+    return pane._model.data(pane._model.index(r, c))
+
+
+def _set_cell(pane, r, c, value):
+    pane._model.setData(pane._model.index(r, c), value)
+
+
+def _hdr(pane, i):
+    return pane._model.headerData(i, Qt.Orientation.Horizontal)
+
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +74,32 @@ def bids_root(tmp_path: Path) -> Path:
         "participant_id\tage\nsub-01\t27\n"
     )
     return root
+
+
+# ---------------------------------------------------------------------------
+# Helpers - TSV loading is threaded (NIfTI pattern), so tests must let the
+# worker finish before asserting on the populated model. Polling on the
+# pane's ``_loader`` is race-free (set to None in the load callbacks).
+# ---------------------------------------------------------------------------
+def _load(pane, path, root, qapp, timeout_ms: int = 10000) -> None:
+    from PyQt6.QtCore import QElapsedTimer
+
+    pane.set_file(path, root)
+    t = QElapsedTimer()
+    t.start()
+    while pane._loader is not None and t.elapsed() < timeout_ms:
+        qapp.processEvents()
+    qapp.processEvents()
+
+
+def _wait_loaded(viewer, qapp, timeout_ms: int = 10000) -> None:
+    from PyQt6.QtCore import QElapsedTimer
+
+    t = QElapsedTimer()
+    t.start()
+    while viewer._loader is not None and t.elapsed() < timeout_ms:
+        qapp.processEvents()
+    qapp.processEvents()
 
 
 # ---------------------------------------------------------------------------
@@ -127,29 +171,32 @@ def test_set_file_populates_table(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     assert pane.current_file() == events
     assert pane._stack.currentIndex() == 1  # table visible
     assert pane._model.columnCount() == 3
     assert pane._model.rowCount() == 3
     # Column headers come from the first line of the file.
     headers = [
-        pane._model.horizontalHeaderItem(i).text()
+        _hdr(pane, i)
         for i in range(pane._model.columnCount())
     ]
     assert headers == ["onset", "duration", "trial_type"]
     # First data row.
-    assert pane._model.item(0, 0).text() == "0"
-    assert pane._model.item(0, 2).text() == "cue"
+    assert _cell(pane, 0, 0) == "0"
+    assert _cell(pane, 0, 2) == "cue"
 
 
-def test_set_file_handles_tsv_gz(qapp, bids_root: Path) -> None:
+def test_set_file_handles_tsv_gz(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
     gz = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_physio.tsv.gz"
     )
-    pane.set_file(gz, bids_root)
+    # .gz tables always load on a background thread (uncompressed size is
+    # opaque), so wait for the parse to land before asserting.
+    with qtbot.waitSignal(pane.loaded, timeout=10000):
+        pane.set_file(gz, bids_root)
     assert pane._model.columnCount() == 2
     assert pane._model.rowCount() == 2
 
@@ -160,7 +207,7 @@ def test_set_file_none_clears(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     pane.set_file(None, None)
     assert pane.current_file() is None
     assert pane._stack.currentIndex() == 0
@@ -173,7 +220,7 @@ def test_footer_summary_reports_dimensions(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     text = pane._footer_summary.text()
     assert "3 rows" in text and "3 columns" in text
 
@@ -185,7 +232,7 @@ def test_table_cells_are_editable(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     triggers = pane._table.editTriggers()
     # Cells respond to double-click and F2.
     assert bool(triggers & QAbstractItemView.EditTrigger.DoubleClicked)
@@ -202,11 +249,11 @@ def test_edit_cell_marks_pane_dirty(
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     assert not pane.is_dirty()
     assert not pane._save_btn.isEnabled()
 
-    pane._model.item(0, 2).setText("custom_trial")
+    _set_cell(pane, 0, 2, "custom_trial")
     qapp.processEvents()
 
     assert pane.is_dirty()
@@ -225,8 +272,8 @@ def test_save_flushes_cells_to_disk(
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
-    pane._model.item(0, 2).setText("custom_trial")
+    _load(pane, events, bids_root, qapp)
+    _set_cell(pane, 0, 2, "custom_trial")
     qapp.processEvents()
 
     with qtbot.waitSignal(pane.file_saved, timeout=500):
@@ -249,13 +296,13 @@ def test_add_row_appends_blank_row(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     before = pane._model.rowCount()
     pane._on_add_row()
     assert pane._model.rowCount() == before + 1
     # Newest row has the same column count and is empty.
     last = before
-    assert pane._model.item(last, 0).text() == ""
+    assert _cell(pane, last, 0) == ""
     assert pane.is_dirty()
 
 
@@ -265,7 +312,7 @@ def test_delete_row_removes_selected_row(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     before = pane._model.rowCount()
     # Select the first row.
     pane._table.setCurrentIndex(pane._model.index(0, 0))
@@ -292,17 +339,16 @@ def test_add_column_appends_with_user_name(
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     before_cols = pane._model.columnCount()
     pane._on_add_column()
 
     assert pane._model.columnCount() == before_cols + 1
     new_idx = before_cols
-    header_item = pane._model.horizontalHeaderItem(new_idx)
-    assert header_item.text() == "extra"
+    assert _hdr(pane, new_idx) == "extra"
     # Every existing row got a blank cell in the new column.
     for r in range(pane._model.rowCount()):
-        assert pane._model.item(r, new_idx).text() == ""
+        assert _cell(pane, r, new_idx) == ""
     assert pane.is_dirty()
 
 
@@ -322,7 +368,7 @@ def test_add_column_cancel_is_noop(
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     before = pane._model.columnCount()
     pane._on_add_column()
     assert pane._model.columnCount() == before
@@ -335,14 +381,14 @@ def test_delete_column_removes_selected_column(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     before = pane._model.columnCount()
     pane._table.setCurrentIndex(pane._model.index(0, 1))  # duration column
     pane._on_delete_column()
     assert pane._model.columnCount() == before - 1
     # The remaining headers no longer include "duration".
     remaining = [
-        pane._model.horizontalHeaderItem(i).text()
+        _hdr(pane, i)
         for i in range(pane._model.columnCount())
     ]
     assert "duration" not in remaining
@@ -355,14 +401,14 @@ def test_revert_reloads_from_disk(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     pane._on_add_row()
-    pane._model.item(pane._model.rowCount() - 1, 0).setText("99")
+    _set_cell(pane, pane._model.rowCount() - 1, 0, "99")
     qapp.processEvents()
     assert pane.is_dirty()
 
-    pane.revert()
-    qapp.processEvents()
+    pane.revert()  # revert re-reads from disk on the worker thread
+    _wait_loaded(pane, qapp)
 
     assert not pane.is_dirty()
     # Disk unchanged (we never saved), and the in-memory row count
@@ -378,8 +424,9 @@ def test_save_handles_tsv_gz(qapp, qtbot, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_physio.tsv.gz"
     )
-    pane.set_file(gz, bids_root)
-    pane._model.item(0, 0).setText("99")
+    with qtbot.waitSignal(pane.loaded, timeout=10000):
+        pane.set_file(gz, bids_root)
+    _set_cell(pane, 0, 0, "99")
     qapp.processEvents()
 
     with qtbot.waitSignal(pane.file_saved, timeout=500):
@@ -398,8 +445,8 @@ def test_save_failed_signal_on_io_error(
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
-    pane._model.item(0, 0).setText("X")
+    _load(pane, events, bids_root, qapp)
+    _set_cell(pane, 0, 0, "X")
     qapp.processEvents()
 
     def _explode(self_, path):
@@ -421,7 +468,7 @@ def test_save_with_no_dirty_state_is_noop(qapp, bids_root: Path) -> None:
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     mtime_before = events.stat().st_mtime_ns
     assert pane.save() is True
     assert events.stat().st_mtime_ns == mtime_before
@@ -435,29 +482,46 @@ def test_switching_files_discards_unsaved_edits(
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
     )
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     pane._on_add_row()
     assert pane.is_dirty()
 
     participants = bids_root / "participants.tsv"
-    pane.set_file(participants, bids_root)
+    _load(pane, participants, bids_root, qapp)
     # Loading a different file resets dirty state.
     assert not pane.is_dirty()
     # Original file unchanged on disk.
     assert "99" not in events.read_text()
 
 
+def test_large_tsv_reports_total_and_caps(qapp, tmp_path: Path) -> None:
+    """A big TSV reads its real total but caps the preview - and (with the
+    pandas C parser) loads on the worker without freezing the GUI."""
+    from bidsmgr.gui.widgets.tsv_viewer_pane import _MAX_PREVIEW_ROWS
+
+    p = tmp_path / "big.tsv"
+    extra = 2500
+    with open(p, "w") as f:
+        f.write("a\tb\n")
+        for i in range(_MAX_PREVIEW_ROWS + extra):
+            f.write(f"{i}\t{i * 2}\n")
+    pane = TsvViewerPane()
+    _load(pane, p, tmp_path, qapp)
+    assert pane._model.rowCount() == _MAX_PREVIEW_ROWS
+    assert str(_MAX_PREVIEW_ROWS + extra) in pane._footer_summary.text()
+
+
 def test_ragged_row_is_padded_to_header_width(qapp, tmp_path: Path) -> None:
     p = tmp_path / "ragged.tsv"
     p.write_text("a\tb\tc\n1\t2\n3\t4\t5\n")
     pane = TsvViewerPane()
-    pane.set_file(p, tmp_path)
+    _load(pane, p, tmp_path, qapp)
     # Header has 3 columns; first data row has 2 cells but is padded.
     assert pane._model.columnCount() == 3
     assert pane._model.rowCount() == 2
-    assert pane._model.item(0, 0).text() == "1"
-    assert pane._model.item(0, 1).text() == "2"
-    assert pane._model.item(0, 2).text() == ""
+    assert _cell(pane, 0, 0) == "1"
+    assert _cell(pane, 0, 1) == "2"
+    assert _cell(pane, 0, 2) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +540,7 @@ def test_clicking_tsv_swaps_center_pane_to_table(
         / "sub-01_ses-01_task-rest_events.tsv"
     )
     panel._on_file_selected(events)
-    qapp.processEvents()
+    _wait_loaded(panel._tsv_viewer, qapp)
 
     # Center stack now shows the TSV viewer.
     assert panel._center_stack.currentWidget() is panel._tsv_viewer
@@ -496,7 +560,7 @@ def test_clicking_json_swaps_back_to_sidecar(
         / "sub-01_ses-01_task-rest_events.tsv"
     )
     panel._on_file_selected(events)
-    qapp.processEvents()
+    _wait_loaded(panel._tsv_viewer, qapp)
     assert panel._center_stack.currentWidget() is panel._tsv_viewer
 
     json_path = (
@@ -521,7 +585,7 @@ def test_clicking_directory_returns_to_sidecar_view(
         / "sub-01_ses-01_task-rest_events.tsv"
     )
     panel._on_file_selected(events)
-    qapp.processEvents()
+    _wait_loaded(panel._tsv_viewer, qapp)
     assert panel._center_stack.currentWidget() is panel._tsv_viewer
 
     anat = bids_root / "sub-01" / "ses-01" / "anat"
@@ -541,7 +605,7 @@ def test_root_swap_clears_tsv_viewer(
         / "sub-01_ses-01_task-rest_events.tsv"
     )
     panel._on_file_selected(events)
-    qapp.processEvents()
+    _wait_loaded(panel._tsv_viewer, qapp)
     assert panel._tsv_viewer.current_file() == events
 
     other = tmp_path / "Other"
@@ -556,19 +620,19 @@ def test_tsv_undo_redo(qapp, bids_root: Path) -> None:
     events = bids_root / "sub-01" / "ses-01" / "func" / "sub-01_ses-01_task-x_events.tsv"
     events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text("onset\tduration\n0\t1\n", encoding="utf-8")
-    pane.set_file(events, bids_root)
+    _load(pane, events, bids_root, qapp)
     assert not pane.can_undo()  # nothing to undo at load
 
-    pane._model.item(0, 0).setText("5")  # edit a cell
+    _set_cell(pane, 0, 0, "5")  # edit a cell
     assert pane.can_undo() and pane.is_dirty()
-    assert pane._model.item(0, 0).text() == "5"
+    assert _cell(pane, 0, 0) == "5"
 
     pane.undo()
-    assert pane._model.item(0, 0).text() == "0"
+    assert _cell(pane, 0, 0) == "0"
     assert not pane.is_dirty() and pane.can_redo()
 
     pane.redo()
-    assert pane._model.item(0, 0).text() == "5"
+    assert _cell(pane, 0, 0) == "5"
     assert pane.is_dirty()
 
 
@@ -576,9 +640,9 @@ def test_tsv_new_edit_clears_redo(qapp, bids_root: Path) -> None:
     pane = TsvViewerPane()
     events = bids_root / "e.tsv"
     events.write_text("a\tb\n1\t2\n", encoding="utf-8")
-    pane.set_file(events, bids_root)
-    pane._model.item(0, 0).setText("x")
+    _load(pane, events, bids_root, qapp)
+    _set_cell(pane, 0, 0, "x")
     pane.undo()
     assert pane.can_redo()
-    pane._model.item(0, 1).setText("y")  # a fresh edit diverges the timeline
+    _set_cell(pane, 0, 1, "y")  # a fresh edit diverges the timeline
     assert not pane.can_redo()

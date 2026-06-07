@@ -106,6 +106,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     theme = ThemeManager(app, font_scale=persisted.font_scale)
     theme.apply(initial_theme)
 
+    # Round every QComboBox dropdown (frameless + translucent popup window),
+    # matching the header project menu. Safe no-op if it ever fails.
+    from .gui.combo_popup import install as install_combo_popup_rounder
+    install_combo_popup_rounder(app)
+
     win = MainWindow(theme)
     # Bind the --project dataset through the standard open-project flow so the
     # Converter is set_project'd (output locked), the Editor points at the root,

@@ -534,6 +534,8 @@ class WelcomePanel(QWidget):
             return
         bids_root = Path(path)
         menu = QMenu(self)
+        from .combo_popup import round_menu
+        round_menu(menu)
         act_open = menu.addAction("Open")
         act_open.setEnabled(bids_root.exists())
         act_forget = menu.addAction("Remove from list")

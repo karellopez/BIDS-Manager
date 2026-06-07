@@ -33,7 +33,6 @@ import logging
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -144,6 +143,9 @@ class PropertiesPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pane")
+        # Low floor so the user can squeeze the Properties pane down and give
+        # the inspection table more room (the splitter honours this).
+        self.setMinimumWidth(56)
         self._model: Optional[InventoryTableModel] = None
         self._project: Optional[Project] = None
         self._row: Optional[int] = None
@@ -412,9 +414,9 @@ class PropertiesPanel(QWidget):
     ) -> QWidget:
         f = QFrame()
         f.setObjectName("path-preview")
-        l = QVBoxLayout(f)
-        l.setContentsMargins(11, 9, 11, 9)
-        l.setSpacing(0)
+        lay = QVBoxLayout(f)
+        lay.setContentsMargins(11, 9, 11, 9)
+        lay.setSpacing(0)
         pal = CUR()
 
         # Compose the same token list the prototype rendered, derived
@@ -468,7 +470,7 @@ class PropertiesPanel(QWidget):
             f'font-size: {scaled_px(11)}px; color: {pal["text"]}; '
             'background: transparent;'
         )
-        l.addWidget(lbl)
+        lay.addWidget(lbl)
         return f
 
     @staticmethod

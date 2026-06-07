@@ -72,6 +72,59 @@ QToolTip {
     font-size: 11px;
 }
 
+/* ---------- Dropdowns (global, rounded + stylish) ----------
+ * Every plain QComboBox gets a rounded, themed box + a rounded popup list
+ * with rounded item selection (mirroring the project dropdown look).
+ * Object-name'd combos (#ent-input, #project-switcher) keep their own
+ * more-specific rules on top of this. */
+QComboBox {
+    background: $surface2;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 3px 8px;
+    min-height: 20px;
+    /* Force Qt's own list popup instead of the native macOS NSMenu, which
+     * ignores every QSS rule below (square corners, native selection). With
+     * this the popup is a styleable QAbstractItemView. */
+    combobox-popup: 0;
+}
+QComboBox:hover { border-color: $accent_border; }
+QComboBox:focus, QComboBox:on { border-color: $accent; }
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    border: none;
+    width: 16px;
+}
+QComboBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid $dim;
+    width: 0; height: 0;
+    margin-right: 6px;
+}
+QComboBox QAbstractItemView {
+    background: $surface2;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 4px;
+    outline: 0;
+    selection-background-color: $accent_bg;
+    selection-color: $accent;
+}
+QComboBox QAbstractItemView::item {
+    padding: 5px 10px;
+    border-radius: 5px;
+    min-height: 18px;
+}
+QComboBox QAbstractItemView::item:selected { background: $accent_bg; color: $accent; }
+/* The popup container window (made frameless + translucent by
+ * gui/combo_popup.py) - transparent so only the rounded view above shows. */
+#combo-popup { background: transparent; border: none; }
+
 /* ---------- Top header (above toolbar) ---------- */
 QFrame#top-header {
     background: $surface;
@@ -167,6 +220,23 @@ QWidget#proj-menu-row-current { background: $surface3; border-radius: 5px; }
 QWidget#proj-menu-row-current:hover { background: $accent_bg; }
 QLabel#proj-menu-name, QLabel#proj-menu-path { background: transparent; }
 
+/* Generic rounded context / popup menu (combo_popup.round_menu), e.g. the
+ * Welcome recents right-click menu. Same look as the project dropdown. */
+QMenu#rounded-menu {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu#rounded-menu::separator { height: 1px; background: $border; margin: 4px 8px; }
+QMenu#rounded-menu::item {
+    padding: 7px 12px;
+    border-radius: 5px;
+    color: $text;
+}
+QMenu#rounded-menu::item:selected { background: $accent_bg; color: $accent; }
+QMenu#rounded-menu::item:disabled { color: $muted; }
+
 /* ---------- Toolbar ---------- */
 QFrame#toolbar {
     background: $surface2;
@@ -252,9 +322,12 @@ QFrame#vsep {
 }
 
 /* ---------- Status chips ---------- */
+/* border-radius is large so Qt clamps it to half the height -> a perfect
+ * pill at ANY font scale (a fixed 9px looked square once the font/height
+ * changed). A border is required so the background clips to the radius. */
 QLabel[chipKind] {
-    padding: 1px 8px;
-    border-radius: 9px;
+    padding: 1px 9px;
+    border-radius: 100px;
     font-size: 11px;
     font-weight: 500;
     background: $surface3;
@@ -841,6 +914,73 @@ QLabel#sidecar-footer-summary {
     font-size: 10px;
 }
 
+/* ---------- Editor: EEG/MEG recording viewer ---------- */
+/* Metadata card: a scrollable list of label/value rows shown before the
+ * user loads the signal. All colours come from palette tokens so the
+ * card follows the dark/light theme. */
+QScrollArea#viewer-meta-scroll { background: $bg; border: none; }
+QLabel#viewer-meta-title {
+    color: $text;
+    font-size: 16px;
+    font-weight: 700;
+    padding-bottom: 4px;
+}
+QLabel#viewer-meta-section {
+    color: $accent;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding-top: 10px;
+}
+QWidget#viewer-meta-row { background: transparent; }
+QLabel#viewer-meta-key {
+    color: $dim;
+    font-size: 12px;
+}
+QLabel#viewer-meta-val {
+    color: $text;
+    font-size: 12px;
+}
+QLabel#viewer-meta-note {
+    color: $teal;
+    font-size: 11px;
+    padding-top: 4px;
+}
+/* Collapsible section header inside the time-series viewer (Display
+ * controls / Events). Flat, full-width, with a hover wash. */
+QPushButton#viewer-section-toggle {
+    background: $surface2;
+    color: $dim;
+    border: none;
+    border-bottom: 1px solid $subtle;
+    padding: 5px 12px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-align: left;
+}
+QPushButton#viewer-section-toggle:hover { color: $text; background: $surface3; }
+QPushButton#viewer-section-toggle:checked { color: $text; }
+/* The fixed-width channel-label strip beside the plot + the horizontal
+ * toolbar scroll (lets the viewer shrink without the toolbar forcing width). */
+QScrollArea#viewer-label-strip { background: $bg; border: none; }
+QScrollArea#viewer-toolbar-scroll { background: transparent; border: none; }
+
+/* "Load signal" button on the metadata card - styled like the header project
+ * switcher (accent pill, rounded, centered), not a green action button. */
+QPushButton#load-signal-btn {
+    background: $accent_bg;
+    color: $accent;
+    border: 1px solid $accent_border;
+    border-radius: 5px;
+    padding: 7px 30px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#load-signal-btn:hover { background: $accent_border; color: $text; }
+QPushButton#load-signal-btn:pressed { background: $accent_bg; }
+
 /* ---------- Editor: validation panel ---------- */
 QWidget#val-panel { background: $surface; }
 QLabel#val-section-title {
@@ -861,9 +1001,8 @@ QLabel#val-audit-missing {
     font-family: "SF Mono","Menlo","Monaco",monospace;
 }
 
-QLabel#val-count-ok   { background: $surface3; color: $dim; padding: 1px 6px; border-radius: 8px; font-size: 9px; }
-QLabel#val-count-warn { background: $warning_bg; color: $warning; padding: 1px 6px; border-radius: 8px; font-size: 9px; }
-QLabel#val-count-err  { background: $error_bg; color: $error; padding: 1px 6px; border-radius: 8px; font-size: 9px; }
+/* Validation-pane section count chips are now painted Chip widgets
+ * (widgets/primitives.Chip) - always-pill, theme-aware - so no QSS here. */
 
 QFrame#val-msg {
     background: $surface2;

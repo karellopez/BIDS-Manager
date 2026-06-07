@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -42,13 +41,14 @@ from .widgets import (
     BusySpinner,
     Chip,
     NiftiViewerPane,
-    PaneHeader,
     PanelFrame,
     PathBar,
+    RecordingViewerPane,
     SidecarFormPane,
     TsvViewerPane,
     ValidationPane,
     VSep,
+    is_recording_path,
 )
 
 log = logging.getLogger(__name__)
@@ -104,10 +104,16 @@ class EditorPanel(QWidget):
         self._sidecar_form = SidecarFormPane()
         self._tsv_viewer = TsvViewerPane()
         self._nifti_viewer = NiftiViewerPane()
+        self._recording_viewer = RecordingViewerPane()
         self._center_stack = QStackedWidget()
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
+        self._center_stack.addWidget(self._recording_viewer)
+        # Threaded panes drive the toolbar busy spinner + status bar.
+        self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
+        self._recording_viewer.loading_changed.connect(self._on_pane_loading)
+        self._recording_viewer.status_message.connect(self.log_message)
         # Undo/redo toolbar buttons follow the active editable pane.
         self._sidecar_form.history_changed.connect(self._sync_undo_redo)
         self._tsv_viewer.history_changed.connect(self._sync_undo_redo)
@@ -390,6 +396,7 @@ class EditorPanel(QWidget):
         self._sidecar_form.set_file(None, None, None)
         self._tsv_viewer.set_file(None, None)
         self._nifti_viewer.set_file(None, None)
+        self._recording_viewer.set_file(None, None)
         self._center_stack.setCurrentWidget(self._sidecar_form)
         self._validation_pane.set_report(None)
         self._validation_pane.set_current_file(None, None)
@@ -614,18 +621,26 @@ class EditorPanel(QWidget):
         * ``.tsv`` / ``.tsv.gz`` → :class:`TsvViewerPane` (table).
         * ``.nii`` / ``.nii.gz`` → :class:`NiftiViewerPane` (2-D slice
           viewer with orientation buttons + brightness/contrast).
-        * everything else (JSON sidecars, EEG/MEG, …) →
-          :class:`SidecarFormPane`. The sidecar pane shows the form
-          for JSON and a "no sidecar form for this file type" hint
-          for other kinds (MEG / EEG viewers are future work).
+        * EEG / MEG / iEEG recordings (``.fif``, ``.edf``, ``.set``,
+          ``.vhdr``, ``.cnt``, CTF ``.ds``, …) →
+          :class:`RecordingViewerPane` (metadata card + threaded
+          time-series viewer).
+        * everything else (JSON sidecars, …) → :class:`SidecarFormPane`.
         """
         if path.is_dir():
-            # Directories don't carry sidecars. We still push the
+            # CTF .ds / EGI .mff are directory-shaped recordings — route
+            # them to the recording viewer instead of the dir-clear path.
+            if is_recording_path(path):
+                self._show_recording(path)
+                self._validation_pane.set_current_file(path, self.current_root())
+                return
+            # Plain directories don't carry sidecars. We still push the
             # folder down to the validation panel so its "Folder"
             # section can reflect the user's focus.
             self._sidecar_form.set_file(None, None, None)
             self._tsv_viewer.set_file(None, None)
             self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._sidecar_form)
             self._validation_pane.set_current_file(path, self.current_root())
             return
@@ -637,18 +652,43 @@ class EditorPanel(QWidget):
             # show stale state for a different file.
             self._sidecar_form.set_file(None, None, None)
             self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._tsv_viewer)
         elif name.endswith(".nii") or name.endswith(".nii.gz"):
             self._nifti_viewer.set_file(path, root)
             self._sidecar_form.set_file(None, None, None)
             self._tsv_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._nifti_viewer)
+        elif is_recording_path(path):
+            self._show_recording(path)
         else:
             self._sidecar_form.set_file(path, root, self._report)
             self._tsv_viewer.set_file(None, None)
             self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._sidecar_form)
         self._validation_pane.set_current_file(path, root)
+
+    def _show_recording(self, path: Path) -> None:
+        """Route an EEG/MEG/iEEG recording to the recording viewer."""
+        root = self.current_root()
+        self._recording_viewer.set_file(path, root)
+        self._sidecar_form.set_file(None, None, None)
+        self._tsv_viewer.set_file(None, None)
+        self._nifti_viewer.set_file(None, None)
+        self._center_stack.setCurrentWidget(self._recording_viewer)
+
+    def _on_pane_loading(self, busy: bool, message: str) -> None:
+        """Mirror a center pane's threaded load onto the toolbar spinner.
+
+        Only drives the spinner; it does not touch the validate buttons
+        (those are owned by :meth:`_set_busy`). When a dataset validation
+        is in flight we leave the spinner under its control.
+        """
+        if self._report_worker is not None and self._report_worker.isRunning():
+            return
+        self._spinner.set_busy(busy, message=message)
 
     # ------------------------------------------------------------------
     # Theme cascade (called by MainWindow._on_palette_changed)
@@ -760,6 +800,7 @@ class EditorPanel(QWidget):
         self._sidecar_form.repaint_for_palette(pal)
         self._tsv_viewer.repaint_for_palette(pal)
         self._nifti_viewer.repaint_for_palette(pal)
+        self._recording_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
         for frame in getattr(self, "_panel_frames", []):
             frame._refresh_icons()

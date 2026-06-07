@@ -268,6 +268,17 @@ class PanelFrame(QFrame):
         win = QDialog(self.window())
         win.setWindowTitle(f"BIDS-Manager - {self._title}" if self._title else "BIDS-Manager")
         win.setObjectName("panel-frame-float")
+        # A bare QDialog gets only a close button on Linux / Windows. Promote
+        # it to a normal top-level window so it carries minimize + maximize
+        # buttons and can be maximised / tiled like any other window.
+        win.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         lay = QVBoxLayout(win)
         lay.setContentsMargins(0, 0, 0, 0)
         self._inner.setParent(win)
