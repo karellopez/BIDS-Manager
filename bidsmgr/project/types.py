@@ -91,6 +91,10 @@ class ScanImported(_EventBase):
     type: Literal["scan_imported"] = "scan_imported"
     inventory_tsv: str
     row_ids: tuple[str, ...]
+    # Raw source folder the scan read from. Optional for back-compat with logs
+    # written before resume support; needed so reopening a project can restore
+    # the source location (and convert can find the files).
+    raw_root: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +255,7 @@ class ProjectState(BaseModel):
     description: Optional[str] = None
 
     inventory_tsv: Optional[str] = None
+    raw_root: Optional[str] = None
     row_ids: tuple[str, ...] = ()
 
     entity_overrides: dict[str, dict[str, Optional[str]]] = Field(default_factory=dict)

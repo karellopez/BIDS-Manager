@@ -376,16 +376,18 @@ class OutputFsPane(QWidget):
         pal = CUR()
         root_item = _render_node(result.root, pal)
         self._tree.addTopLevelItem(root_item)
-        root_item.setExpanded(True)
 
         if snap is None:
-            # First-time render: auto-expand the first level
-            # (each ``<dataset>/`` folder) so the user immediately
-            # sees the converted shape.
+            # First-time render: expand the root + first level so the user
+            # immediately sees the shape.
+            root_item.setExpanded(True)
             for i in range(root_item.childCount()):
                 root_item.child(i).setExpanded(True)
         else:
-            # Subsequent rebuilds — defer to whatever the user had open.
+            # Subsequent rebuilds (watcher-triggered during convert, etc.) must
+            # respect whatever the user had open -- including a collapsed root.
+            # Do NOT force the root expanded here, or a refresh re-expands a
+            # folder the user just collapsed.
             self._restore_state(snap)
 
         self._last_rendered_root = self._root

@@ -20,8 +20,15 @@ from .convert import ConvertWorker
 from .file_report import FileReportWorker, FolderReportWorker
 from .metadata import MetadataWorker
 from .nifti_loader import NiftiLoaderWorker
+from .meeg_recording_loader import (
+    RecordingComputeWorker,
+    RecordingMetaWorker,
+    RecordingResampleWorker,
+    RecordingSignalWorker,
+)
 from .report import ReportWorker
 from .scan import ScanWorker
+from .tsv_loader import TsvLoaderWorker
 from .validate import ValidateWorker
 
 __all__ = [
@@ -30,7 +37,12 @@ __all__ = [
     "FolderReportWorker",
     "MetadataWorker",
     "NiftiLoaderWorker",
+    "RecordingComputeWorker",
+    "RecordingMetaWorker",
+    "RecordingResampleWorker",
+    "RecordingSignalWorker",
     "ReportWorker",
     "ScanWorker",
+    "TsvLoaderWorker",
     "ValidateWorker",
 ]

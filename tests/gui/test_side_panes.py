@@ -246,7 +246,13 @@ def test_filter_pane_per_sequence_leaves_show_basenames(qtbot) -> None:
     ``proposed_basename`` (or fallback)."""
     df = make_df([
         _func_row(proposed_basename="sub-001_ses-pre_task-rest_bold", series_uid="1.1"),
-        _func_row(proposed_basename="sub-001_ses-pre_task-mb_bold",   series_uid="2.2"),
+        _func_row(
+            proposed_basename="sub-001_ses-pre_task-mb_bold", series_uid="2.2",
+            task="mb",
+            entities=json.dumps(
+                {"subject": "001", "session": "pre", "task": "mb"}, sort_keys=True,
+            ),
+        ),
     ])
     model = InventoryTableModel(df)
     pane = FilterPane()
@@ -270,7 +276,11 @@ def test_filter_pane_unchecking_one_sequence_only_toggles_that_row(qtbot) -> Non
         _func_row(proposed_basename="sub-001_ses-pre_task-rest_bold",
                   series_uid="1.1"),
         _func_row(proposed_basename="sub-001_ses-pre_task-mb_bold",
-                  series_uid="2.2"),
+                  series_uid="2.2", task="mb",
+                  entities=json.dumps(
+                      {"subject": "001", "session": "pre", "task": "mb"},
+                      sort_keys=True,
+                  )),
     ])
     model = InventoryTableModel(df)
     pane = FilterPane()

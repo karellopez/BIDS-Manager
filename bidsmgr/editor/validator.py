@@ -25,10 +25,11 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import bidsmgr
 from .. import schema as schema_mod
+from ..schema.types import Severity as SchemaSeverity
 from .types import (
     FieldLevel,
     FileVerdict,
@@ -405,16 +406,25 @@ def _check_filename_entities(
         return
 
     for v in verdicts or []:
-        # ValidationVerdict has fields: severity, kind, message, ...
-        ok = bool(getattr(v, "ok", True))
-        if ok:
+        # ValidationVerdict exposes ``is_ok`` (property) + ``severity``
+        # (schema Severity enum) + ``rule_id`` - NOT ``ok``/``kind``. The
+        # old code read the wrong attributes, so ``getattr(v, "ok", True)``
+        # always defaulted to True and basename validation never flagged
+        # anything (a silent no-op). Use the real fields + map the severity.
+        if v.is_ok:
             continue
+        sev = (
+            Severity.ERR if v.severity == SchemaSeverity.ERROR else Severity.WARN
+        )
         verdict.issues.append(Issue(
-            severity=Severity.ERR,
-            rule_id=f"bids.basename.{getattr(v, 'kind', 'invalid')}",
+            severity=sev,
+            rule_id=f"bids.basename.{getattr(v, 'rule_id', 'invalid')}",
             message=str(getattr(v, "message", v)),
         ))
-        verdict.severity = Severity.ERR
+        if sev is Severity.ERR:
+            verdict.severity = Severity.ERR
+        elif verdict.severity is Severity.OK:
+            verdict.severity = Severity.WARN
 
 
 def _audit_sidecar(

@@ -117,7 +117,15 @@ _BASENAME_TOKEN = re.compile(r"^([a-zA-Z]+)-([0-9a-zA-Z]+)$")
 def validate_basename(
     basename: str,
     datatype: Datatype,
-    extensions: tuple[str, ...] = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv", ".edf", ".bdf", ".vhdr", ".set"),
+    # Longest / double extensions FIRST so e.g. ``.tsv.gz`` is stripped before
+    # ``.tsv`` (otherwise the suffix parses as ``physio.tsv.gz`` and is
+    # wrongly flagged "not valid"). Covers MRI, physio, and EEG/MEG/iEEG.
+    extensions: tuple[str, ...] = (
+        ".nii.gz", ".tsv.gz", ".fif.gz",
+        ".nii", ".tsv", ".json", ".bval", ".bvec",
+        ".edf", ".bdf", ".gdf", ".vhdr", ".vmrk", ".eeg", ".fdt",
+        ".set", ".fif", ".con", ".sqd", ".cnt", ".kdf", ".mef", ".nwb", ".egi",
+    ),
 ) -> list[ValidationVerdict]:
     """Parse + validate a BIDS basename. Strips extension; needs a known suffix."""
 

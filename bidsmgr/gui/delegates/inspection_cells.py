@@ -27,6 +27,7 @@ from ..theme_manager import CUR, scaled_px
 from ..widgets.status_badge import badge_paint
 from .row_state import (
     HIGHLIGHT_ROLE,
+    INHERITED_ROLE,
     ROW_STATE_ROLE,
     paint_highlight,
     paint_row_state,
@@ -188,6 +189,13 @@ class CellTextDelegate(QStyledItemDelegate):
 
         if row_state == "skip":
             color = QColor(pal["muted"])
+
+        # A value inherited from the dataset default (no per-row override)
+        # is shown muted + italic so it reads as "inherited, not set here".
+        if index.data(INHERITED_ROLE):
+            color = QColor(pal["dim"])
+            f.setItalic(True)
+            painter.setFont(f)
 
         painter.setPen(color)
         r = option.rect.adjusted(8, 0, -8, 0)

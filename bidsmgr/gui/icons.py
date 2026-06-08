@@ -76,8 +76,14 @@ NAMES: dict[str, tuple[str, str]] = {
     "scan":         ("mdi6.magnify-scan",             "accent"),
     "settings":     ("mdi6.cog-outline",              "text"),
     "run":          ("mdi6.play",                     "success"),
+    "stop":         ("mdi6.stop-circle-outline",      "error"),
     "bulk_edit":    ("mdi6.pencil-outline",           "text"),
+    "columns":      ("mdi6.view-column-outline",      "text"),
     "highlight":    ("mdi6.flag-outline",             "warning"),
+    "undo":         ("mdi6.undo-variant",             "text"),
+    "redo":         ("mdi6.redo-variant",             "text"),
+    "revalidate":   ("mdi6.refresh",                  "accent"),
+    "project":      ("mdi6.folder-multiple-outline",  "accent"),
 
     # ---- Converter bottom tabs ----
     "log":          ("mdi6.text-box-outline",         "text"),
@@ -91,6 +97,17 @@ NAMES: dict[str, tuple[str, str]] = {
     "folder_check": ("mdi6.folder-search-outline",    "accent"),
     "dataset":      ("mdi6.database-search-outline",  "accent"),
     "strict":       ("mdi6.lightning-bolt-outline",   "warning"),
+
+    # ---- Editor MEG/EEG recording viewer ----
+    "load_signal":  ("mdi6.play-circle-outline",      "success"),
+    "filter":       ("mdi6.tune-variant",             "accent"),
+    "resample":     ("mdi6.sine-wave",                "accent"),
+    "psd":          ("mdi6.chart-bell-curve",         "purple"),
+    "reset_view":   ("mdi6.backup-restore",           "text"),
+    "close_data":   ("mdi6.close-box-outline",        "error"),
+    "channels":     ("mdi6.format-list-checks",       "text"),
+    "events":       ("mdi6.flag-outline",             "warning"),
+    "waveform":     ("mdi6.chart-line-variant",       "text"),
 
     # ---- File-tree node icons (Converter raw + output, Editor BIDS) ----
     "tree_folder":  ("ph.folder-simple-light",        "accent"),
@@ -107,6 +124,13 @@ NAMES: dict[str, tuple[str, str]] = {
     "info":         ("mdi6.information-outline",      "accent"),
     "close":        ("mdi6.close",                    "text"),
     "check":        ("mdi6.check",                    "success"),
+
+    # ---- Collapsible / detachable panel frame ----
+    "panel_collapse": ("mdi6.chevron-down",           "text"),
+    "panel_expand":   ("mdi6.chevron-right",          "text"),
+    "chevron_left":   ("mdi6.chevron-left",           "text"),
+    "detach":         ("mdi6.open-in-new",            "text"),
+    "reattach":       ("mdi6.dock-window",            "text"),
 }
 
 
@@ -150,6 +174,43 @@ def icon(name: str, color: Optional[str] = None) -> QIcon:
     return ico
 
 
+# EEG / MEG / iEEG recording file extensions that get the "brain + signal"
+# composite tree icon (mirrors the Editor viewer's openable file set; the
+# directory formats .ds / .mff render as folders in the tree).
+_RECORDING_TREE_EXTS: tuple[str, ...] = (
+    ".fif.gz", ".fif", ".con", ".sqd", ".kdf",
+    ".vhdr", ".edf", ".bdf", ".gdf", ".set", ".cnt", ".egi", ".mef", ".nwb",
+)
+
+
+def _recording_tree_icon() -> QIcon:
+    """Composite brain (like NIfTI) + a small signal squiggle badge.
+
+    Signals a recording the Editor can open in the time-series viewer.
+    Cached + theme-tinted like the rest of the icon set.
+    """
+    pal = CUR()
+    brain = pal.get("text", "#e6edf3")
+    signal = pal.get("accent", "#58a6ff")
+    key = ("__recording_tree__", f"{brain}|{signal}")
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        ico = qta.icon(
+            "ph.brain-light", "mdi6.pulse",
+            options=[
+                {"color": brain},
+                {"color": signal, "scale_factor": 0.62, "offset": (0.22, 0.26)},
+            ],
+        )
+    except Exception as exc:  # pragma: no cover - fall back to plain brain
+        log.debug("recording tree icon failed: %s", exc)
+        ico = icon("tree_nifti")
+    _CACHE[key] = ico
+    return ico
+
+
 def icon_for_path(name: str, *, is_dir: bool = False) -> QIcon:
     """Return the tree-node ``QIcon`` for a file path / name.
 
@@ -158,15 +219,21 @@ def icon_for_path(name: str, *, is_dir: bool = False) -> QIcon:
     Unknown extensions return an empty ``QIcon`` rather than a default
     so generic files don't pick up a misleading glyph.
     """
-    if is_dir:
-        return icon("tree_folder")
     lower = name.lower()
+    if is_dir:
+        # Directory-shaped recordings (CTF .ds, EGI .mff) are recordings,
+        # not plain folders - give them the brain + signal icon too.
+        if lower.endswith(".ds") or lower.endswith(".mff"):
+            return _recording_tree_icon()
+        return icon("tree_folder")
     if lower.endswith(".nii.gz") or lower.endswith(".nii"):
         return icon("tree_nifti")
     if lower.endswith(".json"):
         return icon("tree_json")
     if lower.endswith(".tsv.gz") or lower.endswith(".tsv"):
         return icon("tree_tsv")
+    if lower.endswith(_RECORDING_TREE_EXTS):
+        return _recording_tree_icon()
     return QIcon()
 
 

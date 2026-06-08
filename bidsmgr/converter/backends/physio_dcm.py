@@ -131,7 +131,23 @@ class PhysioDcmBackend:
                     duration_s=time.monotonic() - t0,
                 )
 
-        staged = sorted(output_dir.glob(f"{task.basename}*"))
+        # bidsphysio inserts a ``_recording-<label>`` infix *before* the
+        # ``_physio`` suffix when a recording carries multiple sampling
+        # rates, so the emitted names are
+        # ``<stem>_recording-<label>_physio.{tsv.gz,json}`` rather than the
+        # exact ``<basename>`` (= ``<stem>_physio``). Glob on the stem so we
+        # detect both the single-rate (``<stem>_physio.*``) and multi-rate
+        # forms; ``*_physio.`` keeps us from picking up a sibling imaging
+        # file (e.g. the accompanying ``_bold.nii.gz``) in the same dir.
+        stem = (
+            task.basename[: -len("_physio")]
+            if task.basename.endswith("_physio")
+            else task.basename
+        )
+        staged = sorted(
+            set(output_dir.glob(f"{stem}*_physio.tsv.gz"))
+            | set(output_dir.glob(f"{stem}*_physio.json"))
+        )
         if not staged:
             return ConvertResult(
                 task=task, success=False,

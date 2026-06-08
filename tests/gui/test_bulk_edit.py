@@ -83,12 +83,15 @@ def test_bulk_set_subject_updates_bids_name_and_basename() -> None:
         assert json.loads(ent)["subject"] == "099"
 
 
-def test_bulk_set_dataset_applies_to_every_row() -> None:
+def test_bulk_set_dataset_is_blocked() -> None:
+    # The dataset column is owned by the project / locked output folder and is
+    # read-only; bulk-editing it must be a no-op (nothing changed).
     df = make_df([_row(series_uid=str(i)) for i in range(3)])
     model = InventoryTableModel(df)
+    assert "dataset" not in model.BULK_EDITABLE_KEYS
     n = model.bulk_set([0, 1, 2], "dataset", "other_study")
-    assert n == 3
-    assert (model.dataframe()["dataset"] == "other_study").all()
+    assert n == 0
+    assert (model.dataframe()["dataset"] == "study").all()  # unchanged
 
 
 def test_bulk_set_task_rebuilds_basename() -> None:
@@ -146,16 +149,17 @@ def test_dialog_apply_writes_through_bulk_set(qtbot) -> None:
 
     dlg = BulkEditDialog(model, rows=[0, 1, 2])
     qtbot.addWidget(dlg)
-    # Pick the dataset column from the dropdown (find by user data).
+    # Pick the task column from the dropdown (find by user data). The dataset
+    # column is intentionally not offered (read-only / project-owned).
     for i in range(dlg._col_combo.count()):
-        if dlg._col_combo.itemData(i) == "dataset":
+        if dlg._col_combo.itemData(i) == "task":
             dlg._col_combo.setCurrentIndex(i)
             break
-    dlg._value_edit.setText("other_study")
+    dlg._value_edit.setText("memory")
     dlg._on_apply()
 
     assert dlg.changed_count() == 3
-    assert (model.dataframe()["dataset"] == "other_study").all()
+    assert (model.dataframe()["task"] == "memory").all()
 
 
 def test_dialog_blank_value_is_a_noop(qtbot) -> None:
@@ -218,3 +222,59 @@ def test_bulk_btn_enables_with_multi_selection(qtbot, tmp_path) -> None:
         )
     assert sorted(panel._selected_rows()) == [0, 2]
     assert panel._bulk_btn.isEnabled() is True
+
+
+# ---------------------------------------------------------------------------
+# Constrained-choice columns -> dropdown-only (never free-typed)
+# ---------------------------------------------------------------------------
+
+
+def _select_column(dlg, key) -> None:
+    for i in range(dlg._col_combo.count()):
+        if dlg._col_combo.itemData(i) == key:
+            dlg._col_combo.setCurrentIndex(i)
+            break
+    dlg._on_column_changed(dlg._col_combo.currentIndex())
+
+
+def test_dialog_line_freq_is_fixed_dropdown(qtbot) -> None:
+    df = make_df([_row(proposed_datatype="eeg", series_uid="", source_file="a.edf",
+                       line_freq="", proposed_basename="sub-001_task-rest_eeg")])
+    model = InventoryTableModel(df)
+    dlg = BulkEditDialog(model, rows=[0])
+    qtbot.addWidget(dlg)
+    _select_column(dlg, "line_freq")
+    assert dlg._value_is_combo is True
+    assert dlg._value_combo.isEditable() is False  # dropdown-only
+    items = [dlg._value_combo.itemText(i) for i in range(dlg._value_combo.count())]
+    assert items == ["50", "60"]
+
+
+def test_dialog_montage_is_dropdown(qtbot) -> None:
+    df = make_df([_row(proposed_datatype="eeg", series_uid="", source_file="a.edf",
+                       montage="", proposed_basename="sub-001_task-rest_eeg")])
+    model = InventoryTableModel(df)
+    dlg = BulkEditDialog(model, rows=[0])
+    qtbot.addWidget(dlg)
+    _select_column(dlg, "montage")
+    assert dlg._value_is_combo is True
+    assert dlg._value_combo.isEditable() is False
+    assert dlg._value_combo.count() > 0
+
+
+def test_dialog_apply_combo_value(qtbot) -> None:
+    df = make_df([
+        _row(proposed_datatype="eeg", series_uid="", source_file="a.edf",
+             line_freq="", proposed_basename="sub-001_task-rest_eeg"),
+        _row(BIDS_name="sub-002", proposed_datatype="eeg", series_uid="",
+             source_file="b.edf", line_freq="",
+             proposed_basename="sub-002_task-rest_eeg"),
+    ])
+    model = InventoryTableModel(df)
+    dlg = BulkEditDialog(model, rows=[0, 1])
+    qtbot.addWidget(dlg)
+    _select_column(dlg, "line_freq")
+    dlg._value_combo.setCurrentText("60")
+    dlg._on_apply()
+    assert dlg.changed_count() == 2
+    assert (model.dataframe()["line_freq"] == "60").all()

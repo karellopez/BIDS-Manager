@@ -145,7 +145,7 @@ class TestHappyPath:
         # Staging cleaned up.
         assert not (bids_parent / "study_a" / ".tmp_bidsmgr").exists()
 
-    def test_dataset_description_appends_on_rerun(
+    def test_dataset_description_generatedby_is_idempotent_on_rerun(
         self, tmp_path: Path, patch_subprocess,
     ) -> None:
         dicoms = _make_dicoms(tmp_path, "T1")
@@ -163,7 +163,30 @@ class TestHappyPath:
             (bids_parent / "study_a" / "dataset_description.json").read_text()
         )
         assert isinstance(dd["GeneratedBy"], list)
-        assert len(dd["GeneratedBy"]) == 2  # one entry per run
+        # Re-running convert into the same dataset (the incremental-conversion
+        # case) must NOT pile up duplicate identical bidsmgr stamps.
+        bidsmgr_entries = [g for g in dd["GeneratedBy"] if g.get("Name") == "bidsmgr"]
+        assert len(bidsmgr_entries) == 1
+
+    def test_dataset_description_uses_schema_bids_version(
+        self, tmp_path: Path, patch_subprocess,
+    ) -> None:
+        from bidsmgr.schema import bids_version as schema_bids_version
+
+        dicoms = _make_dicoms(tmp_path, "T1")
+        tsv = _write_inventory(
+            tmp_path,
+            [_row(series_uid="UID1", basename="sub-001_T1w")],
+            {"UID1": [str(p) for p in dicoms]},
+        )
+        bids_parent = tmp_path / "out"
+        run_convert(tsv, bids_parent, n_jobs=1)
+
+        dd = json.loads(
+            (bids_parent / "study_a" / "dataset_description.json").read_text()
+        )
+        # No hardcoded version: stamped value tracks the bundled schema.
+        assert dd["BIDSVersion"] == schema_bids_version()
 
     def test_provenance_has_dcm2niix_version(
         self, tmp_path: Path, patch_subprocess,
@@ -276,10 +299,12 @@ class TestFilteringAndDryRun:
 # ---------------------------------------------------------------------------
 
 
-class TestAtomicCommit:
-    def test_skip_when_target_exists_no_overwrite(
+class TestMergeCommit:
+    def test_merge_adds_new_files_keeps_existing_no_overwrite(
         self, tmp_path: Path, patch_subprocess,
     ) -> None:
+        # Incremental: an existing subject is merged into, not skipped. New files
+        # (anat/) are added; non-colliding existing content is left untouched.
         dicoms = _make_dicoms(tmp_path, "T1")
         tsv = _write_inventory(
             tmp_path,
@@ -287,17 +312,16 @@ class TestAtomicCommit:
             {"UID1": [str(p) for p in dicoms]},
         )
         bids_parent = tmp_path / "out"
-        # Pre-create the target.
-        (bids_parent / "study_a" / "sub-001").mkdir(parents=True)
-        (bids_parent / "study_a" / "sub-001" / "PRE-EXISTING").write_text("x")
+        sub = bids_parent / "study_a" / "sub-001"
+        sub.mkdir(parents=True)
+        (sub / "PRE-EXISTING").write_text("x")
 
         rc = run_convert(tsv, bids_parent, n_jobs=1)
         assert rc == 0
-        # Pre-existing content untouched; no anat/ written.
-        assert (bids_parent / "study_a" / "sub-001" / "PRE-EXISTING").exists()
-        assert not (bids_parent / "study_a" / "sub-001" / "anat").exists()
+        assert (sub / "PRE-EXISTING").read_text() == "x"     # kept
+        assert (sub / "anat" / "sub-001_T1w.nii.gz").exists()  # new file merged in
 
-    def test_overwrite_backs_up_existing(
+    def test_merge_keeps_colliding_file_without_overwrite(
         self, tmp_path: Path, patch_subprocess,
     ) -> None:
         dicoms = _make_dicoms(tmp_path, "T1")
@@ -307,19 +331,41 @@ class TestAtomicCommit:
             {"UID1": [str(p) for p in dicoms]},
         )
         bids_parent = tmp_path / "out"
-        old_target = bids_parent / "study_a" / "sub-001"
-        old_target.mkdir(parents=True)
-        (old_target / "OLD").write_text("preserved")
+        anat = bids_parent / "study_a" / "sub-001" / "anat"
+        anat.mkdir(parents=True)
+        (anat / "sub-001_T1w.nii.gz").write_text("ORIGINAL")  # collides
+
+        run_convert(tsv, bids_parent, n_jobs=1)  # no overwrite
+        # Existing file is preserved; nothing backed up.
+        assert (anat / "sub-001_T1w.nii.gz").read_text() == "ORIGINAL"
+        assert not (bids_parent / "study_a" / ".bidsmgr" / "backup").exists()
+
+    def test_overwrite_backs_up_only_colliding_files(
+        self, tmp_path: Path, patch_subprocess,
+    ) -> None:
+        dicoms = _make_dicoms(tmp_path, "T1")
+        tsv = _write_inventory(
+            tmp_path,
+            [_row(series_uid="UID1", basename="sub-001_T1w")],
+            {"UID1": [str(p) for p in dicoms]},
+        )
+        bids_parent = tmp_path / "out"
+        sub = bids_parent / "study_a" / "sub-001"
+        (sub / "anat").mkdir(parents=True)
+        (sub / "anat" / "sub-001_T1w.nii.gz").write_text("OLD-T1")  # collides
+        (sub / "OTHER-SESSION-FILE").write_text("keep me")          # no collision
 
         run_convert(tsv, bids_parent, n_jobs=1, overwrite=True)
 
-        # New tree present.
-        assert (old_target / "anat" / "sub-001_T1w.nii.gz").exists()
-        # Old content moved to backup.
-        backup_root = bids_parent / "study_a" / ".bidsmgr" / "backup"
-        backups = list(backup_root.glob("sub-001_*"))
+        # Colliding file replaced; non-colliding existing content untouched.
+        # (The converted .nii.gz is gzipped binary, so compare bytes.)
+        assert (sub / "anat" / "sub-001_T1w.nii.gz").read_bytes() != b"OLD-T1"
+        assert (sub / "OTHER-SESSION-FILE").read_text() == "keep me"
+        # Only the colliding file is in the backup.
+        backups = list((sub.parent / ".bidsmgr" / "backup").glob("sub-001_*"))
         assert len(backups) == 1
-        assert (backups[0] / "OLD").read_text() == "preserved"
+        assert (backups[0] / "anat" / "sub-001_T1w.nii.gz").read_bytes() == b"OLD-T1"
+        assert not (backups[0] / "OTHER-SESSION-FILE").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -420,3 +466,37 @@ class TestFailureHandling:
         anat = bids_parent / "study_a" / "sub-001" / "anat"
         assert (anat / "sub-001_T2w.nii.gz").exists()
         assert not (anat / "sub-001_T1w.nii.gz").exists()
+
+
+def _eeg_row(**over):
+    base = {
+        "source_file": "sub-01_task-rest.edf",
+        "series_uid": "",
+        "BIDS_name": "sub-001",
+        "session": "",
+        "proposed_datatype": "eeg",
+        "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "entities": json.dumps({"subject": "001", "task": "rest"}),
+        "task": "rest",
+        "run": "",
+        "line_freq": "",
+        "montage": "",
+        "eeg_reference": "",
+        "eeg_ground": "",
+        "dataset": "ds",
+        "companion_files": "",
+    }
+    base.update(over)
+    return pd.Series(base)
+
+
+def test_force_edf_flag_threads_onto_eeg_task(tmp_path):
+    """``--force-edf`` reaches the EEG ConvertTask; default leaves it off."""
+    row = _eeg_row()
+    t_off = convert_mod._row_to_task_eeg_meg(row, tmp_path)
+    assert t_off is not None and t_off.force_edf is False
+
+    t_on = convert_mod._row_to_task_eeg_meg(row, tmp_path, force_edf=True)
+    assert t_on is not None and t_on.force_edf is True
+    assert t_on.datatype == "eeg"

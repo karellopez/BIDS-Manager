@@ -46,6 +46,12 @@ import pandas as pd
 from .. import schema
 from ..classifier import dcm2niix_bidsguess, sequence_dict
 from ..classifier.types import Classification
+from ..classifier.user_rules import (
+    ExclusionRule,
+    UserHint,
+    exclusion_matches,
+)
+from ..classifier import user_rules as user_rules_module
 from ..inventory import probe_convert as probe_convert_module
 from ..inventory._time import parse_dicom_time_seconds as _parse_dicom_time_seconds
 from ..inventory.eeg_meg import EEG_MEG_COLUMNS, scan_eeg_meg
@@ -58,6 +64,11 @@ from ..inventory.mri_dicom import (
 )
 from ..inventory.probe_convert import ProbeFileStats
 from ..inventory.types import InventoryRow
+from ..recording_meta import (
+    RecordingMetaSpec,
+    dump_spec,
+    scaffold_sidecar_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +213,10 @@ def _reroute_b0_references_to_fmap_epi(
     for k, c in list(chosen.items()):
         if c.datatype != "dwi" or c.suffix != "dwi":
             continue
+        # A user hint that resolved to dwi/dwi is the user's explicit choice;
+        # don't second-guess it with the B0 reroute.
+        if c.classifier == "user_hint":
+            continue
         row = rows_by_id.get(k)
         if row is None:
             continue
@@ -316,13 +331,51 @@ def _is_classification_schema_valid(c: Classification) -> bool:
     return not [v for v in verdicts if v.severity is schema.Severity.ERROR]
 
 
-def _run_classifier_chain(rows: list[InventoryRow]) -> dict[str, Classification]:
+# A user-hint classification at or above this confidence is a "force" hint
+# (sequence_dict emits 0.95 for force, 0.60 otherwise; dcm2niix BidsGuess is
+# 0.85). Force hints override BidsGuess; non-force hints only beat the regex
+# fallback.
+_FORCE_HINT_CONFIDENCE = 0.90
+
+
+def _user_hint_classifications(
+    rows: list[InventoryRow],
+    user_hints: Optional[list[UserHint]],
+) -> dict[str, Classification]:
+    """Return ``{row_id hex -> Classification}`` for rows matching a user hint,
+    schema-validated. ``derivatives`` is rejected (user hints route to raw
+    BIDS datatypes only). A hand-edited / invalid hint is dropped with a log
+    rather than producing a broken basename."""
+    out: dict[str, Classification] = {}
+    for c in sequence_dict.classify_user_hints(rows, user_hints):
+        if c.datatype == "derivatives":
+            log.debug("user hint rejected (derivatives not allowed): %s", c)
+            continue
+        if not _is_classification_schema_valid(c):
+            log.debug("user hint rejected by schema: %s", c)
+            continue
+        out[c.row_id.hex] = c
+    return out
+
+
+def _run_classifier_chain(
+    rows: list[InventoryRow],
+    *,
+    user_hints: Optional[list[UserHint]] = None,
+) -> dict[str, Classification]:
     """Run the BidsGuess classifier first; fall back to sequence_dict.
 
     Returns a mapping ``row_id (hex) -> Classification``. Each row gets at
-    most one classification — the highest-confidence schema-valid result,
-    or the sequence_dict fallback if BidsGuess produced nothing usable.
+    most one classification — the highest-confidence schema-valid result.
+
+    User hints (when supplied) sit by confidence: a ``force`` hint (0.95)
+    overrides even BidsGuess (0.85); a default hint (0.60) beats the regex
+    fallback (0.40/0.45) but loses to BidsGuess.
     """
+
+    user_cls = _user_hint_classifications(rows, user_hints)
+    force_hints = {h: c for h, c in user_cls.items() if c.confidence >= _FORCE_HINT_CONFIDENCE}
+    nonforce_hints = {h: c for h, c in user_cls.items() if c.confidence < _FORCE_HINT_CONFIDENCE}
 
     # Layer 1 — dcm2niix BidsGuess.
     try:
@@ -333,7 +386,9 @@ def _run_classifier_chain(rows: list[InventoryRow]) -> dict[str, Classification]
 
     rows_by_id = {r.row_id.hex: r for r in rows}
 
-    chosen: dict[str, Classification] = {}
+    # Seed force user hints (0.95) before BidsGuess so BidsGuess (0.85) can't
+    # displace them.
+    chosen: dict[str, Classification] = dict(force_hints)
     for c in bg_results:
         if not _is_classification_schema_valid(c):
             log.debug("BidsGuess result rejected by schema: %s", c)
@@ -350,6 +405,12 @@ def _run_classifier_chain(rows: list[InventoryRow]) -> dict[str, Classification]
         key = c.row_id.hex
         existing = chosen.get(key)
         if existing is None or c.confidence > existing.confidence:
+            chosen[key] = c
+
+    # Non-force user hints (0.60) win on rows BidsGuess did not claim, before
+    # the regex fallback gets a turn.
+    for key, c in nonforce_hints.items():
+        if key not in chosen:
             chosen[key] = c
 
     # Layer 3 — legacy regex/sequence-dictionary classifier (also runs the
@@ -920,7 +981,124 @@ def _augment_dataframe(
                     annotated_issues.append(anomaly)
                     df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
 
+    _flag_nonimage_rows(df)
     return df
+
+
+# Marker prepended to ``proposed_issues`` for a DERIVED non-image series.
+# The GUI inventory model keys on the leading ``NONIMAGE_ISSUE_TOKEN``
+# substring to paint the row's "not an image" highlight, so keep the two
+# in sync (mirrors how the abort highlight keys on ``suspected_abort``).
+NONIMAGE_ISSUE_TOKEN = "non-image series"
+NONIMAGE_ISSUE = (
+    "non-image series: the DICOM headers carry no pixel data "
+    "(Rows/Columns absent), so dcm2niix cannot convert it to NIfTI. "
+    "This is typically a scanner-derived object such as a Siemens "
+    "diffusion TENSOR map. Excluded from conversion."
+)
+
+
+def _is_nonimage_flag(val: object) -> bool:
+    """True only when the internal ``_has_pixel_data`` flag is explicitly
+    False. NaN / blank / True (fmap-collapsed rows, EEG/MEG rows, real
+    images) are treated as images."""
+    if val is True or val is False:
+        return val is False
+    return str(val).strip().lower() in ("false", "0")
+
+
+def _is_physio_row(df: pd.DataFrame, idx: object) -> bool:
+    """True for Siemens CMRR ``_PhysioLog.dcm`` rows.
+
+    Physio DICOMs carry no Image Pixel module (no Rows/Columns) just like a
+    DERIVED non-image object, but unlike one they ARE convertible -- the
+    ``PhysioDcmBackend`` (bidsphysio) turns them into ``_physio.tsv.gz`` +
+    ``_physio.json``. So they must be exempt from the non-image exclusion.
+    Identified by the ``physio`` suffix the converter dispatches on, with
+    ``modality`` / basename fallbacks for robustness."""
+    def _cell(col: str) -> str:
+        return str(df.at[idx, col]).strip().lower() if col in df.columns else ""
+
+    return (
+        _cell("bids_guess_suffix") == "physio"
+        or _cell("modality") == "physio"
+        or _cell("proposed_basename").endswith("_physio")
+    )
+
+
+def _flag_nonimage_rows(df: pd.DataFrame) -> None:
+    """Exclude + annotate DICOM series that carry no pixel data.
+
+    A series whose DICOMs lack the Image Pixel module (Rows/Columns) is a
+    DERIVED non-image object (commonly a Siemens diffusion TENSOR map, also
+    structured reports / spectroscopy frames). dcm2niix cannot turn it into
+    a NIfTI, so instead of letting the converter attempt it and fail with a
+    cryptic ``rc=2`` we flag the row here: force ``bids_guess_skip`` /
+    ``include=0`` so it is never converted, and prepend a clear reason to
+    ``proposed_issues`` so it surfaces in the inventory table highlighted as
+    "not an actual image". Operates on the internal ``_has_pixel_data``
+    column (stamped by ``inventory.mri_dicom``, dropped from the final TSV).
+    """
+    if "_has_pixel_data" not in df.columns:
+        return
+    for df_idx in df.index:
+        if not _is_nonimage_flag(df.at[df_idx, "_has_pixel_data"]):
+            continue
+        # Physio rows have no pixel data but ARE convertible (bidsphysio).
+        if _is_physio_row(df, df_idx):
+            continue
+        df.at[df_idx, "bids_guess_skip"] = True
+        df.at[df_idx, "include"] = 0
+        existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
+        df.at[df_idx, "proposed_issues"] = (
+            f"{NONIMAGE_ISSUE} | {existing}" if existing else NONIMAGE_ISSUE
+        )
+
+
+# Marker prepended to ``proposed_issues`` for a user-excluded series. Mirrors
+# the non-image precedent: row stays visible (include=0) so the user can
+# re-enable it; the GUI surfaces the reason via the issues column / tooltip.
+USER_EXCLUDED_ISSUE_TOKEN = "user-excluded"
+
+
+def _apply_user_exclusions(
+    df: pd.DataFrame,
+    exclusions: Optional[list[ExclusionRule]],
+) -> None:
+    """Flag rows matching a user exclusion rule: ``include=0`` +
+    ``bids_guess_skip`` + a ``user-excluded`` note prepended to
+    ``proposed_issues``. Reversible (the row stays in the inventory; the user
+    can re-tick ``include``). Matches the rule against the series description
+    (``sequence``) or the relative path (``source_folder`` / ``source_file``).
+    """
+    if not exclusions:
+        return
+
+    def _cell(idx, col: str) -> str:
+        return str(df.at[idx, col]).strip() if col in df.columns else ""
+
+    for idx in df.index:
+        sequence = _cell(idx, "sequence")
+        path = _cell(idx, "source_folder") or _cell(idx, "source_file")
+        matched = next(
+            (r for r in exclusions
+             if exclusion_matches(r, sequence=sequence, path=path)),
+            None,
+        )
+        if matched is None:
+            continue
+        if "include" in df.columns:
+            df.at[idx, "include"] = 0
+        if "bids_guess_skip" in df.columns:
+            df.at[idx, "bids_guess_skip"] = True
+        note = (
+            f"{USER_EXCLUDED_ISSUE_TOKEN}: matched the scan exclusion rule "
+            f"'{matched.pattern}' ({matched.target}/{matched.match_mode}); "
+            "excluded from conversion. Re-tick 'include' to convert it anyway."
+        )
+        existing = str(df.at[idx, "proposed_issues"] or "").strip() if "proposed_issues" in df.columns else ""
+        if "proposed_issues" in df.columns:
+            df.at[idx, "proposed_issues"] = f"{note} | {existing}" if existing else note
 
 
 def _probe_anomaly(
@@ -977,11 +1155,60 @@ def _default_dataset_slug(dicom_root: Path) -> str:
     return slug or "dataset"
 
 
+def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
+    """Seed a recording-metadata scaffold from detected EEG/MEG event codes.
+
+    Reads the internal ``_event_codes`` column (populated by the EEG/MEG
+    scanner, dropped from the TSV itself), unions the codes across recordings,
+    and writes a starter :class:`RecordingMetaSpec` with an event map of blank
+    labels next to the inventory TSV. Event labels are left blank for the user
+    to fill; the enrichment step skips blank labels, so an unedited scaffold is
+    harmless. Returns the path written, or ``None`` when there is nothing to
+    seed (no EEG/MEG rows, or no event codes).
+
+    Device fields are intentionally NOT seeded: the manufacturer is a read-only
+    suggestion (``manufacturer_suggestion`` column) and mne-bids fills the MEG
+    sidecar Manufacturer itself, so seeding a default here would wrongly
+    overwrite it. The scaffold is never overwritten if one already exists, so a
+    CLI re-scan does not clobber labels the user has filled in (the GUI resets a
+    stale scaffold when it starts a fresh scan).
+    """
+    if "source_file" not in merged.columns:
+        return None
+    eeg_rows = merged[merged["source_file"].astype(str).str.len() > 0]
+    if eeg_rows.empty:
+        return None
+
+    # Union of detected trigger/annotation codes across all recordings.
+    codes: list[str] = []
+    for raw in eeg_rows.get("_event_codes", pd.Series([], dtype=object)):
+        try:
+            for c in json.loads(raw) if isinstance(raw, str) and raw else []:
+                if c and c not in codes:
+                    codes.append(c)
+        except (ValueError, TypeError):
+            continue
+
+    if not codes:
+        return None
+
+    scaffold_path = scaffold_sidecar_path(output_tsv)
+    if scaffold_path.exists():
+        # Preserve any labels/edits the user already made on a prior scan.
+        return None
+
+    spec = RecordingMetaSpec(
+        event_maps={"*": {c: "" for c in sorted(codes)}},
+    )
+    scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
+    return scaffold_path
+
+
 def _unified_column_order(df: pd.DataFrame) -> list[str]:
     """Final unified TSV column order. Locked contract:
 
-    ``TSV(22) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
-    EXTENDED(3) + EEG_MEG(12) = 51``.
+    ``TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
+    EXTENDED(3) + EEG_MEG(16) = 57``.
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
@@ -1039,6 +1266,84 @@ def _write_files_by_uid_sidecar(output_tsv: Path, files_by_uid: dict[str, list[s
     return sidecar
 
 
+# Marker prepended to ``proposed_issues`` for a row whose scan pooled multiple
+# distinct DICOM StudyDescriptions. This routes the heads-up through the
+# existing severity system: the GUI inventory model classifies any non-error
+# ``proposed_issues`` note as a ``warn`` row, so these rows count toward the
+# "warnings" chip and appear in the Issues dialog. Awareness-only: the row is
+# NOT excluded or altered, and it still converts. The wording deliberately
+# avoids the error-token substrings the model treats as fatal
+# (``required`` / ``missing`` / ``build_basename`` / ``suspected_abort``).
+MIXED_STUDY_ISSUE_TOKEN = "multiple studies in scan"
+
+
+def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
+    """Flag rows (and log) when one scan pooled multiple DICOM StudyDescriptions.
+
+    Several distinct StudyDescriptions in a single scanned source usually mean
+    two studies were pooled together, or the protocol changed mid-acquisition.
+    StudyDescription is not a BIDS entity and is deliberately not shown as a GUI
+    column, so the heads-up is surfaced two ways instead: a one-line summary on
+    the ``bidsmgr.cli.scan`` logger (the CLI surface, also the GUI Log dock), and
+    a non-fatal note appended to each affected row's ``proposed_issues`` so the
+    rows read as ``warn`` in the inventory table, count toward the warnings chip,
+    and list in the Issues dialog (the GUI surface the user already knows).
+    Nothing is excluded or rewritten. EEG/MEG rows have no StudyDescription and
+    are ignored.
+    """
+    if "StudyDescription" not in df.columns:
+        return
+    studies = df["StudyDescription"].astype(str).str.strip()
+    present = studies != ""
+    if not present.any():
+        return
+    distinct = sorted(studies[present].unique())
+    if len(distinct) <= 1:
+        return
+
+    # CLI / Log-dock surface: one summary line.
+    counts = studies[present].value_counts()
+    summary = ", ".join(f"'{name}' ({int(counts[name])} series)" for name in distinct)
+    log.warning(
+        "Multiple distinct DICOM StudyDescriptions found in this scan: %s. "
+        "This usually means two studies were pooled or the protocol changed. "
+        "If these are separate studies, scan each into its own dataset.",
+        summary,
+    )
+
+    # GUI severity-system surface: append a per-row warning note so each affected
+    # row shows up in the warnings chip + Issues dialog.
+    if "proposed_issues" in df.columns:
+        for df_idx in df.index[present]:
+            this_study = studies.at[df_idx]
+            others = ", ".join(f"'{s}'" for s in distinct if s != this_study)
+            note = (
+                f"{MIXED_STUDY_ISSUE_TOKEN}: this series is '{this_study}'; "
+                f"scan also contains {others}"
+            )
+            existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
+            df.at[df_idx, "proposed_issues"] = (
+                f"{existing} | {note}" if existing else note
+            )
+
+    # The strongest signal is a single subject spanning more than one study.
+    if "BIDS_name" in df.columns:
+        sub = df.loc[present, ["BIDS_name", "StudyDescription"]].copy()
+        sub["BIDS_name"] = sub["BIDS_name"].astype(str).str.strip()
+        sub = sub[sub["BIDS_name"] != ""]
+        for name, grp in sub.groupby("BIDS_name"):
+            subj_studies = sorted(
+                grp["StudyDescription"].astype(str).str.strip().unique()
+            )
+            if len(subj_studies) > 1:
+                log.warning(
+                    "  subject %s spans %d StudyDescriptions: %s",
+                    name,
+                    len(subj_studies),
+                    ", ".join(f"'{s}'" for s in subj_studies),
+                )
+
+
 def run_scan(
     dicom_root: Path,
     output_tsv: Path,
@@ -1049,6 +1354,9 @@ def run_scan(
     dataset: Optional[str] = None,
     line_freq: Optional[float] = None,
     montage: Optional[str] = None,
+    cancel_check=None,
+    user_hints: Optional[list[UserHint]] = None,
+    exclusions: Optional[list[ExclusionRule]] = None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -1086,7 +1394,13 @@ def run_scan(
 
     df = scan_dicoms_long(
         dicom_root, output_tsv=None, n_jobs=n_jobs, dataset=dataset_slug,
+        cancel_check=cancel_check,
     )
+
+    # Honour a Stop requested during the (dominant) DICOM read before
+    # starting the EEG/MEG walk.
+    from ..util.cancel import raise_if_cancelled
+    raise_if_cancelled(cancel_check, "scan cancelled by user")
 
     # EEG/MEG branch: independent walk, merged at the end.
     df_eeg = scan_eeg_meg(
@@ -1108,8 +1422,12 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
+        _apply_user_exclusions(merged, exclusions)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
+        scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
+        if scaffold_path is not None:
+            print(f"Recording-metadata scaffold written to: {scaffold_path}")
         log.warning(
             "no DICOMs found; the inventory has only EEG/MEG rows. "
             "files_by_uid sidecar will not be written."
@@ -1120,11 +1438,13 @@ def run_scan(
 
     chosen: dict[str, Classification] = {}
     if skip_bids_guess:
-        # Only run sequence_dict (legacy regex layer).
+        # Only run sequence_dict (legacy regex layer). User hints (force +
+        # non-force) still apply, taking priority over the regex fallback.
+        chosen = dict(_user_hint_classifications(rows, user_hints))
         for c in sequence_dict.classify(rows):
             chosen.setdefault(c.row_id.hex, c)
     else:
-        chosen = _run_classifier_chain(rows)
+        chosen = _run_classifier_chain(rows, user_hints=user_hints)
 
     chosen = _reroute_b0_references_to_fmap_epi(rows, chosen)
     abort_verdicts = _detect_aborts(rows, chosen)
@@ -1178,11 +1498,29 @@ def run_scan(
         merged = df
     merged = _finalize_unified_dataframe(merged)
 
+    # User exclusions run last, on the unified frame, so they cover MRI +
+    # EEG/MEG rows and stamp the same proposed_issues cell after non-image
+    # flagging (mutates in place; reversible).
+    _apply_user_exclusions(merged, exclusions)
+
+    # Heads-up (warnings chip + Issues dialog + log) if the scan pooled
+    # multiple DICOM studies. Runs after non-image flagging + user exclusions
+    # so it only appends to proposed_issues and never downgrades a more severe
+    # row state.
+    _flag_mixed_study_descriptions(merged)
+
     merged.to_csv(
         output_tsv, sep="\t", index=False,
         columns=_unified_column_order(merged),
     )
     print(f"Inventory written to: {output_tsv}")
+
+    # Seed a recording-metadata scaffold from facts detected in the EEG/MEG
+    # headers (event codes, device). The convert/metadata verbs auto-discover
+    # it; the user fills the human-only fields (event labels, reference, ...).
+    scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
+    if scaffold_path is not None:
+        print(f"Recording-metadata scaffold written to: {scaffold_path}")
 
     # Always write the per-UID DICOM file map next to the TSV. ``bidsmgr-convert``
     # reads this sidecar to find the source files for each MRI row's dcm2niix call.
@@ -1205,7 +1543,20 @@ def run_scan(
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="bidsmgr-scan", description=__doc__.split("\n")[0])
     parser.add_argument("dicom_root", help="Directory containing DICOM files (any depth)")
-    parser.add_argument("output_tsv", help="Destination TSV file")
+    parser.add_argument(
+        "output_tsv", nargs="?", default=None,
+        help="Destination TSV file (omit when using --project)",
+    )
+    parser.add_argument(
+        "--project", default=None, type=Path,
+        help=(
+            "Scan INTO a project dataset folder (created by bidsmgr-create or "
+            "the GUI; created/adopted if absent). The inventory is saved as a "
+            "new versioned scan under <project>/.bidsmgr/project/scans/ instead "
+            "of a loose TSV, so it is resumable in the GUI and never overwrites "
+            "an earlier scan. --dataset defaults to the project folder name."
+        ),
+    )
     parser.add_argument(
         "--jobs", "-j",
         type=int,
@@ -1264,6 +1615,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--rules-file", default=None,
+        help=(
+            "Path to a JSON file with user scan rules: "
+            "{\"user_hints\": [{\"patterns\": [...], \"datatype\": \"func\", "
+            "\"suffix\": \"bold\", \"task\": \"rest\", \"match_mode\": "
+            "\"substring\", \"force\": false}], \"scan_exclusions\": "
+            "[{\"pattern\": \"calibration\", \"target\": \"sequence\", "
+            "\"match_mode\": \"substring\"}]}. Same schema the GUI Settings "
+            "'Scan rules' tab persists. Hints extend the classifier; "
+            "exclusions mark matching series include=0."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -1271,6 +1635,63 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+
+    user_hints: Optional[list[UserHint]] = None
+    exclusions: Optional[list[ExclusionRule]] = None
+    if args.rules_file:
+        try:
+            with open(args.rules_file, "r", encoding="utf-8") as fh:
+                rules_obj = json.load(fh)
+        except (OSError, ValueError) as exc:
+            parser.error(f"--rules-file could not be read as JSON: {exc}")
+        user_hints, exclusions = user_rules_module.from_json(rules_obj)
+        # Reject any bad regex up front so the scan doesn't run a no-op rule.
+        for h in user_hints:
+            if h.match_mode == "regex":
+                for p in h.patterns:
+                    err = user_rules_module.validate_regex(p)
+                    if err:
+                        parser.error(f"--rules-file: bad hint regex {p!r}: {err}")
+        for r in exclusions:
+            if r.match_mode == "regex":
+                err = user_rules_module.validate_regex(r.pattern)
+                if err:
+                    parser.error(f"--rules-file: bad exclusion regex {r.pattern!r}: {err}")
+
+    if args.project is None and not args.output_tsv:
+        parser.error("provide an output_tsv path, or use --project <dataset>")
+
+    if args.project is not None:
+        # Project mode: scan into a new versioned bundle under the project.
+        from ..cli.create import open_or_create_workspace
+        from ..project import workspace
+        from ..project.orchestration import import_scan_as_version, row_id
+
+        bids_root = Path(args.project)
+        open_or_create_workspace(bids_root)  # ensure scaffold + project bundle
+        staging = workspace.scans_dir(bids_root).parent / ".scan_staging"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        staged_tsv = staging / "inventory.tsv"
+        df = run_scan(
+            Path(args.dicom_root), staged_tsv,
+            n_jobs=args.jobs, skip_bids_guess=args.no_bids_guess,
+            probe_convert=args.probe_convert,
+            dataset=args.dataset or bids_root.name,
+            line_freq=args.line_freq, montage=args.montage,
+            user_hints=user_hints, exclusions=exclusions,
+        )
+        version = import_scan_as_version(
+            bids_root, staged_tsv, raw_root=Path(args.dicom_root),
+            row_ids=tuple(row_id(df, i) for i in range(len(df))),
+            n_rows=len(df),
+        )
+        print(
+            f"Scan saved as version '{version.version_id}' in project "
+            f"{bids_root} ({len(df)} rows)."
+        )
+        return 0
 
     run_scan(
         Path(args.dicom_root),
@@ -1281,6 +1702,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         dataset=args.dataset,
         line_freq=args.line_freq,
         montage=args.montage,
+        user_hints=user_hints,
+        exclusions=exclusions,
     )
     return 0
 

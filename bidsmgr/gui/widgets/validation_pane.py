@@ -53,22 +53,22 @@ from ...editor.types import (
     SidecarField,
     ValidationReport,
 )
-from .primitives import PaneHeader
+from .primitives import Chip, PaneHeader
 from .val_message import ValMessage
 
 log = logging.getLogger(__name__)
 
 
-def _count_chip_object_name(issues: list[Issue]) -> str:
-    """Pick the ``val-count-*`` QSS object name for a count chip.
+def _count_chip_kind(issues: list[Issue]) -> str:
+    """Pick the :class:`Chip` ``kind`` for a section count chip.
 
     Worst severity wins — one ``err`` in a section flips its chip red.
     """
     if any(i.severity is Severity.ERR for i in issues):
-        return "val-count-err"
+        return "err"
     if any(i.severity is Severity.WARN for i in issues):
-        return "val-count-warn"
-    return "val-count-ok"
+        return "warn"
+    return ""  # default (neutral) chip
 
 
 def _find_verdict(
@@ -134,7 +134,9 @@ class ValidationPane(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pane")
-        self.setMinimumWidth(320)
+        # Keep a small floor so the user can squeeze it down when they want
+        # more room for the viewer / tree (the splitter respects this).
+        self.setMinimumWidth(72)
 
         self._report: Optional[ValidationReport] = None
         self._current_file: Optional[Path] = None
@@ -159,6 +161,9 @@ class ValidationPane(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # No early horizontal scrollbar - let the cards wrap/clip so the pane
+        # can be squeezed narrow without a scrollbar popping in.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._body)
         v.addWidget(scroll, 1)
 
@@ -315,8 +320,7 @@ class ValidationPane(QWidget):
         title_l.setObjectName("val-section-title")
         head.addWidget(title_l)
         head.addStretch(1)
-        count_l = QLabel(str(len(issues)))
-        count_l.setObjectName(_count_chip_object_name(issues))
+        count_l = Chip(str(len(issues)), _count_chip_kind(issues))
         head.addWidget(count_l)
         sl.addLayout(head)
 
@@ -394,16 +398,15 @@ class ValidationPane(QWidget):
         # Header chip — severity reflects the worst missing level.
         total_fields = sum(len(v) for v in by_level.values())
         if missing_req:
-            chip_obj = "val-count-err"
+            chip_kind = "err"
             chip_text = f"{len(missing_req)} missing required"
         elif missing_rec:
-            chip_obj = "val-count-warn"
+            chip_kind = "warn"
             chip_text = f"{len(missing_rec)} missing recommended"
         else:
-            chip_obj = "val-count-ok"
+            chip_kind = ""
             chip_text = f"{total_fields} fields"
-        chip = QLabel(chip_text)
-        chip.setObjectName(chip_obj)
+        chip = Chip(chip_text, chip_kind)
         head.addWidget(chip)
         sl.addLayout(head)
 

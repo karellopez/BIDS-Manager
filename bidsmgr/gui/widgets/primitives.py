@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,33 +34,76 @@ from PyQt6.QtWidgets import (
 )
 
 
-class Chip(QLabel):
-    """A small pill label. ``kind`` selects color via QSS property selector.
+def _chip_qcolor(token: str) -> QColor:
+    """Parse a palette token (hex or ``rgba(r,g,b,a)``) into a QColor.
 
-    Known kinds (from ``theme.qss``): ``default``, ``success``, ``warn``,
-    ``err``, ``purple``, ``teal``. Unknown kinds fall back to ``default``.
+    ``QColor`` cannot parse the CSS ``rgba(...)`` strings the palette uses
+    for translucent tints, so handle those explicitly.
+    """
+    s = (token or "").strip()
+    if s.startswith(("rgba(", "rgb(")):
+        nums = s[s.index("(") + 1: s.rindex(")")].split(",")
+        try:
+            r, g, b = (int(float(nums[i])) for i in range(3))
+            a = int(float(nums[3]) * 255) if len(nums) > 3 else 255
+            return QColor(r, g, b, a)
+        except (ValueError, IndexError):
+            return QColor("#000000")
+    return QColor(s or "#000000")
+
+
+class Chip(QLabel):
+    """A small pill label that **paints its own rounded background**.
+
+    ``kind`` selects the colour set: ``default``, ``success``, ``warn``,
+    ``err``, ``accent``, ``purple``, ``teal``.
+
+    The pill is drawn in :meth:`paintEvent` with a corner radius of
+    ``height / 2``, so it is ALWAYS a perfect pill at any font size /
+    DPI / platform - QSS ``border-radius`` proved unreliable across
+    macOS/Linux/Windows + font scales. Colours are read live from the
+    active palette (:func:`bidsmgr.gui.theme_manager.CUR`) at paint time,
+    so a theme swap (which triggers ``update()``) recolours automatically.
 
     Emits :pyattr:`clicked` on a left-mouse release **only if**
-    :meth:`set_clickable` is called with ``True``. The default chip is
-    a passive label (no signal, no cursor change) so existing callers
-    don't accidentally pick up click semantics.
+    :meth:`set_clickable` is called with ``True``.
     """
 
     clicked = pyqtSignal()
 
+    # kind -> (background token, foreground token, border token).
+    _KIND_TOKENS = {
+        "default": ("surface3", "dim", "border"),
+        "success": ("success_bg", "success", "success_border"),
+        "warn":    ("warning_bg", "warning", "warning_border"),
+        "err":     ("error_bg", "error", "error_border"),
+        "accent":  ("accent_bg", "accent", "accent_border"),
+        "purple":  ("purple_bg", "purple", "purple_border"),
+        "teal":    ("teal_bg", "teal", "teal_border"),
+    }
+
     def __init__(self, text: str, kind: str = "", parent=None) -> None:
         super().__init__(text, parent)
-        self.setProperty("chipKind", kind or "default")
+        self._kind = kind or "default"
+        # Keep the property so any QSS targeting chipKind still matches.
+        self.setProperty("chipKind", self._kind)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        # Transparent widget background so ONLY the painted pill shows - the
+        # parent (toolbar / panel) shows through the rounded corners. Without
+        # this Qt fills the widget rect first, leaving a square behind the pill.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Horizontal breathing room + a hair of vertical so the pill reads.
+        self.setContentsMargins(9, 1, 9, 1)
         self._clickable = False
 
-    def set_clickable(self, clickable: bool) -> None:
-        """Toggle whether mouse presses on the chip emit ``clicked``.
+    def setText(self, text: str) -> None:  # noqa: N802 — Qt naming
+        super().setText(text)
+        self.updateGeometry()
+        self.update()
 
-        Also flips the cursor to a hand pointer so users can tell the
-        chip is an actionable element.
-        """
+    def set_clickable(self, clickable: bool) -> None:
+        """Toggle whether mouse presses on the chip emit ``clicked``."""
         self._clickable = clickable
         self.setCursor(
             Qt.CursorShape.PointingHandCursor if clickable else
@@ -71,6 +115,28 @@ class Chip(QLabel):
                 and self.rect().contains(event.position().toPoint()):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):  # noqa: N802 — Qt naming
+        from ..theme_manager import CUR
+
+        pal = CUR()
+        bg_t, fg_t, br_t = self._KIND_TOKENS.get(
+            self._kind, self._KIND_TOKENS["default"]
+        )
+        bg = _chip_qcolor(pal.get(bg_t, "#1c2128"))
+        fg = _chip_qcolor(pal.get(fg_t, "#8b949e"))
+        border = _chip_qcolor(pal.get(br_t, "#21262d"))
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = rect.height() / 2.0
+        p.setBrush(QBrush(bg))
+        p.setPen(QPen(border, 1))
+        p.drawRoundedRect(rect, radius, radius)
+        p.setPen(QPen(fg))
+        p.setFont(self.font())
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
 
 
 class VSep(QFrame):

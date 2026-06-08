@@ -107,6 +107,13 @@ def _physio_row(**overrides) -> dict:
         BIDS_name="sub-002",
         session="ses-post",
         task="mb",
+        # func/physio requires a task entity; keep the entities JSON in sync
+        # with the mirror cells so live validation reads the row as valid
+        # (status "phys") rather than flagging a missing task.
+        entities=json.dumps(
+            {"subject": "002", "session": "post", "task": "mb"},
+            sort_keys=True,
+        ),
         **overrides,
     )
 
@@ -200,7 +207,14 @@ def test_id_strips_sub_prefix() -> None:
 
 
 def test_session_strips_ses_prefix_and_dashes_empty() -> None:
-    df = make_df([_ok_row(session="ses-pre"), _ok_row(session="")])
+    # Row 1 has no session at all (entities lacks it) -> empty mirror cell.
+    # The model mirrors entities -> cells on load, so a row whose entities
+    # carry a session always shows it; only a genuinely session-less row
+    # renders "—".
+    df = make_df([
+        _ok_row(session="ses-pre"),
+        _ok_row(session="", entities=json.dumps({"subject": "001"}, sort_keys=True)),
+    ])
     model = InventoryTableModel(df)
     col = next(i for i, c in enumerate(COLUMNS) if c.key == "ses")
     assert model.data(model.index(0, col), Qt.ItemDataRole.DisplayRole) == "pre"
@@ -262,6 +276,128 @@ def test_status_kind_ok_for_valid_mri_row() -> None:
     assert model.data(model.index(0, status_col), PAYLOAD_ROLE) == "ok"
 
 
+def test_row_state_noimg_for_nonimage_series() -> None:
+    """A DERIVED non-image series (flagged by the scanner with the
+    ``non-image series`` token) reads as ``noimg`` — taking priority over
+    the ``skip`` it would otherwise get for being excluded (include=0)."""
+    df = make_df([_ok_row(
+        include=0,
+        bids_guess_skip=True,
+        proposed_issues=(
+            "non-image series: the DICOM headers carry no pixel data "
+            "(Rows/Columns absent), so dcm2niix cannot convert it. "
+            "Excluded from conversion."
+        ),
+    )])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "noimg"
+
+
+def test_status_kind_noimg_for_nonimage_series() -> None:
+    df = make_df([_ok_row(
+        include=0, bids_guess_skip=True,
+        proposed_issues="non-image series: no pixel data; excluded.",
+    )])
+    model = InventoryTableModel(df)
+    status_col = next(i for i, c in enumerate(COLUMNS) if c.key == "status")
+    assert model.data(model.index(0, status_col), PAYLOAD_ROLE) == "noimg"
+
+
+# ---------------------------------------------------------------------------
+# Live entity-validation (recomputed on every edit)
+# ---------------------------------------------------------------------------
+
+
+def _task_col() -> int:
+    return next(i for i, c in enumerate(COLUMNS) if c.key == "task")
+
+
+def _func_row_missing_task(**overrides) -> dict:
+    """A func/bold row whose entities lack the required task entity."""
+    row = _func_row(**overrides)
+    row["entities"] = json.dumps({"subject": "001", "session": "pre"}, sort_keys=True)
+    row["task"] = ""
+    return row
+
+
+def test_live_validation_flags_func_bold_missing_task() -> None:
+    """A func/bold row whose entities lack the required task reads as err
+    at load (live validation runs on construction, not just on edit)."""
+    df = make_df([_func_row_missing_task()])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "err"
+
+
+def test_live_validation_clears_error_when_user_supplies_task() -> None:
+    """Editing the missing task to a real value re-validates the row to
+    valid (the chips track the fix)."""
+    df = make_df([_func_row_missing_task()])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "err"
+    assert model.setData(model.index(0, _task_col()), "rest") is True
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == ""
+
+
+def test_live_validation_introduces_error_when_user_clears_task() -> None:
+    """Clearing a required task on a valid row flips it back to err."""
+    df = make_df([_func_row()])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == ""
+    assert model.setData(model.index(0, _task_col()), "") is True
+    assert model.data(model.index(0, 0), ROW_STATE_ROLE) == "err"
+
+
+def test_revalidate_all_recomputes_states_after_external_change() -> None:
+    """``revalidate_all`` picks up a change made directly to the DataFrame
+    (an edit path that bypassed setData) -- the Re-validate button's engine."""
+    df = make_df([_func_row()])
+    model = InventoryTableModel(df)
+    assert model.row_state(0) == ""
+    # Mutate the underlying frame directly (no setData / refresh_row).
+    model.dataframe().at[0, "task"] = ""
+    model.dataframe().at[0, "entities"] = json.dumps(
+        {"subject": "001", "session": "pre"}, sort_keys=True,
+    )
+    assert model.row_state(0) == ""  # still stale (no recompute yet)
+    model.revalidate_all()
+    assert model.row_state(0) == "err"  # now reflects the missing task
+
+
+def test_live_validation_preserves_static_scan_notes() -> None:
+    """Recomputing the validation segment must not drop static scan notes
+    (suspected_abort, B0 reroute, collision hints, ...)."""
+    note = "rerouted to fmap/epi: SeriesDescription contains a B0 marker"
+    row = _func_row_missing_task()
+    row["proposed_issues"] = note
+    df = make_df([row])
+    model = InventoryTableModel(df)
+    # Loaded: static note + fresh "task required" error coexist.
+    issues = model.dataframe().at[0, "proposed_issues"]
+    assert note in issues and "required" in issues.lower()
+    # After the user supplies the task, only the static note remains.
+    model.setData(model.index(0, _task_col()), "rest")
+    issues = model.dataframe().at[0, "proposed_issues"]
+    assert issues == note
+
+
+def test_tooltip_surfaces_proposed_issues() -> None:
+    """Hovering any cell of a flagged row shows the scanner's reason."""
+    df = make_df([_ok_row(
+        proposed_issues="non-image series: no pixel data | trivial: few files",
+    )])
+    model = InventoryTableModel(df)
+    tip = model.data(model.index(0, 1), Qt.ItemDataRole.ToolTipRole)
+    assert tip is not None and "non-image series" in tip
+    # `` | ``-joined notes are split onto separate lines for readability.
+    assert "\n" in tip
+
+
+def test_no_tooltip_when_no_issues() -> None:
+    df = make_df([_ok_row(proposed_issues="")])
+    model = InventoryTableModel(df)
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.ToolTipRole) is None
+
+
 def test_include_payload_reads_dataframe() -> None:
     df = make_df([_ok_row(include=1), _ok_row(include=0)])
     model = InventoryTableModel(df)
@@ -300,6 +436,68 @@ def test_setdata_same_value_is_noop() -> None:
     model = InventoryTableModel(df)
     task_col = next(i for i, c in enumerate(COLUMNS) if c.key == "task")
     assert model.setData(model.index(0, task_col), "rest") is False
+
+
+def test_editing_task_preserves_run_entity() -> None:
+    """Regression: a fresh scan TSV carries entities in JSON but leaves the
+    mirror cells (task / run / session) blank. Editing one mirror cell must
+    not delete the others. Previously, changing ``task`` ran
+    ``rebuild_from_columns`` which saw the blank ``run`` cell and dropped
+    ``run`` from the entities, so ``sub-001_task-X_run-1_bold`` lost its run.
+    """
+    # Mirror cells deliberately blank, entities holds run+task (real scan shape).
+    row = _ok_row(
+        proposed_datatype="func",
+        bids_guess_datatype="func",
+        bids_guess_suffix="bold",
+        proposed_basename="sub-001_task-dmaging_run-1_bold",
+        task="",   # blank mirror cell, as a fresh scan TSV leaves it
+        run="",
+        session="",
+        entities=json.dumps(
+            {"subject": "001", "task": "dmaging", "run": "1"},
+            sort_keys=True,
+        ),
+    )
+    model = InventoryTableModel(make_df([row]))
+
+    # The load pass should have mirrored entities → cells.
+    assert model.entities(0).get("run") == "1"
+
+    task_col = next(i for i, c in enumerate(COLUMNS) if c.key == "task")
+    bn_col = next(i for i, c in enumerate(COLUMNS) if c.key == "basename")
+    assert model.setData(model.index(0, task_col), "newtask") is True
+
+    new_bn = model.data(model.index(0, bn_col), Qt.ItemDataRole.DisplayRole)
+    assert "task-newtask" in new_bn
+    assert "run-1" in new_bn          # run entity survived the task edit
+    assert model.entities(0).get("run") == "1"
+
+
+def test_bulk_edit_task_preserves_run_across_rows() -> None:
+    """The same guarantee via the bulk-edit path (``bulk_set``)."""
+    rows = [
+        _ok_row(
+            proposed_datatype="func",
+            bids_guess_datatype="func",
+            bids_guess_suffix="bold",
+            proposed_basename=f"sub-001_task-dmaging_run-{n}_bold",
+            task="", run="", session="", series_uid=f"uid-{n}",
+            entities=json.dumps(
+                {"subject": "001", "task": "dmaging", "run": str(n)},
+                sort_keys=True,
+            ),
+        )
+        for n in (1, 2, 3)
+    ]
+    model = InventoryTableModel(make_df(rows))
+    changed = model.bulk_set([0, 1, 2], "task", "memory")
+    assert changed == 3
+    bn_col = next(i for i, c in enumerate(COLUMNS) if c.key == "basename")
+    for r, n in zip((0, 1, 2), (1, 2, 3)):
+        bn = model.data(model.index(r, bn_col), Qt.ItemDataRole.DisplayRole)
+        assert "task-memory" in bn
+        assert f"run-{n}" in bn
 
 
 def test_toggling_include_changes_row_state_to_skip() -> None:
@@ -434,3 +632,152 @@ def test_model_renders_in_real_qtableview(qtbot) -> None:
     # If we got here, the model + delegates rendered with no Qt errors.
     assert view.model() is model
     assert view.model().rowCount() == 5
+
+
+# ---------------------------------------------------------------------------
+# Recording-metadata inheritance (global default <- per-row override)
+# ---------------------------------------------------------------------------
+
+
+def _eeg_inherit_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"BIDS_name": "sub-001", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+         "source_file": "a.edf", "proposed_basename": "sub-001_task-rest_eeg",
+         "entities": json.dumps({"subject": "001", "task": "rest"}),
+         "line_freq": "", "montage": "", "eeg_reference": "", "eeg_ground": "", "include": 1},
+        {"BIDS_name": "sub-002", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+         "source_file": "b.edf", "proposed_basename": "sub-002_task-rest_eeg",
+         "entities": json.dumps({"subject": "002", "task": "rest"}),
+         "line_freq": "60", "montage": "", "eeg_reference": "", "eeg_ground": "", "include": 1},
+    ])
+
+
+def _col_index(key: str) -> int:
+    return next(i for i, c in enumerate(COLUMNS) if c.key == key)
+
+
+def _spec(line_freq):
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    return RecordingMetaSpec(defaults=AcquisitionSpec(power_line_freq=line_freq))
+
+
+def test_inheritance_blank_cell_shows_global_default() -> None:
+    from bidsmgr.gui.delegates import INHERITED_ROLE
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_spec(50.0))
+    col = _col_index("line_freq")
+    idx0 = m.index(0, col)
+    assert m.data(idx0, Qt.ItemDataRole.DisplayRole) == "50"  # inherited from global
+    assert m.data(idx0, INHERITED_ROLE) is True
+    # Row 1 has an explicit override -> shown as-is, not inherited.
+    idx1 = m.index(1, col)
+    assert m.data(idx1, Qt.ItemDataRole.DisplayRole) == "60"
+    assert m.data(idx1, INHERITED_ROLE) is False
+
+
+def test_inheritance_set_equal_global_clears_override() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_spec(50.0))
+    col = _col_index("line_freq")
+    # Setting the global value clears the cell back to inherited.
+    m.setData(m.index(0, col), "50")
+    assert m.dataframe().at[0, "line_freq"] == ""
+    assert m.is_inherited(0, "line_freq") is True
+    # A differing value is stored as a real override.
+    m.setData(m.index(0, col), "60")
+    assert m.dataframe().at[0, "line_freq"] == "60"
+    assert m.is_inherited(0, "line_freq") is False
+
+
+def test_inheritance_global_change_reflows_inherited_rows() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_spec(50.0))
+    assert m.effective_value(0, "line_freq") == "50"
+    m.set_global_spec(_spec(60.0))
+    assert m.effective_value(0, "line_freq") == "60"  # inherited row re-flowed
+    # Inert without a spec.
+    m2 = InventoryTableModel(_eeg_inherit_df())
+    assert m2.effective_value(0, "line_freq") == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-row acquisition overrides (scaffold overrides[row_id]; not TSV columns)
+# ---------------------------------------------------------------------------
+
+
+def _device_spec(**defaults):
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    return RecordingMetaSpec(defaults=AcquisitionSpec(**defaults))
+
+
+def test_acq_override_inherits_dataset_default() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products", amplifier_model="actiCHamp"))
+    # No per-row override yet -> effective is the dataset default, flagged inherited.
+    assert m.acq_effective(0, "manufacturer") == "Brain Products"
+    assert m.acq_override(0, "manufacturer") == ""
+    assert m.acq_is_inherited(0, "manufacturer") is True
+    assert m.acq_effective(0, "amplifier_model") == "actiCHamp"
+
+
+def test_acq_override_set_stores_in_spec_and_emits(qtbot) -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    with qtbot.waitSignal(m.recordingSpecChanged, timeout=500):
+        assert m.set_acq_override(0, "manufacturer", "BioSemi") is True
+    assert m.acq_override(0, "manufacturer") == "BioSemi"
+    assert m.acq_is_inherited(0, "manufacturer") is False
+    # Stored under the row_id (the EEG source path), not a TSV column.
+    assert m.global_spec().overrides["a.edf"].manufacturer == "BioSemi"
+    assert "manufacturer" not in m.dataframe().columns
+
+
+def test_acq_override_equal_default_clears_to_inherited() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+    # Re-set to the dataset default -> override cleared, row inherits again.
+    assert m.set_acq_override(0, "manufacturer", "Brain Products") is True
+    assert m.acq_override(0, "manufacturer") == ""
+    assert m.acq_is_inherited(0, "manufacturer") is True
+    assert "a.edf" not in m.global_spec().overrides  # empty override dropped
+
+
+def test_acq_override_blank_clears_and_keeps_other_fields() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec())
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+    m.set_acq_override(0, "amplifier_model", "actiCHamp")
+    # Clearing one field keeps the override entry alive for the other.
+    assert m.set_acq_override(0, "manufacturer", "") is True
+    over = m.global_spec().overrides["a.edf"]
+    assert over.manufacturer is None
+    assert over.amplifier_model == "actiCHamp"
+
+
+def test_acq_override_keyed_per_row() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+    # Row 1 (source b.edf) is untouched -> still inherits the default.
+    assert m.acq_effective(1, "manufacturer") == "Brain Products"
+    assert m.acq_override(1, "manufacturer") == ""
+
+
+def test_acq_override_noop_returns_false() -> None:
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec(manufacturer="Brain Products"))
+    # Setting the inherited value again is a no-op.
+    assert m.set_acq_override(0, "manufacturer", "Brain Products") is False
+
+
+def test_acq_override_meg_string_field() -> None:
+    """MEG manual fields (dewar position) round-trip through the override path."""
+    m = InventoryTableModel(_eeg_inherit_df())
+    m.set_global_spec(_device_spec())
+    m.set_acq_override(0, "dewar_position", "supine")
+    assert m.global_spec().overrides["a.edf"].dewar_position == "supine"
+    assert m.acq_effective(0, "dewar_position") == "supine"
+    # Clear -> override dropped (back to unset).
+    assert m.set_acq_override(0, "dewar_position", "") is True
+    assert "a.edf" not in m.global_spec().overrides

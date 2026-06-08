@@ -52,8 +52,14 @@ def test_app_settings_load_defaults(isolated_settings) -> None:
     s = AppSettings.load()
     assert s.theme == "dark"
     assert s.scan_n_jobs == 1
-    assert s.scan_probe_convert is False
+    # Default-on: probe-convert, skip-residuals, and the whole post-convert chain.
+    assert s.scan_probe_convert is True
+    assert s.convert_skip_residuals is True
     assert s.post_run_metadata is True
+    assert s.post_metadata_fill_todos is True
+    assert s.post_run_validate is True
+    assert s.post_validate_strict is True
+    assert s.post_validate_html is True
 
 
 def test_app_settings_save_and_reload(isolated_settings) -> None:
@@ -61,27 +67,23 @@ def test_app_settings_save_and_reload(isolated_settings) -> None:
     s.theme = "light"
     s.scan_n_jobs = 8
     s.scan_probe_convert = True
-    s.scan_montage = "standard_1005"
     s.post_run_validate = False
     s.save()
     reloaded = AppSettings.load()
     assert reloaded.theme == "light"
     assert reloaded.scan_n_jobs == 8
     assert reloaded.scan_probe_convert is True
-    assert reloaded.scan_montage == "standard_1005"
     assert reloaded.post_run_validate is False
 
 
 def test_remember_helpers_persist_individually(isolated_settings, tmp_path) -> None:
     AppSettings.remember_raw_root(tmp_path / "a")
     AppSettings.remember_bids_parent(tmp_path / "b")
-    AppSettings.remember_dataset_slug("study42")
     AppSettings.remember_theme("light")
 
     s = AppSettings.load()
     assert s.raw_root == str(tmp_path / "a")
     assert s.bids_parent == str(tmp_path / "b")
-    assert s.dataset_slug == "study42"
     assert s.theme == "light"
 
 
@@ -151,12 +153,14 @@ def test_mandatory_columns_cannot_be_hidden(isolated_settings, qtbot) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dataset_column_is_editable_in_inspector() -> None:
-    """The ``dataset`` column partitions the convert queue per-row, so it
-    must be user-editable from the table without needing a global toolbar
-    input."""
+def test_dataset_column_is_read_only_in_inspector() -> None:
+    """The ``dataset`` column is owned by the project / locked output folder
+    (it determines the conversion target dir), so it is read-only and excluded
+    from bulk edits to prevent accidental misrouting."""
+    from bidsmgr.gui.models.inventory import InventoryTableModel
     dataset = next(c for c in COLUMNS if c.key == "dataset")
-    assert dataset.editable is True
+    assert dataset.editable is False
+    assert "dataset" not in InventoryTableModel.BULK_EDITABLE_KEYS
 
 
 def test_tsv_filename_input_seeded_from_settings(isolated_settings, qtbot) -> None:
@@ -205,11 +209,6 @@ def test_scan_click_writes_tsv_under_bids_parent(isolated_settings, qtbot, tmp_p
     assert (out / "inv.tsv").exists()
     # The old behaviour wrote into the raw folder — make sure that's gone.
     assert not (raw / ".bidsmgr_scan.tsv").exists()
-
-
-def test_default_dataset_slug_helper() -> None:
-    assert ConverterPanel._default_dataset_slug(Path("/x/My Study v2")) == "my-study-v2"
-    assert ConverterPanel._default_dataset_slug(Path("/tmp/abc__def")) == "abc__def"
 
 
 # ---------------------------------------------------------------------------

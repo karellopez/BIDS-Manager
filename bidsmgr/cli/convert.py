@@ -13,8 +13,10 @@ Pipeline per (dataset, subject, session)::
               - fixups.scans_tsv.update_scans_tsv (no-op today)
               - fixups.intended_for.populate_intended_for
 
-    Phase 3   sequential per-subject atomic commit:
-              os.rename(<staging>/sub-<id>, <bids_root>/sub-<id>)
+    Phase 3   sequential per-subject merge commit:
+              new subject  -> os.rename(<staging>/sub-<id>, <bids_root>/sub-<id>)
+              existing subject -> merge staged files in (add new ses/datatype;
+              keep or, with --overwrite, back-up-and-replace colliding files)
 
 Failure handling: per-series failures don't abort the subject; per-subject
 post-conv or atomic-commit failures write a JSON error log to
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import filecmp
 import gzip
 import json
 import logging
@@ -55,10 +58,30 @@ from ..converter import (
     dispatch,
     select_backend,
 )
-from ..fixups import apply_fieldmap_renames, populate_intended_for, update_scans_tsv
+from ..fixups import (
+    apply_fieldmap_renames,
+    attach_companion_files,
+    enrich_recording_sidecars,
+    populate_intended_for,
+    update_scans_tsv,
+)
+from ..recording_meta import (
+    RecordingMetaSpec,
+    default_spec,
+    load_spec,
+    resolve_effective,
+    scaffold_sidecar_path,
+)
+from ..util.cancel import OperationCancelled, is_cancelled
 from ..util.paths import long_path, safe_path_component
+from ._scaffold import ensure_bidsignore, ensure_dataset_description
 
 log = logging.getLogger(__name__)
+
+# Datatypes converted by the mne-bids backend. These rows are run
+# sequentially in Phase 1 because ``write_raw_bids`` mutates shared
+# dataset files (participants.tsv / scans.tsv) on every call.
+_MNE_BIDS_DATATYPES: frozenset[str] = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 
 # ---------------------------------------------------------------------------
@@ -73,22 +96,43 @@ def run_convert(
     dataset: Optional[str] = None,
     n_jobs: int = 1,
     overwrite: bool = False,
+    on_existing: Optional[str] = None,
     dry_run: bool = False,
     dcm2niix_bin: Optional[Path] = None,
-    line_freq: Optional[float] = 50.0,
-    montage: Optional[str] = None,
+    recording_meta: Optional[Path] = None,
     raw_root: Optional[Path] = None,
+    skip_residuals: bool = True,
+    force_edf: bool = False,
+    cancel_check=None,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
 
     Returns 0 on success, non-zero if any subject failed.
 
-    ``line_freq`` and ``montage`` are EEG/MEG-only knobs passed to the
-    mne-bids backend; they fill in metadata (``PowerLineFrequency``,
-    ``electrodes.tsv``) that recording files don't always carry.
+    ``recording_meta`` points at an optional recording-metadata JSON. Its
+    dataset defaults supply EEG/MEG ``line_freq`` / ``montage`` when the
+    inventory cell is blank, and its richer fields (reference, ground,
+    filters, device, institution, event maps, ...) are folded into the BIDS
+    sidecars after the write. When omitted, a default spec is used
+    (``PowerLineFrequency = 50``), preserving prior behaviour.
+
+    ``skip_residuals`` (default True) drops the dcm2niix residual/secondary
+    outputs -- derived single-volume duplicates split off one input series
+    (e.g. ``..._bolda`` next to ``..._bold``). Pass False to keep them.
     """
     tsv = Path(tsv)
     bids_parent = Path(bids_parent)
+
+    # Resolve the existing-subject policy. ``--overwrite`` is the back-compat
+    # alias for ``replace``; the default is the safe-by-default ``skip`` (merge
+    # new files, never touch existing ones).
+    if on_existing is None:
+        on_existing = "replace" if overwrite else "skip"
+    if on_existing not in ("skip", "update", "replace", "error"):
+        raise ValueError(
+            f"invalid on_existing {on_existing!r}; "
+            "expected skip / update / replace / error"
+        )
 
     # One-line version banner so a user's conversion log unambiguously
     # records which copy of the package executed (matters when the same
@@ -154,18 +198,34 @@ def run_convert(
         log.warning("no rows to convert (after filtering)")
         return 0
 
-    backends = default_backends(
-        dcm2niix_bin=dcm2niix_bin,
-        line_freq=line_freq,
-        montage=montage,
-    )
+    # Recording-metadata spec for EEG/MEG enrichment. Precedence: an explicit
+    # --recording-meta path, else the scaffold the scan wrote next to the TSV
+    # (auto-discovered), else a default spec (keeps PowerLineFrequency=50).
+    if recording_meta is not None:
+        spec = load_spec(Path(recording_meta))
+        log.info("loaded recording metadata from %s", recording_meta)
+    else:
+        auto_meta = scaffold_sidecar_path(tsv)
+        if auto_meta.exists():
+            spec = load_spec(auto_meta)
+            log.info("auto-loaded recording-metadata scaffold %s", auto_meta)
+        else:
+            spec = default_spec()
+
+    backends = default_backends(dcm2niix_bin=dcm2niix_bin)
     # Capture dcm2niix version once for provenance — it's still the
     # primary backend for MRI rows.
     primary = select_backend("mri", dcm2niix_bin=dcm2niix_bin)
     dcm2niix_version = _dcm2niix_version_string(primary.binary)
 
     n_failed = 0
+    n_new = 0
+    n_merged = 0
+    n_collision = 0
+    cancelled = False
     for dataset_name, dataset_df in df.groupby("dataset"):
+        if cancelled:
+            break
         if not dataset_name:
             log.warning("skipping %d rows with empty dataset name", len(dataset_df))
             continue
@@ -173,9 +233,25 @@ def run_convert(
         bids_root = bids_parent / str(dataset_name)
         if not dry_run:
             bids_root.mkdir(parents=True, exist_ok=True)
-            _ensure_dataset_description(bids_root, dcm2niix_version)
+            ensure_dataset_description(bids_root, generated_by={
+                "Name": "bidsmgr",
+                "Version": bidsmgr.__version__,
+                "Description": "dcm2niix-direct backend",
+                "Container": {"Type": "binary", "Tag": dcm2niix_version},
+            })
+            # Keep .bidsmgr/ + .tmp_bidsmgr/ out of the official bids-validator.
+            ensure_bidsignore(bids_root)
+            # Pre-convert collision summary: which incoming subjects already
+            # exist on disk (incremental add into an existing dataset).
+            _log_existing_subject_summary(bids_root, dataset_df, on_existing)
 
         for subject, subject_df in dataset_df.groupby("BIDS_name", sort=True):
+            # Stop here if the user requested it. Subjects committed before
+            # this point stay (the desired "stop now" behaviour); nothing
+            # half-written is left because the commit is per-subject atomic.
+            if is_cancelled(cancel_check):
+                cancelled = True
+                break
             if not subject:
                 log.warning("skipping rows with empty BIDS_name")
                 continue
@@ -183,6 +259,9 @@ def run_convert(
             tasks = _build_tasks_for_subject(
                 subject_df, bids_root, files_by_uid,
                 source_search_roots=source_search_roots,
+                skip_residuals=skip_residuals,
+                force_edf=force_edf,
+                spec=spec,
             )
             if not tasks:
                 continue
@@ -191,16 +270,48 @@ def run_convert(
                 _print_tasks(tasks)
                 continue
 
+            # Target dir derives from the task's subject entity (e.g. "001"),
+            # the same way _convert_subject builds subj_segment.
+            existed = (
+                bids_root / f"sub-{safe_path_component(tasks[0].subject)}"
+            ).exists()
             try:
                 _convert_subject(
                     tasks, bids_root, backends,
-                    n_jobs=n_jobs, overwrite=overwrite,
+                    n_jobs=n_jobs, on_existing=on_existing,
                     dcm2niix_version=dcm2niix_version,
+                    cancel_check=cancel_check,
+                    spec=spec,
                 )
+                if existed:
+                    n_merged += 1
+                else:
+                    n_new += 1
+            except OperationCancelled:
+                log.warning("conversion stopped by user (sub-%s not committed)", subject)
+                cancelled = True
+                break
+            except CollisionAbort as exc:
+                # Expected stop under on_existing="error": clean message, no
+                # forensic traceback. Counts as a failure so rc is non-zero.
+                log.warning("collision: %s", exc)
+                n_collision += 1
+                n_failed += 1
             except Exception:
                 log.exception("subject %s failed during conversion", subject)
                 n_failed += 1
 
+    # Results summary.
+    parts = [f"{n_new} new", f"{n_merged} merged into existing"]
+    if n_collision:
+        parts.append(f"{n_collision} collision(s)")
+    if n_failed:
+        parts.append(f"{n_failed} failed")
+    log.info("convert summary: %s", ", ".join(parts))
+
+    if cancelled:
+        log.warning("conversion stopped by user before all subjects were processed")
+        return 130  # 128 + SIGINT, conventional "interrupted" code
     return 0 if n_failed == 0 else 1
 
 
@@ -215,8 +326,10 @@ def _convert_subject(
     backends: list,
     *,
     n_jobs: int,
-    overwrite: bool,
+    on_existing: str,
     dcm2niix_version: str,
+    cancel_check=None,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> None:
     """Run Phases 1–3 for a single (dataset, subject, session) group."""
     subject = tasks[0].subject
@@ -234,7 +347,7 @@ def _convert_subject(
     try:
         # Phase 1: parallel per-series dispatch + conversion.
         results = _phase1_parallel_dcm2niix(
-            tasks, staging, backends, n_jobs=n_jobs,
+            tasks, staging, backends, n_jobs=n_jobs, cancel_check=cancel_check,
         )
 
         # Phase 2: per-subject post-conv (sequential, fast).
@@ -243,19 +356,35 @@ def _convert_subject(
         n_intended_for = populate_intended_for(
             staging, subject=subject, session=tasks[0].session,
         )
+        # EEG/MEG sidecar/channels/events enrichment from the recording-
+        # metadata spec (no-op for MRI-only subjects or when spec is None).
+        n_enriched = enrich_recording_sidecars(staging, tasks, spec)
+        # Copy any per-row curated companion files (events/beh/stim/...) into
+        # the staged tree (place + name only; no conversion).
+        n_enriched += attach_companion_files(staging, tasks)
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we
         # built for the staging dir so the commit target name is
         # consistent across OSes.
         target = bids_root / subj_segment
-        _atomic_commit(staging, target, overwrite=overwrite)
+        _merge_commit(staging, target, on_existing=on_existing)
         _write_provenance(
             target, results, rename_map, n_intended_for, n_scans_tsv,
-            dcm2niix_version=dcm2niix_version,
+            dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
         )
         log.info("committed sub-%s to %s", subject, target)
 
+    except OperationCancelled:
+        # User Stop, not a failure: no forensic error log. The ``finally``
+        # wipes staging so this subject leaves nothing half-written; the
+        # caller (run_convert) stops the subject loop.
+        raise
+    except CollisionAbort:
+        # on_existing="error" tripped: collision detected before anything was
+        # moved, so the target is intact. Not a crash; re-raise without a
+        # forensic error log (the caller logs the message).
+        raise
     except Exception as exc:
         # Determine which phase blew up: results being non-empty means
         # Phase 1 finished before something went wrong.
@@ -325,19 +454,57 @@ def _phase1_parallel_dcm2niix(
     backends: list,
     *,
     n_jobs: int,
+    cancel_check=None,
 ) -> list[ConvertResult]:
     """Run per-series conversion in parallel; return per-task results.
 
     Backend selection is per-task: each task is dispatched to the
     first registered backend whose ``can_handle()`` returns True.
-    """
-    if n_jobs == 1 or len(tasks) == 1:
-        return [_phase1_one(backends, t, staging) for t in tasks]
 
-    parallel_backend = "threading" if len(tasks) < 4 else "loky"
-    return Parallel(n_jobs=n_jobs, backend=parallel_backend)(
-        delayed(_phase1_one)(backends, t, staging) for t in tasks
-    )
+    A Stop request raises :class:`OperationCancelled` once the in-flight
+    task(s) return -- new tasks stop dispatching, the subject's staging is
+    wiped by the caller's ``finally``, and nothing is committed.
+    """
+    from ..util.cancel import OperationCancelled, is_cancelled
+
+    if is_cancelled(cancel_check):
+        raise OperationCancelled("conversion cancelled by user")
+
+    # mne-bids' ``write_raw_bids`` rewrites shared dataset files
+    # (``participants.tsv`` and the subject's ``*_scans.tsv``) on *every*
+    # call. Running several EEG/MEG recordings for one subject in parallel
+    # therefore races on those files: one worker truncates+rewrites while
+    # another reads, and mne-bids blows up ("loadtxt: input contained no
+    # data" -> IndexError). dcm2niix (MRI) and physio tasks write only their
+    # own independent outputs and are safe to parallelise. So split the work:
+    # mne-bids-backed tasks run sequentially, the rest run in the pool.
+    serial = [t for t in tasks if t.datatype in _MNE_BIDS_DATATYPES]
+    parallel_tasks = [t for t in tasks if t.datatype not in _MNE_BIDS_DATATYPES]
+
+    out: list[ConvertResult] = []
+
+    for t in serial:
+        if is_cancelled(cancel_check):
+            raise OperationCancelled("conversion cancelled by user")
+        out.append(_phase1_one(backends, t, staging))
+
+    if parallel_tasks:
+        if n_jobs == 1 or len(parallel_tasks) == 1:
+            for t in parallel_tasks:
+                if is_cancelled(cancel_check):
+                    raise OperationCancelled("conversion cancelled by user")
+                out.append(_phase1_one(backends, t, staging))
+        else:
+            parallel_backend = "threading" if len(parallel_tasks) < 4 else "loky"
+            gen = Parallel(
+                n_jobs=n_jobs, backend=parallel_backend, return_as="generator",
+            )(delayed(_phase1_one)(backends, t, staging) for t in parallel_tasks)
+            for res in gen:
+                out.append(res)
+                if is_cancelled(cancel_check):
+                    raise OperationCancelled("conversion cancelled by user")
+
+    return out
 
 
 def _phase1_one(backends: list, task: ConvertTask, staging: Path) -> ConvertResult:
@@ -393,31 +560,121 @@ def _prune_empty_dirs(root: Path) -> None:
                 pass
 
 
-def _atomic_commit(staging_subject: Path, target: Path, *, overwrite: bool) -> None:
-    """Move ``staging_subject`` onto ``target`` atomically.
-
-    POSIX ``os.rename`` is atomic within a filesystem and refuses to
-    overwrite a non-empty target. When the target exists:
-
-    * ``overwrite=False`` → log + skip (staging gets wiped by caller).
-    * ``overwrite=True``  → move existing target aside to
-      ``<bids_root>/.bidsmgr/backup/sub-<id>_<utcstamp>/`` then rename.
+class CollisionAbort(Exception):
+    """Raised by :func:`_merge_commit` under ``on_existing="error"`` when the
+    staged subject has files that already exist on disk. The caller logs the
+    message (no forensic error log) and counts the subject as failed.
     """
-    if target.exists():
-        if not overwrite:
-            log.warning(
-                "target %s already exists; skipping subject (use --overwrite to replace)",
-                target,
-            )
-            return
-        backup_root = target.parent / ".bidsmgr" / "backup"
-        backup_root.mkdir(parents=True, exist_ok=True)
-        backup = backup_root / f"{target.name}_{_utc_stamp()}"
-        shutil.move(str(target), str(backup))
-        log.info("backed up existing %s to %s", target, backup)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    os.rename(staging_subject, target)
+
+_ON_EXISTING_VERB = {
+    "skip": "merge new files, keep existing",
+    "update": "merge, replace changed files",
+    "replace": "merge, replace colliding files (backed up)",
+    "error": "abort on any file collision",
+}
+
+
+def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str) -> None:
+    """Pre-convert heads-up: which incoming subjects already exist on disk.
+
+    Awareness for incremental conversion: a subject already on disk will be
+    merged into per ``on_existing``. Informational only (the per-subject merge
+    counts + the final summary report the actual outcome). ``BIDS_name`` values
+    (``sub-XXX``) match the on-disk subject dir names for the common case.
+    """
+    if "BIDS_name" not in dataset_df.columns:
+        return
+    incoming = sorted({str(s).strip() for s in dataset_df["BIDS_name"] if str(s).strip()})
+    on_disk = {p.name for p in bids_root.glob("sub-*") if p.is_dir()}
+    if not incoming or not on_disk:
+        return  # brand-new dataset (or no subjects): nothing to flag
+    already = [s for s in incoming if s in on_disk]
+    new = [s for s in incoming if s not in on_disk]
+    msg = (
+        f"converting into existing dataset '{bids_root.name}' "
+        f"({len(on_disk)} subject(s) present): {len(new)} new"
+    )
+    if already:
+        shown = ", ".join(already[:8]) + ("" if len(already) <= 8 else " ...")
+        msg += (
+            f", {len(already)} already present ({shown}) "
+            f"-> {_ON_EXISTING_VERB[on_existing]}"
+        )
+    log.info(msg)
+
+
+def _merge_commit(
+    staging_subject: Path, target: Path, *, on_existing: str,
+) -> tuple[int, int, int]:
+    """Commit a staged subject into the dataset, merging into an existing one.
+
+    A brand-new subject is moved in wholesale via the atomic ``os.rename`` fast
+    path. When the subject already exists, the staged tree is merged FILE BY FILE
+    so adding a new session or datatype lands beside the existing data instead of
+    replacing the whole subject (the incremental-conversion case). Returns
+    ``(added, replaced, kept)`` file counts.
+
+    ``on_existing`` governs a staged file that collides with one already on disk:
+
+    * ``"skip"``    keep the existing file (default; existing data never lost);
+    * ``"update"``  replace it only if the content differs (identical files kept);
+    * ``"replace"`` always back it up then replace it;
+    * ``"error"``   abort the whole subject (commit nothing) if ANY file collides.
+
+    A replaced file is first moved to
+    ``<bids_root>/.bidsmgr/backup/<sub>_<utcstamp>/<relpath>``, so the merge path
+    is reconstructable even though atomicity drops from subject- to file-level.
+    """
+    staged = [p for p in sorted(staging_subject.rglob("*")) if p.is_file()]
+
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(staging_subject, target)
+        return (len(staged), 0, 0)
+
+    colliding = [p for p in staged if (target / p.relative_to(staging_subject)).exists()]
+    if colliding and on_existing == "error":
+        rels = ", ".join(str(p.relative_to(staging_subject)) for p in colliding[:5])
+        more = "" if len(colliding) <= 5 else f" (+{len(colliding) - 5} more)"
+        raise CollisionAbort(
+            f"{target.name}: {len(colliding)} file(s) already exist ({rels}{more}); "
+            f"aborted (use --on-existing skip/update/replace to proceed)"
+        )
+
+    backup_dir = target.parent / ".bidsmgr" / "backup" / f"{target.name}_{_utc_stamp()}"
+    added = replaced = kept = 0
+    for src in staged:
+        rel = src.relative_to(staging_subject)
+        dst = target / rel
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            added += 1
+            continue
+        # Colliding file.
+        if on_existing == "skip":
+            kept += 1
+            continue
+        if on_existing == "update" and filecmp.cmp(str(src), str(dst), shallow=False):
+            kept += 1  # identical content; leave the existing file in place
+            continue
+        bdst = backup_dir / rel
+        bdst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(dst), str(bdst))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        replaced += 1
+    if added or replaced or kept:
+        tail = (
+            " (use --on-existing replace to overwrite the kept files)"
+            if kept and on_existing == "skip" else ""
+        )
+        log.info(
+            "merged into existing %s: %d added, %d replaced, %d kept%s",
+            target, added, replaced, kept, tail,
+        )
+    return (added, replaced, kept)
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +702,18 @@ def _build_tasks_for_subject(
     files_by_uid: dict[str, list[str]],
     *,
     source_search_roots: tuple[Path, ...] = (),
+    skip_residuals: bool = True,
+    force_edf: bool = False,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> list[ConvertTask]:
     tasks: list[ConvertTask] = []
     for _, row in subject_df.iterrows():
         task = _row_to_task(
             row, bids_root, files_by_uid,
             source_search_roots=source_search_roots,
+            skip_residuals=skip_residuals,
+            force_edf=force_edf,
+            spec=spec,
         )
         if task is not None:
             tasks.append(task)
@@ -463,6 +726,9 @@ def _row_to_task(
     files_by_uid: dict[str, list[str]],
     *,
     source_search_roots: tuple[Path, ...] = (),
+    skip_residuals: bool = True,
+    force_edf: bool = False,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
     """Detect MRI vs EEG/MEG row shape and dispatch to the right builder.
 
@@ -472,12 +738,15 @@ def _row_to_task(
     """
     series_uid = str(row.get("series_uid", "")).strip()
     if series_uid:
-        return _row_to_task_mri(row, bids_root, files_by_uid)
+        return _row_to_task_mri(
+            row, bids_root, files_by_uid, skip_residuals=skip_residuals,
+        )
 
     source_file = str(row.get("source_file", "")).strip()
     if source_file:
         return _row_to_task_eeg_meg(
             row, bids_root, source_search_roots=source_search_roots,
+            force_edf=force_edf, spec=spec,
         )
 
     return None
@@ -487,6 +756,8 @@ def _row_to_task_mri(
     row: pd.Series,
     bids_root: Path,
     files_by_uid: dict[str, list[str]],
+    *,
+    skip_residuals: bool = True,
 ) -> Optional[ConvertTask]:
     series_uid = str(row.get("series_uid", "")).strip()
     if not series_uid:
@@ -566,7 +837,33 @@ def _row_to_task_mri(
         basename=basename,
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
+        skip_residuals=skip_residuals,
+        companion_files=_parse_companion(row),
     )
+
+
+def _parse_companion(row: pd.Series) -> tuple[tuple[str, str], ...]:
+    """Parse the row's ``companion_files`` JSON column into (suffix, path) pairs.
+
+    Format: a JSON list of ``{"suffix": "events", "path": "/abs/file.tsv"}``.
+    Returns ``()`` on missing/malformed input.
+    """
+    raw = str(row.get("companion_files", "") or "").strip()
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return ()
+    out: list[tuple[str, str]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                suffix = str(item.get("suffix", "")).strip()
+                path = str(item.get("path", "")).strip()
+                if suffix and path:
+                    out.append((suffix, path))
+    return tuple(out)
 
 
 def _parse_entities_json(row: pd.Series) -> dict[str, str]:
@@ -589,6 +886,8 @@ def _row_to_task_eeg_meg(
     bids_root: Path,
     *,
     source_search_roots: tuple[Path, ...] = (),
+    force_edf: bool = False,
+    spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
     """Build a :class:`ConvertTask` for an EEG/MEG/iEEG/NIRS row.
 
@@ -670,13 +969,31 @@ def _row_to_task_eeg_meg(
     # extension — the backend collects whatever lands in the datatype dir.
     expected_outputs: tuple[str, ...] = (".json",)
 
-    # Per-row EEG/MEG knobs (if the user filled them in the TSV).
+    # Resolve EEG/MEG line_freq + montage. Precedence: the inventory cell
+    # wins; else the recording-metadata dataset default (resolved per row by
+    # source path); line_freq finally falls back to 50 Hz so
+    # PowerLineFrequency is always populated (preserves prior behaviour now
+    # that the dataset-wide --line-freq flag is gone).
+    eff_acq = resolve_effective(spec, source_file).acquisition if spec is not None else None
+
     line_freq_raw = str(row.get("line_freq", "")).strip()
     try:
         line_freq = float(line_freq_raw) if line_freq_raw else None
     except ValueError:
         line_freq = None
+    if line_freq is None and eff_acq is not None:
+        line_freq = eff_acq.power_line_freq
+    if line_freq is None:
+        line_freq = 50.0
+
     montage = str(row.get("montage", "")).strip() or None
+    if montage is None and eff_acq is not None:
+        montage = eff_acq.montage
+
+    # Per-row reference/ground overrides (the spec default applies in the
+    # enrichment fixup when these are blank).
+    eeg_reference = str(row.get("eeg_reference", "")).strip() or None
+    eeg_ground = str(row.get("eeg_ground", "")).strip() or None
 
     return ConvertTask(
         row_id=source_file,  # source path is unique per recording
@@ -694,6 +1011,10 @@ def _row_to_task_eeg_meg(
         repetition_type=str(row.get("repetition_type", "")).strip(),
         line_freq=line_freq,
         montage=montage,
+        eeg_reference=eeg_reference,
+        eeg_ground=eeg_ground,
+        force_edf=force_edf,
+        companion_files=_parse_companion(row),
     )
 
 
@@ -736,35 +1057,6 @@ def _load_files_by_uid_sidecar(
 # ---------------------------------------------------------------------------
 
 
-def _ensure_dataset_description(bids_root: Path, dcm2niix_version: str) -> None:
-    """Create or append-update ``dataset_description.json`` ``GeneratedBy``."""
-    p = bids_root / "dataset_description.json"
-    if p.exists():
-        try:
-            data = json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = {}
-    else:
-        data = {}
-
-    data.setdefault("Name", bids_root.name)
-    data.setdefault("BIDSVersion", "1.10.0")
-    data.setdefault("DatasetType", "raw")
-
-    generated_by = data.get("GeneratedBy")
-    if not isinstance(generated_by, list):
-        generated_by = []
-    generated_by.append({
-        "Name": "bidsmgr",
-        "Version": bidsmgr.__version__,
-        "Description": "dcm2niix-direct backend",
-        "Container": {"Type": "binary", "Tag": dcm2niix_version},
-    })
-    data["GeneratedBy"] = generated_by
-
-    p.write_text(json.dumps(data, indent=2) + "\n")
-
-
 def _write_provenance(
     target: Path,
     results: list[ConvertResult],
@@ -773,6 +1065,7 @@ def _write_provenance(
     n_scans_tsv: int,
     *,
     dcm2niix_version: str,
+    n_enriched: int = 0,
 ) -> None:
     """Per-subject provenance at ``<target>/.bidsmgr/provenance.json``."""
     prov_dir = target / ".bidsmgr"
@@ -803,6 +1096,7 @@ def _write_provenance(
         ],
         "intended_for_updated": n_intended_for,
         "scans_tsv_rewritten": n_scans_tsv,
+        "recording_sidecars_enriched": n_enriched,
     }
     (prov_dir / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
 
@@ -905,12 +1199,32 @@ def main(argv: Optional[list[str]] = None) -> int:
             "sibling BIDS root under <bids_parent>."
         ),
     )
-    parser.add_argument("tsv", help="Inventory TSV produced by `bidsmgr-scan`")
     parser.add_argument(
-        "bids_parent",
+        "tsv", nargs="?", default=None,
+        help="Inventory TSV produced by `bidsmgr-scan` (omit when using --project)",
+    )
+    parser.add_argument(
+        "bids_parent", nargs="?", default=None,
         help=(
             "Parent directory; each `dataset` value becomes a sibling BIDS "
-            "root underneath."
+            "root underneath. Omit when using --project (output is the project)."
+        ),
+    )
+    parser.add_argument(
+        "--project", default=None, type=Path,
+        help=(
+            "Convert the project dataset's active (latest) scan version into "
+            "its locked root. Resolves the inventory + output + recording "
+            "metadata from <project>/.bidsmgr/project, replaying the curation "
+            "edits recorded in the GUI. Supersedes the positional tsv / "
+            "bids_parent."
+        ),
+    )
+    parser.add_argument(
+        "--version", default=None,
+        help=(
+            "With --project, convert a specific scan version instead of the "
+            "latest. Accepts the version id or its index (see bidsmgr-project)."
         ),
     )
     parser.add_argument(
@@ -925,8 +1239,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--overwrite", action="store_true",
         help=(
-            "Replace existing sub-<id>/ folders. Existing content is moved "
-            "to <bids_root>/.bidsmgr/backup/ before the new tree lands."
+            "Alias for --on-existing replace: when a subject already exists, back "
+            "up and replace colliding files (new sessions/datatypes still merge in)."
+        ),
+    )
+    parser.add_argument(
+        "--on-existing", choices=("skip", "update", "replace", "error"),
+        default=None,
+        help=(
+            "Policy when an incoming subject already exists on disk. New "
+            "sessions/datatypes always merge in; this governs colliding files: "
+            "'skip' keep existing (default), 'update' replace only changed files, "
+            "'replace' back up + replace colliding files, 'error' abort the "
+            "subject if anything would collide. --overwrite is an alias for replace."
         ),
     )
     parser.add_argument(
@@ -938,22 +1263,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Path to a specific dcm2niix binary (defaults to bundled).",
     )
     parser.add_argument(
-        "--line-freq", default=50.0, type=float,
+        "--recording-meta", default=None, type=Path,
         help=(
-            "Power-line frequency in Hz, written to PowerLineFrequency in "
-            "EEG/MEG/iEEG JSON sidecars (BIDS-required). Default 50; use 60 "
-            "in the Americas / parts of Asia. Pass --line-freq 0 to leave "
-            "unset and let the recording's own value apply."
-        ),
-    )
-    parser.add_argument(
-        "--montage", default=None,
-        help=(
-            "Apply a built-in mne montage to every EEG/MEG row before "
-            "writing (e.g. standard_1020, biosemi64, easycap-M1). Fills "
-            "electrodes.tsv + coordsystem.json. Use only if all rows in "
-            "the inventory share the same channel layout. See "
-            "`mne.channels.get_builtin_montages()` for the full list."
+            "Path to a recording-metadata JSON (EEG/MEG enrichment). Its "
+            "dataset defaults supply line_freq / montage for blank inventory "
+            "cells, and its richer fields fill sidecar reference / ground / "
+            "filters / device / institution, retype auxiliary channels, and "
+            "map event codes to labels. Optional; omitting it leaves "
+            "PowerLineFrequency=50 by default. Set per-row line_freq / montage "
+            "in the inventory TSV columns to override per recording."
         ),
     )
     parser.add_argument(
@@ -967,6 +1285,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--keep-residuals", action="store_true",
+        help=(
+            "Keep dcm2niix residual/secondary outputs. By default the "
+            "converter drops the derived single-volume duplicates dcm2niix "
+            "splits off one input series (e.g. ..._bolda alongside ..._bold, "
+            "or _Eq_ / _ROI markers). These are not real acquired images and "
+            "have no valid BIDS suffix. Pass this flag to keep them."
+        ),
+    )
+    parser.add_argument(
+        "--force-edf", action="store_true",
+        help=(
+            "Re-encode EEG / iEEG recordings to EDF on write instead of "
+            "keeping the source format. Harmonises a study to one BIDS-native "
+            "format, and makes a non-BIDS-native but mne-readable source "
+            "(GDF, EGI, ...) convertible. MEG / NIRS are unaffected."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -975,17 +1312,66 @@ def main(argv: Optional[list[str]] = None) -> int:
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
+    if args.project is not None:
+        # Project mode: convert a scan version into the locked root.
+        from ..project.orchestration import (
+            find_version, latest_version, version_dataframe,
+        )
+
+        bids_root = Path(args.project)
+        if args.version:
+            version = find_version(bids_root, args.version)
+            if version is None:
+                parser.error(
+                    f"no scan version {args.version!r} in {bids_root} "
+                    f"(see `bidsmgr-project {bids_root}`)"
+                )
+        else:
+            version = latest_version(bids_root)
+        if version is None:
+            parser.error(
+                f"no scans in project {bids_root}; run `bidsmgr-scan "
+                f"<raw> --project {bids_root}` first"
+            )
+        # Replay the GUI curation edits onto the inventory, keep the dataset
+        # column in lock-step with the (possibly renamed) folder, and bake it
+        # back into the version inventory so dcm2niix's files_by_uid sidecar
+        # (which sits next to it) stays aligned.
+        df = version_dataframe(version, apply_edits=True)
+        if "dataset" in df.columns:
+            df["dataset"] = bids_root.name
+        df.to_csv(version.inventory, sep="\t", index=False)
+        return run_convert(
+            version.inventory,
+            bids_root.parent,
+            dataset=bids_root.name,
+            n_jobs=args.jobs,
+            overwrite=args.overwrite,
+            on_existing=args.on_existing,
+            dry_run=args.dry_run,
+            dcm2niix_bin=args.dcm2niix,
+            recording_meta=args.recording_meta,
+            raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
+            skip_residuals=not args.keep_residuals,
+            force_edf=args.force_edf,
+        )
+
+    if not args.tsv or not args.bids_parent:
+        parser.error("provide tsv and bids_parent, or use --project <dataset>")
+
     return run_convert(
         Path(args.tsv),
         Path(args.bids_parent),
         dataset=args.dataset,
         n_jobs=args.jobs,
         overwrite=args.overwrite,
+        on_existing=args.on_existing,
         dry_run=args.dry_run,
         dcm2niix_bin=args.dcm2niix,
-        line_freq=args.line_freq if args.line_freq > 0 else None,
-        montage=args.montage,
+        recording_meta=args.recording_meta,
         raw_root=args.raw_root,
+        skip_residuals=not args.keep_residuals,
+        force_edf=args.force_edf,
     )
 
 

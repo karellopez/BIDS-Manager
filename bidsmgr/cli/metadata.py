@@ -36,7 +36,7 @@ def run_metadata_cli(
     dataset: Optional[str] = None,
     inventory_tsv: Optional[Path] = None,
     name: Optional[str] = None,
-    bids_version: str = "1.10.0",
+    bids_version: Optional[str] = None,
     license: Optional[str] = None,
     authors: Optional[list[str]] = None,
     acknowledgements: Optional[str] = None,
@@ -47,10 +47,17 @@ def run_metadata_cli(
     dataset_doi: Optional[str] = None,
     fill_todos: bool = False,
     write_report: bool = True,
+    participants_file: Optional[Path] = None,
+    phenotype_files: Optional[list[Path]] = None,
 ) -> int:
     """Run the metadata engine on every BIDS root under ``target``.
 
     Returns 0 if every root processed cleanly, 1 if any errored.
+
+    ``participants_file`` is an optional demographics spreadsheet whose
+    ``age`` / ``sex`` / ``handedness`` columns override the inventory; it is
+    applied to every BIDS root. ``phenotype_files`` are measure tables written
+    to ``phenotype/`` in each root.
     """
     target = Path(target)
     if not target.is_dir():
@@ -65,8 +72,13 @@ def run_metadata_cli(
     n_failed = 0
     for bids_root in bids_roots:
         meta = DatasetMetadata(
-            name=name or bids_root.name,
-            bids_version=bids_version,
+            # Omit name when unset so the engine preserves an existing
+            # dataset_description Name (e.g. from `bidsmgr create`) instead of
+            # overwriting it with the folder name.
+            **({"name": name} if name else {}),
+            # Omit when unset so DatasetMetadata's schema-sourced default
+            # applies (no hardcoded BIDS version anywhere).
+            **({"bids_version": bids_version} if bids_version else {}),
             license=license,
             authors=list(authors or []),
             acknowledgements=acknowledgements,
@@ -83,6 +95,8 @@ def run_metadata_cli(
                 dataset_meta=meta,
                 fill_todos=fill_todos,
                 write_report=write_report,
+                participants_file=participants_file,
+                phenotype_files=phenotype_files,
             )
         except Exception:
             log.exception("metadata engine failed on %s", bids_root)
@@ -186,8 +200,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
-        "target",
-        help="BIDS root, or a parent containing one or more BIDS roots.",
+        "target", nargs="?", default=None,
+        help="BIDS root, or a parent containing one or more BIDS roots "
+             "(omit when using --project).",
+    )
+    parser.add_argument(
+        "--project", default=None, type=Path,
+        help=(
+            "Run on a project dataset folder: the target is the project root "
+            "and the inventory is resolved from its active scan version "
+            "(so demographics / phenotype / participants flow through). "
+            "Supersedes the positional target."
+        ),
+    )
+    parser.add_argument(
+        "--version", default=None,
+        help=(
+            "With --project, take the inventory from a specific scan version "
+            "instead of the latest (version id or index; see bidsmgr-project)."
+        ),
     )
     parser.add_argument(
         "--dataset", default=None,
@@ -202,10 +233,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--participants", default=None, type=Path, dest="participants_file",
+        help=(
+            "Optional participants spreadsheet (TSV/CSV/XLSX/ODS) keyed by a "
+            "'participant_id' column. Its 'age' / 'sex' / 'handedness' columns "
+            "override the inventory-derived demographics in participants.tsv."
+        ),
+    )
+    parser.add_argument(
+        "--phenotype", action="append", default=None, type=Path,
+        dest="phenotype_files",
+        help=(
+            "Phenotype measure table (TSV/CSV/XLSX/ODS) keyed by "
+            "'participant_id'. Repeat for each instrument; each is written to "
+            "phenotype/<measure>.tsv + .json."
+        ),
+    )
+    parser.add_argument(
         "--name", default=None,
         help="Dataset Name (defaults to the BIDS root directory name).",
     )
-    parser.add_argument("--bids-version", default="1.10.0")
+    parser.add_argument(
+        "--bids-version", default=None,
+        help="BIDS version for dataset_description.json (defaults to the "
+             "bundled schema's version).",
+    )
     parser.add_argument("--license", default=None)
     parser.add_argument(
         "--author", action="append", dest="authors", default=None,
@@ -249,10 +301,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
+    target = args.target
+    inventory_tsv = args.inventory_tsv
+    if args.project is not None:
+        # Project mode: target is the project root; inventory is a scan
+        # version (so demographics + the scaffold's phenotype / participants
+        # files are auto-discovered relative to it).
+        from ..project.orchestration import find_version, latest_version
+        bids_root = Path(args.project)
+        target = bids_root
+        if inventory_tsv is None:
+            version = (
+                find_version(bids_root, args.version) if args.version
+                else latest_version(bids_root)
+            )
+            if args.version and version is None:
+                parser.error(
+                    f"no scan version {args.version!r} in {bids_root} "
+                    f"(see `bidsmgr-project {bids_root}`)"
+                )
+            if version is not None:
+                inventory_tsv = version.inventory
+    elif not target:
+        parser.error("provide a target directory, or use --project <dataset>")
+
     return run_metadata_cli(
-        Path(args.target),
+        Path(target),
         dataset=args.dataset,
-        inventory_tsv=args.inventory_tsv,
+        inventory_tsv=inventory_tsv,
         name=args.name,
         bids_version=args.bids_version,
         license=args.license,
@@ -265,6 +341,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         dataset_doi=args.dataset_doi,
         fill_todos=args.fill_todos,
         write_report=args.write_report,
+        participants_file=args.participants_file,
+        phenotype_files=args.phenotype_files,
     )
 
 

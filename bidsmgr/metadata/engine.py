@@ -33,7 +33,15 @@ import pandas as pd
 
 import bidsmgr
 from .. import schema as schema_mod
+from .demographics import (
+    load_participants_table,
+    merge_demographics,
+    normalize_handedness,
+    normalize_sex,
+)
+from .phenotype import load_sidecar_dictionary, write_phenotype
 from .types import DatasetMetadata, MetadataReport, SidecarFill, TodoFill
+from ..recording_meta import load_spec, scaffold_sidecar_path
 
 # The literal placeholder value written by ``--fill-todos`` for every
 # missing required / recommended field. Deliberately just the string
@@ -97,6 +105,8 @@ def run_metadata(
     fill_todos: bool = False,
     write_report: bool = True,
     generator_label: str = "bidsmgr",
+    participants_file: Optional[Path] = None,
+    phenotype_files: Optional[list[Path]] = None,
 ) -> MetadataReport:
     """Generate dataset-level metadata for the BIDS root at ``bids_root``.
 
@@ -123,6 +133,13 @@ def run_metadata(
         ``<bids_root>/.bidsmgr/metadata_report.json`` after every run.
     generator_label
         ``GeneratedBy.Name`` to record. Defaults to ``"bidsmgr"``.
+    participants_file
+        Optional participants spreadsheet (TSV/CSV/XLSX/ODS) keyed by
+        ``participant_id``. Its demographic columns (``age`` / ``sex`` /
+        ``handedness``) override the inventory-derived values.
+    phenotype_files
+        Optional list of phenotype measure tables. Each becomes
+        ``phenotype/<measure>.tsv`` + ``.json``.
 
     Returns
     -------
@@ -135,11 +152,15 @@ def run_metadata(
     if not bids_root.is_dir():
         raise FileNotFoundError(f"BIDS root not found: {bids_root}")
 
-    meta = dataset_meta or DatasetMetadata(name=bids_root.name)
-    if meta.name == "Untitled BIDS Dataset":
-        # Caller supplied an empty DatasetMetadata; use the directory name
-        # so dataset_description.json reads sensibly.
-        meta = meta.model_copy(update={"name": bids_root.name})
+    meta = dataset_meta or DatasetMetadata()
+    # Resolve the dataset Name without clobbering one already on disk. An
+    # explicit caller-supplied Name wins; otherwise preserve an existing
+    # dataset_description.json Name (set by ``bidsmgr create`` or hand-edited);
+    # else fall back to the folder name. A metadata run with no ``--name`` must
+    # not overwrite a Name the user already chose.
+    if meta.name in (None, "", "Untitled BIDS Dataset"):
+        resolved = _existing_dataset_name(bids_root) or bids_root.name
+        meta = meta.model_copy(update={"name": resolved})
 
     report = MetadataReport(
         bidsmgr_version=str(getattr(bidsmgr, "__version__", "0.0.0")),
@@ -147,8 +168,17 @@ def run_metadata(
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
+    # Auto-discover phenotype tables + participants spreadsheet from the
+    # inventory's recording-metadata scaffold when not explicitly provided (the
+    # GUI dataset-metadata dialog stores them there).
+    if phenotype_files is None and inventory_tsv is not None:
+        phenotype_files = _phenotype_files_from_scaffold(inventory_tsv)
+    if participants_file is None and inventory_tsv is not None:
+        participants_file = _participants_file_from_scaffold(inventory_tsv)
+
     _write_dataset_description(bids_root, meta, generator_label, report)
-    _write_participants(bids_root, inventory_tsv, report)
+    _write_participants(bids_root, inventory_tsv, report, participants_file=participants_file)
+    write_phenotype(bids_root, phenotype_files, report)
     _write_readme(bids_root, meta.name, report)
     _write_changes(bids_root, report)
     _refresh_scans_tsv(bids_root, report)
@@ -164,6 +194,23 @@ def run_metadata(
 # ---------------------------------------------------------------------------
 # dataset_description.json
 # ---------------------------------------------------------------------------
+
+
+def _existing_dataset_name(bids_root: Path) -> Optional[str]:
+    """Return the ``Name`` from an existing ``dataset_description.json``, if any.
+
+    Used so a metadata run with no explicit ``--name`` preserves a Name the user
+    already set (via ``bidsmgr create`` or by hand) instead of overwriting it.
+    """
+    p = bids_root / "dataset_description.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    name = data.get("Name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name.strip() else None
 
 
 def _write_dataset_description(
@@ -251,7 +298,8 @@ def _write_dataset_description(
 
 
 _PARTICIPANT_COLUMNS: tuple[str, ...] = (
-    "participant_id", "age", "sex", "given_name", "family_name", "patient_id",
+    "participant_id", "age", "sex", "handedness",
+    "given_name", "family_name", "patient_id",
 )
 
 
@@ -262,31 +310,112 @@ _PARTICIPANT_DESCRIPTIONS: dict[str, dict[str, object]] = {
         "Description": "Biological sex",
         "Levels": {"M": "male", "F": "female", "O": "other", "n/a": "not available"},
     },
+    "handedness": {
+        "Description": "Handedness of the participant",
+        "Levels": {"R": "right", "L": "left", "A": "ambidextrous", "n/a": "not available"},
+    },
     "given_name": {"Description": "Subject given name (kept for internal traceability)"},
     "family_name": {"Description": "Subject family name (kept for internal traceability)"},
     "patient_id": {"Description": "Original DICOM PatientID"},
 }
 
 
+def _phenotype_files_from_scaffold(inventory_tsv: Path) -> Optional[list[Path]]:
+    """Read phenotype table paths from the inventory's recording-meta scaffold.
+
+    The GUI dataset-metadata dialog stores phenotype file paths in
+    ``<inventory>.tsv.recording_meta.json``. Paths are resolved relative to the
+    inventory directory when not absolute. Returns ``None`` when there is no
+    scaffold or it lists no phenotype files.
+    """
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return None
+        spec = load_spec(scaffold)
+    except Exception:
+        return None
+    if not spec.phenotype_files:
+        return None
+    base = Path(inventory_tsv).parent
+    out: list[Path] = []
+    for p in spec.phenotype_files:
+        pp = Path(p)
+        out.append(pp if pp.is_absolute() else base / pp)
+    return out or None
+
+
+def _participants_file_from_scaffold(inventory_tsv: Path) -> Optional[Path]:
+    """Read the participants spreadsheet path from the recording-meta scaffold.
+
+    The GUI dataset-metadata dialog stores it in
+    ``<inventory>.tsv.recording_meta.json``. Resolved relative to the inventory
+    directory when not absolute. Returns ``None`` when unset.
+    """
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return None
+        spec = load_spec(scaffold)
+    except Exception:
+        return None
+    raw = (spec.participants_file or "").strip()
+    if not raw:
+        return None
+    pp = Path(raw)
+    return pp if pp.is_absolute() else Path(inventory_tsv).parent / pp
+
+
 def _write_participants(
-    bids_root: Path, inventory_tsv: Optional[Path], report: MetadataReport,
+    bids_root: Path,
+    inventory_tsv: Optional[Path],
+    report: MetadataReport,
+    participants_file: Optional[Path] = None,
 ) -> None:
     subjects = sorted(p.name for p in bids_root.glob("sub-*") if p.is_dir())
     if not subjects:
         return
 
     demo_lookup = _load_demographics_from_inventory(inventory_tsv, report)
+    participant_codebook: dict = {}
+    if participants_file is not None:
+        # A user-supplied participants spreadsheet is the authoritative
+        # demographic source: its non-empty cells override the inventory.
+        demo_lookup = merge_demographics(
+            demo_lookup, load_participants_table(Path(participants_file)),
+        )
+        # Optional sibling JSON codebook (descriptions / levels / units for the
+        # spreadsheet's columns) -> participants.json.
+        participant_codebook = load_sidecar_dictionary(Path(participants_file))
+
+    # Any column the participants spreadsheet carries beyond the known
+    # demographics is preserved verbatim: it flows into participants.tsv and is
+    # described in participants.json. Order is the first-seen order across
+    # subjects for a stable, readable table.
+    known = set(_PARTICIPANT_COLUMNS)
+    extra_cols: list[str] = []
+    for sid in subjects:
+        for col in demo_lookup.get(sid, {}):
+            if col and col not in known and col not in extra_cols:
+                extra_cols.append(col)
 
     rows: list[dict[str, str]] = []
     for sid in subjects:
         row: dict[str, str] = {"participant_id": sid}
         extra = demo_lookup.get(sid, {})
-        for col in ("age", "sex", "given_name", "family_name", "patient_id"):
+        for col in ("age", "sex", "handedness", "given_name", "family_name", "patient_id"):
             v = extra.get(col, "")
+            if col == "sex":
+                v = normalize_sex(v)
+            elif col == "handedness":
+                v = normalize_handedness(v)
+            row[col] = v if v else "n/a"
+        for col in extra_cols:
+            v = str(extra.get(col, "") or "").strip()
             row[col] = v if v else "n/a"
         rows.append(row)
 
-    df_new = pd.DataFrame(rows, columns=list(_PARTICIPANT_COLUMNS))
+    df_new = pd.DataFrame(rows, columns=list(_PARTICIPANT_COLUMNS) + extra_cols)
 
     out_tsv = bids_root / "participants.tsv"
     df_existing: Optional[pd.DataFrame] = None
@@ -315,11 +444,20 @@ def _write_participants(
     report.files_written.append(out_tsv)
 
     out_json = bids_root / "participants.json"
-    json_payload = {
-        col: _PARTICIPANT_DESCRIPTIONS[col]
-        for col in df_out.columns
-        if col in _PARTICIPANT_DESCRIPTIONS
-    }
+    json_payload: dict = {}
+    for col in df_out.columns:
+        if col in _PARTICIPANT_DESCRIPTIONS:
+            json_payload[col] = _PARTICIPANT_DESCRIPTIONS[col]
+        elif col == "participant_id":
+            continue
+        else:
+            # Extra spreadsheet column: use the user's codebook entry if any,
+            # else a minimal Description = the column name.
+            entry = participant_codebook.get(str(col))
+            json_payload[col] = (
+                entry if isinstance(entry, dict) and entry
+                else {"Description": str(col)}
+            )
     out_json.write_text(json.dumps(json_payload, indent=2) + "\n", encoding="utf-8")
     report.files_written.append(out_json)
 
@@ -366,6 +504,7 @@ def _load_demographics_from_inventory(
             "patient_id": str(head.get("PatientID", "") or ""),
             "age": str(head.get("PatientAge", "") or head.get("age", "") or ""),
             "sex": str(head.get("PatientSex", "") or head.get("sex", "") or ""),
+            "handedness": str(head.get("Handedness", "") or head.get("handedness", "") or ""),
         }
     return lookup
 

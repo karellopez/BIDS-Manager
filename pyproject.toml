@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.1.4"
+version = "1.2.3"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -73,7 +73,13 @@ dependencies = [
     "numpy>=1.26,<3.0",
     "joblib>=1.3,<=1.5.3",
 
-    # Editor viewer.
+    # System info (CPU thread count, total RAM) shown in Settings and used
+    # to cap the parallel-workers spinboxes. Already pulled in transitively
+    # by joblib/loky; declared explicitly so the cap never silently breaks.
+    "psutil>=5.9,<=7.0.0",
+
+    # Editor viewer (NIfTI slices + MEG/EEG time-series + PSD, all
+    # rendered in-app with pyqtgraph - no matplotlib dependency).
     "pyqtgraph>=0.13,<=0.14.0",
     "PyOpenGL>=3.1,<=3.1.10",
 
@@ -104,6 +110,8 @@ Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 # ``import sklearn``).
 [project.scripts]
 bidsmgr           = "bidsmgr.main:main"
+bidsmgr-create    = "bidsmgr.cli.create:main"
+bidsmgr-project   = "bidsmgr.cli.project:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"

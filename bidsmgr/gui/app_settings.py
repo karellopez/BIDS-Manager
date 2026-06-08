@@ -13,7 +13,8 @@ adding a new one outside that namespace is a code smell.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -26,7 +27,6 @@ KEYS = {
     "theme":              "ui/theme",                # "dark" | "light"
     "raw_root":           "paths/raw_root",          # last raw input dir
     "bids_parent":        "paths/bids_parent",       # last BIDS output dir
-    "dataset_slug":       "scan/dataset_slug",       # default dataset name
     "scan_tsv_filename":  "scan/tsv_filename",       # filename of the scan TSV
     "highlight_aborts":   "inspector/highlight_aborts",   # toolbar toggle
     "active_view":        "ui/active_view",          # "converter" | "editor"
@@ -38,12 +38,17 @@ KEYS = {
     # Scan defaults
     "scan_n_jobs":        "scan/n_jobs",
     "scan_probe_convert": "scan/probe_convert",
-    "scan_line_freq":     "scan/line_freq",
-    "scan_montage":       "scan/montage",
     "scan_skip_bids_guess": "scan/skip_bids_guess",
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
-    "convert_overwrite":  "convert/overwrite",
+    "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
+    "convert_on_existing": "convert/on_existing",    # skip|update|replace|error
+    "convert_skip_residuals": "convert/skip_residuals",
+    "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
+    # Scan rules (user-extensible classifier hints + series exclusions).
+    # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
+    "user_hints":         "classifier/user_hints",
+    "scan_exclusions":    "classifier/scan_exclusions",
     # Post-convert chain
     "post_run_metadata":  "post_convert/run_metadata",
     "post_run_validate":  "post_convert/run_validate",
@@ -59,6 +64,9 @@ KEYS = {
     # "default" → ``assets/logo.png`` (monochrome, palette-inverted on dark).
     # "app_icon" → ``assets/macos/AppIcon128.png`` (full-color BIDS-Manager logo).
     "header_logo": "ui/header_logo",
+    # Recently opened/created project dataset roots (JSON list, most-recent
+    # first), shown on the Welcome tab.
+    "recent_projects": "project/recent",
 }
 
 
@@ -92,7 +100,6 @@ class AppSettings:
     # Recently-used paths (paths come back as str; callers wrap in Path).
     raw_root: Optional[str] = None
     bids_parent: Optional[str] = None
-    dataset_slug: str = ""
     # Scan-TSV filename only (the TSV lives under ``<bids_parent>/``).
     # The user can override this from the toolbar field.
     scan_tsv_filename: str = "inventory.tsv"
@@ -102,21 +109,31 @@ class AppSettings:
 
     # Scan defaults
     scan_n_jobs: int = 1
-    scan_probe_convert: bool = False
-    scan_line_freq: float = 50.0
-    scan_montage: str = ""
+    # Default on: probe-convert runs dcm2niix per series at scan time to
+    # enrich the BIDS guess with sidecar-derived hints.
+    scan_probe_convert: bool = True
     scan_skip_bids_guess: bool = False
 
     # Convert defaults
     convert_n_jobs: int = 1
-    convert_overwrite: bool = False
+    convert_overwrite: bool = False  # legacy; migrated into convert_on_existing
+    # Policy when an incoming subject already exists during convert:
+    # skip (default, keep existing) | update (replace changed) | replace
+    # (back up + replace colliding) | error (abort on any collision).
+    convert_on_existing: str = "skip"
+    # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
+    # ``..._bold``). Default on: they are derived duplicates, not real images.
+    convert_skip_residuals: bool = True
+    # Re-encode EEG / iEEG recordings to EDF on convert (mne-bids format="EDF").
+    convert_force_edf: bool = False
 
-    # Post-convert chain
+    # Post-convert chain. All steps on by default: run metadata + validation
+    # with TODO placeholders, strict validation, and an HTML report.
     post_run_metadata: bool = True
     post_run_validate: bool = True
     post_metadata_fill_todos: bool = True
-    post_validate_strict: bool = False
-    post_validate_html: bool = False
+    post_validate_strict: bool = True
+    post_validate_html: bool = True
 
     # PyPI version string the user picked "Skip this version" on, so the
     # startup update check doesn't nag them about the same release on
@@ -132,6 +149,19 @@ class AppSettings:
     # "default"  → minimalist mark in ``assets/logo.png``, inverted on dark.
     # "app_icon" → full-color BIDS-Manager app icon (``assets/macos/AppIcon128.png``).
     header_logo: str = "default"
+
+    # Scan rules (JSON-serialisable list[dict]); converted to/from the
+    # engine's frozen dataclasses at the boundary via ``to_user_hints`` /
+    # ``to_exclusions`` (keeps the classifier import out of this module's
+    # hot path and the engine free of any GUI dependency).
+    # hint:      {"patterns": [...], "datatype", "suffix", "task",
+    #             "entities": {k: v}, "match_mode", "force"}
+    # exclusion: {"pattern", "target": "sequence"|"path", "match_mode"}
+    user_hints: list = field(default_factory=list)
+    scan_exclusions: list = field(default_factory=list)
+
+    # Recently opened/created project dataset roots (most-recent first).
+    recent_projects: list = field(default_factory=list)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -170,6 +200,16 @@ class AppSettings:
         def _as_str(v, default: str) -> str:
             return str(v) if v not in (None, "") else default
 
+        def _as_json_list(v, default: list) -> list:
+            """Parse a JSON list stored in QSettings; corrupt/non-list -> default."""
+            if not v:
+                return list(default)
+            try:
+                out = json.loads(v) if isinstance(v, str) else v
+            except (ValueError, TypeError):
+                return list(default)
+            return out if isinstance(out, list) else list(default)
+
         out.theme = _as_str(s.value(KEYS["theme"]), out.theme)
         if out.theme not in ("dark", "light"):
             out.theme = "dark"
@@ -199,7 +239,6 @@ class AppSettings:
         )
         out.raw_root = s.value(KEYS["raw_root"]) or None
         out.bids_parent = s.value(KEYS["bids_parent"]) or None
-        out.dataset_slug = _as_str(s.value(KEYS["dataset_slug"]), out.dataset_slug)
         out.scan_tsv_filename = _as_str(
             s.value(KEYS["scan_tsv_filename"]), out.scan_tsv_filename,
         )
@@ -210,14 +249,26 @@ class AppSettings:
         out.scan_n_jobs = _as_int(s.value(KEYS["scan_n_jobs"]), out.scan_n_jobs)
         out.scan_probe_convert = _as_bool(s.value(KEYS["scan_probe_convert"]),
                                           out.scan_probe_convert)
-        out.scan_line_freq = _as_float(s.value(KEYS["scan_line_freq"]), out.scan_line_freq)
-        out.scan_montage = _as_str(s.value(KEYS["scan_montage"]), out.scan_montage)
         out.scan_skip_bids_guess = _as_bool(s.value(KEYS["scan_skip_bids_guess"]),
                                             out.scan_skip_bids_guess)
 
         out.convert_n_jobs = _as_int(s.value(KEYS["convert_n_jobs"]), out.convert_n_jobs)
         out.convert_overwrite = _as_bool(s.value(KEYS["convert_overwrite"]),
                                           out.convert_overwrite)
+        # Migrate the legacy overwrite checkbox: if no explicit policy is stored
+        # but overwrite was on, default the policy to "replace".
+        out.convert_on_existing = _as_str(
+            s.value(KEYS["convert_on_existing"]),
+            "replace" if out.convert_overwrite else "skip",
+        )
+        if out.convert_on_existing not in ("skip", "update", "replace", "error"):
+            out.convert_on_existing = "skip"
+        out.convert_skip_residuals = _as_bool(
+            s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
+        )
+        out.convert_force_edf = _as_bool(
+            s.value(KEYS["convert_force_edf"]), out.convert_force_edf,
+        )
 
         out.post_run_metadata = _as_bool(s.value(KEYS["post_run_metadata"]),
                                          out.post_run_metadata)
@@ -244,22 +295,22 @@ class AppSettings:
         )
         if out.header_logo not in ("default", "app_icon"):
             out.header_logo = "default"
+        out.user_hints = _as_json_list(s.value(KEYS["user_hints"]), [])
+        out.scan_exclusions = _as_json_list(s.value(KEYS["scan_exclusions"]), [])
+        out.recent_projects = _as_json_list(s.value(KEYS["recent_projects"]), [])
         return out
 
     def save(self) -> None:
         s = self._settings()
         # Strings.
         s.setValue(KEYS["theme"], self.theme)
-        s.setValue(KEYS["dataset_slug"], self.dataset_slug)
         s.setValue(KEYS["scan_tsv_filename"], self.scan_tsv_filename)
-        s.setValue(KEYS["scan_montage"], self.scan_montage)
         if self.raw_root is not None:
             s.setValue(KEYS["raw_root"], self.raw_root)
         if self.bids_parent is not None:
             s.setValue(KEYS["bids_parent"], self.bids_parent)
         # Ints / floats.
         s.setValue(KEYS["scan_n_jobs"], int(self.scan_n_jobs))
-        s.setValue(KEYS["scan_line_freq"], float(self.scan_line_freq))
         s.setValue(KEYS["convert_n_jobs"], int(self.convert_n_jobs))
         # Bools — store as strings so the load path doesn't depend on
         # platform-specific QVariant→Python bool quirks.
@@ -267,6 +318,8 @@ class AppSettings:
             ("scan_probe_convert",       self.scan_probe_convert),
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
+            ("convert_skip_residuals",   self.convert_skip_residuals),
+            ("convert_force_edf",        self.convert_force_edf),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
@@ -275,9 +328,14 @@ class AppSettings:
             ("editor_strict_validate",   self.editor_strict_validate),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
+        s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["skipped_update_version"], self.skipped_update_version)
         s.setValue(KEYS["font_scale"], float(self.font_scale))
         s.setValue(KEYS["header_logo"], self.header_logo)
+        # Scan rules as JSON blobs.
+        s.setValue(KEYS["user_hints"], json.dumps(self.user_hints))
+        s.setValue(KEYS["scan_exclusions"], json.dumps(self.scan_exclusions))
+        s.setValue(KEYS["recent_projects"], json.dumps(self.recent_projects))
         s.sync()
 
     # ------------------------------------------------------------------
@@ -294,10 +352,6 @@ class AppSettings:
         cls._settings().setValue(KEYS["bids_parent"], str(path))
 
     @classmethod
-    def remember_dataset_slug(cls, slug: str) -> None:
-        cls._settings().setValue(KEYS["dataset_slug"], slug)
-
-    @classmethod
     def remember_tsv_filename(cls, filename: str) -> None:
         cls._settings().setValue(KEYS["scan_tsv_filename"], filename)
 
@@ -306,6 +360,27 @@ class AppSettings:
         cls._settings().setValue(
             KEYS["highlight_aborts"], "1" if enabled else "0",
         )
+
+    @classmethod
+    def remember_recent_project(cls, path: Path, *, cap: int = 10) -> None:
+        """Push a project dataset root to the front of the recent list.
+
+        De-duplicates (most-recent-first) and caps the list length so the
+        Welcome tab stays tidy.
+        """
+        s = cls._settings()
+        existing = cls.load().recent_projects
+        p = str(path)
+        out = [p] + [x for x in existing if x != p]
+        s.setValue(KEYS["recent_projects"], json.dumps(out[:cap]))
+
+    @classmethod
+    def forget_recent_project(cls, path: Path) -> None:
+        """Drop a project from the recent list (does not touch the dataset)."""
+        s = cls._settings()
+        p = str(path)
+        out = [x for x in cls.load().recent_projects if x != p]
+        s.setValue(KEYS["recent_projects"], json.dumps(out))
 
     @classmethod
     def remember_theme(cls, theme: str) -> None:
@@ -328,6 +403,24 @@ class AppSettings:
         cls._settings().setValue(
             KEYS["editor_strict_validate"], "1" if enabled else "0",
         )
+
+    # ------------------------------------------------------------------
+    # Scan-rules boundary: list[dict] (JSON) <-> engine frozen dataclasses.
+    # The conversion lives here so the engine never imports settings and the
+    # GUI / CLI share one (de)serialiser (``classifier.user_rules``).
+    # ------------------------------------------------------------------
+
+    def to_user_hints(self) -> list:
+        """Return the persisted hints as ``list[UserHint]`` for the scanner."""
+        from ..classifier import user_rules
+        hints, _ = user_rules.from_json({"user_hints": self.user_hints})
+        return hints
+
+    def to_exclusions(self) -> list:
+        """Return the persisted exclusions as ``list[ExclusionRule]``."""
+        from ..classifier import user_rules
+        _, excl = user_rules.from_json({"scan_exclusions": self.scan_exclusions})
+        return excl
 
     @classmethod
     def remember_nifti_crosshair(cls, color: str, thickness: int) -> None:

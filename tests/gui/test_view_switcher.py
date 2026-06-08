@@ -15,23 +15,27 @@ from bidsmgr.gui.converter_panel import ConverterPanel
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.main_window import MainWindow
 from bidsmgr.gui.theme_manager import ThemeManager
+from bidsmgr.gui.welcome_panel import WelcomePanel
 
 
 pytestmark = pytest.mark.gui
 
 
-def test_stack_hosts_both_panels(qapp, isolated_settings) -> None:
+def test_stack_hosts_three_panels(qapp, isolated_settings) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
     qapp.processEvents()
 
-    assert win.stack.count() == 2
+    assert win.stack.count() == 3
     assert isinstance(win.stack.widget(0), ConverterPanel)
     assert isinstance(win.stack.widget(1), EditorPanel)
-    # Default is Converter when no setting persisted.
-    assert win.stack.currentIndex() == 0
-    assert win._header._converter_btn.isChecked()
+    assert isinstance(win.stack.widget(2), WelcomePanel)
+    # Project-first: with no project bound the window lands on the Welcome
+    # (Home) tab; Converter/Editor stay reachable via their pills.
+    assert win.stack.currentIndex() == 2
+    assert win._header._welcome_btn.isChecked()
+    assert not win._header._converter_btn.isChecked()
     assert not win._header._editor_btn.isChecked()
 
 
@@ -60,14 +64,20 @@ def test_view_change_signal_swaps_stack_and_persists(
     assert AppSettings.load().active_view == "converter"
 
 
-def test_persisted_active_view_restores_on_construction(
-    qapp, isolated_settings,
+def test_persisted_active_view_restores_with_project(
+    qapp, isolated_settings, tmp_path,
 ) -> None:
+    # The persisted Converter/Editor view is restored only when a project is
+    # bound at construction (the ``--project`` path). With no project the window
+    # lands on Welcome regardless (see test_stack_hosts_three_panels).
+    from bidsmgr.cli.create import open_or_create_workspace
+
     AppSettings.remember_active_view("editor")
+    proj = open_or_create_workspace(tmp_path / "ds")
 
     theme = ThemeManager(qapp)
     theme.apply("dark")
-    win = MainWindow(theme)
+    win = MainWindow(theme, project=proj)
     qapp.processEvents()
 
     assert win.stack.currentIndex() == 1

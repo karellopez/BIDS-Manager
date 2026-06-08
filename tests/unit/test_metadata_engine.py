@@ -124,6 +124,32 @@ class TestDatasetDescription:
         assert dd["Funding"] == ["NIH-12345"]
         assert dd["DatasetDOI"] == "10.1234/x"
 
+    def test_metadata_preserves_existing_name_without_explicit_name(
+        self, tmp_path: Path,
+    ) -> None:
+        # A Name set by `bidsmgr create` / hand-edit must survive a metadata run
+        # that did not pass an explicit name (no clobber to the folder name).
+        root = _make_minimal_bids(tmp_path)  # folder is named "study"
+        p = root / "dataset_description.json"
+        data = json.loads(p.read_text())
+        data["Name"] = "Human Chosen Name"
+        p.write_text(json.dumps(data))
+
+        run_metadata(root)  # no dataset_meta, no name
+
+        assert json.loads(p.read_text())["Name"] == "Human Chosen Name"
+
+    def test_metadata_falls_back_to_folder_name_when_none_on_disk(
+        self, tmp_path: Path,
+    ) -> None:
+        # Fresh dataset with no Name on disk + no explicit name => folder name.
+        root = tmp_path / "my_dataset"
+        (root / "sub-001" / "anat").mkdir(parents=True)
+        _write_pair(root / "sub-001" / "anat", "sub-001_T1w", sidecar={})
+        run_metadata(root)
+        dd = json.loads((root / "dataset_description.json").read_text())
+        assert dd["Name"] == "my_dataset"
+
     def test_user_edits_not_clobbered(self, tmp_path: Path) -> None:
         """A field added by the user is preserved across a metadata rerun."""
         root = _make_minimal_bids(tmp_path)
@@ -579,3 +605,44 @@ class TestInferDatatypeSuffix:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}")
         assert _infer_datatype_suffix(target, root) == expected
+
+
+class TestParticipantsExtraColumns:
+    def test_spreadsheet_extra_columns_carried_with_codebook(self, tmp_path):
+        """Columns beyond the known demographics flow into participants.tsv and
+        are described in participants.json (rs-bidsify-style), using a sibling
+        codebook when present."""
+        root = _make_minimal_bids(tmp_path)
+        participants = tmp_path / "subjects.csv"
+        participants.write_text(
+            "participant_id,age,sex,group,iq\nsub-001,30,female,patient,118\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "subjects.json").write_text(json.dumps({
+            "group": {"Description": "Study group", "Levels": {"patient": "clinical"}},
+            "iq": {"Description": "Full-scale IQ", "Units": "points"},
+        }), encoding="utf-8")
+
+        run_metadata(root, participants_file=participants)
+
+        tsv = (root / "participants.tsv").read_text()
+        header = tsv.splitlines()[0].split("\t")
+        assert "group" in header and "iq" in header
+        assert "patient" in tsv and "118" in tsv
+
+        pj = json.loads((root / "participants.json").read_text())
+        assert pj["group"]["Levels"]["patient"] == "clinical"
+        assert pj["iq"]["Units"] == "points"
+        # Known demographic columns keep their built-in descriptions.
+        assert pj["sex"]["Levels"]["F"] == "female"
+
+    def test_extra_column_without_codebook_gets_default_description(self, tmp_path):
+        root = _make_minimal_bids(tmp_path)
+        participants = tmp_path / "subjects.tsv"
+        participants.write_text(
+            "participant_id\tcohort\nsub-001\twave1\n", encoding="utf-8",
+        )
+        run_metadata(root, participants_file=participants)
+        pj = json.loads((root / "participants.json").read_text())
+        assert pj["cohort"] == {"Description": "cohort"}
+        assert "cohort" in (root / "participants.tsv").read_text().splitlines()[0]

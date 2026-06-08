@@ -30,6 +30,10 @@ from ..theme_manager import CUR, rgba
 ROW_STATE_ROLE: int = Qt.ItemDataRole.UserRole + 1
 # Bool role: ``True`` paints a purple tint on top of the row-state tint.
 HIGHLIGHT_ROLE: int = Qt.ItemDataRole.UserRole + 3
+# Bool role: ``True`` means the cell shows a value INHERITED from the dataset
+# default (no per-row override). Delegates paint it muted to distinguish it
+# from an explicit override.
+INHERITED_ROLE: int = Qt.ItemDataRole.UserRole + 4
 
 
 def paint_row_state(
@@ -39,9 +43,9 @@ def paint_row_state(
 ) -> None:
     """Tint the cell's background according to ``row_state``.
 
-    Recognised values: ``"selected"``, ``"warn"``, ``"err"``, ``"skip"``.
-    Anything else (including ``None`` / ``""``) is a no-op so the model
-    can omit the role for non-special rows.
+    Recognised values: ``"selected"``, ``"warn"``, ``"err"``, ``"skip"``,
+    ``"noimg"``. Anything else (including ``None`` / ``""``) is a no-op so
+    the model can omit the role for non-special rows.
     """
     if not row_state:
         return
@@ -54,6 +58,11 @@ def paint_row_state(
         painter.fillRect(option.rect, rgba(pal["error"], 0.06))
     elif row_state == "skip":
         painter.fillRect(option.rect, QColor(pal["bg"]))
+    elif row_state == "noimg":
+        # DERIVED non-image object (no pixel data; excluded from convert).
+        # A distinct teal wash so it reads as "flagged / informational"
+        # rather than the de-emphasised grey of an ordinary skip.
+        painter.fillRect(option.rect, rgba(pal["teal"], 0.14))
 
 
 def paint_highlight(

@@ -3,6 +3,11 @@
 Reads / writes :class:`bidsmgr.gui.app_settings.AppSettings` via
 ``QSettings``. All changes are applied on **Save** (no live binding) so
 the user can experiment with values and cancel without commit.
+
+Tabs: Display / System / Scan / Convert + post-convert. The Convert tab
+lays the post-convert chain out as an indented hierarchy (parent step +
+its sub-options), and a "Restore defaults" button resets every widget to
+the :class:`AppSettings` field defaults.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -18,19 +24,52 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .. import schema
+from ..classifier import sequence_dict
+from ..classifier import user_rules
+from ..util.system_info import SystemInfo, get_system_info
 from .app_settings import AppSettings
 
 
+def _indented(child: QWidget, *, indent: int = 22) -> QWidget:
+    """Wrap ``child`` in a left-indented container so it reads as a
+    sub-option nested under the checkbox above it (the post-convert
+    hierarchy tree)."""
+    box = QWidget()
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(indent, 0, 0, 0)
+    lay.setSpacing(6)
+    lay.addWidget(child)
+    lay.addStretch(1)
+    return box
+
+
+def _bind_children(parent_cb: QCheckBox, *children: QWidget) -> None:
+    """Enable ``children`` only while ``parent_cb`` is checked, and sync
+    immediately so the initial state is correct."""
+    def _sync(checked: bool) -> None:
+        for c in children:
+            c.setEnabled(checked)
+    parent_cb.toggled.connect(_sync)
+    _sync(parent_cb.isChecked())
+
+
 class SettingsDialog(QDialog):
-    """Three-tab settings dialog: Display / Scan / Convert.
+    """Settings dialog: Display / System / Scan / Convert + post-convert.
 
     Theme + post-convert chain live under their natural homes. The
     inspector column visibility is NOT here — it's controlled via the
@@ -41,25 +80,38 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("BIDS-Manager — Settings")
-        self.resize(540, 560)
+        self.resize(560, 600)
         self._settings = settings
+        # Detected once: the worker-count spinboxes are capped at the host's
+        # logical thread count so the user can never ask for more workers
+        # than the machine has threads.
+        self._sys: SystemInfo = get_system_info()
 
         v = QVBoxLayout(self)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_display_tab(), "Display")
+        tabs.addTab(self._build_system_tab(), "System")
         tabs.addTab(self._build_scan_tab(), "Scan")
+        tabs.addTab(self._build_scan_rules_tab(), "Scan rules")
         tabs.addTab(self._build_convert_tab(), "Convert + post-convert")
         v.addWidget(tabs, 1)
 
-        # Save / Cancel.
+        # Save / Cancel / Restore defaults.
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel,
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.RestoreDefaults,
         )
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
+        buttons.button(
+            QDialogButtonBox.StandardButton.RestoreDefaults
+        ).clicked.connect(self._on_restore_defaults)
         v.addWidget(buttons)
+
+        # Populate every widget from the current settings.
+        self._load_into_widgets(self._settings)
 
     # ------------------------------------------------------------------
     # Tabs
@@ -75,35 +127,32 @@ class SettingsDialog(QDialog):
         ("Extra large (1.50x)",    1.50),
     ]
 
+    # Combo presets for the header brand mark.
+    _HEADER_LOGO_PRESETS: list[tuple[str, str]] = [
+        ("Default (monochrome mark)", "default"),
+        ("App icon (full color)",     "app_icon"),
+    ]
+
     def _build_display_tab(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
 
         self._theme_combo = QComboBox()
         self._theme_combo.addItems(["dark", "light"])
-        self._theme_combo.setCurrentText(self._settings.theme)
         form.addRow("Theme:", self._theme_combo)
 
         # Font scale: multiplies every font-size (QSS + delegate paints +
         # inline stylesheets + icon sizes) so the user can comfortably
-        # nudge the whole UI up or down without touching individual
-        # widgets. The user's choice is persisted in QSettings under
-        # ``ui/font_scale``.
+        # nudge the whole UI up or down. Persisted under ``ui/font_scale``.
         self._font_scale_combo = QComboBox()
         for label, _value in self._FONT_SCALE_PRESETS:
             self._font_scale_combo.addItem(label)
-        current_idx = self._closest_font_scale_index(self._settings.font_scale)
-        self._font_scale_combo.setCurrentIndex(current_idx)
         form.addRow("Font scale:", self._font_scale_combo)
 
-        # Header brand artwork. "Default" = minimalist mark inverted on
-        # dark; "App icon" = full-color BIDS-Manager application icon.
+        # Header brand artwork.
         self._header_logo_combo = QComboBox()
         for label, _value in self._HEADER_LOGO_PRESETS:
             self._header_logo_combo.addItem(label)
-        self._header_logo_combo.setCurrentIndex(
-            self._header_logo_index(self._settings.header_logo)
-        )
         form.addRow("Header logo:", self._header_logo_combo)
 
         hint = QLabel(
@@ -116,11 +165,435 @@ class SettingsDialog(QDialog):
 
         return w
 
-    # Combo presets for the header brand mark.
-    _HEADER_LOGO_PRESETS: list[tuple[str, str]] = [
-        ("Default (monochrome mark)", "default"),
-        ("App icon (full color)",     "app_icon"),
-    ]
+    def _build_system_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        info = QGroupBox("System info (detected)")
+        form = QFormLayout(info)
+
+        threads = self._sys.logical_threads
+        cores = self._sys.physical_cores
+        cpu_txt = f"{threads} logical threads"
+        if cores:
+            cpu_txt += f"  /  {cores} physical cores"
+        form.addRow("CPU:", QLabel(cpu_txt))
+
+        ram_gib = self._sys.total_ram_gib
+        form.addRow(
+            "Memory:",
+            QLabel(f"{ram_gib:.1f} GiB total" if ram_gib is not None else "unknown"),
+        )
+
+        v.addWidget(info)
+
+        note = QLabel(
+            "Parallel-worker counts (Scan and Convert) are capped at the "
+            f"detected thread count ({threads}). Asking for more workers than "
+            "the machine has threads only adds scheduling overhead, so the "
+            "spinboxes will not go higher."
+        )
+        note.setStyleSheet("color: #8b949e;")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        v.addStretch(1)
+        return w
+
+    def _build_scan_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        defaults = QGroupBox("Scan defaults")
+        form = QFormLayout(defaults)
+
+        self._scan_jobs = QSpinBox()
+        self._scan_jobs.setRange(1, self._sys.logical_threads)
+        self._scan_jobs.setToolTip(
+            f"Capped at the detected thread count ({self._sys.logical_threads})."
+        )
+        form.addRow("Parallel workers (-j):", self._scan_jobs)
+
+        # EEG/MEG line frequency + montage are no longer scan settings: they
+        # are recording metadata, edited as dropdowns per recording in the
+        # inspection table (montage / line_freq columns) and dataset-wide in
+        # the "Recording metadata" editor. Free-text fields here would have
+        # been a second, inconsistent way to set the same values.
+
+        self._scan_probe = QCheckBox(
+            "Enable --probe-convert (run dcm2niix per series to enrich "
+            "naming with the actual file count + extensions)"
+        )
+        form.addRow("Probe:", self._scan_probe)
+
+        self._scan_skip_bids_guess = QCheckBox(
+            "Skip dcm2niix BidsGuess classifier (use only the legacy "
+            "regex fallback layer)"
+        )
+        form.addRow("Classifier:", self._scan_skip_bids_guess)
+
+        v.addWidget(defaults)
+        v.addStretch(1)
+        return w
+
+    # ------------------------------------------------------------------
+    # Scan rules tab (exclusions + user hints + read-only built-ins)
+    # ------------------------------------------------------------------
+
+    def _build_scan_rules_tab(self) -> QWidget:
+        # Valid BIDS datatypes for the hint dropdowns (derivatives excluded -
+        # user hints route to raw datatypes only).
+        self._valid_datatypes = sorted(
+            d for d in schema.list_datatypes() if d != "derivatives"
+        )
+
+        content = QWidget()
+        v = QVBoxLayout(content)
+
+        intro = QLabel(
+            "These rules apply to MRI / DICOM series, which are classified "
+            "from their SeriesDescription. EEG / MEG recordings are classified "
+            "by a different built-in method (mne channel types) and are NOT "
+            "affected by custom sequence hints. Path-based exclusions can still "
+            "skip any modality."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #8b949e;")
+        v.addWidget(intro)
+
+        # Exclusions.
+        excl_box = QGroupBox("Scan exclusions (skip matching series)")
+        ebl = QVBoxLayout(excl_box)
+        self._excl_table = QTableWidget(0, 3)
+        self._excl_table.setHorizontalHeaderLabels(["Pattern", "Match against", "Mode"])
+        self._excl_table.verticalHeader().setVisible(False)
+        self._excl_table.setMinimumHeight(130)
+        self._excl_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        ebl.addWidget(self._excl_table)
+        ebl.addLayout(self._rule_row_buttons(self._add_exclusion_row, self._excl_table))
+        v.addWidget(excl_box)
+
+        # User hints (MRI / DICOM only).
+        hint_box = QGroupBox("Custom sequence hints (MRI / DICOM only)")
+        hbl = QVBoxLayout(hint_box)
+        self._hint_table = QTableWidget(0, 6)
+        self._hint_table.setHorizontalHeaderLabels(
+            ["Patterns (comma-separated)", "Datatype", "Suffix", "Task", "Mode", "Force"]
+        )
+        self._hint_table.verticalHeader().setVisible(False)
+        self._hint_table.setMinimumHeight(150)
+        self._hint_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        hbl.addWidget(self._hint_table)
+        force_hint = QLabel(
+            "Datatype + suffix are chosen from the BIDS schema (no free text). "
+            "'Force' overrides even the dcm2niix classifier; otherwise a hint "
+            "only beats the built-in regex layer. 'Task' is the optional "
+            "task-<label> for func rows."
+        )
+        force_hint.setWordWrap(True)
+        force_hint.setStyleSheet("color: #8b949e;")
+        hbl.addWidget(force_hint)
+        hbl.addLayout(self._rule_row_buttons(self._add_hint_row, self._hint_table))
+        v.addWidget(hint_box)
+
+        # Read-only built-in criteria.
+        builtin_box = QGroupBox("Built-in MRI classifier criteria (read-only)")
+        bbl = QVBoxLayout(builtin_box)
+        builtin_note = QLabel(
+            "What the MRI classifier already matches. EEG / MEG do not use this "
+            "table - their datatype comes from mne channel types."
+        )
+        builtin_note.setWordWrap(True)
+        builtin_note.setStyleSheet("color: #8b949e;")
+        bbl.addWidget(builtin_note)
+        builtin = QTableWidget(0, 4)
+        builtin.setHorizontalHeaderLabels(
+            ["Label / group", "Datatype", "Suffix", "Match patterns"]
+        )
+        builtin.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        builtin.verticalHeader().setVisible(False)
+        builtin.setMinimumHeight(240)
+        builtin.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )
+        self._populate_builtin_criteria(builtin)
+        bbl.addWidget(builtin)
+        v.addWidget(builtin_box)
+        v.addStretch(1)
+
+        # Whole tab scrolls (not just the built-in table).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
+
+    def _rule_row_buttons(self, add_cb, table: QTableWidget) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        add = QPushButton("Add row")
+        add.clicked.connect(lambda: add_cb())
+        rem = QPushButton("Delete selected")
+        rem.clicked.connect(lambda: self._delete_selected_rows(table))
+        bar.addStretch(1)
+        bar.addWidget(add)
+        bar.addWidget(rem)
+        return bar
+
+    @staticmethod
+    def _delete_selected_rows(table: QTableWidget) -> None:
+        for r in sorted({i.row() for i in table.selectedIndexes()}, reverse=True):
+            table.removeRow(r)
+
+    def _add_exclusion_row(self, pattern: str = "", target: str = "sequence",
+                           mode: str = "substring") -> None:
+        t = self._excl_table
+        r = t.rowCount()
+        t.insertRow(r)
+        t.setItem(r, 0, QTableWidgetItem(pattern))
+        target_cb = QComboBox()
+        target_cb.addItems(list(user_rules.EXCLUSION_TARGETS))
+        target_cb.setCurrentText(target if target in user_rules.EXCLUSION_TARGETS else "sequence")
+        t.setCellWidget(r, 1, target_cb)
+        mode_cb = QComboBox()
+        mode_cb.addItems(list(user_rules.MATCH_MODES))
+        mode_cb.setCurrentText(mode if mode in user_rules.MATCH_MODES else "substring")
+        t.setCellWidget(r, 2, mode_cb)
+
+    def _add_hint_row(self, patterns: str = "", datatype: str = "", suffix: str = "",
+                      task: str = "", mode: str = "substring", force: bool = False) -> None:
+        t = self._hint_table
+        r = t.rowCount()
+        t.insertRow(r)
+        t.setItem(r, 0, QTableWidgetItem(patterns))
+
+        # Datatype + suffix are constrained dropdowns (no hand-typed labels).
+        # The suffix list depends on the chosen datatype, so it re-fills
+        # whenever the datatype changes.
+        dt_cb = QComboBox()
+        dt_cb.addItems(self._valid_datatypes)
+        suffix_cb = QComboBox()
+
+        def _refill_suffixes(dt: str) -> None:
+            suffix_cb.blockSignals(True)
+            suffix_cb.clear()
+            try:
+                suffix_cb.addItems(sorted(schema.list_suffixes(dt)))
+            except Exception:
+                pass
+            suffix_cb.blockSignals(False)
+
+        dt_cb.currentTextChanged.connect(_refill_suffixes)
+        if datatype in self._valid_datatypes:
+            dt_cb.setCurrentText(datatype)
+        _refill_suffixes(dt_cb.currentText())   # seed for the initial datatype
+        if suffix:
+            idx = suffix_cb.findText(suffix)
+            if idx >= 0:
+                suffix_cb.setCurrentIndex(idx)
+        t.setCellWidget(r, 1, dt_cb)
+        t.setCellWidget(r, 2, suffix_cb)
+
+        t.setItem(r, 3, QTableWidgetItem(task))
+        mode_cb = QComboBox()
+        mode_cb.addItems(list(user_rules.MATCH_MODES))
+        mode_cb.setCurrentText(mode if mode in user_rules.MATCH_MODES else "substring")
+        t.setCellWidget(r, 4, mode_cb)
+        force_item = QTableWidgetItem()
+        force_item.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+        )
+        force_item.setCheckState(Qt.CheckState.Checked if force else Qt.CheckState.Unchecked)
+        t.setItem(r, 5, force_item)
+
+    @staticmethod
+    def _populate_builtin_criteria(table: QTableWidget) -> None:
+        rows: list[tuple[str, str, str, str]] = []
+        for label, hint in sequence_dict.SEQUENCE_HINTS.items():
+            dt = hint.container_override or (hint.datatype or "")
+            rows.append((label, dt, hint.suffix or "", ", ".join(hint.patterns)))
+        for rgx, suffix, dt in sequence_dict._DWI_DERIVATIVE_PATTERNS:
+            rows.append(("dwi-derivative", dt, suffix, rgx))
+        for task_label, pats in sequence_dict.TASK_HINT_PATTERNS.items():
+            rows.append((f"task:{task_label}", "func", "(task entity)", ", ".join(pats)))
+        table.setRowCount(len(rows))
+        for r, cells in enumerate(rows):
+            for col, val in enumerate(cells):
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                table.setItem(r, col, it)
+
+    def _read_scan_rules(self) -> tuple[list[dict], list[dict], Optional[str]]:
+        """Read both editable tables into list[dict]. Returns
+        ``(hints, exclusions, error)`` - ``error`` non-None means a hint /
+        regex was invalid and the dialog must not save."""
+        # Exclusions.
+        exclusions: list[dict] = []
+        for r in range(self._excl_table.rowCount()):
+            item = self._excl_table.item(r, 0)
+            pattern = item.text().strip() if item else ""
+            if not pattern:
+                continue
+            mode = self._excl_table.cellWidget(r, 2).currentText()
+            if mode == "regex":
+                err = user_rules.validate_regex(pattern)
+                if err:
+                    return [], [], f"Exclusion regex {pattern!r} is invalid: {err}"
+            exclusions.append({
+                "pattern": pattern,
+                "target": self._excl_table.cellWidget(r, 1).currentText(),
+                "match_mode": mode,
+            })
+
+        # Hints.
+        hints: list[dict] = []
+        valid_datatypes = schema.list_datatypes()
+        for r in range(self._hint_table.rowCount()):
+            pat_item = self._hint_table.item(r, 0)
+            patterns = [p.strip() for p in (pat_item.text() if pat_item else "").split(",") if p.strip()]
+            if not patterns:
+                continue
+            # Datatype + suffix come from constrained dropdowns.
+            datatype = self._hint_table.cellWidget(r, 1).currentText().strip()
+            suffix = self._hint_table.cellWidget(r, 2).currentText().strip()
+            task = (self._hint_table.item(r, 3).text().strip() if self._hint_table.item(r, 3) else "")
+            mode = self._hint_table.cellWidget(r, 4).currentText()
+            force_item = self._hint_table.item(r, 5)
+            force = bool(force_item and force_item.checkState() == Qt.CheckState.Checked)
+
+            if not datatype or not suffix:
+                return [], [], f"Hint for {patterns!r} needs both a datatype and a suffix."
+            if datatype == "derivatives" or datatype not in valid_datatypes:
+                return [], [], (
+                    f"Hint datatype {datatype!r} is not a valid BIDS datatype. "
+                    f"Choose one of: {', '.join(sorted(valid_datatypes))}."
+                )
+            if suffix not in schema.list_suffixes(datatype):
+                return [], [], (
+                    f"Suffix {suffix!r} is not valid for datatype {datatype!r}."
+                )
+            if mode == "regex":
+                for p in patterns:
+                    err = user_rules.validate_regex(p)
+                    if err:
+                        return [], [], f"Hint regex {p!r} is invalid: {err}"
+            hints.append({
+                "patterns": patterns,
+                "datatype": datatype,
+                "suffix": suffix,
+                "task": task,
+                "entities": {},
+                "match_mode": mode,
+                "force": force,
+            })
+        return hints, exclusions, None
+
+    def _build_convert_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        convert = QGroupBox("Convert defaults")
+        form = QFormLayout(convert)
+
+        self._convert_jobs = QSpinBox()
+        self._convert_jobs.setRange(1, self._sys.logical_threads)
+        self._convert_jobs.setToolTip(
+            f"Capped at the detected thread count ({self._sys.logical_threads})."
+        )
+        form.addRow("Parallel workers (-j):", self._convert_jobs)
+
+        # Policy for a subject that already exists in the dataset (incremental
+        # conversion). New sessions/datatypes always merge in; this governs
+        # files that collide with existing ones. Replaces the old overwrite
+        # checkbox (which mapped only to "replace").
+        self._convert_on_existing = QComboBox()
+        for value, label in (
+            ("skip",    "Skip: keep existing files, add only new (safe default)"),
+            ("update",  "Update: replace only files whose content changed"),
+            ("replace", "Replace: back up and replace colliding files"),
+            ("error",   "Error: abort a subject if any file would be overwritten"),
+        ):
+            self._convert_on_existing.addItem(label, userData=value)
+        self._convert_on_existing.setToolTip(
+            "What to do when a subject already exists in the dataset. Adding a "
+            "new session or datatype always merges in; this only governs files "
+            "that collide with existing ones. Existing data is never lost on the "
+            "default (Skip)."
+        )
+        form.addRow("Existing subjects:", self._convert_on_existing)
+
+        self._convert_skip_residuals = QCheckBox(
+            "Skip residual volumes (drop dcm2niix secondary duplicates such "
+            "as ..._bolda / _Eq_ / _ROI that are not real images)"
+        )
+        self._convert_skip_residuals.setToolTip(
+            "dcm2niix splits a single input series into the real image plus "
+            "derived single-volume duplicates it names ..._bolda, ..._Eq_1, "
+            "etc. These have no valid BIDS suffix. Recommended: on."
+        )
+        form.addRow("Residuals:", self._convert_skip_residuals)
+
+        self._convert_force_edf = QCheckBox(
+            "Force EDF for EEG / iEEG (re-encode recordings to EDF on convert)"
+        )
+        self._convert_force_edf.setToolTip(
+            "Re-encode EEG / iEEG recordings to EDF instead of keeping the "
+            "source format. Harmonises a study to one BIDS-native format, and "
+            "makes a non-BIDS-native but mne-readable source (GDF, EGI, ...) "
+            "convertible. MEG / NIRS are unaffected."
+        )
+        form.addRow("Force EDF:", self._convert_force_edf)
+
+        v.addWidget(convert)
+
+        # Post-convert chain laid out as an indented hierarchy: each step is
+        # a parent checkbox; its sub-options sit indented beneath and are
+        # enabled only while the parent is on.
+        post = QGroupBox("Post-convert chain (run after every conversion)")
+        pv = QVBoxLayout(post)
+        pv.setSpacing(4)
+
+        self._post_run_metadata = QCheckBox(
+            "Generate metadata (dataset_description, participants.tsv, "
+            "*_scans.tsv, sidecar audit)"
+        )
+        pv.addWidget(self._post_run_metadata)
+        self._post_metadata_fill_todos = QCheckBox(
+            "Insert 'TODO' placeholders for missing recommended fields"
+        )
+        pv.addWidget(_indented(self._post_metadata_fill_todos))
+
+        self._post_run_validate = QCheckBox(
+            "Validate dataset (schema + bidsschematools structural)"
+        )
+        pv.addWidget(self._post_run_validate)
+        self._post_validate_strict = QCheckBox(
+            "Strict: treat warnings as errors (--strict)"
+        )
+        self._post_validate_html = QCheckBox(
+            "Write a self-contained validation_report.html (--html)"
+        )
+        pv.addWidget(_indented(self._post_validate_strict))
+        pv.addWidget(_indented(self._post_validate_html))
+
+        _bind_children(self._post_run_metadata, self._post_metadata_fill_todos)
+        _bind_children(
+            self._post_run_validate,
+            self._post_validate_strict,
+            self._post_validate_html,
+        )
+
+        v.addWidget(post)
+        v.addStretch(1)
+        return w
+
+    # ------------------------------------------------------------------
+    # Widget <-> settings
+    # ------------------------------------------------------------------
 
     @classmethod
     def _header_logo_index(cls, value: str) -> int:
@@ -131,12 +604,7 @@ class SettingsDialog(QDialog):
 
     @classmethod
     def _closest_font_scale_index(cls, value: float) -> int:
-        """Return the preset index whose multiplier is nearest *value*.
-
-        Lets us round-trip an arbitrary persisted float (e.g. a hand-
-        edited QSettings value) back to the nearest combo entry without
-        rejecting it.
-        """
+        """Return the preset index whose multiplier is nearest *value*."""
         try:
             return min(
                 range(len(cls._FONT_SCALE_PRESETS)),
@@ -145,116 +613,78 @@ class SettingsDialog(QDialog):
         except Exception:
             return 1  # "Normal"
 
-    def _build_scan_tab(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
+    def _load_into_widgets(self, s: AppSettings) -> None:
+        """Push every value from ``s`` into the dialog's widgets.
 
-        # Defaults group.
-        defaults = QGroupBox("Scan defaults")
-        form = QFormLayout(defaults)
+        Used both on open (with the live settings) and by "Restore
+        defaults" (with a fresh ``AppSettings()``), so the two paths can
+        never drift. Worker counts are clamped to the detected thread cap.
+        """
+        cap = self._sys.logical_threads
 
-        self._scan_jobs = QSpinBox()
-        self._scan_jobs.setRange(1, 64)
-        self._scan_jobs.setValue(self._settings.scan_n_jobs)
-        form.addRow("Parallel workers (-j):", self._scan_jobs)
-
-        self._scan_dataset = QLineEdit()
-        self._scan_dataset.setText(self._settings.dataset_slug)
-        self._scan_dataset.setPlaceholderText("(auto-derive from raw folder name)")
-        form.addRow("Default dataset slug:", self._scan_dataset)
-
-        self._scan_line_freq = QDoubleSpinBox()
-        self._scan_line_freq.setRange(0.0, 100.0)
-        self._scan_line_freq.setDecimals(1)
-        self._scan_line_freq.setSingleStep(1.0)
-        self._scan_line_freq.setValue(self._settings.scan_line_freq)
-        form.addRow("EEG/MEG line frequency (Hz):", self._scan_line_freq)
-
-        self._scan_montage = QLineEdit()
-        self._scan_montage.setText(self._settings.scan_montage)
-        self._scan_montage.setPlaceholderText("e.g. standard_1005, biosemi64")
-        form.addRow("EEG/MEG montage:", self._scan_montage)
-
-        self._scan_probe = QCheckBox(
-            "Enable --probe-convert (run dcm2niix per series to enrich "
-            "naming with the actual file count + extensions)"
+        self._theme_combo.setCurrentText(s.theme)
+        self._font_scale_combo.setCurrentIndex(
+            self._closest_font_scale_index(s.font_scale)
         )
-        self._scan_probe.setChecked(self._settings.scan_probe_convert)
-        form.addRow("Probe:", self._scan_probe)
-
-        self._scan_skip_bids_guess = QCheckBox(
-            "Skip dcm2niix BidsGuess classifier (use only the legacy "
-            "regex fallback layer)"
+        self._header_logo_combo.setCurrentIndex(
+            self._header_logo_index(s.header_logo)
         )
-        self._scan_skip_bids_guess.setChecked(self._settings.scan_skip_bids_guess)
-        form.addRow("Classifier:", self._scan_skip_bids_guess)
 
-        v.addWidget(defaults)
-        v.addStretch(1)
-        return w
+        self._scan_jobs.setValue(max(1, min(s.scan_n_jobs, cap)))
+        self._scan_probe.setChecked(s.scan_probe_convert)
+        self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
 
-    def _build_convert_tab(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
+        self._convert_jobs.setValue(max(1, min(s.convert_n_jobs, cap)))
+        idx = self._convert_on_existing.findData(s.convert_on_existing)
+        self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
+        self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
+        self._convert_force_edf.setChecked(s.convert_force_edf)
 
-        convert = QGroupBox("Convert defaults")
-        form = QFormLayout(convert)
-        self._convert_jobs = QSpinBox()
-        self._convert_jobs.setRange(1, 64)
-        self._convert_jobs.setValue(self._settings.convert_n_jobs)
-        form.addRow("Parallel workers (-j):", self._convert_jobs)
+        self._post_run_metadata.setChecked(s.post_run_metadata)
+        self._post_metadata_fill_todos.setChecked(s.post_metadata_fill_todos)
+        self._post_run_validate.setChecked(s.post_run_validate)
+        self._post_validate_strict.setChecked(s.post_validate_strict)
+        self._post_validate_html.setChecked(s.post_validate_html)
 
-        self._convert_overwrite = QCheckBox(
-            "Overwrite existing subjects in the BIDS output (otherwise "
-            "the convert verb refuses to clobber)"
-        )
-        self._convert_overwrite.setChecked(self._settings.convert_overwrite)
-        form.addRow("Overwrite:", self._convert_overwrite)
+        # Scan rules: rebuild both editable tables from the persisted lists
+        # (clear first so Restore-defaults empties them).
+        self._excl_table.setRowCount(0)
+        for e in s.scan_exclusions:
+            self._add_exclusion_row(
+                pattern=str(e.get("pattern", "")),
+                target=str(e.get("target", "sequence")),
+                mode=str(e.get("match_mode", "substring")),
+            )
+        self._hint_table.setRowCount(0)
+        for h in s.user_hints:
+            pats = h.get("patterns", [])
+            if isinstance(pats, str):
+                pats = [pats]
+            self._add_hint_row(
+                patterns=", ".join(str(p) for p in pats),
+                datatype=str(h.get("datatype", "")),
+                suffix=str(h.get("suffix", "")),
+                task=str(h.get("task", "") or ""),
+                mode=str(h.get("match_mode", "substring")),
+                force=bool(h.get("force", False)),
+            )
 
-        v.addWidget(convert)
+    def _on_restore_defaults(self) -> None:
+        """Reset all widgets to the AppSettings field defaults (not saved
+        until the user clicks Save)."""
+        self._load_into_widgets(AppSettings())
 
-        # Post-convert chain.
-        post = QGroupBox("Post-convert chain (run after every conversion)")
-        pform = QFormLayout(post)
-
-        self._post_run_metadata = QCheckBox(
-            "Run bidsmgr-metadata (writes dataset_description, "
-            "participants.tsv, *_scans.tsv, sidecar audit)"
-        )
-        self._post_run_metadata.setChecked(self._settings.post_run_metadata)
-        pform.addRow(self._post_run_metadata)
-
-        self._post_metadata_fill_todos = QCheckBox(
-            "  └ insert 'TODO' placeholders for missing recommended fields"
-        )
-        self._post_metadata_fill_todos.setChecked(self._settings.post_metadata_fill_todos)
-        pform.addRow(self._post_metadata_fill_todos)
-
-        self._post_run_validate = QCheckBox(
-            "Run bidsmgr-validate (schema + bidsschematools structural)"
-        )
-        self._post_run_validate.setChecked(self._settings.post_run_validate)
-        pform.addRow(self._post_run_validate)
-
-        self._post_validate_strict = QCheckBox(
-            "  └ --strict (warnings → errors)"
-        )
-        self._post_validate_strict.setChecked(self._settings.post_validate_strict)
-        pform.addRow(self._post_validate_strict)
-
-        self._post_validate_html = QCheckBox(
-            "  └ --html (write self-contained validation_report.html)"
-        )
-        self._post_validate_html.setChecked(self._settings.post_validate_html)
-        pform.addRow(self._post_validate_html)
-
-        v.addWidget(post)
-        v.addStretch(1)
-        return w
-
-    # ------------------------------------------------------------------
     def _on_save(self) -> None:
+        # Validate the scan rules first so an invalid hint blocks the save
+        # without losing the user's other edits.
+        hints, exclusions, error = self._read_scan_rules()
+        if error:
+            QMessageBox.warning(self, "Invalid scan rule", error)
+            return
+
         s = self._settings
+        s.user_hints = hints
+        s.scan_exclusions = exclusions
         s.theme = self._theme_combo.currentText()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()
@@ -264,14 +694,15 @@ class SettingsDialog(QDialog):
         ][1]
 
         s.scan_n_jobs = self._scan_jobs.value()
-        s.dataset_slug = self._scan_dataset.text().strip()
-        s.scan_line_freq = self._scan_line_freq.value()
-        s.scan_montage = self._scan_montage.text().strip()
         s.scan_probe_convert = self._scan_probe.isChecked()
         s.scan_skip_bids_guess = self._scan_skip_bids_guess.isChecked()
 
         s.convert_n_jobs = self._convert_jobs.value()
-        s.convert_overwrite = self._convert_overwrite.isChecked()
+        s.convert_on_existing = self._convert_on_existing.currentData() or "skip"
+        # Keep the legacy flag in sync for any old reader.
+        s.convert_overwrite = (s.convert_on_existing == "replace")
+        s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
+        s.convert_force_edf = self._convert_force_edf.isChecked()
 
         s.post_run_metadata = self._post_run_metadata.isChecked()
         s.post_metadata_fill_todos = self._post_metadata_fill_todos.isChecked()

@@ -77,8 +77,13 @@ class _FileCard(QFrame):
         self._title_btn.setObjectName("issue-card-title")
         self._title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._title_btn.setFlat(True)
+        self._title_btn.setToolTip(title_text)
+        # Ignored horizontal policy: a long path must not force the dialog
+        # wide. The button clips to the available width (full path stays in
+        # the tooltip) so the chips dialog stays compact.
+        self._title_btn.setMinimumWidth(40)
         self._title_btn.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
         )
         self._title_btn.clicked.connect(
             lambda: self.activated.emit(self._path)
@@ -149,7 +154,8 @@ class EditorIssuesDialog(QDialog):
         self.setWindowTitle(
             f"{title} · {count} file{'s' if count != 1 else ''}"
         )
-        self.resize(700, 640)
+        self.resize(560, 620)
+        self.setMinimumWidth(360)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

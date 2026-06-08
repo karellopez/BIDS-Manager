@@ -202,6 +202,90 @@ def test_set_root_none_clears(qapp, bids_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Live refresh (parity with the Converter's output tree)
+# ---------------------------------------------------------------------------
+
+
+def _find_item(tree, label: str):
+    found = []
+
+    def visit(item) -> None:
+        if item.text(0) == label:
+            found.append(item)
+        for i in range(item.childCount()):
+            visit(item.child(i))
+
+    for i in range(tree.topLevelItemCount()):
+        visit(tree.topLevelItem(i))
+    return found[0] if found else None
+
+
+def test_refresh_picks_up_new_files(qapp, bids_root: Path) -> None:
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+    assert _find_item(pane._tree, "sub-01_ses-01_bold.nii.gz") is None
+
+    # A new file lands on disk (e.g. a conversion writing into the open root).
+    func = bids_root / "sub-01" / "ses-01" / "func"
+    func.mkdir(parents=True)
+    (func / "sub-01_ses-01_bold.nii.gz").write_bytes(b"")
+    pane.refresh()
+
+    assert _find_item(pane._tree, "sub-01_ses-01_bold.nii.gz") is not None
+
+
+def test_refresh_preserves_expansion_and_selection(qapp, bids_root: Path) -> None:
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+
+    # Collapse the root, then expand + select a deep row.
+    pane._tree.topLevelItem(0).setExpanded(False)
+    target = _find_item(pane._tree, "anat")
+    assert target is not None
+    target.setExpanded(True)
+    json_item = _find_item(pane._tree, "sub-01_ses-01_T1w.json")
+    pane._tree.setCurrentItem(json_item)
+
+    # A live refresh must not collapse the user's view or drop the selection.
+    pane.refresh()
+
+    assert not pane._tree.topLevelItem(0).isExpanded()  # root stays collapsed
+    assert _find_item(pane._tree, "anat").isExpanded()
+    cur = pane._tree.currentItem()
+    assert cur is not None and cur.text(0) == "sub-01_ses-01_T1w.json"
+
+
+def test_set_root_same_path_preserves_view(qapp, bids_root: Path) -> None:
+    """Re-setting the already-open root must not collapse the user's view
+    (it routes through refresh), mirroring the output tree."""
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+    # Collapse the root the user opened.
+    pane._tree.topLevelItem(0).setExpanded(False)
+    anat = _find_item(pane._tree, "anat")
+    anat.setExpanded(True)
+
+    pane.set_root(bids_root)  # same path -> preserve, not reset
+
+    assert not pane._tree.topLevelItem(0).isExpanded()
+    assert _find_item(pane._tree, "anat").isExpanded()
+
+
+def test_refresh_reapplies_badges(qapp, bids_root: Path) -> None:
+    from bidsmgr.gui.delegates.bids_tree import BADGE_ROLE
+
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+    json_path = bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
+    pane.set_badges({json_path: "err"})
+    assert _find_item(pane._tree, "sub-01_ses-01_T1w.json").data(0, BADGE_ROLE) == "err"
+
+    # Live refresh rebuilds the items; the cached badge must survive.
+    pane.refresh()
+    assert _find_item(pane._tree, "sub-01_ses-01_T1w.json").data(0, BADGE_ROLE) == "err"
+
+
+# ---------------------------------------------------------------------------
 # EditorPanel
 # ---------------------------------------------------------------------------
 

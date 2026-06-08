@@ -17,7 +17,9 @@ from .bids_tree_pane import BidsTreePane
 from .image_label import ImageLabel
 from .json_tree_view import JsonTreeView
 from .nifti_viewer_pane import NiftiViewerPane
+from .panel_frame import PanelFrame
 from .primitives import Chip, PaneHeader, PathBar, VSep
+from .recording_viewer_pane import RecordingViewerPane, is_recording_path
 from .sidecar_form_pane import SidecarFormPane, find_peer_files
 from .sidecar_row import SidecarRow
 from .tsv_viewer_pane import TsvViewerPane
@@ -43,12 +45,15 @@ __all__ = [
     "KIND_FG_TOKEN",
     "NiftiViewerPane",
     "PaneHeader",
+    "PanelFrame",
     "PathBar",
+    "RecordingViewerPane",
     "SidecarFormPane",
     "SidecarRow",
     "TsvViewerPane",
     "ValidationPane",
     "find_peer_files",
+    "is_recording_path",
     "StatusBadge",
     "ValMessage",
     "VSep",

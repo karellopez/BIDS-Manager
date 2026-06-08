@@ -23,6 +23,7 @@ long as series UIDs don't change.
 from __future__ import annotations
 
 import logging
+import threading
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -59,13 +60,17 @@ class ConvertWorker(QThread):
     bids_parent
         Destination parent dir; ``run_convert`` creates one
         ``<bids_parent>/<dataset>/`` per dataset slug.
-    n_jobs, overwrite, dry_run, line_freq, montage
+    n_jobs, overwrite, dry_run, recording_meta
         Pass-through to the CLI verb's keyword args.
     """
 
     progress = pyqtSignal(str)
     finished_with_result = pyqtSignal(int, object)
     failed = pyqtSignal(str)
+    # Emitted when the run stopped because the user clicked Stop. Subjects
+    # committed before the stop remain on disk; the in-flight subject (if
+    # any) is wiped from staging and not committed.
+    stopped = pyqtSignal()
 
     def __init__(
         self,
@@ -75,10 +80,12 @@ class ConvertWorker(QThread):
         *,
         n_jobs: int = 1,
         overwrite: bool = False,
+        on_existing: Optional[str] = None,
         dry_run: bool = False,
-        line_freq: Optional[float] = 50.0,
-        montage: Optional[str] = None,
+        recording_meta: Optional[Path] = None,
         raw_root: Optional[Path] = None,
+        skip_residuals: bool = True,
+        force_edf: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -87,10 +94,21 @@ class ConvertWorker(QThread):
         self._bids_parent = Path(bids_parent)
         self._n_jobs = n_jobs
         self._overwrite = overwrite
+        self._on_existing = on_existing
         self._dry_run = dry_run
-        self._line_freq = line_freq
-        self._montage = montage
+        self._recording_meta = Path(recording_meta) if recording_meta is not None else None
         self._raw_root = Path(raw_root) if raw_root is not None else None
+        self._skip_residuals = skip_residuals
+        self._force_edf = force_edf
+        # Cooperative stop flag, polled by ``run_convert`` between subjects
+        # and between per-subject tasks.
+        self._stop = threading.Event()
+
+    def request_stop(self) -> None:
+        """Ask the in-flight conversion to stop at the next subject / task
+        boundary. Thread-safe. Already-committed subjects stay; the
+        in-flight subject is not committed."""
+        self._stop.set()
 
     def run(self) -> None:
         from ..cli.convert import run_convert  # see scan worker comment
@@ -117,11 +135,19 @@ class ConvertWorker(QThread):
                 self._bids_parent,
                 n_jobs=self._n_jobs,
                 overwrite=self._overwrite,
+                on_existing=self._on_existing,
                 dry_run=self._dry_run,
-                line_freq=self._line_freq,
-                montage=self._montage,
+                recording_meta=self._recording_meta,
                 raw_root=self._raw_root,
+                skip_residuals=self._skip_residuals,
+                force_edf=self._force_edf,
+                cancel_check=self._stop.is_set,
             )
+            if rc == 130 or self._stop.is_set():
+                # 130 = run_convert's "stopped before all subjects" code.
+                self.progress.emit("Conversion stopped by user")
+                self.stopped.emit()
+                return
             verdict = "completed" if rc == 0 else f"completed with {rc} subject failure(s)"
             self.progress.emit(f"Conversion {verdict}")
             self.finished_with_result.emit(rc, self._bids_parent)

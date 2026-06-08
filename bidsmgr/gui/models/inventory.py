@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
 
 from ... import schema as schema_mod
 from ...inventory.rebuild import rebuild_from_columns, rebuild_from_entities
@@ -45,9 +45,86 @@ from ...project import (
     UserToggleInclude,
 )
 from ...project.types import ProjectState
-from ..delegates import HIGHLIGHT_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
+from ...recording_meta import AcquisitionSpec, RecordingMetaSpec
+from ..delegates import HIGHLIGHT_ROLE, INHERITED_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
 
 log = logging.getLogger(__name__)
+
+# Per-row columns whose value inherits from the dataset-wide recording-metadata
+# default when the cell is blank. Maps the TSV/df column -> the attribute on
+# ``RecordingMetaSpec.defaults`` that supplies the default. Editing a cell to a
+# value equal to the default clears it back to "inherited".
+_INHERITANCE_FIELDS: dict[str, str] = {
+    "line_freq": "power_line_freq",
+    "montage": "montage",
+    "eeg_reference": "eeg_reference",
+    "eeg_ground": "eeg_ground",
+}
+
+# Per-row recording-acquisition fields that live in the recording-metadata
+# scaffold's ``overrides[row_id]`` block rather than a TSV column (the convert
+# step's ``resolve_effective`` already layers them over the dataset defaults and
+# the enrichment fixup writes them into the EEG/MEG sidecar). These are the
+# device / institution values that can differ between subjects but are too
+# low-frequency to warrant a spreadsheet column. Maps the panel key -> the
+# attribute on ``AcquisitionSpec``. A blank override inherits the dataset
+# default; setting a value equal to the default clears the override.
+# Device fields are modality-specific (the EEG amplifier and the MEG system are
+# different devices); institution is agnostic and lives at dataset level in the
+# Dataset-metadata dialog, NOT here. MEG fields are only the ones mne-bids
+# cannot derive. All are string-valued.
+_ACQ_OVERRIDE_FIELDS: dict[str, str] = {
+    "manufacturer": "manufacturer",
+    "amplifier_model": "amplifier_model",
+    "software_versions": "software_versions",
+    "cap_manufacturer": "cap_manufacturer",
+    # MEG-specific (manual only)
+    "dewar_position": "dewar_position",
+    "associated_empty_room": "associated_empty_room",
+    "subject_artefact_description": "subject_artefact_description",
+}
+
+
+# ---------------------------------------------------------------------------
+# Live entity-validation (re-runs on every user edit)
+# ---------------------------------------------------------------------------
+#
+# ``proposed_issues`` carries two kinds of note. *Static* notes describe the
+# source and cannot change once scanned (suspected_abort, B0 reroute, fmap
+# multi-output, non-image series, user-excluded, mixed-study / collision
+# hints). *Managed* notes are the schema entity-validation issues derived from
+# (entities, datatype, suffix); these DO change when the user edits a row, so
+# the model recomputes them on every edit and splices them back in, leaving the
+# static notes untouched. That keeps the valid / warning / error chips live.
+
+# Prefixes (the part before ``": "``) of a managed entity-validation issue.
+# Mirror ``schema.validate_entity_set`` rule_ids plus the scan's
+# ``build_basename: <exc>`` note. Kept narrow so a static note never matches.
+_MANAGED_ISSUE_PREFIXES: tuple[str, ...] = (
+    "datatype.",
+    "suffix.",
+    "entity.",
+    "basename.",
+    "build_basename",
+)
+# Managed notes that carry no ``": "`` separator.
+_MANAGED_ISSUE_EXACT: frozenset[str] = frozenset({"BIDS_name missing"})
+
+# Sentinel values the scan inserts for a missing required entity (see
+# ``cli/scan._placeholder_for_entity``). Live validation treats them as still
+# missing so a freshly-scanned row stays flagged until the user supplies a real
+# value, and reverts to valid the moment they do.
+_ENTITY_PLACEHOLDERS: dict[str, str] = {"task": "TASK", "subject": "TBD"}
+_DEFAULT_PLACEHOLDER = "TBD"
+
+
+def _is_managed_issue(token: str) -> bool:
+    """True when ``token`` is a recomputable entity-validation issue."""
+    t = token.strip()
+    if t in _MANAGED_ISSUE_EXACT:
+        return True
+    head = t.split(":", 1)[0].strip()
+    return head.startswith(_MANAGED_ISSUE_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +163,10 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("status",    "",                       "status",   False, 28),
     ColumnSpec("id",        "id",                     "mono",     False, 50, df_column="BIDS_name"),
     # Default-visible curated set.
-    ColumnSpec("dataset",   "dataset",                "plain",    True,  100, df_column="dataset"),
+    # Read-only: the dataset name is owned by the project (the locked output
+    # folder). Editing it by hand would point conversion at the wrong folder,
+    # so it is informative only and excluded from bulk edits.
+    ColumnSpec("dataset",   "dataset",                "plain",    False, 100, df_column="dataset"),
     ColumnSpec("ses",       "ses",                    "mono",     True,  50, df_column="session"),
     ColumnSpec("mod",       "mod",                    "plain",    False, 38, df_column="modality"),
     ColumnSpec("datatype",  "data",                   "plain",    True,  50, df_column="proposed_datatype"),
@@ -103,16 +183,21 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("acq_time",     "acq_time",    "mono",  False, 80,  df_column="acq_time",    default_visible=False),
     ColumnSpec("image_type",   "image_type",  "mono",  False, 120, df_column="image_type",  default_visible=False),
     ColumnSpec("study_date",   "study_date",  "mono",  False, 90,  df_column="study_date",  default_visible=False),
+    ColumnSpec("StudyDescription", "study name", "plain", False, 160, df_column="StudyDescription", default_visible=False),
     ColumnSpec("PatientID",    "PatientID",   "mono",  False, 100, df_column="PatientID",   default_visible=False),
     ColumnSpec("GivenName",    "GivenName",   "plain", False, 100, df_column="GivenName",   default_visible=False),
     ColumnSpec("FamilyName",   "FamilyName",  "plain", False, 100, df_column="FamilyName",  default_visible=False),
-    ColumnSpec("PatientSex",   "sex",         "mono",  False, 40,  df_column="PatientSex",  default_visible=False),
-    ColumnSpec("PatientAge",   "age",         "mono",  False, 50,  df_column="PatientAge",  default_visible=False),
+    ColumnSpec("PatientSex",   "sex",         "mono",  True,  40,  df_column="PatientSex",  default_visible=False),
+    ColumnSpec("PatientAge",   "age",         "mono",  True,  50,  df_column="PatientAge",  default_visible=False),
+    ColumnSpec("Handedness",   "hand",        "mono",  True,  50,  df_column="Handedness",  default_visible=False),
     ColumnSpec("n_channels",   "n_chan",      "mono",  False, 60,  df_column="n_channels",  default_visible=False),
     ColumnSpec("sfreq",        "sfreq",       "mono",  False, 70,  df_column="sfreq",       default_visible=False),
     ColumnSpec("duration_sec", "duration",    "mono",  False, 70,  df_column="duration_sec", default_visible=False),
     ColumnSpec("line_freq",    "line_freq",   "mono",  True,  60,  df_column="line_freq",   default_visible=False),
     ColumnSpec("montage",      "montage",     "plain", True,  100, df_column="montage",     default_visible=False),
+    ColumnSpec("eeg_reference","reference",   "plain", True,  90,  df_column="eeg_reference", default_visible=False),
+    ColumnSpec("eeg_ground",   "ground",      "plain", True,  90,  df_column="eeg_ground",  default_visible=False),
+    ColumnSpec("companion_files","companion", "plain", True,  140, df_column="companion_files", default_visible=False),
     ColumnSpec("probe_n_nifti","probe_nifti", "mono",  False, 80,  df_column="probe_n_nifti", default_visible=False),
     ColumnSpec("probe_n_vols", "probe_vols",  "mono",  False, 70,  df_column="probe_n_volumes", default_visible=False),
     ColumnSpec("repetition_type","repetition","plain", False, 110, df_column="repetition_type", default_visible=False),
@@ -121,6 +206,51 @@ COLUMNS: tuple[ColumnSpec, ...] = (
 
 # Columns the user cannot hide (lose them and rows become unidentifiable).
 MANDATORY_COLUMN_KEYS: frozenset[str] = frozenset({"include", "status", "id"})
+
+
+# Plain-language description per column, surfaced in the "Manage columns"
+# dialog so a non-technical user understands what each one means. Keyed by
+# ``ColumnSpec.key``.
+COLUMN_DESCRIPTIONS: dict[str, str] = {
+    "include":   "Whether this row is converted. Untick to skip the series.",
+    "status":    "At-a-glance state badge: ok, warning, error, skipped, non-image, or physio.",
+    "id":        "Subject label (sub-XXX) the row converts under.",
+    "dataset":   "BIDS dataset slug. Rows with different datasets become sibling BIDS roots.",
+    "ses":       "Session label (ses-XXX). Blank when the study has no sessions.",
+    "mod":       "Detected modality (mri, eeg, meg, physio, ...).",
+    "datatype":  "BIDS datatype folder the row lands in (anat, func, dwi, fmap, eeg, ...).",
+    "suffix":    "BIDS suffix (T1w, bold, dwi, physio, ...).",
+    "task":      "Task entity (task-XXX) for func / eeg / meg rows.",
+    "run":       "Run index (run-N) when a series was repeated.",
+    "conf":      "Classifier confidence (0-1) for the predicted datatype + suffix.",
+    "sequence":  "Scanner sequence name / source description used for classification.",
+    "basename":  "Full predicted BIDS filename (without extension).",
+    "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, or bidsphysio.",
+    "source_file": "Source recording path (EEG / MEG). Blank for DICOM rows.",
+    "n_files":   "Number of source files in the series.",
+    "acq_time":  "Acquisition time from the DICOM / recording header.",
+    "image_type": "DICOM ImageType (ORIGINAL / DERIVED, MAGNITUDE / PHASE, ...).",
+    "study_date": "Study date, used to cluster longitudinal sessions.",
+    "StudyDescription": "DICOM StudyDescription (the study / protocol name). Read-only, MRI only. Not a BIDS entity; shown for awareness. Multiple distinct values in one scan raise a warning.",
+    "PatientID": "DICOM PatientID, a key part of subject identity.",
+    "GivenName": "Patient given name from the header.",
+    "FamilyName": "Patient family name from the header.",
+    "PatientSex": "Participant sex (M/F/O). Seeded from the header; editable; written to participants.tsv.",
+    "PatientAge": "Participant age in years. Seeded from the header; editable; written to participants.tsv.",
+    "Handedness": "Participant handedness (R/L/A). Seeded from the recording header; editable.",
+    "n_channels": "EEG / MEG channel count.",
+    "sfreq":     "Sampling frequency (Hz) of the recording.",
+    "duration_sec": "Recording duration in seconds.",
+    "line_freq": "Power-line frequency (Hz) written to the sidecar. Dropdown (50 / 60); blank uses the dataset default.",
+    "montage":   "EEG / MEG montage applied on conversion. Dropdown of MNE built-in montages; blank leaves positions as-is.",
+    "eeg_reference": "Per-row EEG/iEEG reference electrode override (e.g. Cz). Blank uses the dataset default.",
+    "eeg_ground":    "Per-row EEG/iEEG ground electrode override. Blank uses the dataset default.",
+    "companion_files": "Already-curated companion files (events / beh / stim) linked to this row and copied into BIDS on convert. Edit via the Properties panel.",
+    "probe_n_nifti": "NIfTI files dcm2niix actually produced in a --probe-convert run.",
+    "probe_n_vols":  "Volumes dcm2niix actually produced in a --probe-convert run.",
+    "repetition_type": "Repeat classification, e.g. suspected_abort (operator restart).",
+    "proposed_issues": "Scanner-detected notes: non-image series, B0 reroute, missing entity, ...",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +276,16 @@ class InventoryTableModel(QAbstractTableModel):
 
     COLUMNS: tuple[ColumnSpec, ...] = COLUMNS
 
+    # Emitted when a per-row acquisition override changes (set/cleared via
+    # :meth:`set_acq_override`). The controller (ConverterPanel) listens and
+    # persists the recording-metadata scaffold to disk so the convert verb,
+    # which reloads it, sees the edit.
+    recordingSpecChanged = pyqtSignal()
+    # Emitted whenever the user makes a curation edit (cell / entity / include).
+    # The converter uses it to invalidate its redo stack: a fresh edit diverges
+    # the timeline, so previously-undone edits can no longer be redone.
+    userEdited = pyqtSignal()
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -155,9 +295,36 @@ class InventoryTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._df: pd.DataFrame = df.reset_index(drop=True).copy()
         self._project: Optional[Project] = project
+        # Dataset-wide recording-metadata defaults. Per-row cells in the
+        # inheritance fields show this value (muted) when blank; set via
+        # :meth:`set_global_spec` when the scan scaffold loads / the dataset
+        # metadata dialog saves.
+        self._global_spec: Optional[RecordingMetaSpec] = None
+
+        # Populate the mirror cells (session / task / run) from each row's
+        # ``entities`` JSON on load. A fresh ``bidsmgr-scan`` TSV carries the
+        # entities in JSON but leaves the mirror columns blank. Without this
+        # pass, editing one mirror cell (e.g. ``task``) runs
+        # ``rebuild_from_columns``, which reads the *other* still-blank mirror
+        # cells (e.g. ``run``) as "user cleared it" and drops those entities —
+        # so changing the task silently deleted ``run``. Mirroring entities →
+        # cells up front means a later single-cell edit only ever changes the
+        # field the user actually touched; every other entity is preserved.
+        # This matches what ``cli/convert.py`` does in memory before reading
+        # rows. Idempotent: ``proposed_basename`` is rebuilt from the same
+        # entities, so a well-formed scan TSV is unchanged.
+        rebuild_from_entities(self._df, in_place=True)
 
         if project is not None:
             self._apply_project_overlay(project.state())
+
+        # Normalise ``proposed_issues`` to the live entity-validation state so a
+        # freshly-loaded TSV and a user-edited one read identically (load ==
+        # edit). Static scan notes are preserved; only the schema-validation
+        # segment is recomputed. Pure DataFrame mutation, no signals (we build
+        # the row-state cache from the result immediately below).
+        for i in range(len(self._df)):
+            self._revalidate_row(i)
 
         # Cache per-row state so delegates don't re-derive on every paint.
         # Invalidated for one row by :meth:`refresh_row`.
@@ -171,6 +338,137 @@ class InventoryTableModel(QAbstractTableModel):
         # These rows are already auto-unchecked by the scan, but
         # highlighting helps the user spot them at a glance.
         self._highlight_aborts: bool = False
+
+    # ------------------------------------------------------------------
+    # Recording-metadata inheritance (dataset default <- per-row override)
+    # ------------------------------------------------------------------
+
+    def set_global_spec(self, spec: Optional[RecordingMetaSpec]) -> None:
+        """Set the dataset-wide recording-metadata defaults and refresh display.
+
+        Inherited cells (blank in an inheritance field) now show the new
+        default; the underlying DataFrame is untouched. Emits ``dataChanged``
+        so every row re-renders with the new inherited values.
+        """
+        self._global_spec = spec
+        if len(self._df) and len(self.COLUMNS):
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._df) - 1, len(self.COLUMNS) - 1),
+            )
+
+    def _global_default(self, df_col: str) -> str:
+        """The dataset default for an inheritance field, as a display string."""
+        attr = _INHERITANCE_FIELDS.get(df_col)
+        if attr is None or self._global_spec is None:
+            return ""
+        val = getattr(self._global_spec.defaults, attr, None)
+        if val is None:
+            return ""
+        if isinstance(val, float):
+            return str(int(val)) if val == int(val) else str(val)
+        return str(val)
+
+    def _raw_cell(self, row: int, df_col: str) -> str:
+        if df_col not in self._df.columns or not (0 <= row < len(self._df)):
+            return ""
+        v = self._df.at[row, df_col]
+        return "" if pd.isna(v) else str(v)
+
+    def is_inherited(self, row: int, df_col: str) -> bool:
+        """True when an inheritance-field cell is blank and a default exists."""
+        if df_col not in _INHERITANCE_FIELDS:
+            return False
+        return not self._raw_cell(row, df_col).strip() and bool(self._global_default(df_col))
+
+    def effective_value(self, row: int, df_col: str) -> str:
+        """The per-row override (cell) when set, else the inherited default."""
+        cell = self._raw_cell(row, df_col).strip()
+        return cell if cell else self._global_default(df_col)
+
+    # ------------------------------------------------------------------
+    # Per-row acquisition overrides (recording-metadata scaffold-backed)
+    # ------------------------------------------------------------------
+    #
+    # These device / institution fields are NOT TSV columns; they live in the
+    # scaffold's ``overrides[row_id]`` and inherit from ``defaults`` the same
+    # way the TSV-backed inheritance fields do. The convert step's
+    # ``resolve_effective`` already merges them and the enrichment fixup writes
+    # them into the EEG/MEG sidecar.
+
+    def global_spec(self) -> Optional[RecordingMetaSpec]:
+        """The live recording-metadata spec (defaults + per-row overrides)."""
+        return self._global_spec
+
+    def acq_default(self, field: str) -> str:
+        """The dataset default for an acquisition-override field, as a string."""
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        val = getattr(self._global_spec.defaults, attr, None)
+        return "" if val is None else str(val)
+
+    def _row_override(self, row: int) -> Optional[AcquisitionSpec]:
+        if self._global_spec is None:
+            return None
+        return self._global_spec.overrides.get(self.row_id(row))
+
+    def acq_override(self, row: int, field: str) -> str:
+        """The raw per-row override for an acquisition field (``""`` if unset)."""
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None:
+            return ""
+        over = self._row_override(row)
+        if over is None:
+            return ""
+        val = getattr(over, attr, None)
+        return "" if val is None else str(val)
+
+    def acq_effective(self, row: int, field: str) -> str:
+        """Per-row override when set, else the inherited dataset default."""
+        ov = self.acq_override(row, field)
+        return ov if ov else self.acq_default(field)
+
+    def acq_is_inherited(self, row: int, field: str) -> bool:
+        """True when no per-row override is set and a dataset default exists."""
+        return not self.acq_override(row, field) and bool(self.acq_default(field))
+
+    def set_acq_override(self, row: int, field: str, value: str) -> bool:
+        """Set or clear a per-row acquisition override in the scaffold spec.
+
+        Writing a value equal to the dataset default (or an empty value) clears
+        the override so the row inherits again. Mutates the live spec and emits
+        :attr:`recordingSpecChanged` (the controller persists the scaffold) plus
+        ``dataChanged`` for the row. Returns ``True`` if anything changed.
+        """
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None or not (0 <= row < len(self._df)):
+            return False
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        new_val = (value or "").strip()
+        # Equal to the dataset default -> inherit (store no override).
+        if new_val == self.acq_default(field):
+            new_val = ""
+
+        if new_val == self.acq_override(row, field):
+            return False
+
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.overrides)
+        current = overrides.get(rid) or AcquisitionSpec()
+        updated = current.model_copy(update={attr: (new_val or None)})
+
+        if updated == AcquisitionSpec():
+            overrides.pop(rid, None)
+        else:
+            overrides[rid] = updated
+        self._global_spec = self._global_spec.model_copy(update={"overrides": overrides})
+
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
 
     # ------------------------------------------------------------------
     # Qt model API
@@ -214,6 +512,17 @@ class InventoryTableModel(QAbstractTableModel):
         if role == HIGHLIGHT_ROLE:
             return self._highlight_aborts and self.is_row_aborted(row)
 
+        # Hovering any cell of a flagged row surfaces the scanner's
+        # ``proposed_issues`` (e.g. the "non-image series" reason) so the
+        # user sees *why* a row is highlighted without unhiding the issues
+        # column. Newline-split the `` | ``-joined notes for readability.
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if "proposed_issues" in self._df.columns:
+                issues = str(self._df.at[row, "proposed_issues"] or "").strip()
+                if issues:
+                    return issues.replace(" | ", "\n")
+            return None
+
         # Checkbox and status cells communicate via PAYLOAD_ROLE instead
         # of DisplayRole; they have no text body.
         if spec.role == "checkbox":
@@ -224,6 +533,17 @@ class InventoryTableModel(QAbstractTableModel):
             if role == PAYLOAD_ROLE:
                 return self._status_kind(row)
             return None
+
+        # Inheritance fields: a blank cell shows the dataset default (and the
+        # delegate paints it muted via INHERITED_ROLE).
+        if spec.df_column in _INHERITANCE_FIELDS:
+            if role == INHERITED_ROLE:
+                return self.is_inherited(row, spec.df_column)
+            if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+                eff = self.effective_value(row, spec.df_column)
+                if eff:
+                    return eff
+                return "—" if role == Qt.ItemDataRole.DisplayRole else ""
 
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_value(row, spec)
@@ -249,20 +569,24 @@ class InventoryTableModel(QAbstractTableModel):
         if df_col is None:
             return False
         new_str = "" if value is None else str(value)
+        # Inheritance fields: writing a value equal to the dataset default
+        # clears the cell back to "inherited" instead of storing a redundant
+        # per-row override (the convert/display layers re-resolve the default).
+        if df_col in _INHERITANCE_FIELDS and new_str == self._global_default(df_col):
+            new_str = ""
         old_str = "" if pd.isna(self._df.at[row, df_col]) else str(self._df.at[row, df_col])
         if new_str == old_str:
             return False
 
         # Order: record the event first (durable), then mutate.
-        if self._project is not None:
-            self._project.append(
-                UserSetCell(
-                    row_id=self.row_id(row),
-                    column=df_col,
-                    value=new_str,
-                    previous=old_str,
-                )
+        self._record_edit(
+            UserSetCell(
+                row_id=self.row_id(row),
+                column=df_col,
+                value=new_str,
+                previous=old_str,
             )
+        )
         self._df.at[row, df_col] = new_str
 
         # Mirror cells (session / task / run) feed the entities JSON.
@@ -282,16 +606,12 @@ class InventoryTableModel(QAbstractTableModel):
         """Return a stable per-row identifier used in project events.
 
         Prefers ``series_uid`` (MRI) → ``source_file`` (EEG/MEG) →
-        ``f"row-{row}"``. The fallback is purely positional so it
-        survives reopen only when the row order does; in practice
-        every real row carries one of the first two identifiers.
+        ``f"row-{row}"``. Delegates to the shared, Qt-free
+        :func:`bidsmgr.project.orchestration.row_id` so GUI-recorded edits
+        replay identically in the CLI (``--project``).
         """
-        for col in ("series_uid", "source_file"):
-            if col in self._df.columns:
-                v = self._df.at[row, col]
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return f"row-{row}"
+        from ...project.orchestration import row_id as _row_id
+        return _row_id(self._df, row)
 
     def entities(self, row: int) -> dict[str, str]:
         """Return the row's parsed entities dict, or empty if malformed.
@@ -315,6 +635,12 @@ class InventoryTableModel(QAbstractTableModel):
             log.warning("row %d: malformed entities JSON; returning {}", row)
             return {}
         return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+    def _record_edit(self, event) -> None:
+        """Append a user-edit event to the project (if any) and signal it."""
+        if self._project is not None:
+            self._project.append(event)
+        self.userEdited.emit()
 
     def set_entity(
         self,
@@ -346,15 +672,14 @@ class InventoryTableModel(QAbstractTableModel):
         if new_value == previous:
             return False
 
-        if self._project is not None:
-            self._project.append(
-                UserSetEntity(
-                    row_id=self.row_id(row),
-                    entity=entity,
-                    value=new_value or None,
-                    previous=previous or None,
-                )
+        self._record_edit(
+            UserSetEntity(
+                row_id=self.row_id(row),
+                entity=entity,
+                value=new_value or None,
+                previous=previous or None,
             )
+        )
 
         if new_value:
             current[entity] = new_value
@@ -460,7 +785,8 @@ class InventoryTableModel(QAbstractTableModel):
     # targets (subject, dataset, task) come first.
     BULK_EDITABLE_KEYS: tuple[str, ...] = (
         "id",        # → subject entity + BIDS_name
-        "dataset",
+        # "dataset" is intentionally excluded: it is owned by the project /
+        # locked output folder and must never be changed by hand (see ColumnSpec).
         "ses",
         "task",
         "run",
@@ -468,6 +794,12 @@ class InventoryTableModel(QAbstractTableModel):
         "suffix",
         "line_freq",
         "montage",
+        "eeg_reference",
+        "eeg_ground",
+        "PatientSex",
+        "PatientAge",
+        "Handedness",
+        "companion_files",
     )
 
     def bulk_set(
@@ -560,15 +892,14 @@ class InventoryTableModel(QAbstractTableModel):
             new = str(val)
             if new == old:
                 continue
-            if self._project is not None:
-                self._project.append(
-                    UserSetCell(
-                        row_id=self.row_id(row),
-                        column=col,
-                        value=new,
-                        previous=old,
-                    )
+            self._record_edit(
+                UserSetCell(
+                    row_id=self.row_id(row),
+                    column=col,
+                    value=new,
+                    previous=old,
                 )
+            )
             self._df.at[row, col] = new
             changed = True
         if changed:
@@ -580,16 +911,40 @@ class InventoryTableModel(QAbstractTableModel):
         """Re-derive cached state for ``row`` and notify the view.
 
         Call after any mutation that could affect row state (include
-        toggle, entity edit). Emits ``dataChanged`` for every column of
-        the row so per-row tints, badges, and mirror-cell text refresh
-        together.
+        toggle, entity edit). Re-runs live entity-validation first so the
+        warn / err / valid state reflects the edit, then emits
+        ``dataChanged`` for every column of the row so per-row tints,
+        badges, and mirror-cell text refresh together.
         """
         if not (0 <= row < len(self._df)):
             return
+        self._revalidate_row(row)
         self._row_states[row] = self._derive_row_state(row)
         left = self.index(row, 0)
         right = self.index(row, self.columnCount() - 1)
         self.dataChanged.emit(left, right)
+
+    def revalidate_all(self) -> None:
+        """Recompute every row's validation issues + state, then repaint.
+
+        Forces a full live re-validation: for each row the schema entity checks
+        run against its current entities / datatype / suffix, the managed
+        segment of ``proposed_issues`` is refreshed (static scan notes kept),
+        and the cached row state is rebuilt. Emits one ``dataChanged`` over the
+        whole table so delegates repaint and the controller's chip / preview /
+        stats listeners recompute. Backs the Converter's "Re-validate" button so
+        the valid / warning / error tallies are guaranteed current after any
+        batch of edits, no matter which edit path produced them.
+        """
+        if self.rowCount() == 0:
+            return
+        for i in range(len(self._df)):
+            self._revalidate_row(i)
+            self._row_states[i] = self._derive_row_state(i)
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(self.rowCount() - 1, self.columnCount() - 1),
+        )
 
     def dataframe(self) -> pd.DataFrame:
         """Return the live working DataFrame.
@@ -606,36 +961,14 @@ class InventoryTableModel(QAbstractTableModel):
     def _apply_project_overlay(self, state: ProjectState) -> None:
         """Apply a ``ProjectState`` overlay to the working DataFrame.
 
-        Reverses the on-save semantics: for each row whose ``row_id``
-        appears in ``state``, the saved overrides are written back into
-        the DataFrame so the view shows the same thing as before the
-        save. Unknown row_ids are ignored (the inventory may have been
-        rescanned, dropping rows the project remembers).
+        Replays the saved curation edits (entity / cell / include overrides)
+        onto the table so reopening a project shows the same thing as before.
+        Delegates to the shared, Qt-free
+        :func:`bidsmgr.project.orchestration.apply_project_state` so the CLI
+        (``--project``) replays edits identically.
         """
-        if not state.cell_overrides and not state.include_overrides:
-            return
-
-        # Build row_id → df_index map once.
-        index_for_rid: dict[str, int] = {
-            self.row_id(i): i for i in range(len(self._df))
-        }
-
-        for rid, cells in state.cell_overrides.items():
-            r = index_for_rid.get(rid)
-            if r is None:
-                continue
-            for col, val in cells.items():
-                if col in self._df.columns:
-                    self._df.at[r, col] = val
-            # Force a rebuild for the row so derived cells stay consistent.
-            self._rebuild_one_row(r)
-
-        if "include" in self._df.columns:
-            for rid, inc in state.include_overrides.items():
-                r = index_for_rid.get(rid)
-                if r is None:
-                    continue
-                self._df.at[r, "include"] = 1 if inc else 0
+        from ...project.orchestration import apply_project_state
+        apply_project_state(self._df, state)
 
     def _rebuild_one_row(self, row: int, *, direction: str = "columns") -> None:
         """Reconcile ``entities`` ↔ display cells for a single row.
@@ -677,10 +1010,9 @@ class InventoryTableModel(QAbstractTableModel):
 
     def _set_include(self, row: int, included: bool) -> None:
         """Persist a new include flag (event first, then DataFrame)."""
-        if self._project is not None:
-            self._project.append(
-                UserToggleInclude(row_id=self.row_id(row), include=included)
-            )
+        self._record_edit(
+            UserToggleInclude(row_id=self.row_id(row), include=included)
+        )
         if "include" not in self._df.columns:
             self._df["include"] = 1
         self._df.at[row, "include"] = 1 if included else 0
@@ -756,6 +1088,80 @@ class InventoryTableModel(QAbstractTableModel):
         s = f"{v:.2f}"
         return s[1:] if s.startswith("0.") else s
 
+    # -------- live entity-validation --------
+
+    def _live_entity_issues(self, row: int) -> list[str]:
+        """Schema entity-validation issues for the row's *current* entities.
+
+        Returns the same ``"<rule_id>: <message>"`` strings the scan emits, so
+        they slot straight back into ``proposed_issues``. Skipped rows and rows
+        without a datatype/suffix produce none. Placeholder sentinels are
+        treated as missing (see :data:`_ENTITY_PLACEHOLDERS`).
+        """
+        if not (0 <= row < len(self._df)):
+            return []
+        if not self._read_include(row):
+            return []
+        # A row the scanner marked skip is not converted; don't validate it.
+        if "bids_guess_skip" in self._df.columns:
+            v = self._df.at[row, "bids_guess_skip"]
+            if isinstance(v, str):
+                if v.strip() in ("1", "true", "True"):
+                    return []
+            elif not pd.isna(v) and bool(v):
+                return []
+
+        datatype, suffix = self.datatype_suffix(row)
+        if not datatype or not suffix:
+            return []
+        # Derivatives use a bespoke path that the schema entity validator
+        # rejects wholesale; leave their notes to the scanner.
+        if datatype == "derivatives":
+            return []
+
+        ents = self.entities(row)
+        cleaned = {
+            k: v
+            for k, v in ents.items()
+            if v and v != _ENTITY_PLACEHOLDERS.get(k, _DEFAULT_PLACEHOLDER)
+        }
+        try:
+            verdicts = schema_mod.validate_entity_set(cleaned, datatype, suffix)
+        except Exception:  # pragma: no cover - schema lookups are defensive
+            log.debug("live entity validation failed for row %d", row, exc_info=True)
+            return []
+        return [
+            f"{v.rule_id}: {v.message}"
+            for v in verdicts
+            if v.severity is schema_mod.Severity.ERROR
+        ]
+
+    def _revalidate_row(self, row: int) -> bool:
+        """Recompute the managed (entity-validation) segment of ``proposed_issues``.
+
+        Static scan notes are preserved verbatim; only the schema-validation
+        issues are replaced with a fresh recompute of the row's current
+        entities. Mutates the DataFrame in place (no signal) and returns
+        ``True`` when the cell changed. Callers emit ``dataChanged`` via
+        :meth:`refresh_row`.
+        """
+        if not (0 <= row < len(self._df)):
+            return False
+        if "proposed_issues" not in self._df.columns:
+            return False
+        old_val = "" if pd.isna(self._df.at[row, "proposed_issues"]) else str(
+            self._df.at[row, "proposed_issues"]
+        )
+        existing = [t.strip() for t in old_val.split(" | ") if t.strip()]
+        static = [t for t in existing if not _is_managed_issue(t)]
+        fresh = self._live_entity_issues(row)
+        # Validation issues first (matches the scan's ordering), then static.
+        new_val = " | ".join(fresh + static)
+        if new_val == old_val:
+            return False
+        self._df.at[row, "proposed_issues"] = new_val
+        return True
+
     # -------- per-row state --------
 
     def _derive_row_state(self, row: int) -> str:
@@ -764,6 +1170,17 @@ class InventoryTableModel(QAbstractTableModel):
         Drives the row tint applied by every delegate. Selection is
         applied by the view at paint time, not stored here.
         """
+        # Non-image DERIVED objects (no pixel data; e.g. a Siemens TENSOR
+        # map) are flagged by the scanner via the ``non-image series``
+        # token in ``proposed_issues`` (see ``cli/scan.NONIMAGE_ISSUE_TOKEN``).
+        # They are excluded from conversion (include=0) but must still read
+        # as a deliberate, highlighted "not an image" state rather than a
+        # de-emphasised skip — so this check wins over the include check.
+        if "proposed_issues" in self._df.columns:
+            issues_l = str(self._df.at[row, "proposed_issues"] or "").lower()
+            if "non-image series" in issues_l:
+                return "noimg"
+
         if not self._read_include(row):
             return "skip"
 
@@ -807,6 +1224,8 @@ class InventoryTableModel(QAbstractTableModel):
         keep their distinct icon.
         """
         state = self._row_states[row]
+        if state == "noimg":
+            return "noimg"
         if state == "skip":
             return "skip"
         if state == "err":
@@ -818,4 +1237,10 @@ class InventoryTableModel(QAbstractTableModel):
         return "ok"
 
 
-__all__ = ["COLUMNS", "ColumnSpec", "InventoryTableModel"]
+__all__ = [
+    "COLUMNS",
+    "COLUMN_DESCRIPTIONS",
+    "ColumnSpec",
+    "InventoryTableModel",
+    "MANDATORY_COLUMN_KEYS",
+]

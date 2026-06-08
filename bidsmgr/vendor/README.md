@@ -52,8 +52,19 @@ entirely.
    (`from bidsphysio.base.bidsphysio import ...`) to relative
    (`from ..base.bidsphysio import ...`) so the tree relocates
    cleanly under `bidsmgr.vendor`.
-3. No behavioural changes. Every function and class body is
-   verbatim. Original per-file MIT headers are preserved.
+3. One performance fix in `base/bidsphysio.py`:
+   `PhysioSignal.plug_missing_data` was rewritten from the upstream
+   one-insertion-at-a-time loop (each step a full `np.concatenate` plus
+   a re-scan from index 0, i.e. O(n^2)) to a vectorised single-pass
+   build. The upstream version hangs for minutes on large CMRR logs
+   (a real 22M-sample ECG with many gaps); the rewrite handles 1M
+   samples / ~1M gaps in well under a second. Output is identical to
+   the original for every input where the original actually fills gaps;
+   it additionally fixes an upstream `np.argmax` edge bug that left a
+   gap in the very first sampling interval unfilled. Covered by
+   `tests/unit/test_bidsphysio_plug_missing_data.py`.
+4. Otherwise no behavioural changes. Every other function and class
+   body is verbatim. Original per-file MIT headers are preserved.
 
 **What's in the tree:**
 

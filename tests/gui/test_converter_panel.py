@@ -40,9 +40,12 @@ def test_panel_constructs_without_a_project(qtbot) -> None:
     qtbot.addWidget(panel)
     # No model until the first scan.
     assert panel.model() is None
-    # Scan button is enabled at start; Run-conversion is gated.
-    assert panel._scan_btn.isEnabled()
+    # Project-first gate: with no active project, Scan / Run / the raw + BIDS
+    # change buttons are all disabled until a dataset is opened on Home.
+    assert not panel._scan_btn.isEnabled()
     assert not panel._run_btn.isEnabled()
+    assert not panel._raw_pathbar.change_button.isEnabled()
+    assert not panel._bids_pathbar.change_button.isEnabled()
 
 
 def test_panel_renders_under_offscreen_qpa(qtbot) -> None:
@@ -120,6 +123,33 @@ def test_load_inventory_updates_status_chips(qtbot, tmp_path: Path) -> None:
     assert "1 skipped" in panel._chip_skip.text()
 
 
+def test_revalidate_button_enables_after_scan_and_refreshes_chips(
+    qtbot, tmp_path: Path,
+) -> None:
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    # Disabled before any scan.
+    assert not panel._revalidate_btn.isEnabled()
+
+    # A func/bold row missing its required task -> err.
+    row = _func_row()
+    row["entities"] = json.dumps({"subject": "001", "session": "pre"}, sort_keys=True)
+    row["task"] = ""
+    panel.load_inventory(pd.DataFrame([row]), output_tsv=tmp_path / "inv.tsv")
+    assert panel._revalidate_btn.isEnabled()  # available after scan
+    assert "1 error" in panel._chip_err.text()
+
+    # Simulate a fix that bypassed setData (edit elsewhere), then re-validate:
+    df = panel.model().dataframe()
+    df.at[0, "task"] = "rest"
+    df.at[0, "entities"] = json.dumps(
+        {"subject": "001", "session": "pre", "task": "rest"}, sort_keys=True,
+    )
+    panel._on_revalidate_clicked()
+    assert "0 error" in panel._chip_err.text()
+    assert "1 valid" in panel._chip_valid.text()
+
+
 def test_load_inventory_does_not_overwrite_user_set_bids_output(qtbot, tmp_path: Path) -> None:
     """BIDS output stays whatever the user set (or '(not set)' if unset).
 
@@ -140,11 +170,62 @@ def test_load_inventory_does_not_overwrite_user_set_bids_output(qtbot, tmp_path:
     assert str(chosen) in panel._bids_pathbar.value()
 
 
-def test_bids_pathbar_change_button_is_enabled(qtbot) -> None:
-    """The user must be able to pick the BIDS output before scanning."""
+def _eeg_row() -> dict:
+    return {
+        "BIDS_name": "sub-001", "session": "", "include": 1, "modality": "eeg",
+        "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "entities": json.dumps({"subject": "001", "task": "rest"}, sort_keys=True),
+        "task": "rest", "run": "", "series_uid": "",
+        "source_file": "sub-001/rec.edf",
+        "montage": "", "line_freq": "", "eeg_reference": "", "eeg_ground": "",
+        "proposed_issues": "", "bids_guess_skip": False,
+    }
+
+
+def test_per_row_acq_override_persists_scaffold(qtbot, tmp_path: Path) -> None:
+    """A per-row device override is written to the scaffold beside the TSV so
+    the convert verb (which reloads it) sees the edit."""
+    import json as _json
+    from bidsmgr.recording_meta import (
+        AcquisitionSpec, RecordingMetaSpec, scaffold_sidecar_path,
+    )
+
     panel = ConverterPanel()
     qtbot.addWidget(panel)
-    assert panel._bids_pathbar.change_button.isEnabled()
+    out_tsv = tmp_path / "inv.tsv"
+    panel.load_inventory(pd.DataFrame([_eeg_row()]), output_tsv=out_tsv)
+
+    m = panel.model()
+    m.set_global_spec(RecordingMetaSpec(defaults=AcquisitionSpec(manufacturer="Brain Products")))
+    # Override the manufacturer for row 0 -> triggers recordingSpecChanged.
+    m.set_acq_override(0, "manufacturer", "BioSemi")
+
+    scaffold = scaffold_sidecar_path(out_tsv)
+    assert scaffold.exists()
+    data = _json.loads(scaffold.read_text())
+    assert data["overrides"]["sub-001/rec.edf"]["manufacturer"] == "BioSemi"
+
+
+def test_no_project_gate_blocks_then_set_project_ungates(qtbot, tmp_path) -> None:
+    """With no project the raw/BIDS/Scan controls are blocked; opening a project
+    un-gates raw input + Scan and locks the BIDS output to the project root."""
+    from bidsmgr.cli.create import open_or_create_workspace
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    # Gated before any project.
+    assert not panel._raw_pathbar.change_button.isEnabled()
+    assert not panel._bids_pathbar.change_button.isEnabled()
+    assert not panel._scan_btn.isEnabled()
+
+    root = tmp_path / "ds"
+    proj = open_or_create_workspace(root)
+    panel.set_project(proj, root)
+    # Raw input + Scan enabled; BIDS output locked to the project (disabled).
+    assert panel._raw_pathbar.change_button.isEnabled()
+    assert panel._scan_btn.isEnabled()
+    assert not panel._bids_pathbar.change_button.isEnabled()
+    assert str(root) in panel._bids_pathbar.value()
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +255,29 @@ def test_start_scan_on_empty_dir_finishes_and_loads_empty_model(qtbot, tmp_path:
     assert out_tsv.exists()
 
 
-def test_scan_button_disabled_while_scan_runs(qtbot, tmp_path: Path) -> None:
+def test_fresh_scan_resets_stale_recording_meta_scaffold(qtbot, tmp_path: Path) -> None:
+    """A new scan must not inherit the previous dataset's metadata: the stale
+    scaffold at the output path is removed so it re-seeds from the new data."""
+    from bidsmgr.recording_meta import scaffold_sidecar_path
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    out_tsv = tmp_path / "inv.tsv"
+    # Simulate a leftover scaffold from a PREVIOUS (different) dataset.
+    stale = scaffold_sidecar_path(out_tsv)
+    stale.write_text('{"schema_version": 1, "defaults": {"manufacturer": "OldVendor"}}',
+                     encoding="utf-8")
+    with qtbot.waitSignal(panel.scan_finished, timeout=60_000):
+        worker = panel.start_scan(raw, out_tsv, n_jobs=1)
+    worker.wait()
+    qtbot.wait(50)
+    # The empty scan detects nothing to seed, so the stale scaffold is simply
+    # gone (not carried over).
+    assert not stale.exists()
+
+
+def test_scan_button_becomes_stop_and_locks_run_while_scan_runs(qtbot, tmp_path: Path) -> None:
     panel = ConverterPanel()
     qtbot.addWidget(panel)
 
@@ -182,13 +285,19 @@ def test_scan_button_disabled_while_scan_runs(qtbot, tmp_path: Path) -> None:
     raw.mkdir()
 
     worker = panel.start_scan(raw, tmp_path / "inv.tsv", n_jobs=1)
-    # While the worker is alive the button is disabled.
-    assert not panel._scan_btn.isEnabled()
+    # While the worker is alive the Scan button stays enabled but reads
+    # "Stop scanning"; the Run button is locked out (mutual exclusion).
+    assert panel._scan_btn.isEnabled()
+    assert "Stop" in panel._scan_btn.text()
+    assert not panel._run_btn.isEnabled()
     with qtbot.waitSignal(panel.scan_finished, timeout=60_000):
         pass
     worker.wait()
     qtbot.wait(50)
+    # On completion it reverts to "Scan…".
     assert panel._scan_btn.isEnabled()
+    assert "Scan" in panel._scan_btn.text()
+    assert "Stop" not in panel._scan_btn.text()
 
 
 def test_log_messages_forwarded_to_panel_signal(qtbot, tmp_path: Path) -> None:
@@ -237,56 +346,35 @@ def test_panel_uses_attached_project_for_edits(qtbot, tmp_path: Path) -> None:
 
 
 def test_bottom_dock_split_layout(qtbot) -> None:
-    """Bottom dock is now a horizontal splitter with two QTabWidgets:
-    Log + Conflicts on the left, BIDS preview + Statistics on the right.
+    """Bottom dock is a horizontal splitter of two detach-only PanelFrames,
+    each wrapping a QTabWidget: Log on the left, BIDS preview + Statistics
+    on the right. The whole dock is wrapped in a collapse-to-bottom frame.
     """
-    from PyQt6.QtWidgets import QSplitter, QTabWidget
-
     panel = ConverterPanel()
     qtbot.addWidget(panel)
 
-    # The dock is now a QSplitter (not the original single QTabWidget).
-    # Locate it via the _log_view + _bids_preview children whose
-    # ancestors must include the dock.
-    def _ancestors(w):
-        cur = w
-        while cur is not None:
-            yield cur
-            cur = cur.parent()
-
-    log_ancestors = set(id(a) for a in _ancestors(panel._log_view))
-    preview_ancestors = set(id(a) for a in _ancestors(panel._bids_preview))
-
-    # Find the *common* QSplitter ancestor — that's the dock.
-    common = log_ancestors & preview_ancestors
-    splitters = [
-        w for w in panel.findChildren(QSplitter)
-        if id(w) in common
-    ]
-    # The vertical splitter (top half vs dock) is also a common ancestor;
-    # the horizontal one is the dock itself. Pick the horizontal one.
-    horizontal_splitters = [
-        s for s in splitters if s.orientation().name == "Horizontal"
-    ]
-    assert horizontal_splitters, "expected at least one horizontal splitter"
-    # The dock-level horizontal splitter holds exactly two QTabWidgets.
-    dock_candidates = [
-        s for s in horizontal_splitters
-        if s.count() == 2 and all(
-            isinstance(s.widget(i), QTabWidget) for i in range(2)
-        )
-    ]
-    assert dock_candidates, "expected the dock to be a QSplitter with 2 QTabWidgets"
-
-    dock = dock_candidates[0]
-    left_tabs = dock.widget(0)
-    right_tabs = dock.widget(1)
+    # The dock's two tab groups are wrapped in detach PanelFrames; read the
+    # tab titles directly off the (kept) QTabWidget references.
+    left_tabs = panel._left_tabs
+    right_tabs = panel._right_tabs
     left_titles = [left_tabs.tabText(i) for i in range(left_tabs.count())]
     right_titles = [right_tabs.tabText(i) for i in range(right_tabs.count())]
     assert any("Log" in t for t in left_titles)
-    assert any("Conflicts" in t for t in left_titles)
+    # The Conflicts tab was removed; Log is the only left-hand tab now.
+    assert not any("Conflicts" in t for t in left_titles)
     assert any("BIDS preview" in t for t in right_titles)
     assert any("Statistics" in t for t in right_titles)
+
+    # The Log + preview groups are each independently detachable, and the
+    # whole dock collapses toward the bottom.
+    assert panel._log_frame.is_detached() is False
+    assert panel._preview_frame.is_detached() is False
+    panel._log_frame.detach()
+    assert panel._log_frame.is_detached() is True
+    panel._log_frame.reattach()
+    assert panel._dock_frame.is_collapsed() is False
+    panel._dock_frame.set_collapsed(True)
+    assert panel._dock_frame.is_collapsed() is True
 
 
 def test_log_tab_appends_progress_messages(qtbot) -> None:

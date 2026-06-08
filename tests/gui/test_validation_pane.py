@@ -26,10 +26,11 @@ from bidsmgr.editor.types import (
     ValidationReport,
 )
 from bidsmgr.gui.editor_panel import EditorPanel
+from bidsmgr.gui.widgets import Chip
 from bidsmgr.gui.widgets.val_message import ValMessage
 from bidsmgr.gui.widgets.validation_pane import (
     ValidationPane,
-    _count_chip_object_name,
+    _count_chip_kind,
     _folder_key_for,
 )
 
@@ -101,14 +102,14 @@ def _report_with_three_levels(bids_root: Path) -> ValidationReport:
 
 
 def test_count_chip_picks_worst_severity() -> None:
-    assert _count_chip_object_name([]) == "val-count-ok"
-    assert _count_chip_object_name(
+    assert _count_chip_kind([]) == ""  # neutral / default Chip
+    assert _count_chip_kind(
         [_make_issue(Severity.WARN, "r", "m")]
-    ) == "val-count-warn"
-    assert _count_chip_object_name([
+    ) == "warn"
+    assert _count_chip_kind([
         _make_issue(Severity.WARN, "r", "m"),
         _make_issue(Severity.ERR, "r", "m"),
-    ]) == "val-count-err"
+    ]) == "err"
 
 
 def test_folder_key_relative_to_root(tmp_path: Path) -> None:
@@ -237,20 +238,15 @@ def test_count_chip_object_names_match_severity(
     target = bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     pane.set_current_file(target, bids_root)
 
-    chips = [
-        lbl for lbl in pane._body.findChildren(QLabel)
-        if lbl.objectName() in (
-            "val-count-ok", "val-count-warn", "val-count-err",
-        )
-    ]
+    chips = pane._body.findChildren(Chip)
     assert len(chips) == 3
-    object_names = [c.objectName() for c in chips]
+    kinds = [c.property("chipKind") for c in chips]
     # Dataset section has one ERR → err chip.
-    assert object_names[0] == "val-count-err"
+    assert kinds[0] == "err"
     # Folder section has one WARN → warn chip.
-    assert object_names[1] == "val-count-warn"
+    assert kinds[1] == "warn"
     # File section has one ERR → err chip.
-    assert object_names[2] == "val-count-err"
+    assert kinds[2] == "err"
 
 
 def test_repaint_for_palette_forces_qss_re_evaluation(
@@ -436,12 +432,9 @@ def test_schema_audit_section_appears_for_json_with_fields(
     ]
     assert "Schema audit" in titles
     # Required-missing rolls the chip up to err.
-    chips = [
-        lbl for lbl in pane._body.findChildren(QLabel)
-        if lbl.objectName() in ("val-count-ok", "val-count-warn", "val-count-err")
-    ]
+    chips = pane._body.findChildren(Chip)
     audit_chip = chips[-1]
-    assert audit_chip.objectName() == "val-count-err"
+    assert audit_chip.property("chipKind") == "err"
     assert "missing required" in audit_chip.text()
     # Missing field name surfaces in the audit body.
     miss_labels = [
@@ -477,12 +470,9 @@ def test_schema_audit_chip_is_ok_when_nothing_missing(
     )
     pane.set_report(report)
     pane.set_current_file(bids_root / rel, bids_root)
-    chips = [
-        lbl for lbl in pane._body.findChildren(QLabel)
-        if lbl.objectName() in ("val-count-ok", "val-count-warn", "val-count-err")
-    ]
+    chips = pane._body.findChildren(Chip)
     audit_chip = chips[-1]
-    assert audit_chip.objectName() == "val-count-ok"
+    assert audit_chip.property("chipKind") == "default"
 
 
 def test_schema_audit_section_omitted_when_no_fields(

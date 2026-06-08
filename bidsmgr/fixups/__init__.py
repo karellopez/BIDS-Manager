@@ -19,8 +19,16 @@ Planned later: ``derivatives`` (DWI map relocation: FA/ADC/TRACE/ColFA →
 ``derivatives/<pipeline>/sub-/ses-/dwi/``).
 """
 
+from .companion import attach_companion_files
+from .eeg_sidecar import enrich_recording_sidecars
 from .fieldmaps import apply_fieldmap_renames
 from .intended_for import populate_intended_for
 from .scans_tsv import update_scans_tsv
 
-__all__ = ["apply_fieldmap_renames", "populate_intended_for", "update_scans_tsv"]
+__all__ = [
+    "apply_fieldmap_renames",
+    "populate_intended_for",
+    "update_scans_tsv",
+    "enrich_recording_sidecars",
+    "attach_companion_files",
+]

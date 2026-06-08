@@ -150,6 +150,26 @@ class Project:
         """
         return self.log.truncate_last()
 
+    def undo_last_user_edit(self):
+        """Pop the last event if it is a user edit; return it (else ``None``).
+
+        The GUI Undo button rides this rather than :meth:`undo_last` so it never
+        pops a structural event (ScanImported / StageCompleted / ProjectCreated)
+        and orphans the scan; it reverts the most recent cell / entity / include
+        edit and is a no-op when the last event is not a user edit. The popped
+        event is returned so the GUI can stash it on a redo stack.
+        """
+        from .types import UserSetCell, UserSetEntity, UserToggleInclude
+
+        events = list(self.log)
+        if not events:
+            return None
+        last = events[-1]
+        if isinstance(last, (UserSetCell, UserSetEntity, UserToggleInclude)):
+            if self.log.truncate_last():
+                return last
+        return None
+
     # ------------------------------------------------------------------
     # Bundle housekeeping
     # ------------------------------------------------------------------

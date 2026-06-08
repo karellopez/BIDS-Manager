@@ -285,3 +285,32 @@ def test_fix_request_focuses_field_in_sidecar_form(
     # ``selectAll`` was called as part of focus_field — the editor
     # shows the existing value pre-selected for easy overwrite.
     assert editor.selectedText() == editor.text()
+
+
+def test_editor_undo_redo_buttons_follow_active_pane(qapp, tmp_path: Path) -> None:
+    """The Editor's Undo/Redo buttons delegate to the active editable pane and
+    sync their enabled-state with that pane's history."""
+    import json
+    panel = EditorPanel()
+    qapp.processEvents()
+
+    # No undoable pane yet (NIfTI placeholder / nothing).
+    assert not panel._undo_btn.isEnabled()
+    assert not panel._redo_btn.isEnabled()
+
+    # Point the sidecar pane at a JSON and make it the active center widget.
+    js = tmp_path / "sub-01_task-x_bold.json"
+    js.write_text(json.dumps({"TaskName": "rest"}), encoding="utf-8")
+    panel._sidecar_form.set_file(js, tmp_path, None)
+    panel._center_stack.setCurrentWidget(panel._sidecar_form)
+    qapp.processEvents()
+    assert not panel._undo_btn.isEnabled()  # no edits yet
+
+    panel._sidecar_form._on_field_committed("TaskName", "memory", "str")
+    qapp.processEvents()
+    assert panel._undo_btn.isEnabled()
+
+    panel._on_editor_undo()
+    qapp.processEvents()
+    assert panel._sidecar_form._json_cache["TaskName"] == "rest"
+    assert panel._redo_btn.isEnabled()

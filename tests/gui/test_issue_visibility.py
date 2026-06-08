@@ -269,3 +269,45 @@ def test_jump_to_row_selects_the_table_row(qtbot, tmp_path) -> None:
 
     panel._jump_to_row(1)
     assert panel._table.currentIndex().row() == 1
+
+
+# ---------------------------------------------------------------------------
+# Mixed-StudyDescription heads-up flows through the existing warn system
+# ---------------------------------------------------------------------------
+
+
+def _mixed_study_note() -> str:
+    from bidsmgr.cli.scan import MIXED_STUDY_ISSUE_TOKEN
+    return (
+        f"{MIXED_STUDY_ISSUE_TOKEN}: this series is 'PPMI'; "
+        f"scan also contains '1-MR'"
+    )
+
+
+def test_mixed_study_note_reads_as_warn_in_model(qtbot) -> None:
+    df = make_df([_func_row(proposed_issues=_mixed_study_note())])
+    model = InventoryTableModel(df)
+    # The scan's mixed-study note must classify as a warning (not err/skip),
+    # so it counts toward the warnings chip.
+    assert model.row_state(0) == "warn"
+
+
+def test_mixed_study_row_lists_in_warn_issues_dialog(qtbot) -> None:
+    from bidsmgr.cli.scan import MIXED_STUDY_ISSUE_TOKEN
+    from bidsmgr.gui.issues_dialog import _RowCard
+    from PyQt6.QtWidgets import QLabel
+
+    df = make_df([_func_row(proposed_issues=_mixed_study_note())])
+    model = InventoryTableModel(df)
+    dlg = IssuesDialog(model, severity="warn")
+    qtbot.addWidget(dlg)
+
+    cards = dlg.findChildren(_RowCard)
+    assert len(cards) == 1
+    bodies = [
+        lbl.text()
+        for card in cards
+        for vm in card.findChildren(ValMessage)
+        for lbl in vm.findChildren(QLabel)
+    ]
+    assert any(MIXED_STUDY_ISSUE_TOKEN in t for t in bodies)

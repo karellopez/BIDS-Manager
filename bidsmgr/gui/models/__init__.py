@@ -9,6 +9,7 @@
 """
 
 from .inventory import (
+    COLUMN_DESCRIPTIONS,
     COLUMNS,
     MANDATORY_COLUMN_KEYS,
     ColumnSpec,
@@ -17,6 +18,7 @@ from .inventory import (
 
 __all__ = [
     "COLUMNS",
+    "COLUMN_DESCRIPTIONS",
     "ColumnSpec",
     "InventoryTableModel",
     "MANDATORY_COLUMN_KEYS",

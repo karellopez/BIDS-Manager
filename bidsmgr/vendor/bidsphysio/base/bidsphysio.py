@@ -149,30 +149,60 @@ class PhysioSignal(object):
         """
         Function to plug "missing_value" (NaN, by default) wherever the
         signal was not recorded.
+
+        bids-manager change (vendored): the upstream implementation inserted
+        one missing sample at a time, each insertion doing a full
+        ``np.concatenate`` (O(n) copy of the whole signal) followed by a
+        re-scan from the start -- O(n^2) overall, which hangs for minutes on
+        large CMRR logs (e.g. a 22M-sample ECG with many gaps). This is a
+        fully vectorised rewrite that produces the identical output in a
+        single pass / single allocation. See ``bidsmgr/vendor/README.md``.
         """
 
         # The time increment between samples:
-        dt = 1/self.samples_per_second
+        dt = 1 / self.samples_per_second
 
-        # The following finds the first index for which the difference between
-        #   consecutive elements is larger than dt (plus a small rounding error)
-        # (argmax stops at the first "True"; if it doesn't find any, it returns 0):
-        i = np.argmax( np.ediff1d(self.sampling_times) > dt*(1.001) )
-        while i != 0:
-            # new time array, which adds the missing timepoint:
-            self.sampling_times = np.concatenate(
-                # Note: np.concatenate takes a list as argument, so you need (...)
-                (self.sampling_times[:i+1], [self.sampling_times[i]+dt], self.sampling_times[i+1:])
-            )
-            # new signal array, which adds a "missing_value" at the missing timepoint:
-            self.signal = np.concatenate(
-                # Note: np.concatenate takes a list as argument, so you need (...)
-                (self.signal[:i+1], [missing_value], self.signal[i+1:])
-            )
-            # check to see if we are done:
-            i = np.argmax( np.ediff1d(self.sampling_times) > dt*(1.001) )
+        times = np.asarray(self.sampling_times, dtype=float)
+        signal = np.asarray(self.signal)
+        n = times.size
+        if n < 2:
+            self.samples_count = int(signal.size)
+            return
 
-        self.samples_count = len( self.signal )
+        diffs = np.diff(times)
+        gap_mask = diffs > dt * 1.001
+        # Number of missing samples to insert AFTER each original sample.
+        # ``ceil(diff/dt - 1.001)`` matches the upstream loop's count exactly:
+        # it inserts at ``t+dt, t+2dt, ...`` until the residual gap is <= dt.
+        inserts = np.zeros(n, dtype=np.int64)  # inserts[-1] stays 0 (no gap after last)
+        inserts[:-1][gap_mask] = np.ceil(
+            diffs[gap_mask] / dt - 1.001
+        ).astype(np.int64)
+
+        total = int(inserts.sum())
+        if total == 0:
+            self.samples_count = int(signal.size)
+            return
+
+        out_len = n + total
+        block = 1 + inserts                       # output slots each original sample owns
+        orig_pos = np.cumsum(block) - block       # output index of each original sample
+
+        out_times = np.empty(out_len, dtype=float)
+        out_signal = np.full(out_len, missing_value, dtype=signal.dtype)
+        out_times[orig_pos] = times
+        out_signal[orig_pos] = signal
+
+        # Inserted slots get times ``t_prev + dt * k`` (k = 1, 2, ...).
+        base = np.repeat(times, block)            # preceding original time per slot
+        within = np.arange(out_len) - np.repeat(orig_pos, block)  # 0 at original, 1.. at inserts
+        inserted = np.ones(out_len, dtype=bool)
+        inserted[orig_pos] = False
+        out_times[inserted] = (base + dt * within)[inserted]
+
+        self.sampling_times = out_times
+        self.signal = out_signal
+        self.samples_count = out_len
 
     @classmethod
     def matching_trigger_signal(cls, mysignal, trigger_s):

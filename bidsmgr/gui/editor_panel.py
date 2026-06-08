@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -42,12 +41,14 @@ from .widgets import (
     BusySpinner,
     Chip,
     NiftiViewerPane,
-    PaneHeader,
+    PanelFrame,
     PathBar,
+    RecordingViewerPane,
     SidecarFormPane,
     TsvViewerPane,
     ValidationPane,
     VSep,
+    is_recording_path,
 )
 
 log = logging.getLogger(__name__)
@@ -103,19 +104,47 @@ class EditorPanel(QWidget):
         self._sidecar_form = SidecarFormPane()
         self._tsv_viewer = TsvViewerPane()
         self._nifti_viewer = NiftiViewerPane()
+        self._recording_viewer = RecordingViewerPane()
         self._center_stack = QStackedWidget()
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
+        self._center_stack.addWidget(self._recording_viewer)
+        # Threaded panes drive the toolbar busy spinner + status bar.
+        self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
+        self._recording_viewer.loading_changed.connect(self._on_pane_loading)
+        self._recording_viewer.status_message.connect(self.log_message)
+        # Undo/redo toolbar buttons follow the active editable pane.
+        self._sidecar_form.history_changed.connect(self._sync_undo_redo)
+        self._tsv_viewer.history_changed.connect(self._sync_undo_redo)
+        self._center_stack.currentChanged.connect(self._sync_undo_redo)
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
-        self._splitter.addWidget(self._tree_pane)
-        self._splitter.addWidget(self._center_stack)
-        self._splitter.addWidget(self._validation_pane)
+        # The BIDS tree folds to the left, the validation pane to the right,
+        # and the center viewer grows into the freed space. The viewer is
+        # not collapsible (it's the main surface) but IS detachable so the
+        # JSON / TSV / NIfTI view can pop out into its own window.
+        self._tree_frame = PanelFrame(self._tree_pane, "BIDS tree", edge="left")
+        self._center_frame = PanelFrame(
+            self._center_stack, "Viewer", collapsible=False, detachable=True,
+            hide_inner_header=False,
+        )
+        self._validation_frame = PanelFrame(
+            self._validation_pane, "Validation", edge="right",
+        )
+        self._panel_frames = [
+            self._tree_frame, self._center_frame, self._validation_frame,
+        ]
+        self._splitter.addWidget(self._tree_frame)
+        self._splitter.addWidget(self._center_frame)
+        self._splitter.addWidget(self._validation_frame)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 0)
         self._splitter.setSizes([320, 700, 380])
+        # Collapsing the tree / validation hands width to the center viewer.
+        self._tree_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
+        self._validation_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
         v.addWidget(self._splitter, 1)
 
         # Restore last-opened root if available.
@@ -220,6 +249,27 @@ class EditorPanel(QWidget):
         icons.apply_button(self._open_btn, "open_folder")
         self._open_btn.clicked.connect(self._on_change_root)
         lay.addWidget(self._open_btn)
+
+        lay.addWidget(VSep())
+
+        # Undo / Redo for in-memory edits to the active center pane (JSON
+        # sidecar + TSV table). They delegate to whichever editable pane is
+        # showing; disabled when nothing is undoable (or a NIfTI is shown).
+        self._undo_btn = QPushButton("  Undo")
+        self._undo_btn.setObjectName("tb-btn-ghost")
+        icons.apply_button(self._undo_btn, "undo")
+        self._undo_btn.setToolTip("Undo the last edit (JSON / TSV)")
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.clicked.connect(self._on_editor_undo)
+        lay.addWidget(self._undo_btn)
+
+        self._redo_btn = QPushButton("  Redo")
+        self._redo_btn.setObjectName("tb-btn-ghost")
+        icons.apply_button(self._redo_btn, "redo")
+        self._redo_btn.setToolTip("Redo the last undone edit")
+        self._redo_btn.setEnabled(False)
+        self._redo_btn.clicked.connect(self._on_editor_redo)
+        lay.addWidget(self._redo_btn)
 
         lay.addWidget(VSep())
 
@@ -346,6 +396,7 @@ class EditorPanel(QWidget):
         self._sidecar_form.set_file(None, None, None)
         self._tsv_viewer.set_file(None, None)
         self._nifti_viewer.set_file(None, None)
+        self._recording_viewer.set_file(None, None)
         self._center_stack.setCurrentWidget(self._sidecar_form)
         self._validation_pane.set_report(None)
         self._validation_pane.set_current_file(None, None)
@@ -570,18 +621,26 @@ class EditorPanel(QWidget):
         * ``.tsv`` / ``.tsv.gz`` → :class:`TsvViewerPane` (table).
         * ``.nii`` / ``.nii.gz`` → :class:`NiftiViewerPane` (2-D slice
           viewer with orientation buttons + brightness/contrast).
-        * everything else (JSON sidecars, EEG/MEG, …) →
-          :class:`SidecarFormPane`. The sidecar pane shows the form
-          for JSON and a "no sidecar form for this file type" hint
-          for other kinds (MEG / EEG viewers are future work).
+        * EEG / MEG / iEEG recordings (``.fif``, ``.edf``, ``.set``,
+          ``.vhdr``, ``.cnt``, CTF ``.ds``, …) →
+          :class:`RecordingViewerPane` (metadata card + threaded
+          time-series viewer).
+        * everything else (JSON sidecars, …) → :class:`SidecarFormPane`.
         """
         if path.is_dir():
-            # Directories don't carry sidecars. We still push the
+            # CTF .ds / EGI .mff are directory-shaped recordings — route
+            # them to the recording viewer instead of the dir-clear path.
+            if is_recording_path(path):
+                self._show_recording(path)
+                self._validation_pane.set_current_file(path, self.current_root())
+                return
+            # Plain directories don't carry sidecars. We still push the
             # folder down to the validation panel so its "Folder"
             # section can reflect the user's focus.
             self._sidecar_form.set_file(None, None, None)
             self._tsv_viewer.set_file(None, None)
             self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._sidecar_form)
             self._validation_pane.set_current_file(path, self.current_root())
             return
@@ -593,18 +652,43 @@ class EditorPanel(QWidget):
             # show stale state for a different file.
             self._sidecar_form.set_file(None, None, None)
             self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._tsv_viewer)
         elif name.endswith(".nii") or name.endswith(".nii.gz"):
             self._nifti_viewer.set_file(path, root)
             self._sidecar_form.set_file(None, None, None)
             self._tsv_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._nifti_viewer)
+        elif is_recording_path(path):
+            self._show_recording(path)
         else:
             self._sidecar_form.set_file(path, root, self._report)
             self._tsv_viewer.set_file(None, None)
             self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._sidecar_form)
         self._validation_pane.set_current_file(path, root)
+
+    def _show_recording(self, path: Path) -> None:
+        """Route an EEG/MEG/iEEG recording to the recording viewer."""
+        root = self.current_root()
+        self._recording_viewer.set_file(path, root)
+        self._sidecar_form.set_file(None, None, None)
+        self._tsv_viewer.set_file(None, None)
+        self._nifti_viewer.set_file(None, None)
+        self._center_stack.setCurrentWidget(self._recording_viewer)
+
+    def _on_pane_loading(self, busy: bool, message: str) -> None:
+        """Mirror a center pane's threaded load onto the toolbar spinner.
+
+        Only drives the spinner; it does not touch the validate buttons
+        (those are owned by :meth:`_set_busy`). When a dataset validation
+        is in flight we leave the spinner under its control.
+        """
+        if self._report_worker is not None and self._report_worker.isRunning():
+            return
+        self._spinner.set_busy(busy, message=message)
 
     # ------------------------------------------------------------------
     # Theme cascade (called by MainWindow._on_palette_changed)
@@ -672,15 +756,59 @@ class EditorPanel(QWidget):
 
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Undo / redo (delegates to the active editable center pane)
+    # ------------------------------------------------------------------
+
+    def _active_history_pane(self):
+        """The current center pane if it supports undo/redo, else None."""
+        w = self._center_stack.currentWidget()
+        if w in (self._sidecar_form, self._tsv_viewer):
+            return w
+        return None
+
+    def _sync_undo_redo(self, *args) -> None:
+        del args
+        pane = self._active_history_pane()
+        self._undo_btn.setEnabled(bool(pane) and pane.can_undo())
+        self._redo_btn.setEnabled(bool(pane) and pane.can_redo())
+
+    def _on_editor_undo(self) -> None:
+        pane = self._active_history_pane()
+        if pane is not None:
+            pane.undo()
+
+    def _on_editor_redo(self) -> None:
+        pane = self._active_history_pane()
+        if pane is not None:
+            pane.redo()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Refresh the tree when the Editor becomes visible.
+
+        A conversion (or any external change) may have written into the open
+        dataset while the user was in the Converter tab. ``refresh`` re-walks
+        the root while preserving the user's expand / selection state, so the
+        editor reflects the current disk contents the moment it is shown (and
+        the live ``QFileSystemWatcher`` keeps it current thereafter).
+        """
+        super().showEvent(event)
+        self._tree_pane.refresh()
+
     def repaint_for_palette(self, pal: dict) -> None:
         self._tree_pane.repaint_for_palette(pal)
         self._sidecar_form.repaint_for_palette(pal)
         self._tsv_viewer.repaint_for_palette(pal)
         self._nifti_viewer.repaint_for_palette(pal)
+        self._recording_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
+        for frame in getattr(self, "_panel_frames", []):
+            frame._refresh_icons()
         # Re-tint toolbar icons after the icon cache is cleared in
         # ``MainWindow._on_palette_changed``.
         icons.apply_button(self._open_btn, "open_folder")
+        icons.apply_button(self._undo_btn, "undo")
+        icons.apply_button(self._redo_btn, "redo")
         icons.apply_button(self._validate_dataset_btn, "dataset")
         icons.apply_button(self._strict_btn, "strict")
         # The two partial-validate buttons get their tint from the

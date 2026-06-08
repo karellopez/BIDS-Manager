@@ -20,6 +20,7 @@ Reference: ported from
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -38,7 +39,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Unified-TSV column group for EEG/MEG-specific fields.
 # Appended last in the unified-TSV column order:
-#   TSV(22) + BIDS_GUESS(8) + DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(9)
+#   TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4)
+#   + EXTENDED(3) + EEG_MEG(15) = 56
 # ---------------------------------------------------------------------------
 
 EEG_MEG_COLUMNS: tuple[str, ...] = (
@@ -63,13 +65,33 @@ EEG_MEG_COLUMNS: tuple[str, ...] = (
                        # before write_raw_bids → fills electrodes.tsv +
                        # coordsystem.json. Empty = leave positions to whatever the
                        # recording carries.
+    "eeg_reference",   # User-editable per-row override of the reference electrode
+                       # (e.g. "Cz", "average"). Written to EEGReference / iEEGReference
+                       # in the sidecar. Empty = use the recording-metadata default.
+    "eeg_ground",      # User-editable per-row override of the ground electrode.
+                       # Written to EEGGround / iEEGGround. Empty = use the default.
+    "montage_suggestion",  # Read-only scan suggestion: "<montage> (matched/total)"
+                       # by channel-name overlap. Surfaced in the GUI next to the
+                       # montage dropdown; the user picks the actual montage.
+    "manufacturer_suggestion",  # Read-only scan suggestion: the manufacturer
+                       # detected from the recording header (EEG) or inferred
+                       # from the file format (MEG: .fif -> MEGIN, .ds -> CTF,
+                       # ...). Surfaced as a hint next to the manufacturer field;
+                       # NOT auto-applied (mne-bids fills MEG Manufacturer itself).
 )
 
 
 # Extensions mne-bids accepts as raw inputs.
+# NOTE: ``.pdf`` is deliberately NOT here. It is the 4D / BTi "processed data
+# file" label, but that collides with Adobe PDF documents (consent forms,
+# reports, READMEs) which routinely sit in a data folder - the scanner must
+# never try to read those. 4D/BTi data is a directory (``c,rfDC`` + ``config``
+# + ``hs_file``) anyway and ``mne.io.read_raw`` does not dispatch a bare
+# ``.pdf``, so nothing real is lost; genuine 4D support would key on the
+# directory structure instead.
 _RECOGNISED_EXTS: tuple[str, ...] = (
     # MEG
-    ".fif", ".fif.gz", ".con", ".sqd", ".pdf",
+    ".fif", ".fif.gz", ".con", ".sqd",
     # EEG
     ".vhdr", ".edf", ".bdf", ".gdf", ".set", ".cnt", ".eeg", ".egi", ".mff",
     # iEEG
@@ -79,6 +101,41 @@ _RECOGNISED_EXTS: tuple[str, ...] = (
 )
 # Folder-shaped recordings (CTF MEG, EGI MFF). Treated as single candidates.
 _DIR_FORMATS: tuple[str, ...] = (".ds", ".mff")
+
+# Extensions mne-bids can write to BIDS natively (copy, or native re-encode).
+# A recording in any OTHER recognised format (Neuroscan ``.cnt``, ``.gdf``,
+# EGI ``.egi``/``.mff``, Nihon Kohden ``.eeg`` ...) needs conversion to a
+# BIDS-allowed format. For EEG / iEEG that is EDF, available behind the
+# Force-EDF option; the scan flags such rows so the user is not surprised.
+_BIDS_NATIVE_EXTS: frozenset[str] = frozenset({
+    # MEG (all recognised MEG formats are BIDS-native)
+    ".fif", ".fif.gz", ".ds", ".con", ".sqd", ".kdf",
+    # EEG / iEEG
+    ".vhdr", ".edf", ".bdf", ".set", ".mef", ".nwb",
+    # NIRS
+    ".snirf",
+})
+
+# Tokens prepended to a row's ``proposed_issues`` so the GUI surfaces the
+# reason (warnings chip / Issues dialog / tooltip) and the CLI logs it. Kept
+# free of the model's error-token substrings (``required`` / ``missing`` /
+# ``build_basename`` / ``suspected_abort``) so the row reads as warn / skip,
+# not a hard error.
+UNSUPPORTED_FORMAT_TOKEN = "unsupported format"
+NONNATIVE_FORMAT_TOKEN = "non-native format"
+
+
+def _full_ext(path: Path) -> str:
+    """Lower-case extension, preserving the ``.fif.gz`` double suffix."""
+    name = path.name.lower()
+    if name.endswith(".fif.gz"):
+        return ".fif.gz"
+    # Folder-shaped recordings (.ds / .mff) report the dir suffix.
+    return path.suffix.lower()
+
+
+def _is_bids_native(path: Path) -> bool:
+    return _full_ext(path) in _BIDS_NATIVE_EXTS
 
 
 # ``mne`` is heavy; lazy-import so the module is cheap to import in
@@ -108,6 +165,19 @@ class ProbeResult:
     datatype: str         # 'eeg' | 'meg' | 'ieeg' | 'nirs' | ''
     has_positions: bool
     fmt: str              # short label: 'EDF', 'FIF', 'BrainVision', ...
+    # Seeded enrichment facts read from the recording header (best-effort;
+    # rich for FIF/MEG, often empty for legacy EDF). These pre-fill the
+    # demographics columns and the recording-metadata scaffold so the user
+    # only supplies what the machine cannot read.
+    manufacturer: str = ""   # device manufacturer/type
+    model: str = ""          # device model
+    subj_sex: str = ""       # 'M' | 'F' | '' (only when a real birthday exists)
+    subj_age: str = ""       # integer years as a string, or ''
+    # Handedness is deliberately NOT extracted: file headers commonly default
+    # it (so reading it would be assuming data we do not have). The user
+    # enters it explicitly.
+    event_codes: tuple[str, ...] = ()  # distinct annotation/trigger labels
+    montage_suggestion: str = ""       # "name (matched/total)" for EEG/iEEG, else ""
 
 
 def _detect_datatype(raw) -> str:
@@ -177,8 +247,6 @@ def _format_label(path: Path) -> str:
         return "Nihon Kohden"
     if name.endswith((".sqd", ".con")):
         return "KIT"
-    if name.endswith(".pdf"):
-        return "4D"
     if name.endswith(".ds"):
         return "CTF"
     if name.endswith(".mef"):
@@ -223,6 +291,15 @@ def _probe(path: Path) -> Optional[ProbeResult]:
         except Exception:
             recording_time = str(meas_date)
 
+    datatype = _detect_datatype(raw)
+    manufacturer, model = _device_info(raw, path, datatype)
+    subj_sex, subj_age = _subject_info(raw, meas_date)
+    event_codes = _event_codes(raw)
+    # Best-matching montage is a SCAN-time suggestion (channel-name overlap)
+    # so the user can pick it while curating; not auto-applied. Montage is an
+    # EEG/iEEG concept (MEG carries intrinsic sensor geometry).
+    montage_suggestion = _best_montage(raw.ch_names) if datatype in ("eeg", "ieeg") else ""
+
     return ProbeResult(
         source=path,
         sfreq=sfreq,
@@ -230,10 +307,153 @@ def _probe(path: Path) -> Optional[ProbeResult]:
         n_times=n_times,
         duration_sec=duration_sec,
         recording_time=recording_time,
-        datatype=_detect_datatype(raw),
+        datatype=datatype,
         has_positions=_has_positions(raw),
         fmt=_format_label(path),
+        manufacturer=manufacturer,
+        model=model,
+        subj_sex=subj_sex,
+        subj_age=subj_age,
+        event_codes=event_codes,
+        montage_suggestion=montage_suggestion,
     )
+
+
+# MEG file format -> manufacturer (the format effectively identifies the
+# system, so the manufacturer is known even when the header carries no
+# device_info). Used as the estimate when device_info is empty.
+_MEG_FORMAT_MANUFACTURER: dict[str, str] = {
+    ".fif": "MEGIN / Elekta / Neuromag",
+    ".ds": "CTF",
+    ".con": "KIT / Yokogawa",
+    ".sqd": "KIT / Yokogawa",
+    ".kdf": "KRISS",
+}
+
+
+def _device_info(raw, path=None, datatype: str = "") -> tuple[str, str]:
+    """Best-effort (manufacturer, model) for a recording.
+
+    Reads ``raw.info['device_info']`` first; for MEG, when the header carries no
+    manufacturer, falls back to inferring it from the file format (``.fif`` ->
+    MEGIN, ``.ds`` -> CTF, ``.con/.sqd`` -> KIT, ``.kdf`` -> KRISS) since the
+    format identifies the system. This is an estimate the user can override.
+    """
+    manufacturer, model = "", ""
+    try:
+        dev = raw.info.get("device_info") or {}
+        manufacturer = str(dev.get("type", "") or "")
+        model = str(dev.get("model", "") or "")
+    except Exception:
+        pass
+    if not manufacturer and datatype == "meg" and path is not None:
+        suffix = Path(path).suffix.lower()
+        manufacturer = _MEG_FORMAT_MANUFACTURER.get(suffix, "")
+    return manufacturer, model
+
+
+# MNE FIFF subject sex codes -> BIDS-conventional letters.
+_SEX_MAP = {1: "M", 2: "F"}
+
+
+def _subject_info(raw, meas_date) -> tuple[str, str]:
+    """Best-effort (sex, age) from ``raw.info['subject_info']``.
+
+    Conservative on purpose: a real, non-placeholder ``birthday`` is required
+    as the signal that the record is genuine (anonymised FIF headers stamp
+    ``1900-01-01`` and often default the other fields too). When there is no
+    real birthday we seed nothing rather than assume. Handedness is never
+    auto-seeded (headers commonly default it). Returns ``("", "")`` when the
+    header carries nothing trustworthy.
+    """
+    try:
+        info = raw.info.get("subject_info") or {}
+    except Exception:
+        return "", ""
+    if meas_date is None:
+        return "", ""
+
+    birthday = info.get("birthday")
+    try:
+        by = (
+            birthday.year if hasattr(birthday, "year")
+            else int(birthday[0]) if birthday else None
+        )
+    except Exception:
+        by = None
+    # No real birthday (missing or the 1900 anonymisation placeholder) ->
+    # treat the whole record as untrustworthy and seed nothing.
+    if by is None or by <= 1900:
+        return "", ""
+
+    age = ""
+    try:
+        years = meas_date.year - by
+        if 0 < years <= 120:
+            age = str(years)
+    except Exception:
+        age = ""
+    sex = _SEX_MAP.get(info.get("sex"), "")
+    return sex, age
+
+
+@functools.lru_cache(maxsize=1)
+def _montage_chname_sets() -> dict[str, frozenset[str]]:
+    """Map each built-in MNE montage name to its normalised channel-name set.
+
+    Built once per process (montage construction is not free). Channel names
+    are lower-cased and stripped of non-alphanumerics so EDF padding (``Fc5.``)
+    matches the montage's ``FC5``.
+    """
+    out: dict[str, frozenset[str]] = {}
+    try:
+        import mne
+    except Exception:
+        return out
+    for name in mne.channels.get_builtin_montages():
+        try:
+            m = mne.channels.make_standard_montage(name)
+        except Exception:
+            continue
+        out[name] = frozenset(re.sub(r"[^a-z0-9]", "", c.lower()) for c in m.ch_names)
+    return out
+
+
+def _best_montage(ch_names) -> str:
+    """Return ``"<montage> (matched/total)"`` for the best channel-name overlap.
+
+    A scan-time *suggestion* only: the user confirms or changes it in the GUI.
+    Empty string when nothing matches (or MNE is unavailable).
+    """
+    sets = _montage_chname_sets()
+    if not sets:
+        return ""
+    cleaned = {re.sub(r"[^a-z0-9]", "", str(c).lower()) for c in ch_names}
+    cleaned.discard("")
+    if not cleaned:
+        return ""
+    best_name, best_n = "", 0
+    for name, mset in sets.items():
+        n = len(cleaned & mset)
+        if n > best_n:
+            best_n, best_name = n, name
+    if best_n == 0:
+        return ""
+    return f"{best_name} ({best_n}/{len(ch_names)})"
+
+
+def _event_codes(raw) -> tuple[str, ...]:
+    """Distinct annotation/trigger labels present in the recording."""
+    try:
+        descriptions = list(raw.annotations.description)
+    except Exception:
+        return ()
+    seen: list[str] = []
+    for d in descriptions:
+        s = str(d)
+        if s and s not in seen:
+            seen.append(s)
+    return tuple(sorted(seen))
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +690,6 @@ def scan_eeg_meg(
     bids_id_for_subject: dict[str, str] = {}
 
     for path in candidates:
-        probe = _probe(path)
-        if probe is None:
-            continue
-
         sub_hint, ses_hint, task_hint, run_hint = guess_subject_session_task(path, root)
         sub_token = sub_hint or _bids_id_from_filename(path.parent.name)
         if not sub_token:
@@ -483,6 +699,23 @@ def scan_eeg_meg(
             bids_counter += 1
             bids_id_for_subject[sub_token] = f"sub-{bids_counter:03d}"
         bids_name = bids_id_for_subject[sub_token]
+
+        probe = _probe(path)
+        if probe is None:
+            # A recognised EEG/MEG extension we could not read. Surface it as
+            # an excluded row with a clear reason instead of silently dropping
+            # it, so the user sees the file and why it was skipped.
+            fmt = _format_label(path)
+            note = (
+                f"{UNSUPPORTED_FORMAT_TOKEN}: this {fmt} recording could not be "
+                f"read by mne's generic reader and is excluded from conversion. "
+                f"If it is a valid recording, convert it to EDF / BrainVision "
+                f"with the vendor's tools (or mne's format-specific reader) "
+                f"first, then re-scan."
+            )
+            log.warning("EEG/MEG scan: %s (%s)", note, path)
+            rows.append(_unsupported_row(path, root, dataset, bids_name, sub_token, fmt, note))
+            continue
 
         datatype = probe.datatype or "eeg"
         # Build the BIDS basename via the schema engine so the row's
@@ -527,6 +760,19 @@ def scan_eeg_meg(
         except ValueError:
             rel_source = str(path)
 
+        # The recording read fine, but its format is not one mne-bids writes
+        # natively (e.g. Neuroscan .cnt, GDF, EGI). Such a row still converts,
+        # but only by re-encoding to EDF (EEG / iEEG). Flag it so the user
+        # knows to enable Force EDF; the note is non-fatal (warn), the row
+        # stays included.
+        nonnative_note = ""
+        if not _is_bids_native(path):
+            nonnative_note = (
+                f"{NONNATIVE_FORMAT_TOKEN}: {probe.fmt} is not a BIDS-native "
+                f"format; conversion re-encodes it to EDF (enable Force EDF for "
+                f"EEG / iEEG)."
+            )
+
         # The canonical entities dict — same one used to build the
         # basename, JSON-encoded for the TSV's ``entities`` column.
         # This is the **source of truth**: ``bidsmgr-rebuild`` and the
@@ -549,6 +795,7 @@ def scan_eeg_meg(
             "proposed_datatype": datatype,
             "proposed_basename": basename,
             "Proposed BIDS name": f"{basename}",
+            "proposed_issues": nonnative_note,
             "entities": json.dumps(entities_for_tsv, sort_keys=True),
             "task": task_hint,
             "run": run_hint,
@@ -562,6 +809,25 @@ def scan_eeg_meg(
             "has_positions": int(probe.has_positions),
             "line_freq": "" if line_freq is None else line_freq,
             "montage": montage or "",
+            "eeg_reference": "",
+            "eeg_ground": "",
+            "montage_suggestion": probe.montage_suggestion,
+            # Read-only manufacturer suggestion (header for EEG, format for MEG);
+            # surfaced as a hint, not auto-applied.
+            "manufacturer_suggestion": probe.manufacturer,
+            # Demographics seeded only when the header is genuinely real
+            # (non-placeholder birthday); user-editable. Handedness is never
+            # auto-seeded (see _subject_info). Written to participants.tsv by
+            # the metadata engine.
+            "PatientSex": probe.subj_sex,
+            "Handedness": "",
+            "PatientAge": probe.subj_age,
+            # Internal scaffold seed (leading underscore -> dropped from the
+            # final TSV by the unified column-order selection). Read by the scan
+            # verb to pre-populate the recording-metadata scaffold's event map.
+            # Manufacturer is NOT seeded here - it is a read-only suggestion
+            # (manufacturer_suggestion) and mne-bids fills the MEG sidecar value.
+            "_event_codes": json.dumps(list(probe.event_codes)),
             "dataset": dataset or "",
             # Surface the classifier-style columns so the inspector's
             # ``suffix`` and ``data`` columns show useful values for
@@ -666,6 +932,72 @@ def _splice_session_into_basename(basename: str, session_label: str) -> str:
         return f"{session_label}_{basename}"
     parts.insert(1, session_label)
     return "_".join(parts)
+
+
+def _unsupported_row(
+    path: Path,
+    root: Path,
+    dataset: Optional[str],
+    bids_name: str,
+    sub_token: str,
+    fmt: str,
+    note: str,
+) -> dict:
+    """Build a complete, excluded inventory row for an unreadable recording.
+
+    Mirrors the shape of a normal EEG/MEG row (so the unified TSV stays
+    rectangular) but with ``include=0`` + ``bids_guess_skip=True`` + the
+    ``unsupported format`` note, no probe-derived metadata, and an empty
+    proposed basename. The user sees the file and the reason; conversion skips
+    it.
+    """
+    try:
+        rel_source = path.relative_to(root).as_posix()
+    except ValueError:
+        rel_source = str(path)
+    return {
+        "subject": sub_token,
+        "BIDS_name": bids_name,
+        "session": "",
+        "source_folder": str(path.parent.relative_to(root))
+            if path.parent != root else "",
+        "include": 0,
+        "modality": "eeg",            # best-effort; we could not probe channels
+        "modality_bids": "eeg",
+        "proposed_datatype": "eeg",
+        "proposed_basename": "",
+        "Proposed BIDS name": "",
+        "proposed_issues": note,
+        "entities": json.dumps({"subject": bids_name[len("sub-"):]
+                                if bids_name.startswith("sub-") else bids_name},
+                               sort_keys=True),
+        "task": "",
+        "run": "",
+        "format": fmt,
+        "source_file": rel_source,
+        "n_channels": "",
+        "sfreq": "",
+        "duration_sec": "",
+        "n_times": "",
+        "recording_time": "",
+        "has_positions": "",
+        "line_freq": "",
+        "montage": "",
+        "eeg_reference": "",
+        "eeg_ground": "",
+        "montage_suggestion": "",
+        "manufacturer_suggestion": "",
+        "PatientSex": "",
+        "Handedness": "",
+        "PatientAge": "",
+        "_event_codes": json.dumps([]),
+        "dataset": dataset or "",
+        "bids_guess_classifier": "eeg_meg_scanner",
+        "bids_guess_datatype": "eeg",
+        "bids_guess_suffix": "eeg",
+        "bids_guess_confidence": "0.00",
+        "bids_guess_skip": True,
+    }
 
 
 def _empty_dataframe() -> pd.DataFrame:
