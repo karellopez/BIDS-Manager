@@ -52,8 +52,14 @@ def test_app_settings_load_defaults(isolated_settings) -> None:
     s = AppSettings.load()
     assert s.theme == "dark"
     assert s.scan_n_jobs == 1
-    assert s.scan_probe_convert is False
+    # Default-on: probe-convert, skip-residuals, and the whole post-convert chain.
+    assert s.scan_probe_convert is True
+    assert s.convert_skip_residuals is True
     assert s.post_run_metadata is True
+    assert s.post_metadata_fill_todos is True
+    assert s.post_run_validate is True
+    assert s.post_validate_strict is True
+    assert s.post_validate_html is True
 
 
 def test_app_settings_save_and_reload(isolated_settings) -> None:
@@ -73,13 +79,11 @@ def test_app_settings_save_and_reload(isolated_settings) -> None:
 def test_remember_helpers_persist_individually(isolated_settings, tmp_path) -> None:
     AppSettings.remember_raw_root(tmp_path / "a")
     AppSettings.remember_bids_parent(tmp_path / "b")
-    AppSettings.remember_dataset_slug("study42")
     AppSettings.remember_theme("light")
 
     s = AppSettings.load()
     assert s.raw_root == str(tmp_path / "a")
     assert s.bids_parent == str(tmp_path / "b")
-    assert s.dataset_slug == "study42"
     assert s.theme == "light"
 
 
@@ -205,11 +209,6 @@ def test_scan_click_writes_tsv_under_bids_parent(isolated_settings, qtbot, tmp_p
     assert (out / "inv.tsv").exists()
     # The old behaviour wrote into the raw folder — make sure that's gone.
     assert not (raw / ".bidsmgr_scan.tsv").exists()
-
-
-def test_default_dataset_slug_helper() -> None:
-    assert ConverterPanel._default_dataset_slug(Path("/x/My Study v2")) == "my-study-v2"
-    assert ConverterPanel._default_dataset_slug(Path("/tmp/abc__def")) == "abc__def"
 
 
 # ---------------------------------------------------------------------------

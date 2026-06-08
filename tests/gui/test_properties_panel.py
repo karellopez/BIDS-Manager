@@ -435,3 +435,58 @@ def test_nirs_row_has_no_reference_montage_section(qtbot) -> None:
     assert any("ACQUISITION" in t for t in texts)         # device/institution block
     assert not any("REFERENCE & MONTAGE" in t for t in texts)
     assert not any("montage match" in t for t in texts)   # no montage hint
+
+
+# ---------------------------------------------------------------------------
+# Per-row Compute-PSD button (threaded, mirrors the Editor recording viewer)
+# ---------------------------------------------------------------------------
+
+
+def _psd_buttons(panel):
+    from PyQt6.QtWidgets import QPushButton
+    return [
+        b for b in panel._body.findChildren(QPushButton)
+        if "Compute PSD" in b.text()
+    ]
+
+
+def test_eeg_row_has_compute_psd_button(qtbot) -> None:
+    """An EEG row exposes a Compute-PSD action under the line-frequency field;
+    it is disabled until the recording can be located on disk."""
+    panel, _m = _build_panel_with_model(qtbot, _eeg_row())
+    btns = _psd_buttons(panel)
+    assert len(btns) == 1
+    # No raw root set and the relative source_file does not exist -> disabled.
+    assert not btns[0].isEnabled()
+
+
+def test_compute_psd_button_enabled_when_source_resolvable(qtbot, tmp_path) -> None:
+    rec = tmp_path / "sub-001" / "rec.edf"
+    rec.parent.mkdir(parents=True)
+    rec.write_bytes(b"\x00")
+    panel, _m = _build_panel_with_model(qtbot, _eeg_row())
+    panel.set_raw_root(tmp_path)
+    btns = _psd_buttons(panel)
+    assert len(btns) == 1 and btns[0].isEnabled()
+    assert panel._resolve_source_path(0) == rec
+
+
+def test_meg_and_ieeg_rows_have_psd_button(qtbot) -> None:
+    for dt in ("meg", "ieeg"):
+        row = _eeg_row(
+            proposed_datatype=dt, bids_guess_suffix=dt, modality=dt,
+            proposed_basename=f"sub-001_task-rest_{dt}",
+        )
+        panel, _m = _build_panel_with_model(qtbot, row)
+        assert len(_psd_buttons(panel)) == 1, dt
+
+
+def test_mri_row_has_no_psd_button(qtbot) -> None:
+    """The PSD action only appears for the electrophysiology recording section."""
+    panel, _m = _build_panel_with_model(qtbot)  # default func/bold MRI row
+    assert _psd_buttons(panel) == []
+
+
+def test_resolve_source_path_none_for_dicom_row(qtbot) -> None:
+    panel, _m = _build_panel_with_model(qtbot)  # MRI row has blank source_file
+    assert panel._resolve_source_path(0) is None

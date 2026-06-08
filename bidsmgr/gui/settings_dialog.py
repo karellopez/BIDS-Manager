@@ -27,7 +27,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -213,10 +212,6 @@ class SettingsDialog(QDialog):
             f"Capped at the detected thread count ({self._sys.logical_threads})."
         )
         form.addRow("Parallel workers (-j):", self._scan_jobs)
-
-        self._scan_dataset = QLineEdit()
-        self._scan_dataset.setPlaceholderText("(auto-derive from raw folder name)")
-        form.addRow("Default dataset slug:", self._scan_dataset)
 
         # EEG/MEG line frequency + montage are no longer scan settings: they
         # are recording metadata, edited as dropdowns per recording in the
@@ -636,7 +631,6 @@ class SettingsDialog(QDialog):
         )
 
         self._scan_jobs.setValue(max(1, min(s.scan_n_jobs, cap)))
-        self._scan_dataset.setText(s.dataset_slug)
         self._scan_probe.setChecked(s.scan_probe_convert)
         self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
 
@@ -700,7 +694,6 @@ class SettingsDialog(QDialog):
         ][1]
 
         s.scan_n_jobs = self._scan_jobs.value()
-        s.dataset_slug = self._scan_dataset.text().strip()
         s.scan_probe_convert = self._scan_probe.isChecked()
         s.scan_skip_bids_guess = self._scan_skip_bids_guess.isChecked()
 

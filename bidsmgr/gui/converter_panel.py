@@ -419,6 +419,7 @@ class ConverterPanel(QWidget):
         # Detach the model from every dependent view.
         self._table.setModel(None)
         self._properties.bind_model(None)
+        self._properties.set_raw_root(None)
         self._filter_pane.bind_model(None)
         self._raw_pane.bind_model(None)
         self._raw_pane.set_root(None)
@@ -628,6 +629,7 @@ class ConverterPanel(QWidget):
             sel_model.currentRowChanged.connect(self._on_current_row_changed)
             sel_model.selectionChanged.connect(self._on_selection_changed)
         self._properties.bind_model(self._model)
+        self._properties.set_raw_root(self._raw_root)
         self._filter_pane.bind_model(self._model)
         self._raw_pane.bind_model(self._model)
         if self._raw_root is not None:
@@ -669,17 +671,6 @@ class ConverterPanel(QWidget):
             self._run_btn.setToolTip("Run conversion on the included rows")
         else:
             self._run_btn.setEnabled(False)
-
-    @staticmethod
-    def _default_dataset_slug(folder: Path) -> str:
-        """Mirror ``bidsmgr.cli.scan._default_dataset_slug`` so the
-        prefilled placeholder matches what the CLI would generate.
-        """
-        import re as _re
-        raw = Path(folder).name.lower()
-        slug = _re.sub(r"[^a-z0-9_-]+", "-", raw)
-        slug = _re.sub(r"-{2,}", "-", slug).strip("-_")
-        return slug or "dataset"
 
     def start_scan(
         self,
@@ -1513,7 +1504,8 @@ class ConverterPanel(QWidget):
         # inventory lives in the project bundle and the dataset name is the
         # project's folder name (output is locked to the project root). The
         # free-path case keeps the toolbar filename + chosen BIDS-output folder
-        # and the user partitions datasets by editing the ``dataset`` column.
+        # and lets the scanner derive the dataset slug from the raw folder name;
+        # the user then partitions datasets by editing the ``dataset`` column.
         if self._bids_root is not None:
             # Scan into a fresh staging dir; on success it is promoted to a new
             # version under .bidsmgr/project/scans/ (so a second source scan
@@ -1529,7 +1521,10 @@ class ConverterPanel(QWidget):
             if not filename.lower().endswith(".tsv"):
                 filename += ".tsv"
             self._output_tsv = self._bids_parent / filename
-            dataset = (s.dataset_slug or None)
+            # No GUI dataset-slug setting any more: leave it unset so the
+            # scanner derives the slug from the raw folder name (the CLI's
+            # ``_default_dataset_slug`` default).
+            dataset = None
         self.start_scan(
             self._raw_root,
             self._output_tsv,
@@ -1576,6 +1571,8 @@ class ConverterPanel(QWidget):
                 status=meta.get("status") or "curating",
             )
             self.log_message.emit(f"Relocated source for the active scan to {d}")
+        # Keep the Properties PSD button resolving against the new root.
+        self._properties.set_raw_root(self._raw_root)
         # Live preview of the picked folder before any scan runs.
         self._raw_pane.set_root(self._raw_root)
 

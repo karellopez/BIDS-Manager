@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt
@@ -41,6 +42,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -53,11 +55,12 @@ import pandas as pd
 from .. import schema as schema_mod
 from ..project import Project
 from ..recording_meta import COMMON_CAP_MANUFACTURERS, COMMON_MANUFACTURERS
+from . import icons
 from .delegates import builtin_montages
 from .metadata_help import tooltip_for
 from .models import InventoryTableModel
 from .theme_manager import CUR, scaled_px
-from .widgets import PaneHeader, ValMessage
+from .widgets import BusySpinner, PaneHeader, ValMessage
 
 # Datatypes that carry recording-metadata (the per-row section appears only
 # for these). MEG has no scalp montage / reference / ground concept.
@@ -151,6 +154,16 @@ class PropertiesPanel(QWidget):
         self._row: Optional[int] = None
         self._suppress_writeback = False
         self._entity_rows: list[_EntityRow] = []
+        # Raw input root, used to resolve a row's relative ``source_file`` to an
+        # absolute recording path for the in-panel PSD compute (set by the
+        # ConverterPanel whenever the scanned root changes).
+        self._raw_root: Optional[Path] = None
+        # Background PSD computation state. Only one runs at a time; the worker
+        # is parented to this panel so it survives body rebuilds, and
+        # ``_psd_row_id`` identifies which recording is computing so the button
+        # renders its busy state even across a re-render.
+        self._psd_worker = None
+        self._psd_row_id: Optional[str] = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -200,6 +213,17 @@ class PropertiesPanel(QWidget):
     def set_project(self, project: Optional[Project]) -> None:
         """Attach a project for provenance lookups. Not used yet for writes."""
         self._project = project
+
+    def set_raw_root(self, root: Optional[Path]) -> None:
+        """Set the raw input root used to resolve relative ``source_file`` paths.
+
+        The ConverterPanel calls this whenever the scanned root changes so the
+        per-row PSD button can locate the recording on disk. Re-renders the
+        current row so the button's enabled state reflects path availability.
+        """
+        self._raw_root = Path(root) if root is not None else None
+        if self._row is not None:
+            self.set_selected_row(self._row)
 
     def repaint_for_palette(self, _pal: dict) -> None:
         """Rebuild the body so inline palette reads pick up new colors.
@@ -701,6 +725,10 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._meta_combo_row(
             "line_freq", "line_freq", ["(blank)", "50", "60"], lf, "(blank)",
         ))
+        # Compute-PSD action, directly below the line-frequency field. Reads the
+        # recording on a background thread and shows the same interactive PSD
+        # dialog as the Editor's recording viewer.
+        self._body_layout.addWidget(self._build_psd_row(row))
         self._body_layout.addWidget(self._meta_combo_row(
             "manufacturer", "manufacturer",
             [""] + list(COMMON_MANUFACTURERS), self._acq_eff(row, "manufacturer"), "",
@@ -779,6 +807,151 @@ class PropertiesPanel(QWidget):
                 self._acq_eff(row, "subject_artefact_description"),
                 setter=self._on_acq_field_changed,
             ))
+
+    # ------------------------------------------------------------------
+    # PSD compute (per-row, threaded, mirrors the Editor recording viewer)
+    # ------------------------------------------------------------------
+
+    def _build_psd_row(self, row: int) -> QWidget:
+        """A ``[Compute PSD] [spinner]`` action row, left-aligned under the
+        field column. Disabled when no source recording can be located. While
+        this row's recording is computing it shows the busy spinner; only one
+        PSD runs at a time."""
+        row_w = QWidget()
+        row_w.setObjectName("meta-row")
+        row_w.setStyleSheet("#meta-row { background: transparent; }")
+        h = QHBoxLayout(row_w)
+        # 76px label column + 8px spacing aligns the button under the field.
+        h.setContentsMargins(84, 2, 0, 2)
+        h.setSpacing(8)
+
+        is_computing = (
+            self._psd_worker is not None
+            and self._model is not None
+            and self._psd_row_id is not None
+            and self._psd_row_id == self._model.row_id(row)
+        )
+        path = self._resolve_source_path(row)
+
+        btn = QPushButton("  Compute PSD")
+        btn.setObjectName("tb-btn")
+        icons.apply_button(btn, "psd")
+        btn.setToolTip(
+            "Compute the power spectral density of this recording. Reads the "
+            "file on a background thread and opens the same interactive PSD "
+            "viewer as the Editor."
+        )
+        if is_computing:
+            btn.setText("  Computing PSD…")
+            btn.setEnabled(False)
+        elif path is None:
+            btn.setEnabled(False)
+            btn.setToolTip("No readable source recording found for this row.")
+        else:
+            btn.clicked.connect(lambda _=False, r=row: self._on_compute_psd(r))
+        h.addWidget(btn)
+
+        spinner = BusySpinner()
+        if is_computing:
+            spinner.set_busy(True, message="")
+        h.addWidget(spinner)
+        h.addStretch(1)
+        return row_w
+
+    def _resolve_source_path(self, row: int) -> Optional[Path]:
+        """Resolve a row's ``source_file`` to an existing absolute path.
+
+        Mirrors the converter's resolution order: an absolute path as-is, else
+        relative to the raw input root, the CWD, or ``.resolve()``. Returns
+        ``None`` when nothing on disk matches (DICOM rows have no source_file)."""
+        src = self._cell(row, "source_file").strip()
+        if not src:
+            return None
+        p = Path(src)
+        if p.is_absolute():
+            return p if p.exists() else None
+        candidates: list[Path] = []
+        if self._raw_root is not None:
+            candidates.append(self._raw_root / p)
+        candidates.append(Path.cwd() / p)
+        try:
+            candidates.append(p.resolve())
+        except Exception:
+            pass
+        for c in candidates:
+            if c.exists():
+                return c
+        return None
+
+    def _on_compute_psd(self, row: int) -> None:
+        if self._model is None or self._psd_worker is not None:
+            return
+        path = self._resolve_source_path(row)
+        if path is None:
+            QMessageBox.warning(
+                self, "PSD", "No readable source recording found for this row."
+            )
+            return
+        from ..workers import RecordingComputeWorker
+
+        self._psd_row_id = self._model.row_id(row)
+
+        def _compute(p=path):
+            import mne
+            import numpy as np
+
+            from .widgets.recording_viewer_pane import _read_raw
+
+            raw = _read_raw(p, preload=True)
+            sfreq = float(raw.info["sfreq"])
+            fmax = min(sfreq / 2.0, 150.0)
+            psd = raw.compute_psd(fmin=0.1, fmax=fmax, verbose=False)
+            data = np.asarray(psd.get_data())
+            freqs = np.asarray(psd.freqs)
+            # compute_psd returns only data channels, in its own order - rows
+            # align with psd.ch_names, not the raw channel list. Derive types
+            # from the raw info by name so labels/types stay correct.
+            names = list(psd.ch_names)
+            raw_names = list(raw.ch_names)
+            types = []
+            for ch in names:
+                try:
+                    types.append(mne.channel_type(raw.info, raw_names.index(ch)))
+                except ValueError:
+                    types.append("misc")
+            n = min(data.shape[0], len(names), len(types))
+            return {
+                "freqs": freqs,
+                "data": data[:n],
+                "ch_names": names[:n],
+                "ch_types": types[:n],
+            }
+
+        worker = RecordingComputeWorker(_compute, parent=self)
+        worker.finished_with_result.connect(self._on_psd_ready)
+        worker.failed.connect(self._on_psd_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._psd_worker = worker
+        worker.start()
+        # Re-render so the button shows its busy state (spinner + disabled).
+        self.set_selected_row(row)
+
+    def _on_psd_ready(self, result) -> None:
+        self._psd_worker = None
+        self._psd_row_id = None
+        from .widgets.recording_viewer_pane import _PsdDialog
+
+        dlg = _PsdDialog(result, parent=self)
+        dlg.show()
+        if self._row is not None:
+            self.set_selected_row(self._row)
+
+    def _on_psd_failed(self, msg) -> None:
+        self._psd_worker = None
+        self._psd_row_id = None
+        QMessageBox.warning(self, "PSD error", str(msg))
+        if self._row is not None:
+            self.set_selected_row(self._row)
 
     def _montage_hint(self, suggestion: str) -> QWidget:
         return self._scan_hint("montage", "best montage match (from scan)", suggestion)

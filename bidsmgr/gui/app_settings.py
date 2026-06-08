@@ -27,7 +27,6 @@ KEYS = {
     "theme":              "ui/theme",                # "dark" | "light"
     "raw_root":           "paths/raw_root",          # last raw input dir
     "bids_parent":        "paths/bids_parent",       # last BIDS output dir
-    "dataset_slug":       "scan/dataset_slug",       # default dataset name
     "scan_tsv_filename":  "scan/tsv_filename",       # filename of the scan TSV
     "highlight_aborts":   "inspector/highlight_aborts",   # toolbar toggle
     "active_view":        "ui/active_view",          # "converter" | "editor"
@@ -101,7 +100,6 @@ class AppSettings:
     # Recently-used paths (paths come back as str; callers wrap in Path).
     raw_root: Optional[str] = None
     bids_parent: Optional[str] = None
-    dataset_slug: str = ""
     # Scan-TSV filename only (the TSV lives under ``<bids_parent>/``).
     # The user can override this from the toolbar field.
     scan_tsv_filename: str = "inventory.tsv"
@@ -111,7 +109,9 @@ class AppSettings:
 
     # Scan defaults
     scan_n_jobs: int = 1
-    scan_probe_convert: bool = False
+    # Default on: probe-convert runs dcm2niix per series at scan time to
+    # enrich the BIDS guess with sidecar-derived hints.
+    scan_probe_convert: bool = True
     scan_skip_bids_guess: bool = False
 
     # Convert defaults
@@ -127,12 +127,13 @@ class AppSettings:
     # Re-encode EEG / iEEG recordings to EDF on convert (mne-bids format="EDF").
     convert_force_edf: bool = False
 
-    # Post-convert chain
+    # Post-convert chain. All steps on by default: run metadata + validation
+    # with TODO placeholders, strict validation, and an HTML report.
     post_run_metadata: bool = True
     post_run_validate: bool = True
     post_metadata_fill_todos: bool = True
-    post_validate_strict: bool = False
-    post_validate_html: bool = False
+    post_validate_strict: bool = True
+    post_validate_html: bool = True
 
     # PyPI version string the user picked "Skip this version" on, so the
     # startup update check doesn't nag them about the same release on
@@ -238,7 +239,6 @@ class AppSettings:
         )
         out.raw_root = s.value(KEYS["raw_root"]) or None
         out.bids_parent = s.value(KEYS["bids_parent"]) or None
-        out.dataset_slug = _as_str(s.value(KEYS["dataset_slug"]), out.dataset_slug)
         out.scan_tsv_filename = _as_str(
             s.value(KEYS["scan_tsv_filename"]), out.scan_tsv_filename,
         )
@@ -304,7 +304,6 @@ class AppSettings:
         s = self._settings()
         # Strings.
         s.setValue(KEYS["theme"], self.theme)
-        s.setValue(KEYS["dataset_slug"], self.dataset_slug)
         s.setValue(KEYS["scan_tsv_filename"], self.scan_tsv_filename)
         if self.raw_root is not None:
             s.setValue(KEYS["raw_root"], self.raw_root)
@@ -351,10 +350,6 @@ class AppSettings:
     @classmethod
     def remember_bids_parent(cls, path: Path) -> None:
         cls._settings().setValue(KEYS["bids_parent"], str(path))
-
-    @classmethod
-    def remember_dataset_slug(cls, slug: str) -> None:
-        cls._settings().setValue(KEYS["dataset_slug"], slug)
 
     @classmethod
     def remember_tsv_filename(cls, filename: str) -> None:
