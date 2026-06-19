@@ -65,6 +65,7 @@ class Issue(BaseModel):
     message: str
     field: Optional[str] = None  # JSON key / TSV column when applicable (or entity)
     line: Optional[int] = None   # 1-based row (incl. header) for tabular findings
+    lines: list[int] = Field(default_factory=list)  # all rows a TSV column finding spans
     fix_label: Optional[str] = None
     fix_action: Optional[str] = None
     # A "mirror" of a finding that canonically belongs to a sibling data file

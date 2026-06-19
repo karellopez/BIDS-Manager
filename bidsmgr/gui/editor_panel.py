@@ -825,13 +825,10 @@ class EditorPanel(QWidget):
             self.select_file_in_tree(path)
             verdict = self._verdict_for(path)
             if verdict is not None and field:
-                # Highlight the specific bad cell(s) for this column (a column
-                # can be flagged at several rows). ``line`` is 1-based incl.
-                # header; the viewer resolves it to a cell.
-                items = [
-                    (i.field, i.line, i.severity.value)
-                    for i in verdict.issues if i.field == field
-                ]
+                # Highlight every bad cell for this column. A column finding
+                # carries all offending rows in ``lines`` (the viewer resolves
+                # each 1-based row to a cell).
+                items = self._tsv_highlight_items(verdict.issues, field=field)
                 if items:
                     self._tsv_viewer.highlight_findings(items)
             return
@@ -863,11 +860,7 @@ class EditorPanel(QWidget):
             verdict = self._verdict_for(path)
             if verdict is None:
                 return
-            items = [
-                (i.field, i.line, i.severity.value)
-                for i in verdict.issues
-                if i.field and i.severity in allowed
-            ]
+            items = self._tsv_highlight_items(verdict.issues, allowed=allowed)
             if not items:
                 return
             if path != self._tsv_viewer.current_file():
@@ -898,6 +891,27 @@ class EditorPanel(QWidget):
         if target != self._sidecar_form.current_file():
             self.select_file_in_tree(target)
         self._sidecar_form.highlight_fields(mapping)
+
+    @staticmethod
+    def _tsv_highlight_items(issues, *, field=None, allowed=None) -> list:
+        """Flatten TSV findings to ``(column, line, severity)`` items, one per
+        offending row. A column finding lists every bad row in ``lines``; we
+        expand them all so each bad cell is highlighted (falls back to ``line``
+        for column-level findings without rows)."""
+        items: list = []
+        for issue in issues:
+            if not issue.field:
+                continue
+            if field is not None and issue.field != field:
+                continue
+            if allowed is not None and issue.severity not in allowed:
+                continue
+            rows = issue.lines or (
+                [issue.line] if issue.line is not None else [None]
+            )
+            for ln in rows:
+                items.append((issue.field, ln, issue.severity.value))
+        return items
 
     def _verdict_for(self, path: Path) -> Optional[FileVerdict]:
         """The :class:`FileVerdict` in the current report for ``path`` (matched

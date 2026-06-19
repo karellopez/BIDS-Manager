@@ -80,6 +80,7 @@ def to_bm_issue(bv_issue) -> Issue:
         message=_compose_message(bv_issue),
         field=field,
         line=getattr(bv_issue, "line", None),
+        lines=list(getattr(bv_issue, "lines", []) or []),
         fix_label=fix_label,
         fix_action=fix_action,
     )

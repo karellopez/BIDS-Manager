@@ -783,7 +783,7 @@ class SidecarFormPane(QWidget):
         if not name or self._json_cache is None:
             return False
         if self._view_mode == "tree":
-            return self._focus_field_in_tree(name)
+            return self._focus_field_in_tree(name, severity)
         return self._focus_field_in_form(name, severity)
 
     def highlight_fields(self, severities: dict[str, str]) -> int:
@@ -805,12 +805,15 @@ class SidecarFormPane(QWidget):
                     first = row
         if first is not None:
             self._scroll_widget_visible(first)
+        # Mirror onto the Tree view so the highlight shows in either mode.
+        self._tree_view.set_highlights(severities)
         return n
 
     def clear_field_highlights(self) -> None:
-        """Remove all row highlights."""
+        """Remove all row highlights (BIDS form + Tree view)."""
         for row in self._rows:
             row.set_highlight(None)
+        self._tree_view.clear_highlights()
 
     def _focus_field_in_form(self, name: str, severity: Optional[str] = None) -> bool:
         self.clear_field_highlights()
@@ -833,10 +836,13 @@ class SidecarFormPane(QWidget):
                 return True
         return False
 
-    def _focus_field_in_tree(self, name: str) -> bool:
+    def _focus_field_in_tree(self, name: str, severity: Optional[str] = None) -> bool:
         for i in range(self._tree_view.topLevelItemCount()):
             item = self._tree_view.topLevelItem(i)
             if item.text(0) == name:
+                # Tint this row (clears the others) so the jump is visible in
+                # the Tree view too.
+                self._tree_view.set_highlights({name: severity or "focus"})
                 self._tree_view.setCurrentItem(item)
                 self._tree_view.scrollToItem(item)
                 # Start editing the Value cell so the user can type
