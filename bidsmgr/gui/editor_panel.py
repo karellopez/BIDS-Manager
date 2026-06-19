@@ -120,6 +120,9 @@ class EditorPanel(QWidget):
         self._center_stack.currentChanged.connect(self._sync_undo_redo)
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
+        self._validation_pane.highlight_all_requested.connect(
+            self._on_highlight_all_requested
+        )
         # The BIDS tree folds to the left, the validation pane to the right,
         # and the center viewer grows into the freed space. The viewer is
         # not collapsible (it's the main surface) but IS detachable so the
@@ -180,8 +183,10 @@ class EditorPanel(QWidget):
         if self._report_worker is not None and self._report_worker.isRunning():
             return  # debounce concurrent runs
         self._set_busy(True, "Validating dataset…")
+        schema, max_rows, flag_todos = self._validation_engine_opts()
         worker = ReportWorker(
-            root, strict=self._strict_btn.isChecked(), parent=self,
+            root, strict=self._strict_btn.isChecked(),
+            schema=schema, max_rows=max_rows, flag_todos=flag_todos, parent=self,
         )
         worker.progress.connect(self._on_progress)
         worker.finished_with_report.connect(self._on_report_ready)
@@ -203,7 +208,11 @@ class EditorPanel(QWidget):
         )():
             return
         self._set_busy(True, f"Validating {target.name}…")
-        worker = FileReportWorker(root, target, parent=self)
+        schema, max_rows, flag_todos = self._validation_engine_opts()
+        worker = FileReportWorker(
+            root, target, schema=schema, max_rows=max_rows,
+            flag_todos=flag_todos, parent=self,
+        )
         self._wire_partial_worker(worker)
         self._partial_worker = worker
         worker.start()
@@ -221,7 +230,11 @@ class EditorPanel(QWidget):
         )():
             return
         self._set_busy(True, f"Validating {target.name}/…")
-        worker = FolderReportWorker(root, target, parent=self)
+        schema, max_rows, flag_todos = self._validation_engine_opts()
+        worker = FolderReportWorker(
+            root, target, schema=schema, max_rows=max_rows,
+            flag_todos=flag_todos, parent=self,
+        )
         self._wire_partial_worker(worker)
         self._partial_worker = worker
         worker.start()
@@ -307,29 +320,31 @@ class EditorPanel(QWidget):
         self._validate_dataset_btn.clicked.connect(self.start_dataset_validation)
         lay.addWidget(self._validate_dataset_btn)
 
-        # Strict-validation toggle — when on, "Validate dataset" also
-        # runs ``bidsschematools.validator.validate_bids`` (the official
-        # Python BIDS validator) on top of bidsmgr's schema-driven
-        # layer 1 checks. State persists via AppSettings.
+        # Deep-checks toggle — when on, "Validate dataset" reads NIfTI
+        # headers and file contents (slower, more thorough); when off it
+        # runs the fast structural pass used for live revalidation. Maps
+        # to the validator's read-headers mode. State persists via
+        # AppSettings (the ``editor_strict_validate`` key, kept for
+        # back-compat).
         from .app_settings import AppSettings
-        self._strict_btn = QPushButton("  Strict BIDS")
+        self._strict_btn = QPushButton("  Deep checks")
         self._strict_btn.setObjectName("tb-btn-toggle")
         icons.apply_button(self._strict_btn, "strict")
         self._strict_btn.setCheckable(True)
         self._strict_btn.setChecked(AppSettings.load().editor_strict_validate)
         self._strict_btn.setToolTip(
-            "Strict BIDS validation\n\n"
-            "When ON, “Validate dataset” adds a second pass with the "
-            "official Python BIDS validator (bidsschematools). It "
-            "checks every on-disk path against the BIDS schema regexes "
-            "and surfaces files that don't match a recognised pattern "
-            "or violate mandatory structural rules.\n\n"
-            "When OFF, only bidsmgr's schema-driven layer 1 runs — "
-            "per-(datatype, suffix) sidecar audit, IntendedFor "
-            "resolution, basename / entity checks, dataset-level "
-            "layout. Faster on large trees.\n\n"
-            "Tip: leave this OFF while editing and flip it ON once "
-            "before a final review."
+            "Deep validation checks\n\n"
+            "When ON, “Validate dataset” also opens NIfTI image headers to "
+            "catch truncated or corrupt .nii / .nii.gz files. This is the "
+            "only extra file read, and the only thing this toggle changes.\n\n"
+            "When OFF, the validator runs the fast structural pass — file "
+            "naming, entities, sidecar fields, TSV columns, associations. "
+            "This is the mode used for live revalidation as you edit.\n\n"
+            "Note: EEG / MEG / iEEG recordings are validated from their "
+            "sidecars + channels.tsv and are never opened, so this toggle "
+            "has no effect on a recordings-only dataset.\n\n"
+            "Tip: leave this OFF while editing and flip it ON once before "
+            "a final review."
         )
         self._strict_btn.toggled.connect(self._on_strict_toggled)
         lay.addWidget(self._strict_btn)
@@ -369,6 +384,38 @@ class EditorPanel(QWidget):
     def _on_strict_toggled(self, checked: bool) -> None:
         from .app_settings import AppSettings
         AppSettings.remember_editor_strict_validate(checked)
+
+    @staticmethod
+    def _allowed_severities() -> set:
+        """Severities the Editor displays, from the ``validate_show`` setting.
+
+        Applied uniformly to the tree dots, the status chips, and the
+        Validation pane so "errors only" / "warnings only" hides the rest
+        everywhere (not just in the pane list).
+        """
+        from .app_settings import AppSettings
+        show = AppSettings.load().validate_show
+        if show == "error":
+            return {Severity.ERR}
+        if show == "warning":
+            return {Severity.WARN}
+        return {Severity.ERR, Severity.WARN}
+
+    @staticmethod
+    def _validation_engine_opts() -> tuple[Optional[str], int, bool]:
+        """Resolve the bidsval schema + max-rows + flag-todos knobs from settings.
+
+        Threaded into every validation worker so the engine never reads
+        settings itself (it stays Qt-free). ``schema`` is ``None`` for
+        bidsval's bundled default.
+        """
+        from .app_settings import AppSettings
+        s = AppSettings.load()
+        return (
+            s.validate_schema_version or None,
+            int(s.validate_max_rows),
+            bool(s.validate_flag_todos),
+        )
 
     # ------------------------------------------------------------------
     # Open-root flow
@@ -547,21 +594,24 @@ class EditorPanel(QWidget):
 
     @staticmethod
     def _recompute_report_summary(report: ValidationReport) -> None:
-        """Reset ``severity`` and ``counts`` after files were mutated."""
-        severities = []
-        for f in report.files:
-            severities.append(f.severity)
+        """Reset ``severity`` and ``counts`` after files were mutated.
+
+        Counts are PER-FINDING (every error/warning issue), matching the
+        adapter + bidsval; ``ok`` is the number of clean files.
+        """
+        all_issues = [i for i in report.dataset_issues if not i.mirrored]
         for issues in report.folder_issues.values():
-            severities.extend(i.severity for i in issues)
-        severities.extend(i.severity for i in report.dataset_issues)
-        counts = {"ok": 0, "warn": 0, "err": 0}
-        for sev in severities:
-            val = sev.value if isinstance(sev, Severity) else str(sev)
-            counts[val] = counts.get(val, 0) + 1
-        report.counts = counts
-        if any(s is Severity.ERR for s in severities):
+            all_issues.extend(i for i in issues if not i.mirrored)
+        for f in report.files:
+            all_issues.extend(i for i in f.issues if not i.mirrored)
+        report.counts = {
+            "ok": sum(1 for f in report.files if f.severity is Severity.OK),
+            "warn": sum(1 for i in all_issues if i.severity is Severity.WARN),
+            "err": sum(1 for i in all_issues if i.severity is Severity.ERR),
+        }
+        if any(i.severity is Severity.ERR for i in all_issues):
             report.severity = Severity.ERR
-        elif any(s is Severity.WARN for s in severities):
+        elif any(i.severity is Severity.WARN for i in all_issues):
             report.severity = Severity.WARN
         else:
             report.severity = Severity.OK
@@ -580,10 +630,19 @@ class EditorPanel(QWidget):
         root = self.current_root()
         if root is None:
             return
+        allowed = self._allowed_severities()
         severities: dict[Path, str] = {}
         for fv in report.files:
-            sev = fv.severity
-            value = sev.value if isinstance(sev, Severity) else str(sev)
+            # Badge = worst ALLOWED issue on the file; clean / filtered-out
+            # files get the green "ok" dot. So "errors only" leaves only error
+            # files red and everything else green.
+            issues = [i for i in fv.issues if i.severity in allowed]
+            if any(i.severity is Severity.ERR for i in issues):
+                value = "err"
+            elif any(i.severity is Severity.WARN for i in issues):
+                value = "warn"
+            else:
+                value = "ok"
             absolute = (root / fv.path).resolve() if not fv.path.is_absolute() \
                 else fv.path
             severities[absolute] = value
@@ -591,11 +650,15 @@ class EditorPanel(QWidget):
 
     def _update_chips(self, report: ValidationReport) -> None:
         counts = report.counts
+        allowed = self._allowed_severities()
         self._chip_ok.setText(f"{counts.get('ok', 0)} valid")
         self._chip_warn.setText(f"{counts.get('warn', 0)} warnings")
         self._chip_err.setText(f"{counts.get('err', 0)} errors")
-        for chip in (self._chip_ok, self._chip_warn, self._chip_err):
-            chip.setVisible(True)
+        # The "Show findings" filter hides the chips for severities it excludes
+        # (so "errors only" doesn't surface a warnings counter). "valid" stays.
+        self._chip_ok.setVisible(True)
+        self._chip_warn.setVisible(Severity.WARN in allowed)
+        self._chip_err.setVisible(Severity.ERR in allowed)
 
     def _hide_chips(self) -> None:
         for chip in (self._chip_ok, self._chip_warn, self._chip_err):
@@ -746,13 +809,116 @@ class EditorPanel(QWidget):
     def _on_fix_requested(self, path: Path, field: str) -> None:
         """A user clicked a ValMessage's fix button.
 
-        First land on the file (if it isn't already the bound one),
-        then ask the sidecar pane to focus the named field.
+        Navigate to where the problem is actually edited, then highlight it:
+
+        * a TSV column finding -> open the ``.tsv`` and select that column;
+        * a sidecar field finding -> open the ``.json`` and focus that field.
+          When the finding sits on a data file (``*_bold.nii.gz``, where bidsval
+          attaches sidecar metadata findings), redirect to its editable
+          ``*_bold.json`` sibling so the field can be focused.
         """
-        if path is not None and path != self._sidecar_form.current_file():
+        if path is None:
+            return
+        name = path.name.lower()
+
+        if name.endswith(".tsv") or name.endswith(".tsv.gz"):
             self.select_file_in_tree(path)
-        if field:
+            verdict = self._verdict_for(path)
+            if verdict is not None and field:
+                # Highlight the specific bad cell(s) for this column (a column
+                # can be flagged at several rows). ``line`` is 1-based incl.
+                # header; the viewer resolves it to a cell.
+                items = [
+                    (i.field, i.line, i.severity.value)
+                    for i in verdict.issues if i.field == field
+                ]
+                if items:
+                    self._tsv_viewer.highlight_findings(items)
+            return
+
+        if name.endswith(".json"):
+            target = path
+        else:
+            from ..editor.bidsmgr_checks import sibling_json
+            sib = sibling_json(path)
+            target = sib if (sib is not None and sib.exists()) else path
+
+        if target != self._sidecar_form.current_file():
+            self.select_file_in_tree(target)
+        if field and target.name.lower().endswith(".json"):
             self._sidecar_form.focus_field(field)
+
+    def _on_highlight_all_requested(self, path: Path) -> None:
+        """Highlight every shown error/warning field (JSON) or cell (TSV) for
+        ``path`` in the editor. For a data file, the editable target is its
+        ``.json`` sibling (where the sidecar fields live)."""
+        if path is None or self._report is None:
+            return
+        name = path.name.lower()
+        allowed = self._allowed_severities()
+
+        # TSV: highlight each finding's specific cell (or whole column when the
+        # finding has no row), so the bad values are pinpointed, not the column.
+        if name.endswith(".tsv") or name.endswith(".tsv.gz"):
+            verdict = self._verdict_for(path)
+            if verdict is None:
+                return
+            items = [
+                (i.field, i.line, i.severity.value)
+                for i in verdict.issues
+                if i.field and i.severity in allowed
+            ]
+            if not items:
+                return
+            if path != self._tsv_viewer.current_file():
+                self.select_file_in_tree(path)
+            self._tsv_viewer.highlight_findings(items)
+            return
+
+        # JSON sidecar (or a data file -> its editable .json sibling).
+        if name.endswith(".json"):
+            target = path
+        else:
+            from ..editor.bidsmgr_checks import sibling_json
+            sib = sibling_json(path)
+            target = sib if (sib is not None and sib.exists()) else path
+        verdict = self._verdict_for(target)
+        if verdict is None:
+            return
+        rank = {"err": 2, "warn": 1}
+        mapping: dict[str, str] = {}
+        for issue in verdict.issues:
+            if not issue.field or issue.severity not in allowed:
+                continue
+            sv = issue.severity.value
+            if rank.get(sv, 0) > rank.get(mapping.get(issue.field, ""), 0):
+                mapping[issue.field] = sv
+        if not mapping:
+            return
+        if target != self._sidecar_form.current_file():
+            self.select_file_in_tree(target)
+        self._sidecar_form.highlight_fields(mapping)
+
+    def _verdict_for(self, path: Path) -> Optional[FileVerdict]:
+        """The :class:`FileVerdict` in the current report for ``path`` (matched
+        on the absolute path), or ``None``."""
+        report = self._report
+        root = self.current_root()
+        if report is None or root is None:
+            return None
+        try:
+            target_abs = str(path.resolve())
+        except OSError:
+            target_abs = str(path)
+        for fv in report.files:
+            cand = fv.path if fv.path.is_absolute() else (root / fv.path)
+            try:
+                cand_abs = str(cand.resolve())
+            except OSError:
+                cand_abs = str(cand)
+            if cand_abs == target_abs:
+                return fv
+        return None
 
     # ------------------------------------------------------------------
 

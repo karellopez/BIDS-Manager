@@ -771,34 +771,60 @@ class SidecarFormPane(QWidget):
     # View-mode toggle + tree handlers
     # ----------------------------------------------------------------------
 
-    def focus_field(self, name: str) -> bool:
-        """Scroll to and focus the editor for the field named ``name``.
+    def focus_field(self, name: str, severity: Optional[str] = None) -> bool:
+        """Scroll to, focus, and highlight the field named ``name``.
 
-        Works in both views — the BIDS form jumps to and focuses the
-        matching :class:`SidecarRow`; the Tree view selects the
-        matching top-level row and begins editing its Value cell.
-        Returns ``True`` if a matching field was found.
+        Works in both views — the BIDS form jumps to and highlights the
+        matching :class:`SidecarRow`; the Tree view selects the matching
+        top-level row and begins editing its Value cell. ``severity``
+        (``"err"`` / ``"warn"``) tints the row in that colour; ``None`` uses
+        the neutral focus tint. Returns ``True`` if a matching field was found.
         """
         if not name or self._json_cache is None:
             return False
         if self._view_mode == "tree":
             return self._focus_field_in_tree(name)
-        return self._focus_field_in_form(name)
+        return self._focus_field_in_form(name, severity)
 
-    def _focus_field_in_form(self, name: str) -> bool:
+    def highlight_fields(self, severities: dict[str, str]) -> int:
+        """Highlight every field in ``severities`` (``{name: "err"|"warn"}``).
+
+        Clears any prior highlights first, tints each matching row in its
+        severity colour, and scrolls the first one into view. Returns the
+        number of rows highlighted. Only meaningful in the BIDS form view.
+        """
+        self.clear_field_highlights()
+        first = None
+        n = 0
+        for row in self._rows:
+            sev = severities.get(row.key)
+            if sev:
+                row.set_highlight(sev)
+                n += 1
+                if first is None:
+                    first = row
+        if first is not None:
+            self._scroll_widget_visible(first)
+        return n
+
+    def clear_field_highlights(self) -> None:
+        """Remove all row highlights."""
+        for row in self._rows:
+            row.set_highlight(None)
+
+    def _focus_field_in_form(self, name: str, severity: Optional[str] = None) -> bool:
+        self.clear_field_highlights()
         for row in self._rows:
             if row.key == name:
-                # Scroll the row into view inside the QScrollArea
-                # parent. ``ensureWidgetVisible`` walks up to find the
-                # nearest scroll area for us.
+                row.set_highlight(severity or "focus")
+                # Scroll the row into view inside the QScrollArea parent.
                 editor = row.editor()
                 if editor is not None:
                     self._scroll_widget_visible(editor)
                     editor.setFocus(Qt.FocusReason.OtherFocusReason)
-                    # ``QLineEdit`` highlights its content on focus
-                    # when ``setFocus`` is called this way — gives the
-                    # user a clear visual cue + lets them type to
-                    # overwrite.
+                    # ``QLineEdit`` highlights its content on focus when
+                    # ``setFocus`` is called this way - a clear visual cue +
+                    # lets the user type to overwrite.
                     if hasattr(editor, "selectAll"):
                         editor.selectAll()
                 else:

@@ -48,6 +48,13 @@ dependencies = [
     "bidsschematools>=1.0,<=1.2.2",
     "ancpbids>=0.3,<=0.3.1",
 
+    # BIDS validation engine. The Editor validator + ``bidsmgr-validate`` delegate
+    # to bidsval (schema-driven, pydantic-typed, false-positive-verified against
+    # the reference validator). It pulls only deps BIDS Manager already ships
+    # (bidsschematools, pydantic, nibabel, pandas, mne), so the footprint barely
+    # changes. 0.0.x is pre-1.0; allow patch releases, not a 0.1 minor bump.
+    "bidsval>=0.0.2,<0.1.0",
+
     # GUI.
     "pyqt6>=6.5,<=6.11.0",
 

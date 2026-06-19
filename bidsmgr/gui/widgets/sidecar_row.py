@@ -189,6 +189,14 @@ class SidecarRow(QFrame):
     # Public API
     # ------------------------------------------------------------------
 
+    # Semi-transparent row tints for highlighting findings. Chosen to read on
+    # both the dark and light palettes (low alpha over either background).
+    _HIGHLIGHT_BG: dict[str, str] = {
+        "err":   "rgba(207, 34, 46, 0.22)",
+        "warn":  "rgba(191, 135, 0, 0.26)",
+        "focus": "rgba(79, 195, 247, 0.22)",
+    }
+
     @property
     def key(self) -> str:
         return self._key
@@ -196,6 +204,18 @@ class SidecarRow(QFrame):
     @property
     def value_kind(self) -> str:
         return self._value_kind
+
+    def set_highlight(self, severity: Optional[str]) -> None:
+        """Tint the row to flag a finding (``"err"`` / ``"warn"`` / ``"focus"``)
+        or clear it (``None``). Scoped to ``#sc-row`` so it only paints this
+        row's background, leaving the level bar + value styling intact."""
+        color = self._HIGHLIGHT_BG.get(severity or "")
+        if color:
+            self.setStyleSheet(
+                f"QFrame#sc-row {{ background: {color}; border-radius: 4px; }}"
+            )
+        else:
+            self.setStyleSheet("")
 
     def editor(self) -> Optional[QWidget]:
         """Return the inline editor widget (or ``None`` for read-only rows)."""

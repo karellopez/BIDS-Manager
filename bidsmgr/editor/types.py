@@ -63,9 +63,15 @@ class Issue(BaseModel):
     severity: Severity
     rule_id: str
     message: str
-    field: Optional[str] = None  # JSON key when applicable (or BIDS entity)
+    field: Optional[str] = None  # JSON key / TSV column when applicable (or entity)
+    line: Optional[int] = None   # 1-based row (incl. header) for tabular findings
     fix_label: Optional[str] = None
     fix_action: Optional[str] = None
+    # A "mirror" of a finding that canonically belongs to a sibling data file
+    # (a sidecar metadata finding is attached to e.g. ``*_bold.nii.gz`` but
+    # surfaced again on its editable ``*_bold.json`` so it shows where the user
+    # fixes it). Mirrors are shown but NOT counted (the canonical copy is).
+    mirrored: bool = False
 
 
 class SidecarField(BaseModel):

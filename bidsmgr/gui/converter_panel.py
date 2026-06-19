@@ -1747,6 +1747,9 @@ class ConverterPanel(QWidget):
         worker = ValidateWorker(
             bids_parent,
             strict=s.post_validate_strict,
+            schema=s.validate_schema_version or None,
+            max_rows=s.validate_max_rows,
+            flag_todos=s.validate_flag_todos,
             html_report=s.post_validate_html,
             parent=self,
         )

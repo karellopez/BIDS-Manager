@@ -49,11 +49,17 @@ class ReportWorker(QThread):
         bids_root: Path,
         *,
         strict: bool = False,
+        schema: str | None = None,
+        max_rows: int = 1000,
+        flag_todos: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._bids_root = Path(bids_root)
         self._strict = strict
+        self._schema = schema or None
+        self._max_rows = max_rows
+        self._flag_todos = flag_todos
 
     def run(self) -> None:
         from ..editor import validate
@@ -67,7 +73,13 @@ class ReportWorker(QThread):
 
         try:
             self.progress.emit(f"Validating {self._bids_root}")
-            report = validate(self._bids_root, strict=self._strict)
+            report = validate(
+                self._bids_root,
+                strict=self._strict,
+                schema=self._schema,
+                max_rows=self._max_rows,
+                flag_todos=self._flag_todos,
+            )
             self.progress.emit(
                 f"Validation done: {report.counts.get('ok', 0)} ok, "
                 f"{report.counts.get('warn', 0)} warn, "

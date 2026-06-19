@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -130,6 +131,9 @@ class ValidationPane(QWidget):
     """
 
     fix_requested = pyqtSignal(object, str)  # (Path | None, field_name)
+    # Emitted by the File section's "Highlight in editor" button: highlight
+    # every shown error/warning field (JSON) or column (TSV) for this file.
+    highlight_all_requested = pyqtSignal(object)  # (Path | None)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -212,8 +216,29 @@ class ValidationPane(QWidget):
     # Internals
     # ----------------------------------------------------------------------
 
+    @staticmethod
+    def _allowed_severities() -> set:
+        """Which severities to list, from the ``validate_show`` setting.
+
+        The tree badges + chips always show the full picture; this only
+        narrows the findings list so the user can focus on errors (or
+        warnings). Read fresh each render so a Settings change takes effect
+        on the next validation / file selection.
+        """
+        try:
+            from ...gui.app_settings import AppSettings
+            show = AppSettings.load().validate_show
+        except Exception:
+            show = "error_warning"
+        if show == "error":
+            return {Severity.ERR}
+        if show == "warning":
+            return {Severity.WARN}
+        return {Severity.ERR, Severity.WARN}
+
     def _render(self) -> None:
         """Tear down + rebuild the three sections from current state."""
+        self._allowed = self._allowed_severities()
         # Drop existing section widgets. ``setParent(None)`` is the
         # critical detach — otherwise the deleteLater is deferred and
         # the old sections paint over the new ones briefly.
@@ -289,6 +314,7 @@ class ValidationPane(QWidget):
             file_issues,
             empty_text=empty_text,
             target_file=self._current_file,
+            highlight_button=True,
         )
 
         # Section 4: schema audit (only when the current file has one).
@@ -305,14 +331,20 @@ class ValidationPane(QWidget):
         *,
         empty_text: str,
         target_file: Optional[Path] = None,
+        highlight_button: bool = False,
     ) -> None:
+        # Apply the "Show findings" severity filter (errors only / warnings
+        # only / both). The count chip + empty state reflect the filtered list.
+        allowed = getattr(self, "_allowed", {Severity.ERR, Severity.WARN})
+        issues = [i for i in issues if i.severity in allowed]
+
         section = QFrame()
         section.setObjectName("val-section")
         sl = QVBoxLayout(section)
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(6)
 
-        # Header row: title + count chip.
+        # Header row: title + (optional) highlight button + count chip.
         head = QHBoxLayout()
         head.setSpacing(10)
         head.setContentsMargins(0, 0, 0, 0)
@@ -320,6 +352,21 @@ class ValidationPane(QWidget):
         title_l.setObjectName("val-section-title")
         head.addWidget(title_l)
         head.addStretch(1)
+        # "Highlight in editor" — only on the File section, only when there are
+        # field/column findings to point at.
+        if highlight_button and target_file is not None and any(i.field for i in issues):
+            hl_btn = QPushButton("Highlight in editor")
+            # Distinct object name so it is not mistaken for a per-finding fix
+            # button (it carries the same styling token plus its own).
+            hl_btn.setObjectName("val-highlight-all")
+            hl_btn.setToolTip(
+                "Highlight every shown error / warning field (JSON) or column "
+                "(TSV) for this file in the editor."
+            )
+            hl_btn.clicked.connect(
+                lambda _=False, p=target_file: self.highlight_all_requested.emit(p)
+            )
+            head.addWidget(hl_btn)
         count_l = Chip(str(len(issues)), _count_chip_kind(issues))
         head.addWidget(count_l)
         sl.addLayout(head)

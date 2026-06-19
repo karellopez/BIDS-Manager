@@ -296,9 +296,9 @@ def test_strict_toggle_drives_report_worker_strict_flag(
     captured: dict = {}
     real_init = report_mod.ReportWorker.__init__
 
-    def _spy_init(self, bids_root, *, strict=False, parent=None):
+    def _spy_init(self, bids_root, *, strict=False, parent=None, **kw):
         captured["strict"] = strict
-        return real_init(self, bids_root, strict=strict, parent=parent)
+        return real_init(self, bids_root, strict=strict, parent=parent, **kw)
 
     monkeypatch.setattr(report_mod.ReportWorker, "__init__", _spy_init)
 
@@ -323,9 +323,9 @@ def test_strict_toggle_off_passes_strict_false(
     captured: dict = {}
     real_init = report_mod.ReportWorker.__init__
 
-    def _spy_init(self, bids_root, *, strict=False, parent=None):
+    def _spy_init(self, bids_root, *, strict=False, parent=None, **kw):
         captured["strict"] = strict
-        return real_init(self, bids_root, strict=strict, parent=parent)
+        return real_init(self, bids_root, strict=strict, parent=parent, **kw)
 
     monkeypatch.setattr(report_mod.ReportWorker, "__init__", _spy_init)
 
@@ -338,17 +338,18 @@ def test_strict_toggle_off_passes_strict_false(
 
 
 def test_strict_button_has_tooltip(qapp, isolated_settings) -> None:
-    """Hovering the Strict toggle must surface explanatory text — a
-    user-facing description of what the second pass adds."""
+    """Hovering the Deep-checks toggle must surface explanatory text — a
+    user-facing description of what the deeper pass adds + when to use it."""
     from bidsmgr.gui.editor_panel import EditorPanel as _EP
 
     panel = _EP()
+    assert panel._strict_btn.text().strip() == "Deep checks"
     tip = panel._strict_btn.toolTip()
     assert tip
-    assert "bidsschematools" in tip
-    # Should mention the official Python BIDS validator and a hint
-    # about when to use it.
-    assert "official" in tip.lower()
+    # The deep pass reads file headers / contents; the tip should say so
+    # and hint at when to flip it on.
+    assert "header" in tip.lower()
+    assert "review" in tip.lower()
 
 
 def test_validate_report_severity_values_round_trip(qapp) -> None:

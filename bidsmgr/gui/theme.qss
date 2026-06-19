@@ -1047,7 +1047,7 @@ QLabel#val-field {
     padding: 1px 6px;
 }
 QLabel#val-body  { color: $text; font-size: 11px; }
-QPushButton#val-fix {
+QPushButton#val-fix, QPushButton#val-highlight-all {
     background: $accent_bg;
     color: $accent;
     border: 1px solid $accent_border;
@@ -1055,7 +1055,7 @@ QPushButton#val-fix {
     padding: 1px 7px;
     font-size: 10px;
 }
-QPushButton#val-fix:hover { background: $accent; color: $primary_btn_text; }
+QPushButton#val-fix:hover, QPushButton#val-highlight-all:hover { background: $accent; color: $primary_btn_text; }
 
 /* ---------- Scrollbars ---------- */
 QScrollBar:vertical {
