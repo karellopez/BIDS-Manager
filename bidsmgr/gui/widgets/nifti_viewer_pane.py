@@ -119,6 +119,7 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
 
     img = nib.load(str(path))
     try:
+        img = nib.as_closest_canonical(img)
         data = img.get_fdata()
         return img, data, {}
     except Exception as exc:
