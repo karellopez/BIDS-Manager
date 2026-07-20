@@ -28,10 +28,12 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QFileSystemWatcher, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
+    QApplication,
     QLabel,
+    QMenu,
     QStackedLayout,
     QTreeWidget,
     QTreeWidgetItem,
@@ -208,6 +210,8 @@ class BidsTreePane(QWidget):
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
         self._tree.setItemDelegate(BidsTreeDelegate(self._tree))
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
 
         self._hint = QLabel(
             "No BIDS dataset opened.\n\n"
@@ -475,6 +479,39 @@ class BidsTreePane(QWidget):
         path_str = items[0].data(0, PATH_ROLE)
         if path_str:
             self.file_selected.emit(Path(path_str))
+
+    def _on_show_context_menu(self, position: QPoint) -> None:
+        item = self._tree.itemAt(position)
+        if not item:
+            return
+
+        copy_path_action = QAction("Copy Path", self)
+        copy_path_action.triggered.connect(
+            lambda: self._copy_item_path(item)
+        )
+
+        copy_rel_path_action = QAction("Copy Relative Path", self)
+        copy_rel_path_action.triggered.connect(
+            lambda: self._copy_item_rel_path(item)
+        )
+
+        menu = QMenu()
+        menu.addActions([copy_path_action, copy_rel_path_action])
+
+        menu.exec(self._tree.viewport().mapToGlobal(position))
+
+    def _copy_item_path(self, item: QTreeWidgetItem) -> None:
+        path = item.data(0, PATH_ROLE)
+
+        if path:
+            QApplication.clipboard().setText(path)
+
+    def _copy_item_rel_path(self, item: QTreeWidgetItem) -> None:
+        path = item.data(0, PATH_ROLE)
+
+        if self._root is not None and path is not None:
+            rel_path = Path(path).relative_to(self._root)
+            QApplication.clipboard().setText(str(rel_path))
 
 
 __all__ = ["BidsTreePane", "PATH_ROLE"]
