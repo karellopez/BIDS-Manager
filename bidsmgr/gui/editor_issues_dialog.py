@@ -210,9 +210,18 @@ class EditorIssuesDialog(QDialog):
         else:
             for f in matched:
                 abs_path = self._absolute(f.path)
+                # Show only the issues matching the clicked chip's severity
+                # (an "err" file also carries warnings - don't list those under
+                # the error chip). Skip mirrors so a finding isn't shown twice.
+                shown = [
+                    i for i in f.issues
+                    if (i.severity.value if isinstance(i.severity, Severity)
+                        else str(i.severity)) == severity
+                    and not getattr(i, "mirrored", False)
+                ]
                 card = _FileCard(
                     path=abs_path,
-                    issues=f.issues,
+                    issues=shown,
                     severity=severity,
                     datatype=f.datatype,
                     suffix=f.suffix,
@@ -243,11 +252,25 @@ class EditorIssuesDialog(QDialog):
     ) -> list[FileVerdict]:
         out: list[FileVerdict] = []
         for f in report.files:
-            sev = (
-                f.severity.value if isinstance(f.severity, Severity)
-                else str(f.severity)
-            )
-            if sev == severity:
+            if severity == "ok":
+                # "valid" chip: files with no findings at all.
+                fsev = (
+                    f.severity.value if isinstance(f.severity, Severity)
+                    else str(f.severity)
+                )
+                if fsev == "ok":
+                    out.append(f)
+                continue
+            # err / warn chips: every file that CONTAINS an issue of that
+            # severity (an err+warn file appears under BOTH chips, showing the
+            # matching subset). Matching by file-rollup hid an err file's
+            # warnings from the warnings chip entirely. Skip mirrors.
+            if any(
+                (i.severity.value if isinstance(i.severity, Severity)
+                 else str(i.severity)) == severity
+                and not getattr(i, "mirrored", False)
+                for i in f.issues
+            ):
                 out.append(f)
         # Sort by parent dir then name for predictable layout.
         out.sort(key=lambda f: (str(f.path.parent), f.path.name))

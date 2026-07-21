@@ -9,12 +9,13 @@ it up. Exit code reflects the dataset-wide severity:
 * ``0`` — only ``ok``/``warn`` verdicts (or ``warn`` with ``--strict-warn``).
 * ``1`` — at least one ``err``, OR any ``warn`` when ``--strict-warn``.
 
-The ``--strict`` flag turns on Layer 2 (``bidsschematools.validator``)
-in addition to Layer 1 (schema-driven, always on).
+Validation is delegated to the standalone ``bidsval`` engine via
+``bidsmgr.editor.validator.validate``. The ``--strict`` flag enables
+"deep checks" (read NIfTI headers and file contents; slower) - it maps
+to bidsval's read-headers mode.
 
 Architectural rule: orchestration is straight-line code here; the
-validator itself (``bidsmgr.editor.validator.validate``) is a single
-function returning Pydantic data.
+validator itself is a single function returning Pydantic data.
 """
 
 from __future__ import annotations
@@ -42,6 +43,9 @@ def run_validate_cli(
     dataset: Optional[str] = None,
     strict: bool = False,
     strict_warn: bool = False,
+    schema: Optional[str] = None,
+    max_rows: int = 1000,
+    flag_todos: bool = True,
     write_report: bool = True,
     html_report: bool = False,
 ) -> int:
@@ -64,7 +68,10 @@ def run_validate_cli(
     overall_failed = 0
     for bids_root in bids_roots:
         try:
-            report = validate(bids_root, strict=strict)
+            report = validate(
+                bids_root, strict=strict, schema=schema, max_rows=max_rows,
+                flag_todos=flag_todos,
+            )
         except Exception:
             log.exception("validator raised on %s", bids_root)
             overall_failed += 1
@@ -170,7 +177,7 @@ def _print_summary(bids_root: Path, report: ValidationReport) -> None:
             print(f"    ... and {len(report.dataset_issues) - 20} more")
 
     if report.folder_issues:
-        print(f"  folder-level issues:")
+        print("  folder-level issues:")
         for folder, issues in list(report.folder_issues.items())[:20]:
             for issue in issues[:5]:
                 print(f"    [{issue.severity.value}] {folder}: {issue.message}")
@@ -197,9 +204,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bidsmgr-validate",
         description=(
-            "Schema-driven validation for a BIDS dataset. Runs Layer 1 "
-            "(bidsmgr.schema-based) by default; add --strict to also "
-            "run Layer 2 (bidsschematools structural validation)."
+            "Schema-driven BIDS validation (delegated to the bidsval engine). "
+            "Runs the fast structural pass by default; add --strict for deep "
+            "checks that also read NIfTI headers and file contents."
         ),
     )
     parser.add_argument(
@@ -213,11 +220,36 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--strict", action="store_true",
         help=(
-            "Also run Layer 2: bidsschematools structural validation. "
-            "Adds path-shape checks against the BIDS spec and is slower "
-            "on large trees."
+            "Deep checks: read NIfTI headers and file contents in addition "
+            "to the structural and metadata checks. More thorough (catches "
+            "unreadable / malformed files), slower on large trees."
         ),
     )
+    parser.add_argument(
+        "--schema", default=None,
+        help=(
+            "BIDS schema version to validate against (e.g. 1.11.1). "
+            "Default: bidsval's bundled schema. bidsval ships several "
+            "versions, so an older dataset can be checked against its own."
+        ),
+    )
+    parser.add_argument(
+        "--max-rows", type=int, default=1000, dest="max_rows",
+        help=(
+            "Maximum number of rows scanned per TSV during column / value "
+            "validation (default 1000). Raise to scan more of long tables."
+        ),
+    )
+    parser.add_argument(
+        "--no-todo-warnings", dest="flag_todos", action="store_false",
+        help=(
+            "Do not flag literal 'TODO' placeholder values as warnings. This "
+            "BIDS Manager convention is on by default (the metadata engine "
+            "writes TODO into missing recommended fields); turn it off for "
+            "exact parity with the standalone bidsval engine."
+        ),
+    )
+    parser.set_defaults(flag_todos=True)
     parser.add_argument(
         "--strict-warn", action="store_true",
         help=(
@@ -262,6 +294,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         dataset=args.dataset,
         strict=args.strict,
         strict_warn=args.strict_warn,
+        schema=args.schema,
+        max_rows=args.max_rows,
+        flag_todos=args.flag_todos,
         write_report=args.write_report,
         html_report=args.html_report,
     )

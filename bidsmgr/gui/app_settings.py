@@ -32,7 +32,12 @@ KEYS = {
     "active_view":        "ui/active_view",          # "converter" | "editor"
     "editor_bids_root":   "editor/bids_root",        # last BIDS root opened in the Editor view
     "editor_sidecar_view": "editor/sidecar_view",    # "bids" | "tree"
-    "editor_strict_validate": "editor/strict_validate",  # layer 2 (bidsschematools) on/off
+    "editor_strict_validate": "editor/strict_validate",  # "deep checks": bidsval read_headers on/off
+    # Validation engine (bidsval) knobs, controllable from Settings.
+    "validate_schema_version": "validate/schema_version",  # "" = bidsval bundled default
+    "validate_max_rows": "validate/max_rows",              # TSV rows scanned per table
+    "validate_show": "validate/show",                      # which severities the Editor lists
+    "validate_flag_todos": "validate/flag_todos",          # flag literal TODO placeholders
     "nifti_crosshair_color": "editor/nifti_crosshair_color",   # hex string e.g. "#4FC3F7"
     "nifti_crosshair_thickness": "editor/nifti_crosshair_thickness",  # px, 1..5
     # Scan defaults
@@ -88,10 +93,24 @@ class AppSettings:
     editor_bids_root: Optional[str] = None
     # Which sidecar pane layout is active for JSON files.
     editor_sidecar_view: str = "bids"  # "bids" | "tree"
-    # When True, "Validate dataset" runs ``bidsschematools.validator``
-    # (the official Python BIDS validator) in addition to bidsmgr's
-    # schema-driven layer 1 checks.
+    # "Deep checks" toggle for the Editor's "Validate dataset". When True the
+    # validator (bidsval) reads NIfTI headers and file contents (slower, more
+    # thorough); when False it runs the fast structural pass used for live
+    # revalidation. (Historically this enabled a second bidsschematools pass;
+    # validation is now a single engine and the toggle maps to read_headers.)
     editor_strict_validate: bool = False
+    # Validation engine (bidsval) knobs. ``validate_schema_version`` selects the
+    # BIDS schema version to validate against ("" = bidsval's bundled default);
+    # ``validate_max_rows`` bounds how many rows of each TSV are scanned;
+    # ``validate_show`` filters which severities the Editor's Validation pane
+    # lists ("error_warning" | "error" | "warning").
+    validate_schema_version: str = ""
+    validate_max_rows: int = 1000
+    validate_show: str = "error_warning"
+    # Flag literal "TODO" placeholder values as warnings (a BIDS Manager
+    # convention: the metadata engine writes TODO into missing recommended
+    # fields). On by default; off gives exact bidsval parity.
+    validate_flag_todos: bool = True
     # NIfTI viewer crosshair style. Persisted so the user's chosen
     # colour + thickness survives across sessions.
     nifti_crosshair_color: str = "#4FC3F7"
@@ -226,6 +245,23 @@ class AppSettings:
             s.value(KEYS["editor_strict_validate"]),
             out.editor_strict_validate,
         )
+        out.validate_schema_version = _as_str(
+            s.value(KEYS["validate_schema_version"]),
+            out.validate_schema_version,
+        )
+        out.validate_max_rows = _as_int(
+            s.value(KEYS["validate_max_rows"]), out.validate_max_rows,
+        )
+        if out.validate_max_rows < 1:
+            out.validate_max_rows = 1000
+        out.validate_show = _as_str(
+            s.value(KEYS["validate_show"]), out.validate_show,
+        )
+        if out.validate_show not in ("error_warning", "error", "warning"):
+            out.validate_show = "error_warning"
+        out.validate_flag_todos = _as_bool(
+            s.value(KEYS["validate_flag_todos"]), out.validate_flag_todos,
+        )
         out.nifti_crosshair_color = _as_str(
             s.value(KEYS["nifti_crosshair_color"]),
             out.nifti_crosshair_color,
@@ -326,9 +362,13 @@ class AppSettings:
             ("post_validate_strict",     self.post_validate_strict),
             ("post_validate_html",       self.post_validate_html),
             ("editor_strict_validate",   self.editor_strict_validate),
+            ("validate_flag_todos",      self.validate_flag_todos),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
+        s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
+        s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
+        s.setValue(KEYS["validate_show"], self.validate_show)
         s.setValue(KEYS["skipped_update_version"], self.skipped_update_version)
         s.setValue(KEYS["font_scale"], float(self.font_scale))
         s.setValue(KEYS["header_logo"], self.header_logo)

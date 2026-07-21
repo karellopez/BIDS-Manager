@@ -39,6 +39,9 @@ class ValidateWorker(QThread):
         *,
         strict: bool = False,
         strict_warn: bool = False,
+        schema: str | None = None,
+        max_rows: int = 1000,
+        flag_todos: bool = True,
         html_report: bool = False,
         parent=None,
     ) -> None:
@@ -46,6 +49,9 @@ class ValidateWorker(QThread):
         self._target = Path(target)
         self._strict = strict
         self._strict_warn = strict_warn
+        self._schema = schema or None
+        self._max_rows = max_rows
+        self._flag_todos = flag_todos
         self._html_report = html_report
 
     def run(self) -> None:
@@ -64,6 +70,9 @@ class ValidateWorker(QThread):
                 self._target,
                 strict=self._strict,
                 strict_warn=self._strict_warn,
+                schema=self._schema,
+                max_rows=self._max_rows,
+                flag_todos=self._flag_todos,
                 html_report=self._html_report,
             )
             verdict = "clean" if rc == 0 else f"errored (rc={rc})"

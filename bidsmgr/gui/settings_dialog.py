@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -95,6 +94,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_scan_tab(), "Scan")
         tabs.addTab(self._build_scan_rules_tab(), "Scan rules")
         tabs.addTab(self._build_convert_tab(), "Convert + post-convert")
+        tabs.addTab(self._build_validation_tab(), "Validation")
         v.addWidget(tabs, 1)
 
         # Save / Cancel / Restore defaults.
@@ -568,11 +568,16 @@ class SettingsDialog(QDialog):
         pv.addWidget(_indented(self._post_metadata_fill_todos))
 
         self._post_run_validate = QCheckBox(
-            "Validate dataset (schema + bidsschematools structural)"
+            "Validate dataset (bidsval schema-driven validation)"
         )
         pv.addWidget(self._post_run_validate)
         self._post_validate_strict = QCheckBox(
-            "Strict: treat warnings as errors (--strict)"
+            "Deep checks: read NIfTI headers and file contents (slower)"
+        )
+        self._post_validate_strict.setToolTip(
+            "When on, validation reads NIfTI headers and file contents in "
+            "addition to the structural checks. More thorough, slower on "
+            "large trees. Maps to the validator's read-headers mode."
         )
         self._post_validate_html = QCheckBox(
             "Write a self-contained validation_report.html (--html)"
@@ -588,6 +593,88 @@ class SettingsDialog(QDialog):
         )
 
         v.addWidget(post)
+        v.addStretch(1)
+        return w
+
+    def _build_validation_tab(self) -> QWidget:
+        """Validation-engine (bidsval) knobs.
+
+        The Editor's "Deep checks" toggle (read NIfTI headers / file contents)
+        lives in the Editor toolbar, not here, because it is a per-run choice.
+        These two are dataset-wide preferences worth persisting.
+        """
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        box = QGroupBox("Validation engine (bidsval)")
+        form = QFormLayout(box)
+
+        # BIDS schema version. bidsval bundles several; "" = its default.
+        self._validate_schema = QComboBox()
+        self._validate_schema.addItem("Bundled default (recommended)", userData="")
+        try:
+            import bidsval
+            for ver in bidsval.available_versions():
+                self._validate_schema.addItem(f"BIDS schema {ver}", userData=ver)
+        except Exception:
+            pass
+        self._validate_schema.setToolTip(
+            "Validate against this BIDS schema version. bidsval bundles "
+            "several versions; the bundled default tracks the BIDS release "
+            "BIDS Manager ships with. Picking an older version validates a "
+            "dataset against that version's rules."
+        )
+        form.addRow("BIDS schema version:", self._validate_schema)
+
+        self._validate_max_rows = QSpinBox()
+        self._validate_max_rows.setRange(1, 10_000_000)
+        self._validate_max_rows.setSingleStep(1000)
+        self._validate_max_rows.setToolTip(
+            "Maximum number of rows scanned per TSV during column / value "
+            "validation. Large tables are bounded to keep validation fast; "
+            "raise this to scan more of very long tables."
+        )
+        form.addRow("Max TSV rows scanned:", self._validate_max_rows)
+
+        # Which severities the Editor's Validation pane lists. The tree badges
+        # and chips always reflect the full picture; this only filters the
+        # findings list so you can focus on errors (or warnings).
+        self._validate_show = QComboBox()
+        for label, value in (
+            ("Errors and warnings", "error_warning"),
+            ("Errors only",         "error"),
+            ("Warnings only",       "warning"),
+        ):
+            self._validate_show.addItem(label, userData=value)
+        self._validate_show.setToolTip(
+            "Filter which findings the Editor's Validation pane lists. The "
+            "tree badges and the error / warning counters always show the "
+            "full picture; this only narrows the list so you can focus."
+        )
+        form.addRow("Show findings:", self._validate_show)
+
+        self._validate_flag_todos = QCheckBox(
+            "Flag 'TODO' placeholder values as warnings"
+        )
+        self._validate_flag_todos.setToolTip(
+            "A BIDS Manager convention: the metadata engine writes the literal "
+            "string 'TODO' into missing recommended fields so you can find and "
+            "fill them. On by default. Turn it off for exact parity with the "
+            "standalone bidsval engine (which does not know this convention)."
+        )
+        form.addRow("TODO placeholders:", self._validate_flag_todos)
+
+        v.addWidget(box)
+
+        note = QLabel(
+            "The Editor's \"Deep checks\" toggle (read NIfTI headers and file "
+            "contents) lives in the Editor toolbar, since it is a per-run "
+            "choice. Validation results are written into the project's "
+            "<bids_root>/.bidsmgr/ folder, never into the BIDS tree."
+        )
+        note.setStyleSheet("color: #8b949e;")
+        note.setWordWrap(True)
+        v.addWidget(note)
         v.addStretch(1)
         return w
 
@@ -645,6 +732,14 @@ class SettingsDialog(QDialog):
         self._post_run_validate.setChecked(s.post_run_validate)
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
+
+        # Validation engine.
+        sidx = self._validate_schema.findData(s.validate_schema_version)
+        self._validate_schema.setCurrentIndex(sidx if sidx >= 0 else 0)
+        self._validate_max_rows.setValue(max(1, int(s.validate_max_rows)))
+        shidx = self._validate_show.findData(s.validate_show)
+        self._validate_show.setCurrentIndex(shidx if shidx >= 0 else 0)
+        self._validate_flag_todos.setChecked(s.validate_flag_todos)
 
         # Scan rules: rebuild both editable tables from the persisted lists
         # (clear first so Restore-defaults empties them).
@@ -709,6 +804,11 @@ class SettingsDialog(QDialog):
         s.post_run_validate = self._post_run_validate.isChecked()
         s.post_validate_strict = self._post_validate_strict.isChecked()
         s.post_validate_html = self._post_validate_html.isChecked()
+
+        s.validate_schema_version = self._validate_schema.currentData() or ""
+        s.validate_max_rows = self._validate_max_rows.value()
+        s.validate_show = self._validate_show.currentData() or "error_warning"
+        s.validate_flag_todos = self._validate_flag_todos.isChecked()
 
         s.save()
         self.accept()

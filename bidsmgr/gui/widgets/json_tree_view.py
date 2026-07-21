@@ -56,6 +56,18 @@ log = logging.getLogger(__name__)
 # (and ignored for descendants) so the delegate can paint a colour bar.
 LEVEL_ROLE = Qt.ItemDataRole.UserRole + 5
 
+# Per-item findings highlight severity ("err" / "warn" / "focus"), stored on
+# top-level items so ``drawRow`` can tint the row (a QSS-styled tree ignores an
+# item's background brush, so we paint it ourselves, like the level bar).
+HIGHLIGHT_ROLE = Qt.ItemDataRole.UserRole + 6
+
+# Semi-transparent row tints; low alpha so the text stays readable over them.
+_HL_TINT: dict[str, "QColor"] = {
+    "err":   QColor(207, 34, 46, 78),
+    "warn":  QColor(191, 135, 0, 86),
+    "focus": QColor(79, 195, 247, 78),
+}
+
 # Map our short level codes to the palette token used for the bar.
 _LEVEL_TO_TOKEN: dict[str, str] = {
     "req": "error",
@@ -185,6 +197,14 @@ class JsonTreeView(QTreeWidget):
         super().drawRow(painter, options, index)
         if index.parent().isValid():
             return
+        # Findings highlight overlay (under the level bar, over the row text as a
+        # low-alpha tint) so it shows even though the tree is QSS-styled.
+        hl = index.data(HIGHLIGHT_ROLE)
+        hcolor = _HL_TINT.get(hl) if hl else None
+        if hcolor is not None:
+            painter.save()
+            painter.fillRect(options.rect, hcolor)
+            painter.restore()
         level = index.data(LEVEL_ROLE)
         token = _LEVEL_TO_TOKEN.get(level) if level else None
         if not token:
@@ -247,6 +267,19 @@ class JsonTreeView(QTreeWidget):
         finally:
             self._suppress = False
         self.resizeColumnToContents(0)
+
+    def set_highlights(self, severities: dict[str, str]) -> None:
+        """Tint top-level rows whose key is in ``severities`` ({name: sev});
+        clear the rest. Used by the Editor's fix / highlight-all actions."""
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            item.setData(0, HIGHLIGHT_ROLE, severities.get(item.text(0)) or None)
+        self.viewport().update()
+
+    def clear_highlights(self) -> None:
+        for i in range(self.topLevelItemCount()):
+            self.topLevelItem(i).setData(0, HIGHLIGHT_ROLE, None)
+        self.viewport().update()
 
     def to_dict(self) -> OrderedDict[str, Any]:
         """Read the tree back into a Python object (top-level dict).

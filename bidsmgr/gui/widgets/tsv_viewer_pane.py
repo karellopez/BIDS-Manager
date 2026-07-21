@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -40,6 +41,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QStackedLayout,
+    QStyledItemDelegate,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -153,15 +155,37 @@ class _TsvTableModel(QAbstractTableModel):
     # Emitted on any user cell edit (the pane uses it for dirty tracking).
     cellEdited = pyqtSignal()
 
+    # Cell/column-highlight tints (semi-transparent; read on dark + light).
+    _HL_BRUSH: dict[str, QColor] = {
+        "err":   QColor(207, 34, 46, 120),
+        "warn":  QColor(191, 135, 0, 130),
+        "focus": QColor(79, 195, 247, 110),
+    }
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._header: list[str] = []
         self._rows: list[list[str]] = []
+        # Findings highlighting: specific bad cells {(row, col): severity} take
+        # priority; whole columns {col: severity} cover column-level findings.
+        self._hl_cells: dict[tuple, str] = {}
+        self._hl_cols: dict[int, str] = {}
+
+    def set_highlights(self, cells: dict, cols: dict) -> None:
+        """Set ``{(row, col): sev}`` cells + ``{col: sev}`` columns and repaint."""
+        self._hl_cells = dict(cells)
+        self._hl_cols = dict(cols)
+        if self.rowCount() and self.columnCount():
+            top = self.index(0, 0)
+            bottom = self.index(self.rowCount() - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top, bottom, [Qt.ItemDataRole.BackgroundRole])
 
     # --- data ----------------------------------------------------------
     def set_table(self, header, rows) -> None:
         """Replace the whole table (load / restore). Rectangular-padded."""
         self.beginResetModel()
+        self._hl_cells = {}
+        self._hl_cols = {}
         self._header = [str(h) for h in header]
         w = len(self._header)
         self._rows = []
@@ -193,6 +217,11 @@ class _TsvTableModel(QAbstractTableModel):
             if 0 <= r < len(self._rows) and 0 <= c < len(self._rows[r]):
                 return self._rows[r][c]
             return ""
+        if role == Qt.ItemDataRole.BackgroundRole:
+            sev = self._hl_cells.get((index.row(), index.column())) \
+                or self._hl_cols.get(index.column())
+            color = self._HL_BRUSH.get(sev) if sev else None
+            return QBrush(color) if color is not None else None
         return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
@@ -258,6 +287,26 @@ class _TsvTableModel(QAbstractTableModel):
             self.endRemoveColumns()
 
 
+class _HighlightDelegate(QStyledItemDelegate):
+    """Paints the model's ``BackgroundRole`` brush behind a cell.
+
+    A QSS ``::item`` rule makes ``QTableView`` ignore the model's background
+    brush (the style draws the item), so findings highlights set on the model
+    never showed. This delegate fills the cell with the brush first, then lets
+    the default painter draw the (transparent-background) text + border on top.
+    Selected cells keep the selection colour (the brush is skipped then).
+    """
+
+    def paint(self, painter, option, index):  # noqa: N802
+        brush = index.data(Qt.ItemDataRole.BackgroundRole)
+        from PyQt6.QtWidgets import QStyle
+        if brush is not None and not (option.state & QStyle.StateFlag.State_Selected):
+            painter.save()
+            painter.fillRect(option.rect, brush)
+            painter.restore()
+        super().paint(painter, option, index)
+
+
 class TsvViewerPane(QWidget):
     """Editable table view for BIDS ``.tsv`` files."""
 
@@ -291,6 +340,10 @@ class TsvViewerPane(QWidget):
         # disabled so we never drop the tail rows).
         self._truncated_on_load: bool = False
         self._dirty = False
+        # Findings to highlight once the table is loaded: a list of
+        # ``(column_name, line, severity)`` set by the Editor's fix /
+        # highlight-all buttons. Applied on ``loaded`` (parsing is threaded).
+        self._pending_findings: list = []
         # Undo/redo of in-memory table edits (snapshot = (header, rows)).
         from .edit_history import SnapshotHistory
         self._history = SnapshotHistory()
@@ -376,9 +429,14 @@ class TsvViewerPane(QWidget):
         self._model = _TsvTableModel(self)
         self._model.cellEdited.connect(self._on_cell_edited)
         self._table.setModel(self._model)
+        # Paint findings highlights ourselves (QSS ::item styling otherwise makes
+        # the view ignore the model's background brush).
+        self._table.setItemDelegate(_HighlightDelegate(self._table))
         sel_model = self._table.selectionModel()
         if sel_model is not None:
             sel_model.currentChanged.connect(self._sync_delete_button_state)
+        # Apply any deferred findings highlight once the (threaded) load lands.
+        self.loaded.connect(lambda _p: self._apply_pending_highlights())
 
         self._empty_hint = QLabel(
             "Select a TSV file in the BIDS tree to view it."
@@ -437,6 +495,53 @@ class TsvViewerPane(QWidget):
     def is_dirty(self) -> bool:
         return self._dirty
 
+    def highlight_findings(self, items) -> None:
+        """Highlight TSV findings and scroll to the first.
+
+        ``items`` is a list of ``(column_name, line, severity)`` where ``line``
+        is the finding's 1-based row (including the header) or ``None`` for a
+        whole-column finding. Deferred until the (threaded) load lands, so the
+        Editor can call it right after switching to the TSV.
+        """
+        self._pending_findings = list(items or [])
+        self._apply_pending_highlights()
+
+    def clear_highlights(self) -> None:
+        self._pending_findings = []
+        self._model.set_highlights({}, {})
+
+    def _apply_pending_highlights(self) -> None:
+        items = self._pending_findings
+        if not items:
+            return
+        header = self._model.header()
+        if not header:
+            return  # not loaded yet - stay pending
+        nrows = self._model.rowCount()
+        cells: dict = {}
+        cols: dict = {}
+        first = None
+        for name, line, sev in items:
+            if name not in header:
+                continue
+            c = header.index(name)
+            if line is not None:
+                r = line - 2  # line is 1-based incl. header; data row 0 == line 2
+                if 0 <= r < nrows:
+                    cells[(r, c)] = sev
+                    if first is None:
+                        first = (r, c)
+            else:
+                cols[c] = sev
+                if first is None:
+                    first = (0, c)
+        if not cells and not cols:
+            return  # nothing resolved (e.g. not a column) - stay pending
+        self._model.set_highlights(cells, cols)
+        if first is not None:
+            self._table.scrollTo(self._model.index(*first))
+        self._pending_findings = []
+
     def set_file(
         self,
         path: Optional[Path],
@@ -455,6 +560,9 @@ class TsvViewerPane(QWidget):
         self._current_file = path
         self._current_root = root
         self._history.clear()
+        # A new selection invalidates any deferred highlight from a prior fix
+        # click (the Editor re-sets it after this returns when relevant).
+        self._pending_findings = []
         if path is None:
             self._reset_model()
             self._original_header = []
