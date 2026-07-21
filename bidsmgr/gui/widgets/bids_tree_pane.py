@@ -25,11 +25,21 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import subprocess
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QFileSystemWatcher, QPoint, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtCore import (
+    QFileSystemWatcher,
+    QPoint,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -482,36 +492,114 @@ class BidsTreePane(QWidget):
 
     def _on_show_context_menu(self, position: QPoint) -> None:
         item = self._tree.itemAt(position)
-        if not item:
+        if item is None:
             return
 
-        copy_path_action = QAction("Copy Path", self)
+        # Read the path now, while the item is guaranteed valid. ``menu.exec``
+        # spins a nested event loop, during which the live-refresh timer may
+        # fire and call ``self._tree.clear()``, deleting the underlying C++
+        # item. A callback that captured ``item`` would then dereference a
+        # freed object and raise ``RuntimeError``. Capturing the plain string
+        # keeps the actions safe no matter what happens to the tree meanwhile.
+        path = item.data(0, PATH_ROLE)
+        if not path:
+            return
+
+        menu = QMenu(self)
+        from ..combo_popup import round_menu
+        round_menu(menu)
+
+        copy_path_action = menu.addAction("Copy Path")
         copy_path_action.triggered.connect(
-            lambda: self._copy_item_path(item)
+            lambda: QApplication.clipboard().setText(str(path))
         )
 
-        copy_rel_path_action = QAction("Copy Relative Path", self)
+        copy_rel_path_action = menu.addAction("Copy Relative Path")
         copy_rel_path_action.triggered.connect(
-            lambda: self._copy_item_rel_path(item)
+            lambda: self._copy_relative_path(path)
         )
 
-        menu = QMenu()
-        menu.addActions([copy_path_action, copy_rel_path_action])
+        menu.addSeparator()
+
+        open_in_folder_action = menu.addAction("Open in Folder")
+        open_in_folder_action.triggered.connect(
+            lambda: self._open_in_folder(path)
+        )
 
         menu.exec(self._tree.viewport().mapToGlobal(position))
 
-    def _copy_item_path(self, item: QTreeWidgetItem) -> None:
-        path = item.data(0, PATH_ROLE)
-
-        if path:
-            QApplication.clipboard().setText(path)
-
-    def _copy_item_rel_path(self, item: QTreeWidgetItem) -> None:
-        path = item.data(0, PATH_ROLE)
-
-        if self._root is not None and path is not None:
+    def _copy_relative_path(self, path: str) -> None:
+        if self._root is None:
+            return
+        try:
             rel_path = Path(path).relative_to(self._root)
-            QApplication.clipboard().setText(str(rel_path))
+        except ValueError:
+            # Item lives outside the current dataset root; nothing sensible
+            # to copy as a relative path.
+            return
+        QApplication.clipboard().setText(str(rel_path))
+
+    def _open_in_folder(self, path_str: str) -> None:
+        """Show *path_str* in the OS file manager.
+
+        A directory is opened directly; a file is revealed with the file
+        selected inside its parent folder. Works on macOS (Finder), Windows
+        (Explorer) and Linux (the FileManager1 D-Bus interface, e.g. Nautilus
+        or Dolphin). Any failure falls back to just opening the containing
+        folder via Qt, so the action never dead-ends.
+        """
+        target = Path(path_str)
+        try:
+            system = platform.system()
+            if system == "Darwin":
+                if target.is_dir():
+                    subprocess.Popen(["open", str(target)])
+                else:
+                    subprocess.Popen(["open", "-R", str(target)])
+            elif system == "Windows":
+                if target.is_dir():
+                    os.startfile(str(target))  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen(["explorer", f"/select,{target}"])
+            elif target.is_dir():
+                subprocess.Popen(["xdg-open", str(target)])
+            else:
+                self._reveal_linux(target)
+            return
+        except Exception as exc:  # never break the menu over a cosmetic action
+            log.debug("open in folder failed for %s: %s", target, exc)
+
+        # Fallback: open the containing folder with Qt (no selection).
+        folder = target if target.is_dir() else target.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    @staticmethod
+    def _reveal_linux(target: Path) -> None:
+        """Reveal and select *target* via the FileManager1 D-Bus interface.
+
+        Falls back to opening the parent folder with ``xdg-open`` when no
+        FileManager1 provider answers (raises so the caller's fallback runs).
+        """
+        uri = QUrl.fromLocalFile(str(target)).toString()
+        try:
+            subprocess.run(
+                [
+                    "dbus-send",
+                    "--session",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    f"array:string:{uri}",
+                    "string:",
+                ],
+                check=True,
+                timeout=5,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            subprocess.Popen(["xdg-open", str(target.parent)])
 
 
 __all__ = ["BidsTreePane", "PATH_ROLE"]
