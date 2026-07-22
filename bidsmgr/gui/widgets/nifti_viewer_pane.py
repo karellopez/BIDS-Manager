@@ -58,6 +58,7 @@ from PyQt6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
+    QWheelEvent,
 )
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -644,6 +645,7 @@ class NiftiViewerPane(QWidget):
                 ev, self._orientation, self._image_label,
             ),
         )
+        self._image_label.wheelEvent = self._on_image_label_wheel
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored,
@@ -1160,6 +1162,21 @@ class NiftiViewerPane(QWidget):
             x = i
             y = vol.shape[1] - 1 - j
         return x, y
+
+    # ------------------------------------------------------------------
+    # Scroll on image -> scroll in image stack
+    # ------------------------------------------------------------------
+
+    def _on_image_label_wheel(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y()
+        if delta != 0:
+            step = -1 if delta > 0 else 1
+            new = max(
+                self._slice_slider.minimum(),
+                min(self._slice_slider.maximum(), self._slice_slider.value() + step)
+            )
+            self._slice_slider.setValue(new)
+        event.accept()
 
     # ------------------------------------------------------------------
     # 4-D time-series plot
