@@ -913,6 +913,12 @@ QLabel#sidecar-footer-summary {
     color: $dim;
     font-size: 10px;
 }
+/* Anatomical orientation markers (L/R·A/P·S/I) around each NIfTI slice. */
+QLabel#nifti-orient-label {
+    color: $accent;
+    font-size: 13px;
+    font-weight: 600;
+}
 
 /* ---------- Editor: EEG/MEG recording viewer ---------- */
 /* Metadata card: a scrollable list of label/value rows shown before the

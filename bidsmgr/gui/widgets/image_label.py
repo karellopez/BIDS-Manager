@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QMouseEvent, QWheelEvent
 from PyQt6.QtWidgets import QLabel
 
 
@@ -39,11 +39,17 @@ class ImageLabel(QLabel):
         self,
         update_fn: Optional[Callable[[], None]] = None,
         click_fn: Optional[Callable[[QMouseEvent], None]] = None,
+        wheel_fn: Optional[Callable[[QWheelEvent], bool]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._update_fn = update_fn
         self._click_fn = click_fn
+        # ``wheel_fn`` returns True when it consumed the event (so we
+        # accept it and stop propagation). A real ``wheelEvent`` override
+        # is used instead of monkey-patching the instance so the base
+        # class is called correctly when the callback declines the event.
+        self._wheel_fn = wheel_fn
 
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
@@ -69,6 +75,12 @@ class ImageLabel(QLabel):
         ):
             self._click_fn(event)
         super().mouseMoveEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent):  # type: ignore[override]
+        if callable(self._wheel_fn) and self._wheel_fn(event):
+            event.accept()
+            return
+        super().wheelEvent(event)
 
 
 __all__ = ["ImageLabel"]

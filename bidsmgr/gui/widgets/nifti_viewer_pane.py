@@ -49,23 +49,29 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QImage,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPalette,
     QPen,
     QPixmap,
+    QShortcut,
+    QWheelEvent,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QColorDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -75,6 +81,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from .image_label import ImageLabel
@@ -95,11 +102,32 @@ _AXIS_LABELS = {
     _AXIS_AXIAL:    "Axial",
 }
 
+# Anatomical edge labels drawn on each slice: (left, right, top, bottom).
+# These are STATIC and correct only because NIfTIs are loaded in RAS
+# canonical orientation (``nib.as_closest_canonical`` in ``_load_nifti``),
+# so voxel axes always increase toward R, A and S. Derived from the display
+# transform in ``_voxel_to_arr`` — if either that or the canonicalisation
+# changes, revisit these. (Left/Right follow neurological convention:
+# patient-left on the image left.)
+_ORIENT_LABELS = {
+    _AXIS_SAGITTAL: {"left": "P", "right": "A", "top": "S", "bottom": "I"},
+    _AXIS_CORONAL:  {"left": "L", "right": "R", "top": "S", "bottom": "I"},
+    _AXIS_AXIAL:    {"left": "L", "right": "R", "top": "A", "bottom": "P"},
+}
+
 # Default crosshair colour — overridden per-user via AppSettings
 # (``nifti_crosshair_color``). Material light-blue 300 reads well on
 # both dark and bright slices.
 _DEFAULT_CROSSHAIR_COLOR = "#4FC3F7"
 _DEFAULT_CROSSHAIR_THICKNESS = 1
+
+# Wheel scrolling: how much raw delta must accumulate before advancing one
+# step. ``angleDelta`` is in 1/8-degree units (120 == one mouse-wheel notch);
+# ``pixelDelta`` is device pixels (high-resolution trackpads). Separate
+# thresholds keep a classic mouse at one-step-per-notch while taming the
+# high-frequency stream a trackpad emits. Lower either value to scroll faster.
+_WHEEL_ANGLE_STEP = 120.0
+_WHEEL_PIXEL_STEP = 40.0
 # Semi-opaque black "halo" drawn underneath when thickness >= 2 so
 # the cross stays visible on saturated slices.
 _CROSSHAIR_HALO = QColor(0, 0, 0, 160)
@@ -119,6 +147,7 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
 
     img = nib.load(str(path))
     try:
+        img = nib.as_closest_canonical(img)
         data = img.get_fdata()
         return img, data, {}
     except Exception as exc:
@@ -198,6 +227,21 @@ class NiftiViewerPane(QWidget):
         # Layout mode flags.
         self._tri_view: bool = False
         self._graph_visible: bool = False
+        # Wheel-scroll state. ``_h_key_down`` mirrors the H key: while held,
+        # the wheel drives the 4-D volume (time) axis instead of the slice.
+        # It's tracked via an app-level event filter (installed at the end of
+        # __init__) so it works even when the canvas doesn't hold keyboard
+        # focus. ``_wheel_accum`` accumulates sub-notch deltas per scroll
+        # target so trackpads don't over-scroll.
+        self._h_key_down: bool = False
+        self._wheel_accum: dict = {}
+        # Anatomical edge labels (L/R·A/P·S/I) drawn around each panel.
+        # On by default; toggled by the toolbar button and the "O" shortcut.
+        self._show_orient_labels: bool = True
+        # Edge-label widgets: ``_single_edge`` for the single pane and one
+        # dict per axis in ``_tri_edge`` for Multi view.
+        self._single_edge: dict = {}
+        self._tri_edge: dict = {}
         # pyqtgraph handles (lazy-initialised in _build_graph_panel).
         # ``_plot_layout`` is a GraphicsLayoutWidget hosting a
         # ``dim × dim`` grid of PlotItems (one per neighbour voxel
@@ -270,6 +314,43 @@ class NiftiViewerPane(QWidget):
 
         self._toolbar.setVisible(False)
         self._footer.setVisible(False)
+
+        # Track the H key application-wide so "H + scroll" works over the
+        # canvas without it needing keyboard focus. The filter never
+        # consumes events — it only mirrors the key state.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            # Remove the filter before the interpreter tears PyQt down.
+            # A QApplication holding an event-filter pointer to this pane
+            # during finalisation can leave sip visiting a freed wrapper
+            # (SIGBUS in sip_api_visit_wrappers at exit). Qt auto-drops
+            # this connection if the pane is destroyed first.
+            app.aboutToQuit.connect(self._teardown_event_filter)
+
+        # Single-key shortcuts (A/S/C/M/O). Scoped to the pane's focus,
+        # which the canvas grabs on click / scroll.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._install_shortcuts()
+
+    def _teardown_event_filter(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
+        et = event.type()
+        if et == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+                self._h_key_down = True
+        elif et == QEvent.Type.KeyRelease:
+            if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+                self._h_key_down = False
+        elif et == QEvent.Type.ApplicationDeactivate:
+            # Losing focus can swallow the key-release; reset so H doesn't
+            # get stuck "down" after an app switch.
+            self._h_key_down = False
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
     # Public API
@@ -422,9 +503,17 @@ class NiftiViewerPane(QWidget):
     def _build_toolbar(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("sidecar-toolbar")
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(14, 6, 14, 6)
-        h.setSpacing(8)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(14, 6, 14, 6)
+        outer.setSpacing(6)
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        outer.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        outer.addLayout(row2)
+
+        # --- Row 1: orientation + view toggles + sliders ----------------
 
         # Orientation pills — Axial default.
         self._sa_btn = QPushButton("Sagittal")
@@ -436,8 +525,11 @@ class NiftiViewerPane(QWidget):
             btn.setObjectName("tb-btn-toggle")
             btn.setCheckable(True)
             self._orient_group.addButton(btn)
-            h.addWidget(btn)
+            row1.addWidget(btn)
         self._ax_btn.setChecked(True)
+        self._sa_btn.setToolTip("Sagittal view.  Shortcut: S")
+        self._co_btn.setToolTip("Coronal view.  Shortcut: C")
+        self._ax_btn.setToolTip("Axial view.  Shortcut: A")
         self._sa_btn.clicked.connect(
             lambda: self._set_orientation(_AXIS_SAGITTAL)
         )
@@ -448,19 +540,20 @@ class NiftiViewerPane(QWidget):
             lambda: self._set_orientation(_AXIS_AXIAL)
         )
 
-        h.addSpacing(8)
+        row1.addSpacing(8)
 
-        # Tri-view toggle — sagittal+coronal+axial side by side.
-        self._tri_btn = QPushButton("Tri-view")
+        # Multi view toggle — sagittal+coronal+axial side by side.
+        self._tri_btn = QPushButton("Multi view")
         self._tri_btn.setObjectName("tb-btn-toggle")
         self._tri_btn.setCheckable(True)
         self._tri_btn.setToolTip(
             "Show sagittal, coronal and axial panels side by side.\n"
             "The crosshair voxel is shared — clicking any panel moves "
-            "it across all three."
+            "it across all three. Scroll over a panel to step its slice.\n"
+            "Shortcut: M"
         )
         self._tri_btn.toggled.connect(self._on_tri_toggled)
-        h.addWidget(self._tri_btn)
+        row1.addWidget(self._tri_btn)
 
         # Graph toggle — 4-D time-series at the crosshair voxel.
         self._graph_btn = QPushButton("Graph")
@@ -469,25 +562,75 @@ class NiftiViewerPane(QWidget):
         self._graph_btn.setEnabled(False)
         self._graph_btn.setToolTip(
             "Plot the intensity time-course at the crosshair voxel.\n"
-            "Available only for 4-D NIfTI files."
+            "Available only for 4-D NIfTI files.  Shortcut: G"
         )
         self._graph_btn.toggled.connect(self._on_graph_toggled)
-        h.addWidget(self._graph_btn)
+        row1.addWidget(self._graph_btn)
 
-        h.addSpacing(8)
+        row1.addSpacing(12)
+
+        # Slice slider — current orientation depth.
+        self._slice_slider, self._slice_val = self._make_slider(
+            "Slice", 0, 0,
+        )
+        row1.addLayout(
+            self._wrap_slider("Slice", self._slice_slider, self._slice_val)
+        )
+        self._slice_slider.valueChanged.connect(self._on_slice_slider_changed)
+
+        # Volume slider — only 4-D data drives this.
+        self._vol_slider, self._vol_val = self._make_slider(
+            "Volume", 0, 0,
+        )
+        row1.addLayout(
+            self._wrap_slider("Volume", self._vol_slider, self._vol_val)
+        )
+        self._vol_slider.valueChanged.connect(self._on_vol_slider_changed)
+
+        # Brightness ±1.0 (slider stores ±100 → /100).
+        self._bright_slider, _bright_val = self._make_slider(
+            "Brightness", -100, 100, default=0, show_value=False,
+        )
+        row1.addLayout(self._wrap_slider("Brightness", self._bright_slider, None))
+        self._bright_slider.valueChanged.connect(self._refresh)
+
+        # Contrast 0..2.0 (slider stores 0..200 → /100).
+        self._contrast_slider, _contrast_val = self._make_slider(
+            "Contrast", 0, 200, default=100, show_value=False,
+        )
+        row1.addLayout(self._wrap_slider("Contrast", self._contrast_slider, None))
+        self._contrast_slider.valueChanged.connect(self._refresh)
+
+        row1.addStretch(1)
+
+        # --- Row 2: display options (labels, crosshair, help) -----------
+
+        # Orientation-label toggle — anatomical L/R·A/P·S/I markers.
+        self._labels_btn = QPushButton("Orientation labels")
+        self._labels_btn.setObjectName("tb-btn-toggle")
+        self._labels_btn.setCheckable(True)
+        self._labels_btn.setChecked(self._show_orient_labels)
+        self._labels_btn.setToolTip(
+            "Show anatomical orientation labels (L/R, A/P, S/I) around "
+            "each slice.  Shortcut: O"
+        )
+        self._labels_btn.toggled.connect(self._on_labels_toggled)
+        row2.addWidget(self._labels_btn)
+
+        row2.addSpacing(8)
 
         # Crosshair settings — colour swatch + thickness. Settings
         # persist via AppSettings.
         cross_lbl = QLabel("Cross:")
         cross_lbl.setObjectName("sidecar-footer-summary")
-        h.addWidget(cross_lbl)
+        row2.addWidget(cross_lbl)
         self._crosshair_swatch = QPushButton()
         self._crosshair_swatch.setObjectName("crosshair-swatch")
         self._crosshair_swatch.setFixedSize(22, 22)
         self._crosshair_swatch.setToolTip("Crosshair colour — click to change")
         self._crosshair_swatch.clicked.connect(self._pick_crosshair_color)
         self._refresh_crosshair_swatch()
-        h.addWidget(self._crosshair_swatch)
+        row2.addWidget(self._crosshair_swatch)
 
         self._crosshair_thickness_spin = QSpinBox()
         self._crosshair_thickness_spin.setRange(1, 5)
@@ -500,39 +643,17 @@ class NiftiViewerPane(QWidget):
         self._crosshair_thickness_spin.valueChanged.connect(
             self._on_crosshair_thickness_changed
         )
-        h.addWidget(self._crosshair_thickness_spin)
+        row2.addWidget(self._crosshair_thickness_spin)
 
-        h.addSpacing(12)
+        row2.addStretch(1)
 
-        # Slice slider — current orientation depth.
-        self._slice_slider, self._slice_val = self._make_slider(
-            "Slice", 0, 0,
-        )
-        h.addLayout(self._wrap_slider("Slice", self._slice_slider, self._slice_val))
-        self._slice_slider.valueChanged.connect(self._on_slice_slider_changed)
+        # Help — keyboard / scroll cheat-sheet popup.
+        self._help_btn = QPushButton("Shortcuts")
+        self._help_btn.setObjectName("tb-btn-toggle")
+        self._help_btn.setToolTip("Keyboard & scroll shortcuts")
+        self._help_btn.clicked.connect(self._show_shortcuts_help)
+        row2.addWidget(self._help_btn)
 
-        # Volume slider — only 4-D data drives this.
-        self._vol_slider, self._vol_val = self._make_slider(
-            "Volume", 0, 0,
-        )
-        h.addLayout(self._wrap_slider("Volume", self._vol_slider, self._vol_val))
-        self._vol_slider.valueChanged.connect(self._on_vol_slider_changed)
-
-        # Brightness ±1.0 (slider stores ±100 → /100).
-        self._bright_slider, _bright_val = self._make_slider(
-            "Brightness", -100, 100, default=0, show_value=False,
-        )
-        h.addLayout(self._wrap_slider("Brightness", self._bright_slider, None))
-        self._bright_slider.valueChanged.connect(self._refresh)
-
-        # Contrast 0..2.0 (slider stores 0..200 → /100).
-        self._contrast_slider, _contrast_val = self._make_slider(
-            "Contrast", 0, 200, default=100, show_value=False,
-        )
-        h.addLayout(self._wrap_slider("Contrast", self._contrast_slider, None))
-        self._contrast_slider.valueChanged.connect(self._refresh)
-
-        h.addStretch(1)
         return bar
 
     def _make_slider(
@@ -632,6 +753,46 @@ class NiftiViewerPane(QWidget):
         v.addStretch(1)
         return panel
 
+    def _make_orientation_overlay(
+        self, image_label: ImageLabel,
+    ) -> tuple[QWidget, dict]:
+        """Wrap ``image_label`` in a grid with four edge labels around it.
+
+        Returns ``(container, edges)`` where ``edges`` maps
+        ``top/bottom/left/right`` to the :class:`QLabel` sitting on that
+        side *outside* the image. Callers set the glyph text and toggle
+        visibility. The image occupies the stretchy centre cell so the
+        markers hug its edges as it resizes.
+        """
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(2)
+
+        edges: dict = {}
+        for side in ("top", "bottom", "left", "right"):
+            lbl = QLabel("")
+            lbl.setObjectName("nifti-orient-label")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            font = lbl.font()
+            font.setBold(True)
+            lbl.setFont(font)
+            edges[side] = lbl
+
+        # Fixed width for the L/R markers keeps the image from shifting
+        # when the glyph toggles on and off.
+        edges["left"].setFixedWidth(16)
+        edges["right"].setFixedWidth(16)
+
+        grid.addWidget(edges["top"], 0, 1, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(edges["left"], 1, 0, Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(image_label, 1, 1)
+        grid.addWidget(edges["right"], 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(edges["bottom"], 2, 1, Qt.AlignmentFlag.AlignHCenter)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(1, 1)
+        return container, edges
+
     def _build_single_image(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -642,13 +803,17 @@ class NiftiViewerPane(QWidget):
             click_fn=lambda ev: self._on_image_clicked(
                 ev, self._orientation, self._image_label,
             ),
+            wheel_fn=lambda ev: self._handle_wheel(ev, self._orientation),
         )
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored,
         )
         self._image_label.setMinimumSize(1, 1)
-        lay.addWidget(self._image_label, 1)
+        overlay, self._single_edge = self._make_orientation_overlay(
+            self._image_label,
+        )
+        lay.addWidget(overlay, 1)
         return w
 
     def _build_tri_image(self) -> QWidget:
@@ -674,15 +839,23 @@ class NiftiViewerPane(QWidget):
                 click_fn=lambda ev, a=axis: self._on_image_clicked(
                     ev, a, self._tri_labels[a],
                 ),
+                wheel_fn=lambda ev, a=axis: self._handle_wheel(ev, a),
             )
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setSizePolicy(
                 QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored,
             )
             label.setMinimumSize(1, 1)
-            cv.addWidget(label, 1)
+            overlay, edges = self._make_orientation_overlay(label)
+            # Each Multi-view panel shows a fixed plane, so its markers
+            # never change — set them once here.
+            for side, text in _ORIENT_LABELS[axis].items():
+                edges[side].setText(text)
+            self._tri_edge[axis] = edges
+            cv.addWidget(overlay, 1)
             h.addWidget(cell, 1)
             self._tri_labels[axis] = label
+        self._apply_orient_label_visibility()
         return w
 
     def _build_graph_panel(self) -> QWidget:
@@ -825,8 +998,149 @@ class NiftiViewerPane(QWidget):
     def _on_graph_toggled(self, checked: bool) -> None:
         self._graph_visible = checked
         self._graph_panel.setVisible(checked)
-        if checked and self._data is not None:
-            self._update_graph()
+        if checked:
+            # Start compact: the image keeps the bulk of the height and the
+            # time-series gets ~30%. The splitter stays draggable, so users
+            # can still make the plot bigger or smaller afterwards.
+            total = self._vsplit.height() or 600
+            self._vsplit.setSizes([int(total * 0.7), int(total * 0.3)])
+            if self._data is not None:
+                self._update_graph()
+
+    # ------------------------------------------------------------------
+    # Orientation labels
+    # ------------------------------------------------------------------
+
+    def _update_single_orient_labels(self) -> None:
+        """Set the single pane's edge glyphs for the current orientation."""
+        if not self._single_edge:
+            return
+        for side, text in _ORIENT_LABELS[self._orientation].items():
+            self._single_edge[side].setText(text)
+
+    def _apply_orient_label_visibility(self) -> None:
+        """Show/hide every edge label per :attr:`_show_orient_labels`."""
+        groups = [self._single_edge] + list(self._tri_edge.values())
+        for group in groups:
+            for lbl in group.values():
+                lbl.setVisible(self._show_orient_labels)
+
+    def _on_labels_toggled(self, checked: bool) -> None:
+        self._show_orient_labels = checked
+        self._apply_orient_label_visibility()
+
+    def _toggle_orient_labels(self) -> None:
+        """'O' shortcut — flip the Labels button (its slot does the work)."""
+        self._labels_btn.toggle()
+
+    # ------------------------------------------------------------------
+    # Keyboard shortcuts
+    # ------------------------------------------------------------------
+
+    def _toggle_multi_view(self) -> None:
+        """'M' shortcut — flip the Multi view button."""
+        self._tri_btn.toggle()
+
+    def _toggle_graph(self) -> None:
+        """'G' shortcut — flip the Graph button (only when it applies).
+
+        The button is disabled for non-4-D data; toggling programmatically
+        would bypass that, so guard on ``isEnabled``.
+        """
+        if self._graph_btn.isEnabled():
+            self._graph_btn.toggle()
+
+    def _shortcut_orientation(self, axis: int) -> None:
+        """'A' / 'S' / 'C' shortcuts — jump to a single-pane orientation.
+
+        Leaves Multi view if it's on so the requested plane fills the pane.
+        """
+        if self._tri_view:
+            self._tri_btn.setChecked(False)
+        self._set_orientation(axis)
+
+    def _install_shortcuts(self) -> None:
+        """Wire the single-key shortcuts, scoped to the viewer's focus.
+
+        ``WidgetWithChildrenShortcut`` means they only fire while the pane
+        (or a child) has focus — grabbed on click/scroll — so typing an
+        'a' in a text field elsewhere never switches the plane.
+        """
+        specs = (
+            ("A", lambda: self._shortcut_orientation(_AXIS_AXIAL)),
+            ("S", lambda: self._shortcut_orientation(_AXIS_SAGITTAL)),
+            ("C", lambda: self._shortcut_orientation(_AXIS_CORONAL)),
+            ("M", self._toggle_multi_view),
+            ("G", self._toggle_graph),
+            ("O", self._toggle_orient_labels),
+        )
+        for key, handler in specs:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(handler)
+
+    def _show_shortcuts_help(self) -> None:
+        """Pop up a cheat-sheet of mouse/trackpad gestures and key shortcuts.
+
+        The action and the key/gesture live in separate columns so each is
+        easy to scan.
+        """
+        # (Action, Key / gesture) grouped under section headers.
+        sections = [
+            ("Mouse & trackpad", [
+                ("Move to previous / next slice", "Vertical scroll"),
+                ("Previous / next volume (4-D time)", "Horizontal scroll"),
+                ("Previous / next volume (4-D time)", "Hold H + scroll"),
+                ("Move the crosshair", "Click or drag"),
+            ]),
+            ("Keys", [
+                ("Axial view", "A"),
+                ("Sagittal view", "S"),
+                ("Coronal view", "C"),
+                ("Multi view (toggle)", "M"),
+                ("Graph / time-series (toggle)", "G"),
+                ("Orientation labels (toggle)", "O"),
+            ]),
+        ]
+
+        html = [
+            "<div style='padding:2px 6px'>",
+            "<div style='font-size:13px;font-weight:600'>Viewer shortcuts</div>",
+            "<div style='color:gray;font-size:11px;margin-bottom:2px'>"
+            "Click or scroll the image once to focus it, then the keys "
+            "apply here.</div>",
+        ]
+        for title, rows in sections:
+            html.append(
+                "<div style='color:gray;font-size:11px;font-weight:600;"
+                f"margin-top:8px'>{title}</div>"
+            )
+            html.append("<table cellspacing='0' cellpadding='3'>")
+            for action, key in rows:
+                html.append(
+                    "<tr>"
+                    f"<td style='padding-right:18px'>{action}</td>"
+                    f"<td align='right'><b>{key}</b></td>"
+                    "</tr>"
+                )
+            html.append("</table>")
+        html.append("</div>")
+
+        menu = QMenu(self)
+        try:
+            from ..combo_popup import round_menu
+            round_menu(menu)
+        except Exception:  # pragma: no cover - cosmetic only
+            pass
+        lbl = QLabel("".join(html))
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setContentsMargins(12, 8, 12, 8)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(lbl)
+        menu.addAction(action)
+        menu.exec(self._help_btn.mapToGlobal(
+            self._help_btn.rect().bottomLeft(),
+        ))
 
     # ------------------------------------------------------------------
     # Crosshair config
@@ -921,6 +1235,7 @@ class NiftiViewerPane(QWidget):
         self._sa_btn.setChecked(axis == _AXIS_SAGITTAL)
         self._co_btn.setChecked(axis == _AXIS_CORONAL)
         self._ax_btn.setChecked(axis == _AXIS_AXIAL)
+        self._update_single_orient_labels()
         if self._data is None:
             return
         vol = self._current_volume()
@@ -1074,6 +1389,8 @@ class NiftiViewerPane(QWidget):
     def _on_image_clicked(
         self, event: QMouseEvent, axis: int, label: ImageLabel,
     ) -> None:
+        # Grab focus so the A/S/C/M/O shortcuts target the viewer.
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         if self._data is None or self._cross_voxel is None:
             return
         coords = self._label_pos_to_img_coords(
@@ -1159,6 +1476,108 @@ class NiftiViewerPane(QWidget):
             x = i
             y = vol.shape[1] - 1 - j
         return x, y
+
+    # ------------------------------------------------------------------
+    # Scroll on image -> step through the slice / volume stack
+    # ------------------------------------------------------------------
+
+    def _handle_wheel(self, event: QWheelEvent, axis: int) -> bool:
+        """Route a wheel event from the image panel for ``axis``.
+
+        * Plain **vertical** scroll steps the slice along ``axis``.
+        * **Horizontal** scroll — or vertical scroll with the **H** key
+          held — steps the 4-D volume (time), when the data is 4-D.
+
+        This covers all input styles: a mouse wheel (angleDelta only),
+        a trackpad's natural horizontal swipe (pixelDelta.x), and the
+        H-key modifier for devices that can't scroll horizontally.
+        Returns True when the event was consumed.
+        """
+        if self._data is None or self._cross_voxel is None:
+            return False
+
+        # Focus the viewer so the single-key shortcuts apply here.
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+
+        pd = event.pixelDelta()
+        ad = event.angleDelta()
+        # Prefer pixelDelta (high-resolution trackpads report it and, on
+        # some macOS devices, one scroll direction leaves angleDelta.y at
+        # 0 — the root of the "only scrolls one way" bug). Classic mice
+        # report only angleDelta.
+        use_pixel = not pd.isNull()
+        dx = pd.x() if use_pixel else ad.x()
+        dy = pd.y() if use_pixel else ad.y()
+        thresh = _WHEEL_PIXEL_STEP if use_pixel else _WHEEL_ANGLE_STEP
+
+        is_4d = self._data.ndim == 4 and not self._is_rgb
+
+        # --- Time / volume axis -----------------------------------------
+        # H + scroll (either wheel axis), or a horizontal-dominant swipe.
+        if is_4d and self._h_key_down:
+            steps = self._accum_steps(("vol", axis), dy or dx, thresh)
+            if steps:
+                # Scroll down / right -> forward in time.
+                self._step_volume(-steps)
+            return True
+
+        if abs(dx) > abs(dy):
+            if is_4d:
+                steps = self._accum_steps(("vol", axis), dx, thresh)
+                if steps:
+                    self._step_volume(steps)  # scroll right -> forward
+            # Swallow horizontal even on 3-D so it doesn't pan a parent.
+            return True
+
+        # --- Slice axis (plain vertical scroll) -------------------------
+        steps = self._accum_steps(("slice", axis), dy, thresh)
+        if steps:
+            self._step_slice(axis, -steps)  # scroll up -> previous slice
+        return True
+
+    def _accum_steps(self, key, delta: float, thresh: float) -> int:
+        """Accumulate ``delta`` under ``key`` and return whole steps.
+
+        Sub-threshold movement is banked so slow trackpad scrolls still
+        register while fast ones don't skip; the remainder is carried.
+        """
+        if not delta:
+            return 0
+        acc = self._wheel_accum.get(key, 0.0) + delta
+        steps = int(acc / thresh)  # truncates toward zero for either sign
+        self._wheel_accum[key] = acc - steps * thresh
+        return steps
+
+    def _step_slice(self, axis: int, delta: int) -> None:
+        if not delta or self._cross_voxel is None:
+            return
+        vol = self._current_volume()
+        if axis >= vol.ndim:
+            return
+        cur = self._cross_voxel[axis]
+        new = max(0, min(vol.shape[axis] - 1, cur + delta))
+        if new == cur:
+            return
+        if not self._tri_view and axis == self._orientation:
+            # Single-pane: drive the slider; its slot updates the
+            # crosshair and repaints.
+            self._slice_slider.setValue(new)
+        else:
+            # Multi view: no per-panel slider — move the shared crosshair
+            # voxel directly and repaint all panels.
+            self._cross_voxel[axis] = new
+            self._refresh()
+
+    def _step_volume(self, delta: int) -> None:
+        if not delta or self._data is None:
+            return
+        if not (self._data.ndim == 4 and not self._is_rgb):
+            return
+        cur = self._vol_slider.value()
+        new = max(0, min(self._vol_slider.maximum(), cur + delta))
+        if new != cur:
+            # The slider's slot repaints and moves the graph marker.
+            self._vol_slider.setValue(new)
 
     # ------------------------------------------------------------------
     # 4-D time-series plot
