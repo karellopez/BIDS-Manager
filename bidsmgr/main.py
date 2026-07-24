@@ -61,6 +61,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     from PyQt6.QtWidgets import QApplication
 
+    # Register an OpenGL 3.3 core default surface format *before* the
+    # QApplication is constructed so the NIfTI viewer's GPU raycaster
+    # (bidsmgr.gui.widgets.nifti_gl_view) gets a context its #version 330
+    # shaders can compile against — on macOS the compatibility profile is
+    # stuck at GL 2.1. Harmless for the rest of the (raster) GUI.
+    from .gui.widgets.nifti_gl_view import request_gl_format
+    request_gl_format()
+
     from .gui.main_window import MainWindow
     from .gui.theme_manager import ThemeManager
 
