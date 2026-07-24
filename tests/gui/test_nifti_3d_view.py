@@ -401,6 +401,33 @@ def test_pan_moves_target(qapp) -> None:
     assert np.allclose(w._target, 0.0)         # reset recentres it
 
 
+def test_mouse_wheel_zoom_discrete(qapp) -> None:
+    """A mouse wheel zooms one discrete step per notch, whether the platform
+    reports it as angleDelta (classic) or pixelDelta / sub-notch (Linux)."""
+    from PyQt6.QtCore import QPointF, QPoint, Qt
+    from PyQt6.QtGui import QWheelEvent
+
+    def wheel(ay, ax, py, px):   # synthetic events default to a Mouse device
+        return QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(px, py), QPoint(ax, ay),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+
+    w = RaycastGLWidget()
+    d0 = w._dist
+    w.wheelEvent(wheel(120, 0, 0, 0))            # classic notch
+    assert abs(w._dist / d0 - 0.9) < 1e-6
+    # Linux mouse reporting only pixelDelta accumulates to a notch (thresh 50).
+    w = RaycastGLWidget()
+    d0 = w._dist
+    for _ in range(3):
+        w.wheelEvent(wheel(0, 0, 15, 0))         # 45 < 50 -> no step yet
+    assert w._dist == d0
+    w.wheelEvent(wheel(0, 0, 15, 0))             # 60 -> one step
+    assert abs(w._dist / d0 - 0.9) < 1e-6
+
+
 def test_reset_params_current_effect_only(qapp) -> None:
     """Reset parameters resets ONLY the current effect's params; the effect,
     clip and unrelated params are left alone."""

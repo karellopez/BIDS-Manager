@@ -36,7 +36,8 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal
-from PyQt6.QtGui import QSurfaceFormat, QImage, QPainter, QColor, QFont
+from PyQt6.QtGui import (QSurfaceFormat, QImage, QPainter, QColor, QFont,
+                         QInputDevice)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -670,6 +671,7 @@ class RaycastGLWidget(QOpenGLWidget):
         self._target = np.zeros(3, np.float32)
         self._last: Optional[QPoint] = None
         self._drag = "rotate"
+        self._wheel_accum = 0.0   # mouse-wheel sub-notch accumulator
 
         self.effect = EFFECT_FX[EFFECTS[DEFAULTS["effect"]]]   # shader fx of default
         self.thresh_lo = DEFAULTS["lo"] / 1000.0
@@ -1107,17 +1109,40 @@ class RaycastGLWidget(QOpenGLWidget):
 
     def wheelEvent(self, ev) -> None:
         ad, pd = ev.angleDelta(), ev.pixelDelta()
-        # Unified scroll magnitude in "notches": a mouse-wheel notch is ±1, a
-        # trackpad's many tiny events are fractional — so BOTH the zoom and the
-        # slice navigator scale with it and neither is hyper-sensitive. A mouse
-        # Shift+scroll is remapped to a *horizontal* scroll by many platforms,
-        # so read both axes (and pixelDelta as a trackpad fallback).
-        a = ad.y() or ad.x()
-        steps = (a / 120.0) if a != 0 else ((pd.y() or pd.x()) / 320.0)
+        # A real mouse wheel and a trackpad need different handling, and Linux
+        # (libinput/Wayland) muddies it — a mouse there can report its scroll
+        # as pixelDelta and/or fine-grained sub-notch angleDelta, which a
+        # magnitude-only path scales to nearly nothing (so the wheel "does not
+        # work"). Tell them apart by the pointing DEVICE type (Qt6):
+        #   * mouse  -> ONE discrete step per notch, accumulating sub-notch
+        #               deltas (angle in 1/8-degree units, else pixels).
+        #   * trackpad -> smooth, magnitude-scaled (never hyper-sensitive).
+        # A mouse Shift+scroll is remapped to a horizontal scroll by many
+        # platforms, so both axes are read.
+        trackpad = False
+        try:
+            dev = ev.pointingDevice()
+            trackpad = (dev is not None
+                        and dev.type() == QInputDevice.DeviceType.TouchPad)
+        except Exception:  # noqa: BLE001 - be safe on odd backends
+            trackpad = not pd.isNull()
+        if not trackpad:
+            angle = ad.y() or ad.x()
+            if angle != 0:
+                raw, thresh = float(angle), 120.0        # 1/8-degree, 120 = notch
+            else:
+                raw, thresh = float(pd.y() or pd.x()), 50.0
+            self._wheel_accum += raw
+            n = int(self._wheel_accum / thresh)          # whole notches
+            self._wheel_accum -= n * thresh
+            steps = float(n)
+        else:
+            raw = pd.y() or pd.x() or ad.y() or ad.x()
+            steps = raw / 300.0                          # trackpad: smooth
         if steps == 0.0:
             return
         if (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier) and self.clip_active:
-            self.nudge_clip_pos(0.02 * steps)          # slice navigator
+            self.nudge_clip_pos(0.03 * steps)            # slice navigator
             return
         self._dist = float(np.clip(self._dist * (0.9 ** steps), 0.5, 12.0))  # zoom
         self.update()
