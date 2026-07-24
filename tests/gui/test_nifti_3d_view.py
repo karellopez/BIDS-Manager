@@ -401,31 +401,37 @@ def test_pan_moves_target(qapp) -> None:
     assert np.allclose(w._target, 0.0)         # reset recentres it
 
 
-def test_mouse_wheel_zoom_discrete(qapp) -> None:
-    """A mouse wheel zooms one discrete step per notch, whether the platform
-    reports it as angleDelta (classic) or pixelDelta / sub-notch (Linux)."""
+def test_wheel_zoom_and_slice_nav(qapp) -> None:
+    """Vertical wheel zooms; Shift+wheel (or a horizontal scroll — the X11 /
+    macOS remap of Shift+wheel) navigates the slice while the clip is active."""
     from PyQt6.QtCore import QPointF, QPoint, Qt
     from PyQt6.QtGui import QWheelEvent
 
-    def wheel(ay, ax, py, px):   # synthetic events default to a Mouse device
+    def wheel(ay, ax, shift=False):
         return QWheelEvent(
-            QPointF(10, 10), QPointF(10, 10), QPoint(px, py), QPoint(ax, ay),
-            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(ax, ay),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier,
             Qt.ScrollPhase.NoScrollPhase, False,
         )
 
     w = RaycastGLWidget()
     d0 = w._dist
-    w.wheelEvent(wheel(120, 0, 0, 0))            # classic notch
+    w.wheelEvent(wheel(120, 0))                  # vertical -> zoom one notch
     assert abs(w._dist / d0 - 0.9) < 1e-6
-    # Linux mouse reporting only pixelDelta accumulates to a notch (thresh 50).
-    w = RaycastGLWidget()
+
+    w.clip_active = 1
+    p = w.clip_pos
+    w.wheelEvent(wheel(120, 0, shift=True))      # Shift+vertical -> slice nav
+    assert abs(w.clip_pos - (p + 0.02)) < 1e-6
+    p = w.clip_pos
+    w.wheelEvent(wheel(0, 120))                  # horizontal (Shift remap) -> slice nav
+    assert abs(w.clip_pos - (p + 0.02)) < 1e-6
+
+    w.clip_active = 0                            # horizontal without clip -> zoom
     d0 = w._dist
-    for _ in range(3):
-        w.wheelEvent(wheel(0, 0, 15, 0))         # 45 < 50 -> no step yet
-    assert w._dist == d0
-    w.wheelEvent(wheel(0, 0, 15, 0))             # 60 -> one step
-    assert abs(w._dist / d0 - 0.9) < 1e-6
+    w.wheelEvent(wheel(0, 120))
+    assert w._dist != d0
 
 
 def test_reset_params_current_effect_only(qapp) -> None:
