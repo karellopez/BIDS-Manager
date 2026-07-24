@@ -258,18 +258,64 @@ def test_clip_controls_drive_gl(qapp) -> None:
     view = Nifti3DView()
     c = view.controls
     assert view.gl.clip_active == 0
-    assert not c._az.isEnabled()               # az/el/depth/thick off until enabled
-    c._clip_enable.setChecked(True)
+    assert not c._caz.isEnabled()              # az/el/depth/thick off until enabled
+    c._clip_en.setChecked(True)
     assert view.gl.clip_active == 1
-    assert c._az.isEnabled() and c._el.isEnabled()
+    assert c._caz.isEnabled() and c._cel.isEnabled()
     # Elevation 90° -> axial normal (0,0,1); az=0 el=0 -> coronal (0,1,0).
-    c._el.setValue(90)
+    c._cel.setValue(90)
     assert view.gl.clip_normal[2] > 0.99
-    c._el.setValue(0); c._az.setValue(0)
+    c._cel.setValue(0); c._caz.setValue(0)
     assert abs(view.gl.clip_normal[1] - 1.0) < 1e-3
-    c._clip_enable.setChecked(False)
+    c._clip_en.setChecked(False)
     assert view.gl.clip_active == 0
-    assert not c._az.isEnabled()
+    assert not c._caz.isEnabled()
+
+
+def test_effect_param_graying(qapp) -> None:
+    """Per-effect the panel shows only the relevant parameter rows."""
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS
+
+    view = Nifti3DView()
+    c = view.controls
+    c._effect.setCurrentIndex(EFFECTS.index("Glass"))
+    assert c._rows["brighten"].isHidden()      # Glass: no matcap brightness
+    assert not c._rows["specular"].isHidden()  # Glass: Phong specular shown
+    c._effect.setCurrentIndex(EFFECTS.index("MIP"))
+    assert c._rows["density"].isHidden()        # MIP: nothing but window + quality
+    c._effect.setCurrentIndex(EFFECTS.index("Opacity peeling"))
+    assert not c._rows["peel"].isHidden()       # peeling: peel layers shown
+
+
+def test_slice_overlay_per_effect_default(qapp) -> None:
+    """The cut-face intensity slice defaults on for surface effects only."""
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS, SLICE_DEFAULT_ON
+
+    view = Nifti3DView()
+    c = view.controls
+    for name in SLICE_DEFAULT_ON:                 # Default / Matte / Topography
+        c._effect.setCurrentIndex(EFFECTS.index(name))
+        assert view.gl.slice_overlay == 1
+        assert not c._rows["overlaydepth"].isHidden()
+    for name in ("Glass", "Shell", "Opacity peeling", "MIP"):
+        c._effect.setCurrentIndex(EFFECTS.index(name))
+        assert view.gl.slice_overlay == 0
+        assert c._rows["overlaydepth"].isHidden()
+    c._effect.setCurrentIndex(0)
+    c._odepth.setValue(70)                        # overlay-depth slider drives gl
+    assert abs(view.gl.slice_depth - 0.70) < 1e-6
+
+
+def test_gpu_available_and_cube(qapp) -> None:
+    from bidsmgr.gui.widgets import nifti_gl_view as M
+
+    # Probe returns a bool and is cached; cube geometry/atlas build.
+    assert isinstance(M.gpu_available(), bool)
+    assert M._cube_geometry().shape == (36, 8)
+    view = Nifti3DView()
+    assert view.gl._show_cube is True
+    view.set_show_cube(False)
+    assert view.gl._show_cube is False
 
 
 def test_volume_retained_for_context_loss(qapp) -> None:
@@ -312,12 +358,13 @@ def test_refresh_and_reset_params(qapp) -> None:
     c = view.controls
     c._effect.setCurrentIndex(2)
     c._bright.setValue(260)
-    c._clip_enable.setChecked(True)
+    c._clip_en.setChecked(True)
     assert view.gl.effect == 2 and view.gl.clip_active == 1
     c.reset_params()
+    from bidsmgr.gui.widgets.nifti_gl_view import DEFAULTS
     assert view.gl.effect == 0
     assert view.gl.clip_active == 0
-    assert c._bright.value() == 140
+    assert c._bright.value() == DEFAULTS["brighten"]
     view.gl.refresh()                          # no-op without a live context, must not raise
 
 

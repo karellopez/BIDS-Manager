@@ -236,6 +236,14 @@ class NiftiViewerPane(QWidget):
         self._gl_view = None
         self._gl_page_index: Optional[int] = None
         self._is_3d_capable: bool = False
+        # Whether this host can drive the GPU raycaster (OpenGL 3.3 core on
+        # real hardware). When False the 3D / Ortho 3D toggles are hidden
+        # entirely — the viewer stays a pure 2-D tool.
+        try:
+            from .nifti_gl_view import gpu_available
+            self._gpu_ok: bool = gpu_available()
+        except Exception:  # noqa: BLE001 - never block the 2-D viewer
+            self._gpu_ok = False
         # Combined "Ortho 3D" mode: the three orthogonal slices plus the GPU
         # render in one 2×2 grid, with all render controls in a vertical side
         # panel. Its own bare GL canvas (``_combo_gl``) + controls + slice
@@ -632,6 +640,12 @@ class NiftiViewerPane(QWidget):
         self._quad_btn.toggled.connect(self._on_combo_toggled)
         row1.addWidget(self._quad_btn)
 
+        # No GPU (or no OpenGL 3.3) -> the viewer is 2-D only: hide both
+        # 3-D toggles so the options never appear.
+        if not self._gpu_ok:
+            self._td_btn.setVisible(False)
+            self._quad_btn.setVisible(False)
+
         row1.addSpacing(12)
 
         # Slice slider — current orientation depth.
@@ -981,6 +995,7 @@ class NiftiViewerPane(QWidget):
             self._combo_labels[axis] = label
 
         self._combo_gl = RaycastGLWidget()
+        self._combo_gl.set_show_cube(self._show_orient_labels)
         grid.addWidget(self._combo_gl, 1, 1)
         for i in range(2):
             grid.setRowStretch(i, 1)
@@ -1233,14 +1248,16 @@ class NiftiViewerPane(QWidget):
             self._slice_slider.setEnabled(False)
 
         for w in (self._bright_slider, self._contrast_slider,
-                  self._crosshair_swatch, self._crosshair_thickness_spin,
-                  self._labels_btn):
+                  self._crosshair_swatch, self._crosshair_thickness_spin):
             w.setEnabled(slices_shown)
+        # The orientation-labels toggle also drives the 3-D orientation cube,
+        # so it stays live in every mode once a volume is loaded.
+        self._labels_btn.setEnabled(has_data)
         self._graph_btn.setEnabled(slices_shown and is_4d)
 
         self._tri_btn.setEnabled(has_data)
-        self._td_btn.setEnabled(has_data and self._is_3d_capable)
-        self._quad_btn.setEnabled(has_data and self._is_3d_capable)
+        self._td_btn.setEnabled(has_data and self._is_3d_capable and self._gpu_ok)
+        self._quad_btn.setEnabled(has_data and self._is_3d_capable and self._gpu_ok)
 
     def _toggle_3d(self) -> None:
         """'D' shortcut — flip the 3D button when it applies."""
@@ -1263,6 +1280,7 @@ class NiftiViewerPane(QWidget):
             return self._gl_view
         from .nifti_gl_view import Nifti3DView
         self._gl_view = Nifti3DView()
+        self._gl_view.set_show_cube(self._show_orient_labels)
         self._gl_page_index = self._image_stack.addWidget(self._gl_view)
         return self._gl_view
 
@@ -1322,6 +1340,11 @@ class NiftiViewerPane(QWidget):
         for group in groups:
             for lbl in group.values():
                 lbl.setVisible(self._show_orient_labels)
+        # The same toggle drives the 3-D orientation cube on both GL views.
+        if self._gl_view is not None:
+            self._gl_view.set_show_cube(self._show_orient_labels)
+        if self._combo_gl is not None:
+            self._combo_gl.set_show_cube(self._show_orient_labels)
 
     def _on_labels_toggled(self, checked: bool) -> None:
         self._show_orient_labels = checked
@@ -1667,6 +1690,9 @@ class NiftiViewerPane(QWidget):
             # rather than each slice stretching its own min/max (flat, noisy).
             lo, hi = self._disp_lo, self._disp_hi
             arr = (arr - lo) / (hi - lo) if hi > lo else arr - lo
+            # Gentle gamma to lift the mid-tones for MRIcroGL-like vibrancy /
+            # contrast (brighter grey/white matter without clipping highlights).
+            arr = np.clip(arr, 0.0, 1.0) ** 0.8
         else:
             # RGB / colour voxels: components are already display values.
             arr = arr / 255.0 if arr.max() > 1.0 else arr
