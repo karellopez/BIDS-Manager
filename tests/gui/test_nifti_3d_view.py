@@ -139,9 +139,9 @@ def test_3d_toggle_feeds_volume_to_gl_view(
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
-    assert pane._gl_view is not None
+    assert pane._gl is not None
     # Volume was handed to the GL widget (stashed as pending until first paint).
-    assert pane._gl_view.gl.has_volume() is True
+    assert pane._gl.has_volume() is True
 
 
 def test_3d_and_multiview_mutually_exclusive(
@@ -179,7 +179,7 @@ def test_volume_slider_repushes_in_3d(
     # Moving the volume slider should not raise and keeps a volume bound.
     pane._vol_slider.setValue(2)
     qapp.processEvents()
-    assert pane._gl_view.gl.has_volume() is True
+    assert pane._gl.has_volume() is True
 
 
 def test_set_file_none_clears_3d(
@@ -222,24 +222,40 @@ def test_orientation_shortcut_exits_3d(
 
 
 def test_nifti3dview_normalises_and_binds(qapp) -> None:
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS, EFFECT_FX
+
     view = Nifti3DView()
     vol = np.linspace(0, 1000, 8 * 8 * 8, dtype=np.float32).reshape(8, 8, 8)
     view.set_volume(vol, (1.0, 1.0, 1.0))
     assert view.gl.has_volume() is True
-    # Effect combo drives the GL widget's effect field.
-    view.controls._effect.setCurrentIndex(1)   # MIP
-    assert view.gl.effect == 1
+    # The effect combo maps its label to the shader effect index.
+    view.controls._effect.setCurrentIndex(EFFECTS.index("MIP"))
+    assert view.gl.effect == EFFECT_FX["MIP"]
 
 
 def test_effect_and_lighting_selectors(qapp) -> None:
-    from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS, LIGHTINGS
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS, EFFECT_FX, LIGHTINGS
 
     view = Nifti3DView()
     assert len(EFFECTS) >= 5 and len(LIGHTINGS) >= 5
-    view.controls._effect.setCurrentIndex(2)   # Glass
-    assert view.gl.effect == 2
+    view.controls._effect.setCurrentIndex(EFFECTS.index("Glass"))
+    assert view.gl.effect == EFFECT_FX["Glass"]
     view.controls._light.setCurrentIndex(3)    # a different matcap
     assert view.gl.matcap_name == LIGHTINGS[3]
+
+
+def test_preset_effects_apply(qapp) -> None:
+    """Jelly / Skull are Opacity-peeling presets that apply parameter values."""
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS, EFFECT_FX, EFFECT_PRESET
+
+    view = Nifti3DView()
+    c = view.controls
+    for name in ("Jelly", "Skull"):
+        c._effect.setCurrentIndex(EFFECTS.index(name))
+        assert view.gl.effect == EFFECT_FX[name]          # underlying shader fx
+        preset = EFFECT_PRESET[name]
+        assert c._den.value() == preset["density"]        # preset value applied
+        assert abs(view.gl.density - preset["density"] / 100.0) < 1e-6
 
 
 def test_threshold_sliders_cannot_invert(qapp) -> None:
@@ -272,6 +288,38 @@ def test_clip_controls_drive_gl(qapp) -> None:
     assert not c._caz.isEnabled()
 
 
+def test_slicer_shortcuts(
+    qapp, qtbot, bids_root_with_nifti, isolated_settings,
+) -> None:
+    """Shift+Y/A/S/C/X drive the clip plane and stay in sync with the panel."""
+    pane = NiftiViewerPane()
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    pane._td_btn.click()
+    qapp.processEvents()
+    gl, c = pane._gl, pane._gl_controls
+
+    pane._kbd_toggle_slicer()                       # Shift+Y
+    assert gl.clip_active == 1 and c._clip_en.isChecked()
+    pane._kbd_clip_axial()                          # Shift+A -> normal ~Z
+    assert abs(gl.clip_normal[2]) > 0.99
+    assert c._caz.value() == 0 and c._cel.value() == 90
+    pane._kbd_clip_sagittal()                       # Shift+S -> normal ~X
+    assert abs(gl.clip_normal[0]) > 0.99
+    pane._kbd_clip_coronal()                        # Shift+C -> normal ~Y
+    assert abs(gl.clip_normal[1]) > 0.99
+    n = gl.clip_normal
+    pane._kbd_clip_invert()                         # Shift+X -> flip
+    assert gl.clip_flip
+    assert all(abs(gl.clip_normal[i] + n[i]) < 1e-5 for i in range(3))
+    # Shift+drag / Shift+scroll equivalents mirror into the sliders.
+    gl.drag_clip_azel(20, -5)
+    assert c._caz.value() == int(round(gl.clip_az))
+    gl.nudge_clip_pos(0.05)
+    assert c._cdepth.value() == int(round(gl.clip_pos * 1000))
+    pane._kbd_toggle_slicer()                       # Shift+Y off
+    assert gl.clip_active == 0
+
+
 def test_effect_param_graying(qapp) -> None:
     """Per-effect the panel shows only the relevant parameter rows."""
     from bidsmgr.gui.widgets.nifti_gl_view import EFFECTS
@@ -293,7 +341,7 @@ def test_slice_overlay_per_effect_default(qapp) -> None:
 
     view = Nifti3DView()
     c = view.controls
-    for name in SLICE_DEFAULT_ON:                 # Default / Matte / Topography
+    for name in SLICE_DEFAULT_ON:                 # Standard / Matte / Topography
         c._effect.setCurrentIndex(EFFECTS.index(name))
         assert view.gl.slice_overlay == 1
         assert not c._rows["overlaydepth"].isHidden()
@@ -353,19 +401,23 @@ def test_pan_moves_target(qapp) -> None:
     assert np.allclose(w._target, 0.0)         # reset recentres it
 
 
-def test_refresh_and_reset_params(qapp) -> None:
+def test_reset_params_current_effect_only(qapp) -> None:
+    """Reset parameters resets ONLY the current effect's params; the effect,
+    clip and unrelated params are left alone."""
+    from bidsmgr.gui.widgets.nifti_gl_view import DEFAULTS, EFFECTS
+
     view = Nifti3DView()
     c = view.controls
-    c._effect.setCurrentIndex(2)
-    c._bright.setValue(260)
+    c._effect.setCurrentIndex(EFFECTS.index("Glass"))
     c._clip_en.setChecked(True)
-    assert view.gl.effect == 2 and view.gl.clip_active == 1
+    c._spec.setValue(95)          # a Glass parameter
+    c._bright.setValue(260)       # NOT a Glass parameter
     c.reset_params()
-    from bidsmgr.gui.widgets.nifti_gl_view import DEFAULTS
-    assert view.gl.effect == 0
-    assert view.gl.clip_active == 0
-    assert c._bright.value() == DEFAULTS["brighten"]
-    view.gl.refresh()                          # no-op without a live context, must not raise
+    assert view.gl.effect == EFFECTS.index("Glass")   # effect unchanged
+    assert view.gl.clip_active == 1                    # clip left as-is
+    assert c._spec.value() == DEFAULTS["specular"]     # Glass param reset
+    assert c._bright.value() == 260                    # unrelated param untouched
+    view.gl.refresh()             # no-op without a live context, must not raise
 
 
 def test_drag_right_increases_azimuth(qapp) -> None:
@@ -410,8 +462,8 @@ def test_ortho3d_toggle_shows_grid_and_keeps_slice_controls(
     assert pane._combo_page_index is not None
     assert pane._image_stack.currentIndex() == pane._combo_page_index
     # The render got the volume, and all three slice panels exist.
-    assert pane._combo_gl.has_volume() is True
-    assert pane._combo_controls is not None
+    assert pane._gl.has_volume() is True
+    assert pane._gl_controls is not None
     assert len(pane._combo_labels) == 3
     # Slices are shown, so brightness/contrast/crosshair stay live...
     assert pane._bright_slider.isEnabled()

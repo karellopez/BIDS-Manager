@@ -233,24 +233,32 @@ class NiftiViewerPane(QWidget):
         # stay clear of GL entirely). ``_gl_page_index`` is its slot in
         # ``_image_stack`` once created.
         self._three_d: bool = False
-        self._gl_view = None
-        self._gl_page_index: Optional[int] = None
+        self._combo_view: bool = False
         self._is_3d_capable: bool = False
         # Whether this host can drive the GPU raycaster (OpenGL 3.3 core on
-        # real hardware). When False the 3D / Ortho 3D toggles are hidden
+        # real hardware). When False the 3D / Multi-Planar 3D toggles are hidden
         # entirely — the viewer stays a pure 2-D tool.
         try:
             from .nifti_gl_view import gpu_available
             self._gpu_ok: bool = gpu_available()
         except Exception:  # noqa: BLE001 - never block the 2-D viewer
             self._gpu_ok = False
-        # Combined "Ortho 3D" mode: the three orthogonal slices plus the GPU
-        # render in one 2×2 grid, with all render controls in a vertical side
-        # panel. Its own bare GL canvas (``_combo_gl``) + controls + slice
-        # labels, all built lazily. ``_combo_view`` is the active flag.
-        self._combo_view: bool = False
-        self._combo_gl = None
-        self._combo_controls = None
+        # The two 3-D modes ("3D" = full render, "Multi-Planar 3D" = the three
+        # planes + render in a grid) share ONE render + ONE control panel, so
+        # they are always the SAME view (effect / lighting / clip / camera) —
+        # not independent. The single ``_gl`` canvas + ``_gl_controls`` are
+        # reparented into whichever page is active (both pages live in the same
+        # window, so the GL context is preserved across the move).
+        self._gl = None
+        self._gl_controls = None
+        self._gl_controls_scroll = None
+        self._page_3d = None
+        self._page_combo = None
+        self._gl_slot_3d = None
+        self._ctrl_slot_3d = None
+        self._gl_slot_combo = None
+        self._ctrl_slot_combo = None
+        self._gl_page_index: Optional[int] = None
         self._combo_page_index: Optional[int] = None
         self._combo_labels: dict[int, ImageLabel] = {}
         self._combo_edge: dict = {}
@@ -364,6 +372,18 @@ class NiftiViewerPane(QWidget):
         # which the canvas grabs on click / scroll.
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._install_shortcuts()
+
+        # Eagerly realise the 3-D GL page at construction (when a GPU is
+        # present). The pane is built before the main window is shown, so the
+        # host window is created render-to-texture-capable from the start.
+        # Adding the first QOpenGLWidget to an already-visible window otherwise
+        # forces Qt to recreate the native window — the "GUI closes and
+        # reopens" the first time 3-D is opened on Windows / Linux.
+        if self._gpu_ok:
+            try:
+                self._ensure_gl()
+            except Exception as exc:  # noqa: BLE001 - never block the 2-D viewer
+                log.warning("Could not pre-create the 3-D view: %s", exc)
 
     def _teardown_event_filter(self) -> None:
         app = QApplication.instance()
@@ -586,8 +606,8 @@ class NiftiViewerPane(QWidget):
 
         row1.addSpacing(8)
 
-        # Multi view toggle — sagittal+coronal+axial side by side.
-        self._tri_btn = QPushButton("Multi view")
+        # Multi-Planar toggle — sagittal+coronal+axial side by side.
+        self._tri_btn = QPushButton("Multi-Planar")
         self._tri_btn.setObjectName("tb-btn-toggle")
         self._tri_btn.setCheckable(True)
         self._tri_btn.setToolTip(
@@ -626,8 +646,8 @@ class NiftiViewerPane(QWidget):
         self._td_btn.toggled.connect(self._on_3d_toggled)
         row1.addWidget(self._td_btn)
 
-        # Ortho 3D — the three 2-D planes plus the GPU render in one 2×2 grid.
-        self._quad_btn = QPushButton("Ortho 3D")
+        # Multi-Planar 3D — the three 2-D planes plus the GPU render in one grid.
+        self._quad_btn = QPushButton("Multi-Planar 3D")
         self._quad_btn.setObjectName("tb-btn-toggle")
         self._quad_btn.setCheckable(True)
         self._quad_btn.setEnabled(False)
@@ -937,19 +957,13 @@ class NiftiViewerPane(QWidget):
         self._apply_orient_label_visibility()
         return w
 
-    def _build_combo_image(self) -> QWidget:
-        """Build the Ortho-3D page: 2×2 grid (3 slices + render) + side panel.
-
-        Grid mirrors MRIcroGL's default — Axial (top-left), Coronal
-        (top-right), Sagittal (bottom-left) and the volume render
-        (bottom-right). The three slice panels reuse the crosshair voxel and
-        render path of Multi view; the render is a bare
-        :class:`RaycastGLWidget`. All of its controls live in a vertical
-        :class:`Nifti3DControls` panel on the right (in a scroll area so they
-        never crowd the render), so the render gets the room it needs.
+    def _build_combo_page(self):
+        """The "Multi-Planar 3D" page: 2×2 grid (3 slices + a render slot) +
+        a controls slot on the right. The render + controls slots are filled
+        with the SHARED GL widget / controls by :meth:`_mount_gl`, so this view
+        and the pure "3D" view are always identical. Returns
+        ``(page, gl_slot, ctrl_slot)``.
         """
-        from .nifti_gl_view import Nifti3DControls, RaycastGLWidget
-
         page = QWidget()
         outer = QHBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -994,29 +1008,19 @@ class NiftiViewerPane(QWidget):
             grid.addWidget(cell, r, c)
             self._combo_labels[axis] = label
 
-        self._combo_gl = RaycastGLWidget()
-        self._combo_gl.set_show_cube(self._show_orient_labels)
-        grid.addWidget(self._combo_gl, 1, 1)
+        gl_slot = self._slot()          # the shared render is mounted here
+        grid.addWidget(gl_slot, 1, 1)
         for i in range(2):
             grid.setRowStretch(i, 1)
             grid.setColumnStretch(i, 1)
         outer.addWidget(grid_host, 1)
 
-        # Vertical control column on the right, in a scroll area so it stays
-        # usable when the pane is short.
-        self._combo_controls = Nifti3DControls(self._combo_gl, vertical=True)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        scroll.setWidget(self._combo_controls)
-        scroll.setFixedWidth(212)
-        outer.addWidget(scroll)
+        ctrl_slot = self._slot()        # the shared controls are mounted here
+        ctrl_slot.setFixedWidth(226)
+        outer.addWidget(ctrl_slot)
 
         self._apply_orient_label_visibility()
-        return page
+        return page, gl_slot, ctrl_slot
 
     def _build_graph_panel(self) -> QWidget:
         """Build the 4-D time-series plot panel (pyqtgraph).
@@ -1179,19 +1183,16 @@ class NiftiViewerPane(QWidget):
         self._set_view_mode("combo" if checked else "single")
 
     def _set_view_mode(self, mode: str) -> None:
-        # Lazily build whatever GL page the target mode needs; if that fails
-        # (no GL driver / headless), fall back to plain single-pane 2-D.
-        if mode == "3d":
+        # Build the shared GL render/controls on demand; if that fails (no GL
+        # driver / headless), fall back to plain single-pane 2-D. Then mount
+        # the shared render into the active 3-D page so both 3-D modes show the
+        # very same view.
+        if mode in ("3d", "combo"):
             try:
-                self._ensure_gl_view()
+                self._ensure_gl()
+                self._mount_gl(mode)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Could not open the 3-D view: %s", exc)
-                mode = "single"
-        elif mode == "combo":
-            try:
-                self._ensure_combo_view()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Could not open the Ortho-3D view: %s", exc)
                 mode = "single"
 
         self._tri_view = mode == "multi"
@@ -1265,31 +1266,111 @@ class NiftiViewerPane(QWidget):
             self._td_btn.toggle()
 
     def _toggle_combo(self) -> None:
-        """'P' shortcut — flip the Ortho-3D button when it applies."""
+        """'P' shortcut — flip the Multi-Planar 3D button when it applies."""
         if self._quad_btn.isEnabled():
             self._quad_btn.toggle()
 
-    def _ensure_gl_view(self):
-        """Build the pure-3-D GL page on first use and add it to the stack.
+    # -- 3-D slicer keyboard shortcuts (Shift + …) -------------------------
 
-        Lazy so the OpenGL context is only created when the user actually
-        opens a 3-D mode — importing PyOpenGL / creating a QOpenGLWidget is
-        deferred out of the module import graph and the common path.
+    def _slicer_active(self) -> bool:
+        """Slicer shortcuts apply only while a 3-D render is on screen."""
+        return (self._three_d or self._combo_view) and self._gl_controls is not None
+
+    def _kbd_toggle_slicer(self) -> None:
+        """Shift+Z — activate / deactivate the clip-plane slicer.
+
+        While the slicer is on, Shift+drag orients the cut (azimuth/elevation)
+        and Shift+scroll moves it through the volume.
         """
-        if self._gl_view is not None:
-            return self._gl_view
-        from .nifti_gl_view import Nifti3DView
-        self._gl_view = Nifti3DView()
-        self._gl_view.set_show_cube(self._show_orient_labels)
-        self._gl_page_index = self._image_stack.addWidget(self._gl_view)
-        return self._gl_view
+        if self._slicer_active():
+            self._gl_controls.kbd_toggle_clip()
 
-    def _ensure_combo_view(self):
-        """Build the Ortho-3D (2×2 slices + render) page on first use."""
-        if self._combo_page_index is not None:
+    def _kbd_clip_axial(self) -> None:
+        """Shift+A — axial cut (plane normal along S–I)."""
+        if self._slicer_active():
+            self._gl_controls.kbd_set_axis(0, 90)
+
+    def _kbd_clip_sagittal(self) -> None:
+        """Shift+S — sagittal cut (plane normal along L–R)."""
+        if self._slicer_active():
+            self._gl_controls.kbd_set_axis(90, 0)
+
+    def _kbd_clip_coronal(self) -> None:
+        """Shift+C — coronal cut (plane normal along A–P)."""
+        if self._slicer_active():
+            self._gl_controls.kbd_set_axis(0, 0)
+
+    def _kbd_clip_invert(self) -> None:
+        """Shift+X — invert the cut direction."""
+        if self._slicer_active():
+            self._gl_controls.kbd_invert()
+
+    def _ensure_gl(self):
+        """Build the shared GL render + controls and both 3-D pages once.
+
+        A single :class:`RaycastGLWidget` + :class:`Nifti3DControls` back BOTH
+        the "3D" page and the "Multi-Planar 3D" page; they are reparented into
+        whichever page is active (:meth:`_mount_gl`). That keeps the two views
+        identical — same effect, lighting, clip and camera — rather than two
+        independent renders.
+        """
+        if self._gl is not None:
             return
-        page = self._build_combo_image()
-        self._combo_page_index = self._image_stack.addWidget(page)
+        from .nifti_gl_view import Nifti3DControls, RaycastGLWidget
+        self._gl = RaycastGLWidget()
+        self._gl.set_show_cube(self._show_orient_labels)
+        self._gl_controls = Nifti3DControls(self._gl, vertical=True)
+        self._gl_controls_scroll = QScrollArea()
+        self._gl_controls_scroll.setWidgetResizable(True)
+        self._gl_controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._gl_controls_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._gl_controls_scroll.setWidget(self._gl_controls)
+        self._gl_controls_scroll.setFixedWidth(224)
+
+        (self._page_3d, self._gl_slot_3d,
+         self._ctrl_slot_3d) = self._build_3d_page()
+        (self._page_combo, self._gl_slot_combo,
+         self._ctrl_slot_combo) = self._build_combo_page()
+        self._gl_page_index = self._image_stack.addWidget(self._page_3d)
+        self._combo_page_index = self._image_stack.addWidget(self._page_combo)
+        self._mount_gl("3d")   # park it in the pure-3-D page by default
+
+    @staticmethod
+    def _slot() -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        return w
+
+    def _mount_gl(self, mode: str) -> None:
+        """Reparent the shared render + controls into the active page's slots."""
+        if self._gl is None:
+            return
+        if mode == "combo":
+            gl_slot, ctrl_slot = self._gl_slot_combo, self._ctrl_slot_combo
+        else:
+            gl_slot, ctrl_slot = self._gl_slot_3d, self._ctrl_slot_3d
+        # addWidget reparents (auto-removing from the previous slot). Same
+        # top-level window on both sides, so the GL context is preserved.
+        gl_slot.layout().addWidget(self._gl)
+        ctrl_slot.layout().addWidget(self._gl_controls_scroll)
+
+    def _build_3d_page(self):
+        """The pure "3D" page: full-width render + right-hand controls slot."""
+        page = QWidget()
+        page.setObjectName("pane-dark")
+        h = QHBoxLayout(page)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(2)
+        gl_slot = self._slot()
+        ctrl_slot = self._slot()
+        ctrl_slot.setFixedWidth(226)
+        h.addWidget(gl_slot, 1)
+        h.addWidget(ctrl_slot)
+        return page, gl_slot, ctrl_slot
 
     def _volume_spacing(self) -> tuple[float, float, float]:
         """Voxel spacing (mm) of the loaded image, defaulting to isotropic."""
@@ -1302,22 +1383,13 @@ class NiftiViewerPane(QWidget):
             return (1.0, 1.0, 1.0)
 
     def _push_volume_to_3d(self) -> None:
-        """Send the current (4-D-aware) 3-D volume to the active GL view.
-
-        The pure-3-D page owns a :class:`Nifti3DView` (``set_volume`` windows
-        internally); the Ortho-3D page owns a bare
-        :class:`RaycastGLWidget` (``set_volume_float`` windows for it).
-        """
-        if self._data is None:
+        """Send the current (4-D-aware) 3-D volume to the shared GL render."""
+        if self._data is None or self._gl is None:
             return
         vol = self._current_volume()
         if getattr(vol, "ndim", 0) != 3:
             return
-        spacing = self._volume_spacing()
-        if self._three_d and self._gl_view is not None:
-            self._gl_view.set_volume(vol, spacing)
-        elif self._combo_view and self._combo_gl is not None:
-            self._combo_gl.set_volume_float(vol, spacing)
+        self._gl.set_volume_float(vol, self._volume_spacing())
 
     # ------------------------------------------------------------------
     # Orientation labels
@@ -1340,11 +1412,9 @@ class NiftiViewerPane(QWidget):
         for group in groups:
             for lbl in group.values():
                 lbl.setVisible(self._show_orient_labels)
-        # The same toggle drives the 3-D orientation cube on both GL views.
-        if self._gl_view is not None:
-            self._gl_view.set_show_cube(self._show_orient_labels)
-        if self._combo_gl is not None:
-            self._combo_gl.set_show_cube(self._show_orient_labels)
+        # The same toggle drives the 3-D orientation cube on the shared render.
+        if self._gl is not None:
+            self._gl.set_show_cube(self._show_orient_labels)
 
     def _on_labels_toggled(self, checked: bool) -> None:
         self._show_orient_labels = checked
@@ -1406,6 +1476,13 @@ class NiftiViewerPane(QWidget):
             ("O", self._toggle_orient_labels),
             ("D", self._toggle_3d),
             ("P", self._toggle_combo),
+            # 3-D slicer (clip plane). Shift + drag/scroll while active orients
+            # and navigates the cut.
+            ("Shift+Z", self._kbd_toggle_slicer),
+            ("Shift+A", self._kbd_clip_axial),
+            ("Shift+S", self._kbd_clip_sagittal),
+            ("Shift+C", self._kbd_clip_coronal),
+            ("Shift+X", self._kbd_clip_invert),
         )
         for key, handler in specs:
             sc = QShortcut(QKeySequence(key), self)
@@ -1430,16 +1507,25 @@ class NiftiViewerPane(QWidget):
                 ("Axial view", "A"),
                 ("Sagittal view", "S"),
                 ("Coronal view", "C"),
-                ("Multi view (toggle)", "M"),
+                ("Multi-Planar (toggle)", "M"),
                 ("3D volume render (toggle)", "D"),
-                ("Ortho 3D — planes + render (toggle)", "P"),
+                ("Multi-Planar 3D — planes + render (toggle)", "P"),
                 ("Graph / time-series (toggle)", "G"),
                 ("Orientation labels (toggle)", "O"),
             ]),
             ("3D view", [
                 ("Rotate the volume", "Drag"),
+                ("Pan", "Right-drag"),
                 ("Zoom in / out", "Scroll"),
-                ("Slice into the volume", "Clip plane controls"),
+            ]),
+            ("3D slicer (clip plane)", [
+                ("Activate / deactivate slicer", "Shift+Z"),
+                ("Orient the cut freely", "Shift+drag"),
+                ("Navigate the slice", "Shift+scroll"),
+                ("Axial cut", "Shift+A"),
+                ("Sagittal cut", "Shift+S"),
+                ("Coronal cut", "Shift+C"),
+                ("Invert the cut", "Shift+X"),
             ]),
         ]
 
@@ -2203,9 +2289,8 @@ class NiftiViewerPane(QWidget):
             btn.setEnabled(False)
             btn.blockSignals(was)
         self._image_stack.setCurrentIndex(0)
-        for view in (self._gl_view, self._combo_gl):
-            if view is not None:
-                view.clear()
+        if self._gl is not None:
+            self._gl.clear()
         self._toolbar.setVisible(False)
         self._footer.setVisible(False)
         self._footer_path.setText("")

@@ -35,7 +35,7 @@ import logging
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import QSurfaceFormat, QImage, QPainter, QColor, QFont
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import (
@@ -53,12 +53,22 @@ from PyQt6.QtWidgets import (
 log = logging.getLogger(__name__)
 
 
-def request_gl_format() -> QSurfaceFormat:
-    """Return (and register as default) a portable OpenGL 3.3 core format."""
+def _gl_format() -> QSurfaceFormat:
+    """A portable OpenGL 3.3 core surface format (does not touch the default)."""
     fmt = QSurfaceFormat()
     fmt.setVersion(3, 3)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
+    return fmt
+
+
+def request_gl_format() -> QSurfaceFormat:
+    """Register the 3.3 core format as the app default (call once, pre-app).
+
+    Widgets use :func:`_gl_format` for their own context so the default is not
+    re-set after the shared context exists (which Qt warns about).
+    """
+    fmt = _gl_format()
     QSurfaceFormat.setDefaultFormat(fmt)
     return fmt
 
@@ -83,7 +93,7 @@ def gpu_available() -> bool:
         from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext
         if QApplication.instance() is None:
             return False
-        fmt = request_gl_format()
+        fmt = _gl_format()
         surf = QOffscreenSurface()
         surf.setFormat(fmt)
         surf.create()
@@ -107,21 +117,38 @@ def gpu_available() -> bool:
     return _GPU_CACHE
 
 
-# Effects (index == uEffect in the shader).
-EFFECTS = ["Default", "Matte", "Glass", "X-ray", "MIP", "Edges",
-           "Opacity peeling", "Opacity peeling 2", "Shell", "Topography"]
+# Effect dropdown labels (display order). "Standard" is the default. Some
+# entries are *presets* of an existing shader effect (Jelly / Skull are named
+# parameter presets of Opacity peeling). The display label is decoupled from
+# the shader ``uEffect`` index via :data:`EFFECT_FX`, so labels/order can change
+# without touching the shader.
+EFFECTS = ["Standard", "Matte", "Glass", "X-ray", "MIP", "Edges",
+           "Opacity peeling", "Opacity peeling 2", "Shell", "Topography",
+           "Jelly", "Skull"]
+
+# Label -> shader effect index (uEffect). "Standard" = flat Phong (shader fx 1),
+# "Matte" = waxy matcap (shader fx 0). Jelly/Skull reuse Opacity peeling (fx 6).
+EFFECT_FX: dict[str, int] = {
+    "Standard": 1, "Matte": 0, "Glass": 2, "X-ray": 3, "MIP": 4, "Edges": 5,
+    "Opacity peeling": 6, "Opacity peeling 2": 7, "Shell": 8, "Topography": 9,
+    "Jelly": 6, "Skull": 6,
+}
 
 # Which control keys each effect uses (others are greyed out in the panel).
 # "overlay"/"overlaydepth" (the cut-face intensity slice) only appear for the
 # opaque surface effects where a cross-section reads sensibly.
 _COMMON = {"lo", "hi", "quality"}
 _OVERLAY = {"overlay", "overlaydepth"}
+_MATCAP_PARAMS = _COMMON | _OVERLAY | {"density", "light", "brighten", "surface",
+                                       "ambient", "diffuse", "specular",
+                                       "shininess", "lightaz", "lightel"}
+_PHONG_PARAMS = _COMMON | _OVERLAY | {"density", "ambient", "diffuse", "specular",
+                                      "shininess", "lightaz", "lightel"}
+_PEEL_PARAMS = _COMMON | {"density", "ambient", "diffuse", "specular", "shininess",
+                          "peel", "tlow", "thigh", "lightaz", "lightel"}
 EFFECT_PARAMS: dict[str, set] = {
-    "Default":           _COMMON | _OVERLAY | {"density", "light", "brighten",
-                                               "surface", "lightaz", "lightel"},
-    "Matte":             _COMMON | _OVERLAY | {"density", "ambient", "diffuse",
-                                               "specular", "shininess",
-                                               "lightaz", "lightel"},
+    "Standard":          _PHONG_PARAMS,     # flat Phong (was "Matte")
+    "Matte":             _MATCAP_PARAMS,    # waxy matcap (was "Default")
     "Glass":             _COMMON | {"specular", "shininess", "edgethresh",
                                     "boundthresh", "edgemix", "colortemp",
                                     "lightaz", "lightel"},
@@ -130,21 +157,32 @@ EFFECT_PARAMS: dict[str, set] = {
     "Edges":             _COMMON | {"density", "light", "brighten", "surface",
                                     "boundthresh", "edgethresh", "edgemix",
                                     "lightaz", "lightel"},
-    "Opacity peeling":   _COMMON | {"density", "ambient", "diffuse", "specular",
-                                    "shininess", "peel", "tlow", "thigh",
-                                    "lightaz", "lightel"},
-    "Opacity peeling 2": _COMMON | {"density", "ambient", "diffuse", "specular",
-                                    "shininess", "peel", "tlow", "thigh",
-                                    "lightaz", "lightel"},
+    "Opacity peeling":   _PEEL_PARAMS,
+    "Opacity peeling 2": _PEEL_PARAMS,
     "Shell":             _COMMON | {"boundthresh", "edgethresh", "edgemix",
                                     "colortemp", "specular", "lightaz", "lightel"},
     "Topography":        _COMMON | _OVERLAY | {"density", "light", "brighten",
                                                "surface", "gradientmix",
                                                "intensitymix", "hardness",
                                                "lightaz", "lightel"},
+    "Jelly":             _PEEL_PARAMS,
+    "Skull":             _PEEL_PARAMS,
 }
 # Effects whose cut-face intensity slice is ON by default.
-SLICE_DEFAULT_ON = {"Default", "Matte", "Topography"}
+SLICE_DEFAULT_ON = {"Standard", "Matte", "Topography"}
+
+# Named parameter presets (control key -> value) applied when a preset effect
+# is selected. Derived from the reference MRIcroGL-style looks.
+EFFECT_PRESET: dict[str, dict] = {
+    # Translucent, glassy tissue — the brain shows through the skin.
+    "Jelly": dict(lo=110, hi=400, density=22, ambient=115, diffuse=65,
+                  specular=35, shininess=45, peel=1, tlow=18, thigh=82,
+                  lightaz=0, lightel=25, quality=1024),
+    # Peel the skin to reveal the deeper (facial / orbital / bony) anatomy.
+    "Skull": dict(lo=140, hi=560, density=150, ambient=95, diffuse=50,
+                  specular=50, shininess=20, peel=1, tlow=25, thigh=80,
+                  lightaz=0, lightel=30, quality=1024),
+}
 
 # Matcap "lighting" materials: (ambient, key, fill, spec_power, spec_int, tint).
 _LIGHTINGS: dict[str, tuple] = {
@@ -163,7 +201,7 @@ DEFAULTS = dict(
     ambient=60, diffuse=55, specular=30, shininess=40,
     boundthresh=30, edgethresh=12, edgemix=65, colortemp=50,
     gradientmix=60, intensitymix=35, hardness=50,
-    peel=1, tlow=25, thigh=85, lightaz=210, lightel=40, overlay=True, overlaydepth=40,
+    peel=1, tlow=25, thigh=85, lightaz=0, lightel=0, overlay=True, overlaydepth=28,
     quality=1024, clip=False, clipaz=0, clipel=0, depth=500, thick=1000, cube=True,
 )
 
@@ -473,30 +511,34 @@ void main() {
         if (clipped(p)) { prevClip = true; t += dt; continue; }
         float d = samp(p);
 
-        // Cut face -> intensity slice WITH depth. Bright tissue saturates fast
-        // (reads as a crisp slice); dark CSF/ventricles have low per-step
-        // opacity so the ray penetrates and reveals interior structure. The
-        // integration depth is user-controlled (uSliceDepth).
+        // Cut face -> hybrid cross-section. SOLID tissue at the plane is drawn
+        // as a clean flat intensity slice; low-intensity CSF / air is treated
+        // as EMPTY (transparent) so the lit 3-D render behind shows through —
+        // a ventricle becomes a real, shaded recess (that is the "depth"). The
+        // overlay-depth slider raises the emptiness threshold; smoothstep keeps
+        // the boundary smooth so there are no black-dot speckles. We do NOT
+        // break: the loop continues and the normal surface shading below fills
+        // the transparent parts. Scoped entirely to this block.
         if (uSliceOverlay==1 && uClipActive==1 && prevClip) {
             prevClip = false;
-            if (d > 0.04) {
-                vec4 s = vec4(0.0);
-                vec3 q = p;
-                int ns = int(mix(18.0, 180.0, uSliceDepth));
-                for (int k=0;k<220;++k){
-                    if (k >= ns) break;
-                    float sd = samp(q);
-                    float sv = pow(clamp(sd,0.0,1.0), 0.72);        // contrasty tone
-                    float sa = smoothstep(0.03, 0.14, sd) * 0.11;   // deep penetration
-                    s.rgb += (1.0-s.a) * vec3(sv) * sa;
-                    s.a   += (1.0-s.a) * sa;
-                    if (s.a > 0.985) break;
-                    q += duvw;
-                    if (any(lessThan(q, vec3(0.0))) || any(greaterThan(q, vec3(1.0)))) break;
-                }
-                acc.rgb += (1.0-acc.a) * s.rgb;
-                acc.a = 1.0; break;
+            // De-jitter: snap to the exact clip-plane crossing for a clean value.
+            vec3 q = p;
+            float denom = dot(uClipNormal, duvw);
+            if (abs(denom) > 1e-6) {
+                float sdp = dot(uClipNormal, p - vec3(0.5));
+                float tgt = (abs(sdp - uClipDepth) <= abs(sdp - (uClipDepth+uClipThick)))
+                            ? uClipDepth : (uClipDepth + uClipThick);
+                q = clamp(p + duvw * ((tgt - sdp) / denom), vec3(0.0), vec3(1.0));
             }
+            float sd = samp(q);
+            float thr = mix(0.05, 0.42, uSliceDepth);
+            float solid = smoothstep(thr, thr + 0.12, sd);
+            if (solid > 0.003) {
+                acc.rgb += (1.0-acc.a) * vec3(pow(clamp(sd,0.0,1.0), 0.8)) * solid;
+                acc.a   += (1.0-acc.a) * solid;
+            }
+            t += dt;
+            continue;   // let the lit 3-D volume fill the empty (cavity) parts
         }
         prevClip = false;
 
@@ -509,11 +551,14 @@ void main() {
         float sp = pow(max(dot(reflect(-uLightDir, nv), viewDir), 0.0), max(uShininess,1.0));
 
         vec3 lit; float a = op;
-        if (uEffect==0) {                                  // Default: waxy matcap
+        if (uEffect==0) {                                  // fx0 = "Matte" label (waxy matcap)
             vec3 mc = texture(uMatcap, nv.xy*0.5+0.5).rgb;
             vec3 surf = mix(vec3(0.74), vec3(pow(d,0.72)), uSurface);
-            lit = mc * surf * uBrighten;
-            lit += vec3(1.0, 0.98, 0.94) * sp * 0.6;       // controllable glossy highlight
+            // Waxy matcap base lit with the SAME Phong model as Matte
+            // (ambient + diffuse*N·L, plus specular/shininess), so the lighting
+            // controls behave identically between Default and Matte.
+            vec3 base = mc * surf * uBrighten;
+            lit = base * (uAmbient + uDiffuse * ndl) + vec3(sp * uSpecular);
             lit *= 1.0 - 0.18 * depth01;
             a = op * 0.92;
         } else if (uEffect==9) {                           // Topography
@@ -540,7 +585,7 @@ void main() {
             float e = mix(bnd, edge, uEdgeMix);
             lit = edgeCol * (e * uBrighten + sp * uSpecular);
             a = e * (uEffect==2 ? 0.35 : 0.7);
-        } else {                                           // Matte: Phong + depth cue
+        } else {                                           // fx1 = "Standard" label (flat Phong)
             vec3 base = vec3(mix(0.5, pow(d,0.8), 0.7));
             lit = base * (uAmbient + uDiffuse*ndl) + vec3(sp*uSpecular);
             lit *= 1.0 - 0.30 * depth01;
@@ -595,9 +640,14 @@ void main(){
 class RaycastGLWidget(QOpenGLWidget):
     """QOpenGLWidget hosting the single-pass volume raycaster (no controls)."""
 
+    # Emitted when the clip plane is changed from *inside* the widget (keyboard
+    # shortcuts / Shift-drag / Shift-scroll), so the controls panel can mirror
+    # its sliders. Not emitted for changes driven by the controls themselves.
+    clip_changed = pyqtSignal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFormat(request_gl_format())
+        self.setFormat(_gl_format())
         self._prog = 0
         self._vao = 0
         self._tex = 0
@@ -616,12 +666,12 @@ class RaycastGLWidget(QOpenGLWidget):
         self._matcap_dirty = True
         self._show_cube = True
 
-        self._az, self._el, self._dist = 0.6, 0.3, 2.6
+        self._az, self._el, self._dist = -0.6, 0.3, 1.9
         self._target = np.zeros(3, np.float32)
         self._last: Optional[QPoint] = None
         self._drag = "rotate"
 
-        self.effect = DEFAULTS["effect"]
+        self.effect = EFFECT_FX[EFFECTS[DEFAULTS["effect"]]]   # shader fx of default
         self.thresh_lo = DEFAULTS["lo"] / 1000.0
         self.thresh_hi = DEFAULTS["hi"] / 1000.0
         self.density = DEFAULTS["density"] / 100.0
@@ -644,10 +694,20 @@ class RaycastGLWidget(QOpenGLWidget):
         self.light_dir = light_dir_view(DEFAULTS["lightaz"], DEFAULTS["lightel"])
         self.steps = DEFAULTS["quality"]
         self.matcap_name = LIGHTINGS[0]
+        # Clip plane. Logical state (azimuth/elevation/position/thickness/flip)
+        # is the source of truth; the shader-ready normal/depth/thick are
+        # recomputed from it. Both the controls and the keyboard/mouse slice
+        # shortcuts drive the logical state.
         self.clip_active = 0
+        self.clip_az = float(DEFAULTS["clipaz"])
+        self.clip_el = float(DEFAULTS["clipel"])
+        self.clip_pos = DEFAULTS["depth"] / 1000.0
+        self.clip_thick_frac = DEFAULTS["thick"] / 1000.0
+        self.clip_flip = False
         self.clip_normal = (0.0, 1.0, 0.0)
         self.clip_depth = 0.0
         self.clip_thick = 3.0
+        self._recompute_clip()
         self.slice_overlay = 1
         self.slice_depth = DEFAULTS["overlaydepth"] / 100.0
         self._bg = (0.05, 0.06, 0.08)
@@ -711,8 +771,56 @@ class RaycastGLWidget(QOpenGLWidget):
             self.update()
 
     def reset_view(self) -> None:
-        self._az, self._el, self._dist = 0.6, 0.3, 2.6
+        self._az, self._el, self._dist = -0.6, 0.3, 1.9
         self._target = np.zeros(3, np.float32)
+        self.update()
+
+    # -- clip plane (logical state -> shader uniforms) ---------------------
+
+    def _recompute_clip(self) -> None:
+        n = clip_normal_from(self.clip_az, self.clip_el)
+        if self.clip_flip:
+            n = (-n[0], -n[1], -n[2])
+        self.clip_normal = n
+        self.clip_depth = (self.clip_pos - 0.5) * 1.8
+        self.clip_thick = 0.02 + self.clip_thick_frac * 2.98
+
+    def toggle_clip(self) -> None:
+        """Shift+Y — activate / deactivate the slicer."""
+        self.clip_active = 0 if self.clip_active else 1
+        self.clip_changed.emit()
+        self.update()
+
+    def set_clip_axis(self, az: float, el: float) -> None:
+        """Shift+A/S/C — snap the cut to an anatomical plane (and enable it)."""
+        self.clip_active = 1
+        self.clip_flip = False
+        self.clip_az, self.clip_el = float(az), float(el)
+        self._recompute_clip()
+        self.clip_changed.emit()
+        self.update()
+
+    def invert_clip(self) -> None:
+        """Shift+X — invert (flip) the cut direction."""
+        self.clip_active = 1
+        self.clip_flip = not self.clip_flip
+        self._recompute_clip()
+        self.clip_changed.emit()
+        self.update()
+
+    def nudge_clip_pos(self, delta: float) -> None:
+        """Shift+wheel — move the cut plane through the volume."""
+        self.clip_pos = float(np.clip(self.clip_pos + delta, 0.0, 1.0))
+        self._recompute_clip()
+        self.clip_changed.emit()
+        self.update()
+
+    def drag_clip_azel(self, d_az: float, d_el: float) -> None:
+        """Shift+drag — orient the cut plane freely."""
+        self.clip_az = (self.clip_az + d_az) % 360.0
+        self.clip_el = float(np.clip(self.clip_el + d_el, -90.0, 90.0))
+        self._recompute_clip()
+        self.clip_changed.emit()
         self.update()
 
     # -- GL lifecycle ------------------------------------------------------
@@ -967,9 +1075,13 @@ class RaycastGLWidget(QOpenGLWidget):
     def mousePressEvent(self, ev) -> None:
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         self._last = ev.position().toPoint()
-        pan = (ev.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton)
-               or bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
-        self._drag = "pan" if pan else "rotate"
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if shift and self.clip_active:
+            self._drag = "clip"          # Shift-drag orients the cut plane
+        elif ev.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self._drag = "pan"
+        else:
+            self._drag = "rotate"
 
     def mouseMoveEvent(self, ev) -> None:
         if self._last is None:
@@ -978,6 +1090,9 @@ class RaycastGLWidget(QOpenGLWidget):
         dx = p.x() - self._last.x()
         dy = p.y() - self._last.y()
         self._last = p
+        if self._drag == "clip":
+            self.drag_clip_azel(dx * 0.6, -dy * 0.6)   # emits + updates
+            return
         if self._drag == "pan":
             r, u = self._camera_basis()
             scale = 0.0022 * self._dist
@@ -991,8 +1106,20 @@ class RaycastGLWidget(QOpenGLWidget):
         self._last = None
 
     def wheelEvent(self, ev) -> None:
-        factor = 0.9 if ev.angleDelta().y() > 0 else 1.1
-        self._dist = float(np.clip(self._dist * factor, 0.5, 12.0))
+        ad, pd = ev.angleDelta(), ev.pixelDelta()
+        # Unified scroll magnitude in "notches": a mouse-wheel notch is ±1, a
+        # trackpad's many tiny events are fractional — so BOTH the zoom and the
+        # slice navigator scale with it and neither is hyper-sensitive. A mouse
+        # Shift+scroll is remapped to a *horizontal* scroll by many platforms,
+        # so read both axes (and pixelDelta as a trackpad fallback).
+        a = ad.y() or ad.x()
+        steps = (a / 120.0) if a != 0 else ((pd.y() or pd.x()) / 320.0)
+        if steps == 0.0:
+            return
+        if (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier) and self.clip_active:
+            self.nudge_clip_pos(0.02 * steps)          # slice navigator
+            return
+        self._dist = float(np.clip(self._dist * (0.9 ** steps), 0.5, 12.0))  # zoom
         self.update()
 
 
@@ -1019,7 +1146,10 @@ class Nifti3DControls(QWidget):
         self._build_widgets()
         self._layout()
         self._apply_clip()
-        self._sync_effect_params()
+        self._on_effect(self._effect.currentIndex())   # set shader fx + graying
+        # Keyboard / Shift-drag changes to the clip on the GL widget mirror back
+        # into these sliders.
+        self.gl.clip_changed.connect(self._sync_clip_from_gl)
 
     def _build_widgets(self) -> None:
         self._effect = QComboBox(); self._effect.addItems(EFFECTS)
@@ -1144,7 +1274,20 @@ class Nifti3DControls(QWidget):
     # -- slots -------------------------------------------------------------
 
     def _on_effect(self, i):
-        self.gl.effect = int(i); self._sync_effect_params(); self.gl.update()
+        label = EFFECTS[int(i)]
+        self.gl.effect = EFFECT_FX[label]         # display label -> shader fx
+        self._sync_effect_params()
+        preset = EFFECT_PRESET.get(label)
+        if preset:                                # Jelly / Skull apply a preset
+            self._apply_values(preset)
+        self.gl.update()
+
+    def _apply_values(self, values: dict) -> None:
+        """Push a preset's control values into the widgets (drives the GL)."""
+        setters = self._param_setters()
+        for key, val in values.items():
+            if key in setters:
+                setters[key][0](val)
 
     def _sync_effect_params(self) -> None:
         name = EFFECTS[self._effect.currentIndex()]
@@ -1206,42 +1349,91 @@ class Nifti3DControls(QWidget):
         on = self._clip_en.isChecked()
         for w in (self._caz, self._cel, self._cdepth, self._cthick):
             w.setEnabled(on)
-        if not on:
-            self.gl.clip_active = 0
-        else:
-            self.gl.clip_active = 1
-            self.gl.clip_normal = clip_normal_from(self._caz.value(), self._cel.value())
-            self.gl.clip_depth = (self._cdepth.value() / 1000.0 - 0.5) * 1.8
-            self.gl.clip_thick = 0.02 + (self._cthick.value() / 1000.0) * 2.98
+        self.gl.clip_active = 1 if on else 0
+        self.gl.clip_az = float(self._caz.value())
+        self.gl.clip_el = float(self._cel.value())
+        self.gl.clip_pos = self._cdepth.value() / 1000.0
+        self.gl.clip_thick_frac = self._cthick.value() / 1000.0
+        self.gl._recompute_clip()
         self.gl.update()
 
-    def reset_params(self) -> None:
+    def _sync_clip_from_gl(self) -> None:
+        """Mirror the clip sliders after a keyboard/Shift-drag change on the GL."""
         pairs = (
-            (self._effect.setCurrentIndex, DEFAULTS["effect"]),
-            (self._light.setCurrentIndex, DEFAULTS["light"]),
-            (self._lo.setValue, DEFAULTS["lo"]), (self._hi.setValue, DEFAULTS["hi"]),
-            (self._den.setValue, DEFAULTS["density"]),
-            (self._bright.setValue, DEFAULTS["brighten"]), (self._surf.setValue, DEFAULTS["surface"]),
-            (self._amb.setValue, DEFAULTS["ambient"]), (self._dif.setValue, DEFAULTS["diffuse"]),
-            (self._spec.setValue, DEFAULTS["specular"]), (self._shin.setValue, DEFAULTS["shininess"]),
-            (self._bound.setValue, DEFAULTS["boundthresh"]), (self._edge.setValue, DEFAULTS["edgethresh"]),
-            (self._emix.setValue, DEFAULTS["edgemix"]), (self._ctemp.setValue, DEFAULTS["colortemp"]),
-            (self._gmix.setValue, DEFAULTS["gradientmix"]), (self._imix.setValue, DEFAULTS["intensitymix"]),
-            (self._hard.setValue, DEFAULTS["hardness"]),
-            (self._peel.setValue, DEFAULTS["peel"]), (self._tlow.setValue, DEFAULTS["tlow"]),
-            (self._thigh.setValue, DEFAULTS["thigh"]),
-            (self._laz.setValue, DEFAULTS["lightaz"]), (self._lel.setValue, DEFAULTS["lightel"]),
-            (self._odepth.setValue, DEFAULTS["overlaydepth"]),
-            (self._q.setValue, DEFAULTS["quality"]),
-            (self._caz.setValue, DEFAULTS["clipaz"]), (self._cel.setValue, DEFAULTS["clipel"]),
-            (self._cdepth.setValue, DEFAULTS["depth"]), (self._cthick.setValue, DEFAULTS["thick"]),
-            (self._clip_en.setChecked, DEFAULTS["clip"]),
+            (self._caz, int(round(self.gl.clip_az))),
+            (self._cel, int(round(self.gl.clip_el))),
+            (self._cdepth, int(round(self.gl.clip_pos * 1000))),
+            (self._cthick, int(round(self.gl.clip_thick_frac * 1000))),
         )
-        for setter, val in pairs:
-            setter(val)
-        self._apply_clip()
-        self._sync_effect_params()
-        self.gl.reset_view()
+        for w, val in pairs:
+            was = w.blockSignals(True)
+            w.setValue(val)
+            w.setEnabled(bool(self.gl.clip_active))
+            w.blockSignals(was)
+        was = self._clip_en.blockSignals(True)
+        self._clip_en.setChecked(bool(self.gl.clip_active))
+        self._clip_en.blockSignals(was)
+
+    # -- keyboard slicer shortcuts (driven from the pane) ------------------
+
+    def kbd_toggle_clip(self) -> None:
+        self._clip_en.toggle()          # Shift+Y — drives _apply_clip
+
+    def kbd_set_axis(self, az: int, el: int) -> None:
+        self._clip_en.setChecked(True)  # Shift+A/S/C
+        self._caz.setValue(int(az))
+        self._cel.setValue(int(el))
+
+    def kbd_invert(self) -> None:
+        if not self._clip_en.isChecked():
+            self._clip_en.setChecked(True)
+        self.gl.invert_clip()           # Shift+X
+
+    # Control key -> (widget setter, default value). Used to reset only the
+    # parameters that belong to the currently-selected effect.
+    def _param_setters(self):
+        return {
+            "light": (self._light.setCurrentIndex, DEFAULTS["light"]),
+            "lo": (self._lo.setValue, DEFAULTS["lo"]),
+            "hi": (self._hi.setValue, DEFAULTS["hi"]),
+            "density": (self._den.setValue, DEFAULTS["density"]),
+            "brighten": (self._bright.setValue, DEFAULTS["brighten"]),
+            "surface": (self._surf.setValue, DEFAULTS["surface"]),
+            "ambient": (self._amb.setValue, DEFAULTS["ambient"]),
+            "diffuse": (self._dif.setValue, DEFAULTS["diffuse"]),
+            "specular": (self._spec.setValue, DEFAULTS["specular"]),
+            "shininess": (self._shin.setValue, DEFAULTS["shininess"]),
+            "boundthresh": (self._bound.setValue, DEFAULTS["boundthresh"]),
+            "edgethresh": (self._edge.setValue, DEFAULTS["edgethresh"]),
+            "edgemix": (self._emix.setValue, DEFAULTS["edgemix"]),
+            "colortemp": (self._ctemp.setValue, DEFAULTS["colortemp"]),
+            "gradientmix": (self._gmix.setValue, DEFAULTS["gradientmix"]),
+            "intensitymix": (self._imix.setValue, DEFAULTS["intensitymix"]),
+            "hardness": (self._hard.setValue, DEFAULTS["hardness"]),
+            "peel": (self._peel.setValue, DEFAULTS["peel"]),
+            "tlow": (self._tlow.setValue, DEFAULTS["tlow"]),
+            "thigh": (self._thigh.setValue, DEFAULTS["thigh"]),
+            "lightaz": (self._laz.setValue, DEFAULTS["lightaz"]),
+            "lightel": (self._lel.setValue, DEFAULTS["lightel"]),
+            "overlay": (self._overlay_en.setChecked, DEFAULTS["overlay"]),
+            "overlaydepth": (self._odepth.setValue, DEFAULTS["overlaydepth"]),
+            "quality": (self._q.setValue, DEFAULTS["quality"]),
+        }
+
+    def reset_params(self) -> None:
+        """Reset ONLY the parameters that belong to the current effect back to
+        their defaults (or, for a preset effect like Jelly/Skull, back to the
+        preset). The effect itself, the clip plane and the camera are left as
+        they are (there is a separate Reset view button)."""
+        label = EFFECTS[self._effect.currentIndex()]
+        keys = EFFECT_PARAMS[label]
+        preset = EFFECT_PRESET.get(label)
+        setters = self._param_setters()
+        for key in keys:
+            if key in setters:
+                setter, default = setters[key]
+                val = preset[key] if (preset and key in preset) else default
+                setter(val)
 
 
 # --------------------------------------------------------------------------
