@@ -179,27 +179,22 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
 
     raw = nib.load(str(path))
     native_flip = _native_flip_from_affine(np.asarray(raw.affine))
-    img = raw
-    try:
-        img = nib.as_closest_canonical(img)
-        data = img.get_fdata()
-        return img, data, {"native_flip": native_flip}
-    except Exception as exc:
-        is_dtype_error = (
-            exc.__class__.__name__ == "DTypePromotionError"
-            or "VoidDType" in str(exc)
-        )
-        if not is_dtype_error:
-            raise
+    img = nib.as_closest_canonical(raw)
+
+    # Structured voxels (colour-FA and friends: dtype [('R','u1'),('G','u1'),
+    # ('B','u1')]) cannot go through get_fdata() — it tries to cast the record
+    # dtype to float64. Detect them from the DTYPE up front rather than by
+    # catching and sniffing the failure: the exception's class and message vary
+    # across numpy/nibabel versions (numpy 2.x raises a plain TypeError,
+    # "Cannot cast array data from dtype([('R','u1'),...])"), so the old
+    # message-matching guard let colour-FA files fail to open.
+    if getattr(img.dataobj.dtype, "fields", None) is None:
+        return img, img.get_fdata(), {"native_flip": native_flip}
 
     # Structured / RGB voxels: flatten components into the last axis.
     from numpy.lib import recfunctions as rfn
 
     dataobj = np.asanyarray(img.dataobj)
-    if not getattr(dataobj.dtype, "fields", None):
-        raise RuntimeError(
-            f"NIfTI {path} has an unsupported dtype: {dataobj.dtype}"
-        )
     unstructured = rfn.structured_to_unstructured(dataobj)
     vector_length = (
         int(unstructured.shape[-1])
@@ -207,6 +202,7 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
         else 1
     )
     meta = {
+        "native_flip": native_flip,
         "vector_axis": len(img.shape),
         "vector_length": vector_length,
         "is_rgb": (
@@ -1105,7 +1101,8 @@ class NiftiViewerPane(QWidget):
             grid.setColumnStretch(i, 1)
         outer.addWidget(grid_host, 1)
 
-        ctrl_slot = self._slot()        # the shared controls are mounted here
+        # Opaque (see #nifti-ctrl-slot): the canvas behind is black.
+        ctrl_slot = self._slot("nifti-ctrl-slot")   # shared controls mount here
         ctrl_slot.setFixedWidth(226)
         outer.addWidget(ctrl_slot)
 
@@ -1416,6 +1413,12 @@ class NiftiViewerPane(QWidget):
         self._gl.set_flip(*self._gl_flip())
         self._gl_controls = Nifti3DControls(self._gl, vertical=True)
         self._gl_controls_scroll = QScrollArea()
+        # Name the scroll area AND its viewport so both paint the panel colour.
+        # Without this the black image canvas behind shows through the
+        # scrollbar gutter as a stripe down the controls column (very visible
+        # in the light theme).
+        self._gl_controls_scroll.setObjectName("nifti-ctrl-scroll")
+        self._gl_controls_scroll.viewport().setObjectName("nifti-ctrl-viewport")
         self._gl_controls_scroll.setWidgetResizable(True)
         self._gl_controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._gl_controls_scroll.setHorizontalScrollBarPolicy(
@@ -1433,8 +1436,10 @@ class NiftiViewerPane(QWidget):
         self._mount_gl("3d")   # park it in the pure-3-D page by default
 
     @staticmethod
-    def _slot() -> QWidget:
+    def _slot(name: str = "") -> QWidget:
         w = QWidget()
+        if name:
+            w.setObjectName(name)
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -1461,7 +1466,7 @@ class NiftiViewerPane(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(2)
         gl_slot = self._slot()
-        ctrl_slot = self._slot()
+        ctrl_slot = self._slot("nifti-ctrl-slot")
         ctrl_slot.setFixedWidth(226)
         h.addWidget(gl_slot, 1)
         h.addWidget(ctrl_slot)

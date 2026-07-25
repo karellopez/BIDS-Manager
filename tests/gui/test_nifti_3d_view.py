@@ -674,6 +674,34 @@ def test_render_background_is_black(qapp) -> None:
     assert w._bg == (0.0, 0.0, 0.0)
 
 
+def test_controls_column_is_opaque(qapp, isolated_settings) -> None:
+    """Regression: the black image canvas showed through the 3-D controls
+    scroll gutter as a stripe. Every layer of that column must be nameable by
+    the stylesheet so it paints the panel colour."""
+    from bidsmgr.gui.widgets.nifti_gl_view import Nifti3DControls, RaycastGLWidget
+
+    # The panel used to borrow "sidecar-toolbar" — a QFrame rule that never
+    # matched this QWidget, so it painted nothing.
+    controls = Nifti3DControls(RaycastGLWidget())
+    assert controls.objectName() == "nifti-3d-controls"
+
+    pane = NiftiViewerPane()
+    if not pane._gpu_ok:
+        return                                    # 3-D pages are not built
+    pane._ensure_gl()
+    assert pane._gl_controls_scroll.objectName() == "nifti-ctrl-scroll"
+    # The viewport can't be selected from a stylesheet, so it is named here.
+    assert pane._gl_controls_scroll.viewport().objectName() == "nifti-ctrl-viewport"
+    assert pane._ctrl_slot_3d.objectName() == "nifti-ctrl-slot"
+    assert pane._ctrl_slot_combo.objectName() == "nifti-ctrl-slot"
+
+    qss = (Path(__file__).resolve().parents[2]
+           / "bidsmgr" / "gui" / "theme.qss").read_text()
+    for name in ("nifti-ctrl-slot", "nifti-ctrl-scroll",
+                 "nifti-ctrl-viewport", "nifti-3d-controls"):
+        assert f"#{name}" in qss, f"{name} has no stylesheet rule"
+
+
 def test_drag_right_increases_azimuth(qapp) -> None:
     """Regression: left-right drag was inverted."""
     from PyQt6.QtCore import QPoint, QPointF, Qt

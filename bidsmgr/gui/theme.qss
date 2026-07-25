@@ -1211,3 +1211,14 @@ QWidget#nifti-canvas {
     background: #000000;
     border: none;
 }
+
+/* 3-D controls column — opaque so the black image canvas behind it never
+ * shows through (the scrollbar gutter used to read as a black stripe). The
+ * viewport is named from Python because a stylesheet can't select it. */
+QWidget#nifti-ctrl-slot,
+QScrollArea#nifti-ctrl-scroll,
+QWidget#nifti-ctrl-viewport,
+QWidget#nifti-3d-controls {
+    background: $surface2;
+    border: none;
+}

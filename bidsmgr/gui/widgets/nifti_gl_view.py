@@ -1222,7 +1222,10 @@ class Nifti3DControls(QWidget):
 
     def __init__(self, gl: RaycastGLWidget, *, vertical: bool = True, parent=None) -> None:
         super().__init__(parent)
-        self.setObjectName("sidecar-toolbar")
+        # Own identity (it used to borrow "sidecar-toolbar", a QFrame rule that
+        # never matched this QWidget — so the panel painted nothing and the
+        # black canvas behind showed through).
+        self.setObjectName("nifti-3d-controls")
         self.gl = gl
         self._vertical = vertical
         self._rows: dict[str, QWidget] = {}     # key -> label+widget container
