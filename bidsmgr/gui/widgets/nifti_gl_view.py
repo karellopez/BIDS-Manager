@@ -417,6 +417,7 @@ in  vec2 vNdc;
 out vec4 FragColor;
 
 uniform sampler3D uVol;
+uniform int   uIsRGB;      // 1 when uVol carries colour (e.g. colour-FA)
 uniform sampler2D uMatcap;
 uniform mat4  uInvViewProj;
 uniform mat3  uNormalMatrix;
@@ -446,7 +447,23 @@ bool intersectBox(vec3 ro, vec3 rd, out float tN, out float tF) {
     tF = min(min(b.x, b.y), b.z);
     return tF >= max(tN, 0.0);
 }
-float samp(vec3 p) { return texture(uVol, p).r; }
+// Scalar density at p. For an RGB volume (colour-FA and friends) the three
+// channels are a direction scaled by anisotropy, so the VECTOR LENGTH is the
+// direction-independent magnitude — exactly the FA for a colour-FA map. A
+// luminance weighting would be wrong here: it would make green (A-P) fibres
+// several times denser than blue (S-I) ones purely because of their hue.
+float samp(vec3 p) {
+    vec4 t = texture(uVol, p);
+    return uIsRGB == 1 ? clamp(length(t.rgb), 0.0, 1.0) : t.r;
+}
+// Voxel hue, normalised to full brightness so lighting (not the raw channel
+// magnitude) sets how light or dark the surface reads. White for scalar data.
+vec3 voxelTint(vec3 p) {
+    if (uIsRGB == 0) return vec3(1.0);
+    vec3 c = texture(uVol, p).rgb;
+    float m = max(max(c.r, c.g), c.b);
+    return m > 0.0031 ? c / m : vec3(1.0);
+}
 bool clipped(vec3 p) {
     if (uClipActive == 0) return false;
     float sd = dot(uClipNormal, p - vec3(0.5));
@@ -486,19 +503,25 @@ void main() {
 
     // ---- MIP ----
     if (uEffect == 4) {
-        float mx = 0.0, t = t0;
+        float mx = 0.0, t = t0; vec3 tint = vec3(1.0);
         for (int i=0;i<4096;++i){ if(t>tF)break; vec3 p=(ro+rd*t+uBoxHalf)/boxSize;
-            if(!clipped(p)) mx=max(mx,samp(p)); t+=dt; }
+            // Carry the hue of the brightest voxel so a colour-FA MIP keeps
+            // its direction colouring instead of collapsing to grey.
+            if(!clipped(p)){ float s=samp(p); if(s>mx){ mx=s; tint=voxelTint(p);} } t+=dt; }
         float w = clamp((mx-e0)/(e1-e0),0.0,1.0);
-        FragColor = vec4(mix(uBg, vec3(1.0), w), 1.0); return;
+        FragColor = vec4(mix(uBg, tint, w), 1.0); return;
     }
     // ---- X-ray ----
     if (uEffect == 3) {
-        float sum=0.0, t=t0;
+        float sum=0.0, t=t0; vec3 csum = vec3(0.0);
         for (int i=0;i<4096;++i){ if(t>tF)break; vec3 p=(ro+rd*t+uBoxHalf)/boxSize;
-            if(!clipped(p)){ float d=samp(p); if(d>e0) sum+=(d-e0)*uDensity; } t+=dt; }
+            if(!clipped(p)){ float d=samp(p);
+                if(d>e0){ float w=(d-e0)*uDensity; sum+=w; csum+=voxelTint(p)*w; } }
+            t+=dt; }
         float a = 1.0 - exp(-sum*dt*6.0);
-        FragColor = vec4(mix(uBg, vec3(1.0), clamp(a,0.0,1.0)), 1.0); return;
+        // Density-weighted mean hue along the ray (white for scalar volumes).
+        vec3 tint = sum > 1e-6 ? csum / sum : vec3(1.0);
+        FragColor = vec4(mix(uBg, tint, clamp(a,0.0,1.0)), 1.0); return;
     }
 
     vec3 viewDir = vec3(0.0, 0.0, 1.0);
@@ -520,7 +543,7 @@ void main() {
                 float ndl = max(dot(nv, uLightDir), 0.0);
                 float sp = pow(max(dot(reflect(-uLightDir,nv),viewDir),0.0), max(uShininess,1.0))*uSpecular;
                 vec3 base = vec3(pow(d,0.8));
-                vec3 lit = base*(uAmbient + uDiffuse*ndl) + vec3(sp);
+                vec3 lit = (base*(uAmbient + uDiffuse*ndl) + vec3(sp)) * voxelTint(p);
                 acc.rgb += (1.0-acc.a)*lit*a; acc.a += (1.0-acc.a)*a;
             }
             if (acc.a > uThigh && a < uTlow) {            // filled a layer, then exited it
@@ -626,6 +649,7 @@ void main() {
             lit *= 1.0 - 0.30 * depth01;
             a = op;
         }
+        lit *= voxelTint(p);          // white for scalar data, hue for colour-FA
         if (a > 0.0008) {
             a = 1.0 - pow(1.0 - clamp(a,0.0,1.0), dt/refStep);
             acc.rgb += (1.0-acc.a) * lit * a;
@@ -766,8 +790,20 @@ class RaycastGLWidget(QOpenGLWidget):
     def has_volume(self) -> bool:
         return self._volume is not None
 
+    def is_rgb_volume(self) -> bool:
+        """Whether the loaded volume carries colour rather than a scalar."""
+        return self._volume is not None and self._volume[0].ndim == 4
+
     def set_volume(self, u8: np.ndarray, spacing: tuple[float, float, float]) -> None:
-        self._volume = (np.ascontiguousarray(u8, dtype=np.uint8), spacing)
+        """Upload a volume: ``(X, Y, Z)`` scalar or ``(X, Y, Z, 3)`` colour."""
+        arr = np.ascontiguousarray(u8, dtype=np.uint8)
+        if arr.ndim == 4:
+            if arr.shape[3] < 3:
+                raise ValueError(f"colour volume needs 3+ channels, got {arr.shape}")
+            arr = np.ascontiguousarray(arr[..., :3])   # drop any alpha
+        elif arr.ndim != 3:
+            raise ValueError(f"volume must be 3-D or 4-D colour, got {arr.shape}")
+        self._volume = (arr, spacing)
         if self._prog and self._gl_ok and self._make_current():
             try:
                 self._upload_volume()
@@ -776,7 +812,23 @@ class RaycastGLWidget(QOpenGLWidget):
             self.update()
 
     def set_volume_float(self, vol, spacing) -> None:
-        self.set_volume(normalize_to_u8(vol), spacing)
+        """Normalise and upload. ``(X, Y, Z)`` scalar or ``(X, Y, Z, 3+)`` colour.
+
+        Colour volumes are scaled by ONE window across all channels, so the
+        hue of each voxel survives; windowing per channel would recolour the
+        data (a colour-FA map's direction encoding would be lost).
+        """
+        arr = np.asarray(vol)
+        if arr.ndim == 4:
+            rgb = arr[..., :3].astype(np.float32)
+            hi = float(np.nanmax(rgb)) if rgb.size else 0.0
+            if not np.isfinite(hi) or hi <= 0:
+                hi = 1.0
+            scale = 255.0 if hi <= 1.0 + 1e-6 else 255.0 / hi
+            u8 = np.clip(np.nan_to_num(rgb) * scale, 0, 255).astype(np.uint8)
+            self.set_volume(u8, spacing)
+            return
+        self.set_volume(normalize_to_u8(arr), spacing)
 
     def set_matcap(self, name: str) -> None:
         if name not in _LIGHTINGS:
@@ -947,6 +999,7 @@ class RaycastGLWidget(QOpenGLWidget):
         self._set_vec3(self._prog, "uLightDir", np.array(self.light_dir, np.float32))
         u = lambda n: GL.glGetUniformLocation(self._prog, n)
         GL.glUniform1i(u("uEffect"), int(self.effect))
+        GL.glUniform1i(u("uIsRGB"), 1 if self.is_rgb_volume() else 0)
         GL.glUniform1f(u("uThreshLo"), float(self.thresh_lo))
         GL.glUniform1f(u("uThreshHi"), float(self.thresh_hi))
         GL.glUniform1f(u("uDensity"), float(self.density))
@@ -1099,11 +1152,15 @@ class RaycastGLWidget(QOpenGLWidget):
         if self._volume is None:
             return
         u8, spacing = self._volume
-        x, y, z = u8.shape
+        # (X, Y, Z) scalar, or (X, Y, Z, 3) colour (colour-FA and friends).
+        rgb = u8.ndim == 4
+        x, y, z = u8.shape[:3]
         self._tex_dims = (x, y, z)
         extent = np.array([x*spacing[0], y*spacing[1], z*spacing[2]], np.float32)
         self._box_half = (0.5 * extent / float(extent.max())).astype(np.float32)
-        data = np.ascontiguousarray(u8.transpose(2, 1, 0))
+        data = np.ascontiguousarray(
+            u8.transpose(2, 1, 0, 3) if rgb else u8.transpose(2, 1, 0)
+        )
         if self._tex:
             GL.glDeleteTextures([self._tex])
         self._tex = GL.glGenTextures(1)
@@ -1113,8 +1170,12 @@ class RaycastGLWidget(QOpenGLWidget):
             GL.glTexParameteri(GL.GL_TEXTURE_3D, pn, GL.GL_CLAMP_TO_EDGE)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_R8, x, y, z, 0,
-                        GL.GL_RED, GL.GL_UNSIGNED_BYTE, data)
+        if rgb:
+            GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB8, x, y, z, 0,
+                            GL.GL_RGB, GL.GL_UNSIGNED_BYTE, data)
+        else:
+            GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_R8, x, y, z, 0,
+                            GL.GL_RED, GL.GL_UNSIGNED_BYTE, data)
 
     def _build_program(self, vsrc: str, fsrc: str) -> int:
         def compile_stage(src, stage):

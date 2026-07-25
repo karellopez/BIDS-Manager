@@ -178,6 +178,37 @@ def test_ras_and_radiological_drive_shared_render(
     assert pane._display_labels(_AXIS_AXIAL)["left"] == "R"  # labels swap too
 
 
+def test_colour_fa_is_3d_capable(
+    qapp, qtbot, bids_root_with_nifti, isolated_settings, tmp_path,
+) -> None:
+    """Colour-FA volumes render in 3-D (tinted), like MRIcroGL.
+
+    They used to be excluded: the raycaster only understood a scalar density
+    field. The shader now takes the RGB vector length as the density and the
+    hue as the surface colour.
+    """
+    import nibabel as nib
+
+    rgb = np.zeros((8, 9, 10), dtype=[("R", "u1"), ("G", "u1"), ("B", "u1")])
+    rgb["R"][2:6] = 220
+    rgb["G"][:, 3:7] = 180
+    path = tmp_path / "sub-01_ses-01_colFA.nii.gz"
+    nib.save(nib.Nifti1Image(rgb, np.diag([2.0, 2.0, 2.0, 1.0])), str(path))
+
+    pane = NiftiViewerPane()
+    _load_and_wait(pane, path, tmp_path, qtbot)
+    assert pane._is_rgb is True
+    assert pane._is_3d_capable is True
+    if not pane._gpu_ok:
+        return
+    assert pane._td_btn.isEnabled() is True
+
+    pane._td_btn.click()
+    qapp.processEvents()
+    assert pane._gl.has_volume() is True
+    assert pane._gl.is_rgb_volume() is True      # uploaded as colour
+
+
 def test_first_scan_opens_in_default_view(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
@@ -665,6 +696,48 @@ def test_quality_defaults_to_half(qapp) -> None:
     assert c._q.value() == DEFAULTS["quality"]
     c._effect.setCurrentText("Jelly")
     assert c._q.value() == QUALITY_MAX
+
+
+def test_rgb_volume_upload(qapp) -> None:
+    """Colour volumes (colour-FA) upload as colour, not as a scalar field."""
+    w = RaycastGLWidget()
+    assert w.is_rgb_volume() is False
+
+    rgb = np.zeros((4, 5, 6, 3), np.uint8)
+    rgb[..., 0] = 200
+    w.set_volume(rgb, (1.0, 1.0, 1.0))
+    assert w.is_rgb_volume() is True
+
+    # RGBA is accepted; alpha is dropped (the shader samples .rgb).
+    rgba = np.zeros((4, 5, 6, 4), np.uint8)
+    w.set_volume(rgba, (1.0, 1.0, 1.0))
+    assert w._volume[0].shape == (4, 5, 6, 3)
+
+    # A scalar volume still takes the scalar path.
+    w.set_volume(np.zeros((4, 5, 6), np.uint8), (1.0, 1.0, 1.0))
+    assert w.is_rgb_volume() is False
+
+    for bad in (np.zeros((4, 5, 6, 2), np.uint8), np.zeros((4, 5), np.uint8)):
+        with pytest.raises(ValueError):
+            w.set_volume(bad, (1.0, 1.0, 1.0))
+
+
+def test_rgb_volume_float_keeps_hue(qapp) -> None:
+    """Colour channels share ONE window, so per-voxel hue survives.
+
+    Windowing each channel separately would recolour the data — a colour-FA
+    map's direction encoding (red = L-R, green = A-P, blue = S-I) would be lost.
+    """
+    w = RaycastGLWidget()
+    vol = np.zeros((2, 2, 2, 3), np.float32)
+    vol[..., 0] = 1.0        # red at full
+    vol[..., 1] = 0.5        # green at half
+    w.set_volume_float(vol, (1.0, 1.0, 1.0))
+    stored = w._volume[0]
+    assert stored.shape == (2, 2, 2, 3)
+    assert stored[..., 0].max() == 255
+    assert abs(int(stored[..., 1].max()) - 128) <= 1     # ratio preserved
+    assert stored[..., 2].max() == 0
 
 
 def test_render_background_is_black(qapp) -> None:

@@ -549,9 +549,15 @@ class NiftiViewerPane(QWidget):
             # New file lost its 4th dimension — close the graph.
             self._graph_btn.setChecked(False)
 
-        # 3D modes — GPU raycasting needs a scalar 3-D (or 4-D non-RGB)
-        # volume. Colour/RGB voxels aren't meaningful as a density field.
-        self._is_3d_capable = data.ndim >= 3 and not self._is_rgb
+        # 3D modes — the raycaster takes a scalar 3-D (or 4-D non-RGB) volume,
+        # or a colour volume: for RGB the shader uses the vector length as the
+        # density (the FA of a colour-FA map) and the hue to tint the surface,
+        # like MRIcroGL. 3 or 4 components only; a 5-component "colour" is not
+        # something the shader can map.
+        self._is_3d_capable = bool(
+            data.ndim >= 3
+            and (not self._is_rgb or (data.ndim == 4 and data.shape[3] in (3, 4)))
+        )
 
         # Reset brightness / contrast to defaults when a new file is
         # bound so the previous file's settings don't leak.
@@ -1487,7 +1493,12 @@ class NiftiViewerPane(QWidget):
         if self._data is None or self._gl is None:
             return
         vol = self._current_volume()
-        if getattr(vol, "ndim", 0) != 3:
+        ndim = getattr(vol, "ndim", 0)
+        # Scalar volume, or a colour one (RGB/RGBA) the shader renders tinted.
+        ok = ndim == 3 or (
+            ndim == 4 and self._is_rgb and vol.shape[3] in (3, 4)
+        )
+        if not ok:
             return
         self._gl.set_flip(*self._gl_flip())
         self._gl.set_volume_float(vol, self._volume_spacing())
