@@ -886,6 +886,10 @@ class NiftiViewerPane(QWidget):
 
         # Top: image area (single-pane OR tri-pane).
         self._image_stack = QStackedWidget()
+        # Pure-black visualization area (see #nifti-canvas in theme.qss). The
+        # pages inside are plain QWidgets that paint no background of their
+        # own, so this shows through behind every view mode.
+        self._image_stack.setObjectName("nifti-canvas")
         self._image_stack.addWidget(self._build_single_image())  # idx 0
         self._image_stack.addWidget(self._build_tri_image())     # idx 1
         self._image_stack.setCurrentIndex(0)
@@ -1439,7 +1443,7 @@ class NiftiViewerPane(QWidget):
     def _build_3d_page(self):
         """The pure "3D" page: full-width render + right-hand controls slot."""
         page = QWidget()
-        page.setObjectName("pane-dark")
+        page.setObjectName("nifti-canvas")
         h = QHBoxLayout(page)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(2)

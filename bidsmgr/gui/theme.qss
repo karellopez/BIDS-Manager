@@ -1200,3 +1200,14 @@ QListWidget#welcome-recent::item:selected {
     background: $accent_bg;
     color: $accent;
 }
+
+/* ---------- NIfTI viewer image canvas ----------
+ * The visualization area only (2-D slice panels + the 3-D render pages).
+ * Pure black so scans read like a lightbox and match the GL clear colour;
+ * deliberately NOT #pane-dark, which other panels share. Child pages are
+ * plain QWidgets that paint no background, so this shows through. */
+QStackedWidget#nifti-canvas,
+QWidget#nifti-canvas {
+    background: #000000;
+    border: none;
+}

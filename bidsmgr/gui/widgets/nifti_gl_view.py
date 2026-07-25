@@ -122,16 +122,16 @@ def gpu_available() -> bool:
 # parameter presets of Opacity peeling). The display label is decoupled from
 # the shader ``uEffect`` index via :data:`EFFECT_FX`, so labels/order can change
 # without touching the shader.
-EFFECTS = ["Standard", "Matte", "Juicy shiny", "Glass", "X-ray",
-           "Jelly", "Skull", "MIP", "Edges",
+EFFECTS = ["Standard", "Matte", "Juicy shiny", "Juicy shiny 2", "Glass",
+           "X-ray", "Jelly", "Skull", "MIP", "Edges",
            "Opacity peeling", "Opacity peeling 2", "Shell", "Topography"]
 
 # Label -> shader effect index (uEffect). "Standard" = flat Phong (shader fx 1),
 # "Matte" = waxy matcap (shader fx 0). "Juicy shiny" is a Standard preset;
 # Jelly/Skull reuse Opacity peeling (fx 6).
 EFFECT_FX: dict[str, int] = {
-    "Standard": 1, "Matte": 0, "Juicy shiny": 1, "Glass": 2, "X-ray": 3,
-    "MIP": 4, "Edges": 5,
+    "Standard": 1, "Matte": 0, "Juicy shiny": 1, "Juicy shiny 2": 1,
+    "Glass": 2, "X-ray": 3, "MIP": 4, "Edges": 5,
     "Opacity peeling": 6, "Opacity peeling 2": 7, "Shell": 8, "Topography": 9,
     "Jelly": 6, "Skull": 6,
 }
@@ -152,6 +152,7 @@ EFFECT_PARAMS: dict[str, set] = {
     "Standard":          _PHONG_PARAMS,     # flat Phong (was "Matte")
     "Matte":             _MATCAP_PARAMS,    # waxy matcap (was "Default")
     "Juicy shiny":       _PHONG_PARAMS,     # Standard preset (wet, glossy tissue)
+    "Juicy shiny 2":     _PHONG_PARAMS,     # sharper, harder highlight
     "Glass":             _COMMON | {"specular", "shininess", "edgethresh",
                                     "boundthresh", "edgemix", "colortemp",
                                     "lightaz", "lightel"},
@@ -172,7 +173,8 @@ EFFECT_PARAMS: dict[str, set] = {
     "Skull":             _PEEL_PARAMS,
 }
 # Effects whose cut-face intensity slice is ON by default.
-SLICE_DEFAULT_ON = {"Standard", "Matte", "Juicy shiny", "Topography"}
+SLICE_DEFAULT_ON = {"Standard", "Matte", "Juicy shiny", "Juicy shiny 2",
+                    "Topography"}
 
 # Named parameter presets (control key -> value) applied when a preset effect
 # is selected. Derived from the reference MRIcroGL-style looks.
@@ -183,6 +185,10 @@ EFFECT_PRESET: dict[str, dict] = {
     "Juicy shiny": dict(lo=36, hi=303, density=150, ambient=94, diffuse=50,
                         specular=50, shininess=20, lightaz=0, lightel=30,
                         overlay=True, overlaydepth=68, quality=1024),
+    # Same window, but a much tighter/harder specular — a sharper wet sheen.
+    "Juicy shiny 2": dict(lo=36, hi=303, density=150, ambient=94, diffuse=23,
+                          specular=96, shininess=100, lightaz=0, lightel=30,
+                          overlay=True, overlaydepth=68, quality=1024),
     # Translucent, glassy tissue — the brain shows through the skin.
     "Jelly": dict(lo=110, hi=400, density=7, ambient=115, diffuse=65,
                   specular=35, shininess=45, peel=1, tlow=13, thigh=82,
@@ -734,7 +740,10 @@ class RaycastGLWidget(QOpenGLWidget):
         self._recompute_clip()
         self.slice_overlay = 1
         self.slice_depth = DEFAULTS["overlaydepth"] / 100.0
-        self._bg = (0.05, 0.06, 0.08)
+        # Pure black, matching the 2-D slice canvas. The shader composites
+        # partially-transparent rays against this, so it is both the clear
+        # colour and the "empty space" colour.
+        self._bg = (0.0, 0.0, 0.0)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     # -- public API --------------------------------------------------------

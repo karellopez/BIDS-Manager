@@ -578,31 +578,45 @@ def test_effect_params_are_independent(qapp) -> None:
     assert c._den.value() == EFFECT_PRESET["Skull"]["density"]
 
 
-def test_juicy_shiny_effect(qapp) -> None:
-    """Juicy shiny is a Standard (flat Phong) preset placed after Matte, and
-    Jelly / Skull sit after X-ray."""
+def test_juicy_shiny_effects(qapp) -> None:
+    """Juicy shiny / Juicy shiny 2 are Standard (flat Phong) presets placed
+    after Matte, and Jelly / Skull sit after X-ray."""
     from bidsmgr.gui.widgets.nifti_gl_view import (
         EFFECTS, EFFECT_FX, EFFECT_PRESET, SLICE_DEFAULT_ON,
     )
 
     assert EFFECTS.index("Juicy shiny") == EFFECTS.index("Matte") + 1
+    assert EFFECTS.index("Juicy shiny 2") == EFFECTS.index("Juicy shiny") + 1
     assert EFFECTS.index("Jelly") == EFFECTS.index("X-ray") + 1
     assert EFFECTS.index("Skull") == EFFECTS.index("Jelly") + 1
-    assert EFFECT_FX["Juicy shiny"] == EFFECT_FX["Standard"]
-    assert "Juicy shiny" in SLICE_DEFAULT_ON
 
     view = Nifti3DView()
     c = view.controls
-    c._effect.setCurrentText("Juicy shiny")
-    preset = EFFECT_PRESET["Juicy shiny"]
-    assert c._lo.value() == preset["lo"]
-    assert c._hi.value() == preset["hi"]
-    assert c._den.value() == preset["density"]
-    assert c._amb.value() == preset["ambient"]
-    assert c._shin.value() == preset["shininess"]
-    assert c._odepth.value() == preset["overlaydepth"]
-    assert view.gl.effect == EFFECT_FX["Juicy shiny"]
-    assert view.gl.slice_overlay == 1               # cut-face slice on
+    for name in ("Juicy shiny", "Juicy shiny 2"):
+        assert EFFECT_FX[name] == EFFECT_FX["Standard"]
+        assert name in SLICE_DEFAULT_ON
+        c._effect.setCurrentText(name)
+        preset = EFFECT_PRESET[name]
+        assert c._lo.value() == preset["lo"]
+        assert c._hi.value() == preset["hi"]
+        assert c._den.value() == preset["density"]
+        assert c._amb.value() == preset["ambient"]
+        assert c._dif.value() == preset["diffuse"]
+        assert c._spec.value() == preset["specular"]
+        assert c._shin.value() == preset["shininess"]
+        assert c._odepth.value() == preset["overlaydepth"]
+        assert view.gl.effect == EFFECT_FX[name]
+        assert view.gl.slice_overlay == 1           # cut-face slice on
+
+    # The two are independent presets, not the same values.
+    assert EFFECT_PRESET["Juicy shiny 2"] != EFFECT_PRESET["Juicy shiny"]
+
+
+def test_render_background_is_black(qapp) -> None:
+    """The GL clear / empty-space colour is pure black, matching the 2-D
+    canvas (#nifti-canvas in theme.qss)."""
+    w = RaycastGLWidget()
+    assert w._bg == (0.0, 0.0, 0.0)
 
 
 def test_drag_right_increases_azimuth(qapp) -> None:
