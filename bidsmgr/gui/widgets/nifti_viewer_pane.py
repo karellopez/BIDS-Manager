@@ -116,6 +116,37 @@ _ORIENT_LABELS = {
     _AXIS_AXIAL:    {"left": "L", "right": "R", "top": "A", "bottom": "P"},
 }
 
+# For each plane, which canonical axis (0=L/R, 1=A/P, 2=S/I) maps to the
+# on-screen horizontal and vertical of the displayed slice. Used to turn a
+# per-axis display flip into a slice mirror + label swap. Matches the display
+# transform in ``_voxel_to_arr`` / ``_ORIENT_LABELS`` above.
+_PLANE_HV = {
+    _AXIS_SAGITTAL: (1, 2),   # horizontal = A/P, vertical = S/I
+    _AXIS_CORONAL:  (0, 2),   # horizontal = L/R, vertical = S/I
+    _AXIS_AXIAL:    (0, 1),   # horizontal = L/R, vertical = A/P
+}
+
+
+def _native_flip_from_affine(affine: "np.ndarray") -> tuple[float, float, float]:
+    """Per canonical RAS axis, whether the file stores it reversed (-1) or not.
+
+    Derived from the raw (pre-canonical) affine: if the on-disk data increases
+    toward L/P/I instead of R/A/S on some axis, that axis is flagged -1. This
+    is what the "native storage orientation" view flips back. Axis permutations
+    (e.g. sagittally-stored volumes) are collapsed to their RAS axis, so the
+    anatomical L/R·A/P·S/I labels stay correct even for those.
+    """
+    try:
+        import nibabel as nib
+        ornt = nib.orientations.io_orientation(affine)  # per raw axis: [ras, flip]
+        flip = [1.0, 1.0, 1.0]
+        for ras_axis, sign in ornt:
+            if not np.isnan(ras_axis):
+                flip[int(ras_axis)] = float(sign)
+        return (flip[0], flip[1], flip[2])
+    except Exception:  # pragma: no cover - defensive
+        return (1.0, 1.0, 1.0)
+
 # Default crosshair colour — overridden per-user via AppSettings
 # (``nifti_crosshair_color``). Material light-blue 300 reads well on
 # both dark and bright slices.
@@ -146,11 +177,13 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
     """
     import nibabel as nib  # local import: nibabel is heavy
 
-    img = nib.load(str(path))
+    raw = nib.load(str(path))
+    native_flip = _native_flip_from_affine(np.asarray(raw.affine))
+    img = raw
     try:
         img = nib.as_closest_canonical(img)
         data = img.get_fdata()
-        return img, data, {}
+        return img, data, {"native_flip": native_flip}
     except Exception as exc:
         is_dtype_error = (
             exc.__class__.__name__ == "DTypePromotionError"
@@ -278,6 +311,14 @@ class NiftiViewerPane(QWidget):
         # Anatomical edge labels (L/R·A/P·S/I) drawn around each panel.
         # On by default; toggled by the toolbar button and the "O" shortcut.
         self._show_orient_labels: bool = True
+        # Orientation display. ``_ras_on`` (default) shows canonical RAS; when
+        # off, the file's raw on-disk orientation is shown (2-D + 3-D + labels).
+        # ``_radio_on`` mirrors left/right (radiological convention). Both fold
+        # into one per-axis flip (:meth:`_display_flip`). ``_native_flip`` is
+        # the raw storage flip discovered at load (identity for RAS files).
+        self._ras_on: bool = True
+        self._radio_on: bool = False
+        self._native_flip: tuple[float, float, float] = (1.0, 1.0, 1.0)
         # Edge-label widgets: ``_single_edge`` for the single pane and one
         # dict per axis in ``_tri_edge`` for Multi view.
         self._single_edge: dict = {}
@@ -482,6 +523,7 @@ class NiftiViewerPane(QWidget):
         self._data = data
         self._meta = meta or {}
         self._is_rgb = bool(self._meta.get("is_rgb"))
+        self._native_flip = self._meta.get("native_flip", (1.0, 1.0, 1.0))
         # Default crosshair: centre voxel.
         if data.ndim >= 3:
             self._cross_voxel = [
@@ -516,6 +558,9 @@ class NiftiViewerPane(QWidget):
         self._contrast_slider.setValue(100)
 
         self._set_orientation(self._orientation, refresh=False)
+        # Re-apply edge labels for this file's flip (native mode differs per
+        # file's storage orientation; the fixed-plane panels bake theirs once).
+        self._refresh_all_orient_labels()
         self._compute_display_window()
         self._toolbar.setVisible(True)
         self._footer.setVisible(True)
@@ -715,6 +760,34 @@ class NiftiViewerPane(QWidget):
         )
         self._labels_btn.toggled.connect(self._on_labels_toggled)
         row2.addWidget(self._labels_btn)
+
+        # RAS toggle — show canonical RAS orientation (on) or the file's raw
+        # on-disk orientation (off). Affects the 2-D slices, the 3-D render and
+        # the anatomical labels together. No visible change for RAS-stored files.
+        self._ras_btn = QPushButton("RAS")
+        self._ras_btn.setObjectName("tb-btn-toggle")
+        self._ras_btn.setCheckable(True)
+        self._ras_btn.setChecked(self._ras_on)
+        self._ras_btn.setToolTip(
+            "On: show canonical RAS orientation.  Off: show the file's raw "
+            "on-disk orientation (2-D slices, 3-D render and labels).  No "
+            "visible change for files already stored in RAS."
+        )
+        self._ras_btn.toggled.connect(self._on_ras_toggled)
+        row2.addWidget(self._ras_btn)
+
+        # Radiological — mirror left/right (radiological vs. neurological).
+        self._radio_btn = QPushButton("Radiological")
+        self._radio_btn.setObjectName("tb-btn-toggle")
+        self._radio_btn.setCheckable(True)
+        self._radio_btn.setChecked(self._radio_on)
+        self._radio_btn.setToolTip(
+            "Mirror left/right (radiological convention: patient-left on the "
+            "image right).  Off = neurological.  Applies to the 2-D slices, "
+            "3-D render and L/R labels."
+        )
+        self._radio_btn.toggled.connect(self._on_radio_toggled)
+        row2.addWidget(self._radio_btn)
 
         row2.addSpacing(8)
 
@@ -948,7 +1021,7 @@ class NiftiViewerPane(QWidget):
             overlay, edges = self._make_orientation_overlay(label)
             # Each Multi-view panel shows a fixed plane, so its markers
             # never change — set them once here.
-            for side, text in _ORIENT_LABELS[axis].items():
+            for side, text in self._display_labels(axis).items():
                 edges[side].setText(text)
             self._tri_edge[axis] = edges
             cv.addWidget(overlay, 1)
@@ -1001,7 +1074,7 @@ class NiftiViewerPane(QWidget):
             )
             label.setMinimumSize(1, 1)
             overlay, edges = self._make_orientation_overlay(label)
-            for side, text in _ORIENT_LABELS[axis].items():
+            for side, text in self._display_labels(axis).items():
                 edges[side].setText(text)
             self._combo_edge[axis] = edges
             cv.addWidget(overlay, 1)
@@ -1259,6 +1332,10 @@ class NiftiViewerPane(QWidget):
         self._tri_btn.setEnabled(has_data)
         self._td_btn.setEnabled(has_data and self._is_3d_capable and self._gpu_ok)
         self._quad_btn.setEnabled(has_data and self._is_3d_capable and self._gpu_ok)
+        # RAS / Radiological reorient the 2-D slices and labels too, so they are
+        # live whenever a volume is loaded (independent of the GPU 3-D views).
+        self._ras_btn.setEnabled(has_data)
+        self._radio_btn.setEnabled(has_data)
 
     def _toggle_3d(self) -> None:
         """'D' shortcut — flip the 3D button when it applies."""
@@ -1319,6 +1396,7 @@ class NiftiViewerPane(QWidget):
         from .nifti_gl_view import Nifti3DControls, RaycastGLWidget
         self._gl = RaycastGLWidget()
         self._gl.set_show_cube(self._show_orient_labels)
+        self._gl.set_flip(*self._gl_flip())
         self._gl_controls = Nifti3DControls(self._gl, vertical=True)
         self._gl_controls_scroll = QScrollArea()
         self._gl_controls_scroll.setWidgetResizable(True)
@@ -1389,17 +1467,58 @@ class NiftiViewerPane(QWidget):
         vol = self._current_volume()
         if getattr(vol, "ndim", 0) != 3:
             return
+        self._gl.set_flip(*self._gl_flip())
         self._gl.set_volume_float(vol, self._volume_spacing())
 
     # ------------------------------------------------------------------
     # Orientation labels
     # ------------------------------------------------------------------
 
+    def _display_flip(self) -> tuple[float, float, float]:
+        """Per canonical axis (L/R, A/P, S/I) display flip, folding the RAS
+        (native-orientation) and Radiological toggles together."""
+        nf = (1.0, 1.0, 1.0) if self._ras_on else self._native_flip
+        rx = -1.0 if self._radio_on else 1.0   # radiological mirrors L/R only
+        return (nf[0] * rx, nf[1], nf[2])
+
+    def _gl_flip(self) -> tuple[float, float, float]:
+        """Flip vector for the 3-D render.
+
+        It carries a constant extra L/R mirror versus the 2-D flip: a 3-D
+        look-at view of the volume is the mirror image of a 2-D slice shown in
+        the neurological convention, so this keeps the 3-D render's left/right
+        aligned with the 2-D slices under both RAS/native and radiological.
+        """
+        fx, fy, fz = self._display_flip()
+        return (-fx, fy, fz)
+
+    def _display_labels(self, axis: int) -> dict:
+        """Anatomical edge labels for ``axis`` with the display flip applied."""
+        lab = dict(_ORIENT_LABELS[axis])
+        h, v = _PLANE_HV[axis]
+        f = self._display_flip()
+        if f[h] < 0:
+            lab["left"], lab["right"] = lab["right"], lab["left"]
+        if f[v] < 0:
+            lab["top"], lab["bottom"] = lab["bottom"], lab["top"]
+        return lab
+
+    def _refresh_all_orient_labels(self) -> None:
+        """Re-apply edge labels everywhere (the fixed-plane Multi-Planar and
+        combo panels bake theirs once, so a flip toggle must reset them)."""
+        self._update_single_orient_labels()
+        for axis, edges in self._tri_edge.items():
+            for side, text in self._display_labels(axis).items():
+                edges[side].setText(text)
+        for axis, edges in self._combo_edge.items():
+            for side, text in self._display_labels(axis).items():
+                edges[side].setText(text)
+
     def _update_single_orient_labels(self) -> None:
         """Set the single pane's edge glyphs for the current orientation."""
         if not self._single_edge:
             return
-        for side, text in _ORIENT_LABELS[self._orientation].items():
+        for side, text in self._display_labels(self._orientation).items():
             self._single_edge[side].setText(text)
 
     def _apply_orient_label_visibility(self) -> None:
@@ -1419,6 +1538,24 @@ class NiftiViewerPane(QWidget):
     def _on_labels_toggled(self, checked: bool) -> None:
         self._show_orient_labels = checked
         self._apply_orient_label_visibility()
+
+    def _on_ras_toggled(self, checked: bool) -> None:
+        """RAS on = canonical orientation; off = the file's raw storage order."""
+        self._ras_on = checked
+        self._apply_display_flip()
+
+    def _on_radio_toggled(self, checked: bool) -> None:
+        """Radiological (mirror L/R) vs. neurological convention."""
+        self._radio_on = checked
+        self._apply_display_flip()
+
+    def _apply_display_flip(self) -> None:
+        """Re-render 2-D + labels and re-orient the 3-D render after a toggle."""
+        self._refresh_all_orient_labels()
+        if self._gl is not None:
+            self._gl.set_flip(*self._gl_flip())
+        if self._data is not None:
+            self._refresh()
 
     def _toggle_orient_labels(self) -> None:
         """'O' shortcut — flip the Labels button (its slot does the work).
@@ -1792,6 +1929,16 @@ class NiftiViewerPane(QWidget):
         arr = (arr * 255).astype(np.uint8)
         arr = np.rot90(arr)
 
+        # Mirror the displayed slice to match the orientation flip (RAS/native +
+        # radiological). Rows are screen-vertical, columns screen-horizontal.
+        f = self._display_flip()
+        h_ax, v_ax = _PLANE_HV[axis]
+        if f[h_ax] < 0:
+            arr = arr[:, ::-1]
+        if f[v_ax] < 0:
+            arr = arr[::-1, :]
+        arr = np.ascontiguousarray(arr)
+
         if arr.ndim == 2:
             h, w = arr.shape
             img = QImage(
@@ -1924,6 +2071,7 @@ class NiftiViewerPane(QWidget):
         # Slice index along the clicked axis stays fixed (you can't
         # change depth by clicking inside a 2-D slice). The crosshair
         # moves in the plane.
+        x, y = self._unflip_arr_coords(x, y, axis, vol)
         i, j, k = self._cross_voxel
         if axis == _AXIS_SAGITTAL:
             j = x
@@ -1935,6 +2083,19 @@ class NiftiViewerPane(QWidget):
             i = x
             j = vol.shape[1] - 1 - y
         return i, j, k
+
+    def _flip_arr_coords(self, x: int, y: int, axis: int, vol) -> tuple[int, int]:
+        """Apply the display flip to in-plane (x, y) slice coordinates."""
+        f = self._display_flip()
+        h_ax, v_ax = _PLANE_HV[axis]
+        if f[h_ax] < 0:
+            x = (vol.shape[h_ax] - 1) - x
+        if f[v_ax] < 0:
+            y = (vol.shape[v_ax] - 1) - y
+        return x, y
+
+    # The flip is its own inverse, so mapping a click back is the same op.
+    _unflip_arr_coords = _flip_arr_coords
 
     def _voxel_to_arr(self, voxel, axis: int) -> tuple[int, int]:
         i, j, k = voxel
@@ -1948,7 +2109,7 @@ class NiftiViewerPane(QWidget):
         else:
             x = i
             y = vol.shape[1] - 1 - j
-        return x, y
+        return self._flip_arr_coords(x, y, axis, vol)
 
     # ------------------------------------------------------------------
     # Scroll on image -> step through the slice / volume stack

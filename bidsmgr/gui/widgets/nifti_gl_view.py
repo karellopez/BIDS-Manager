@@ -175,12 +175,12 @@ SLICE_DEFAULT_ON = {"Standard", "Matte", "Topography"}
 # is selected. Derived from the reference MRIcroGL-style looks.
 EFFECT_PRESET: dict[str, dict] = {
     # Translucent, glassy tissue — the brain shows through the skin.
-    "Jelly": dict(lo=110, hi=400, density=22, ambient=115, diffuse=65,
-                  specular=35, shininess=45, peel=1, tlow=18, thigh=82,
+    "Jelly": dict(lo=110, hi=400, density=7, ambient=115, diffuse=65,
+                  specular=35, shininess=45, peel=1, tlow=13, thigh=82,
                   lightaz=0, lightel=25, quality=1024),
     # Peel the skin to reveal the deeper (facial / orbital / bony) anatomy.
-    "Skull": dict(lo=140, hi=560, density=150, ambient=95, diffuse=50,
-                  specular=50, shininess=20, peel=1, tlow=25, thigh=80,
+    "Skull": dict(lo=36, hi=303, density=150, ambient=95, diffuse=50,
+                  specular=50, shininess=20, peel=1, tlow=19, thigh=80,
                   lightaz=0, lightel=30, quality=1024),
 }
 
@@ -302,9 +302,17 @@ def _make_matcap(name: str, size: int = 256) -> np.ndarray:
     return (col * 255.0).astype(np.uint8)
 
 
-def _make_cube_atlas(size: int = 96) -> np.ndarray:
-    """Render the 6 orientation letters into a 3×2 RGBA atlas (numpy)."""
+def _make_cube_atlas(size: int = 96, flip=(1.0, 1.0, 1.0)) -> np.ndarray:
+    """Render the 6 orientation letters into a 3×2 RGBA atlas (numpy).
+
+    ``flip`` (per L/R, A/P, S/I axis; -1 flips) swaps the letter pair on that
+    axis so a mirrored render shows the correct label upright — the cube is
+    never geometrically reflected (that would mirror the glyphs).
+    """
     letters = [["R", "A", "S"], ["L", "P", "I"]]
+    for col, f in enumerate(flip):
+        if f < 0:
+            letters[0][col], letters[1][col] = letters[1][col], letters[0][col]
     img = QImage(size * 3, size * 2, QImage.Format.Format_RGBA8888)
     img.fill(QColor(38, 44, 54))
     p = QPainter(img)
@@ -665,6 +673,13 @@ class RaycastGLWidget(QOpenGLWidget):
         self._matcaps: dict[str, np.ndarray] = {}
         self._matcap_dirty = True
         self._show_cube = True
+        # Display flip along the canonical RAS axes (L/R, A/P, S/I). Driven by
+        # the pane's RAS (native orientation) and Radiological toggles so the
+        # 3-D render mirrors in lock-step with the 2-D slices. (1, 1, 1) is the
+        # neurological RAS default. The orientation cube's letters are swapped
+        # to match rather than mirrored, so they always read upright.
+        self._flip = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        self._cube_flip = (1.0, 1.0, 1.0)   # last flip baked into the atlas
 
         self._az, self._el, self._dist = -0.6, 0.3, 1.9
         self._target = np.zeros(3, np.float32)
@@ -747,6 +762,20 @@ class RaycastGLWidget(QOpenGLWidget):
 
     def set_show_cube(self, on: bool) -> None:
         self._show_cube = bool(on)
+        self.update()
+
+    def set_flip(self, fx: float, fy: float, fz: float) -> None:
+        """Mirror the render along the canonical RAS axes (L/R, A/P, S/I).
+
+        Each argument is +1 (keep) or -1 (flip). Drives the volume mirror and
+        the orientation-cube letter swap so the 3-D view matches the 2-D
+        slices under the RAS / Radiological toggles.
+        """
+        self._flip = np.array(
+            [1.0 if fx >= 0 else -1.0,
+             1.0 if fy >= 0 else -1.0,
+             1.0 if fz >= 0 else -1.0], dtype=np.float32,
+        )
         self.update()
 
     def refresh(self) -> None:
@@ -867,8 +896,17 @@ class RaycastGLWidget(QOpenGLWidget):
         eye = self._eye()
         view = _look_at(eye, self._target, np.array([0, 0, 1], np.float32))
         proj = _perspective(45.0, w / h, 0.01, 20.0)
-        inv_vp = np.linalg.inv(proj @ view).astype(np.float32)
-        rot = np.ascontiguousarray(view[:3, :3], np.float32)
+        # Mirror the volume along the flipped canonical axes by folding a
+        # diagonal reflection into the view. Rays are cast in the (axis-aligned)
+        # box space, so sampling and the lit normal both reflect consistently.
+        r4 = np.eye(4, dtype=np.float32)
+        r4[0, 0], r4[1, 1], r4[2, 2] = self._flip
+        vm = view @ r4
+        inv_vp = np.linalg.inv(proj @ vm).astype(np.float32)
+        rot = np.ascontiguousarray(vm[:3, :3], np.float32)
+        # The cube is NOT reflected (that mirrors the glyphs); its atlas letters
+        # are swapped instead, so pass the un-flipped camera rotation.
+        cube_rot = np.ascontiguousarray(view[:3, :3], np.float32)
 
         GL.glUseProgram(self._prog)
         self._set_mat4(self._prog, "uInvViewProj", inv_vp)
@@ -916,9 +954,19 @@ class RaycastGLWidget(QOpenGLWidget):
         GL.glBindVertexArray(0)
 
         if self._show_cube and self._cube_prog:
-            self._draw_cube(rot, dpr)
+            self._draw_cube(cube_rot, dpr)
 
     def _draw_cube(self, rot: np.ndarray, dpr: float) -> None:
+        flip = tuple(float(v) for v in self._flip)
+        if flip != self._cube_flip and self._cube_tex:
+            atlas = _make_cube_atlas(96, flip)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._cube_tex)
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8,
+                            atlas.shape[1], atlas.shape[0], 0,
+                            GL.GL_RGBA, GL.GL_UNSIGNED_BYTE,
+                            np.ascontiguousarray(atlas))
+            self._cube_flip = flip
         s = int(96 * dpr)
         GL.glViewport(int(8 * dpr), int(8 * dpr), s, s)
         GL.glEnable(GL.GL_DEPTH_TEST)
@@ -1148,6 +1196,11 @@ class Nifti3DControls(QWidget):
         self.gl = gl
         self._vertical = vertical
         self._rows: dict[str, QWidget] = {}     # key -> label+widget container
+        # Slider value read-out: (slider, chip-label, base-text) per slider row,
+        # so "Show values" can append the live integer to each label. The raw
+        # slider units are exactly what the presets in EFFECT_PRESET use.
+        self._value_rows: list = []
+        self._show_values = False
         self._build_widgets()
         self._layout()
         self._apply_clip()
@@ -1196,6 +1249,14 @@ class Nifti3DControls(QWidget):
         self._cdepth = self._sl(0, 1000, DEFAULTS["depth"], self._on_clip)
         self._cthick = self._sl(0, 1000, DEFAULTS["thick"], self._on_clip)
 
+        self._values_en = QCheckBox("Show values")
+        self._values_en.setChecked(self._show_values)
+        self._values_en.setToolTip(
+            "Append each slider's current value to its label — read off exact "
+            "numbers to build presets."
+        )
+        self._values_en.stateChanged.connect(self._on_show_values)
+
         self._refresh_btn = self._btn("Refresh image", lambda: self.gl.refresh())
         self._reset_params_btn = self._btn("Reset parameters", self.reset_params)
         self._reset_view_btn = self._btn("Reset view", self.gl.reset_view)
@@ -1204,6 +1265,7 @@ class Nifti3DControls(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 10, 12, 10)
         outer.setSpacing(8)
+        outer.addWidget(self._values_en)
         specs = [
             ("effect", "Effect", self._effect), ("light", "Lighting", self._light),
             ("lo", "Threshold low", self._lo), ("hi", "Threshold high", self._hi),
@@ -1251,9 +1313,24 @@ class Nifti3DControls(QWidget):
         box = QVBoxLayout(w)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(2)
-        box.addWidget(self._chip(text))
+        chip = self._chip(text)
+        box.addWidget(chip)
         box.addWidget(wdg)
+        # Register sliders so "Show values" can live-append their value.
+        if isinstance(wdg, QSlider):
+            self._value_rows.append((wdg, chip, text))
+            wdg.valueChanged.connect(
+                lambda _v, c=chip, b=text, s=wdg: self._update_value_label(c, b, s)
+            )
         return w
+
+    def _update_value_label(self, chip, base, slider) -> None:
+        chip.setText(f"{base}   {slider.value()}" if self._show_values else base)
+
+    def _on_show_values(self) -> None:
+        self._show_values = self._values_en.isChecked()
+        for slider, chip, base in self._value_rows:
+            self._update_value_label(chip, base, slider)
 
     @staticmethod
     def _wrap(wdg):

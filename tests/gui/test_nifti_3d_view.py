@@ -20,7 +20,11 @@ nib = pytest.importorskip("nibabel")
 pytest.importorskip("OpenGL")
 
 from bidsmgr.gui.widgets.nifti_viewer_pane import NiftiViewerPane
-from bidsmgr.gui.widgets.nifti_gl_view import Nifti3DView, request_gl_format
+from bidsmgr.gui.widgets.nifti_gl_view import (
+    Nifti3DView,
+    RaycastGLWidget,
+    request_gl_format,
+)
 
 
 pytestmark = pytest.mark.gui
@@ -142,6 +146,36 @@ def test_3d_toggle_feeds_volume_to_gl_view(
     assert pane._gl is not None
     # Volume was handed to the GL widget (stashed as pending until first paint).
     assert pane._gl.has_volume() is True
+
+
+def test_ras_and_radiological_drive_shared_render(
+    qapp, qtbot, bids_root_with_nifti, isolated_settings,
+) -> None:
+    """The RAS and Radiological toggles fold into one display flip that reaches
+    both the 2-D labels and the shared 3-D render."""
+    pane = NiftiViewerPane()
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    pane._td_btn.click()
+    qapp.processEvents()
+    from bidsmgr.gui.widgets.nifti_viewer_pane import _AXIS_AXIAL
+    assert pane._ras_btn.isChecked() is True
+    assert pane._radio_btn.isChecked() is False
+
+    # The 3-D flip carries a constant extra L/R mirror vs the 2-D flip so the
+    # rendered volume's left/right lines up with the 2-D slices.
+    def _aligned():
+        d = pane._display_flip()
+        assert pane._gl_flip() == (-d[0], d[1], d[2])
+        assert np.allclose(pane._gl._flip, pane._gl_flip())
+    _aligned()
+    assert pane._display_labels(0)["left"] == "P"          # sagittal unaffected
+    assert pane._display_labels(_AXIS_AXIAL)["left"] == "L"  # neurological
+
+    pane._radio_btn.setChecked(True)
+    qapp.processEvents()
+    _aligned()                                              # still aligned
+    assert pane._display_flip()[0] == -1.0                  # 2-D mirrored L/R
+    assert pane._display_labels(_AXIS_AXIAL)["left"] == "R"  # labels swap too
 
 
 def test_3d_and_multiview_mutually_exclusive(
@@ -432,6 +466,62 @@ def test_wheel_zoom_and_slice_nav(qapp) -> None:
     d0 = w._dist
     w.wheelEvent(wheel(0, 120))
     assert w._dist != d0
+
+
+def test_render_flip_and_cube_atlas(qapp) -> None:
+    """set_flip mirrors the render along canonical axes, and the orientation
+    cube swaps its letters (not its geometry) to match."""
+    from bidsmgr.gui.widgets.nifti_gl_view import _make_cube_atlas
+
+    w = RaycastGLWidget()
+    assert np.allclose(w._flip, [1.0, 1.0, 1.0])   # neurological RAS default
+
+    w.set_flip(-1, 1, 1)
+    assert np.allclose(w._flip, [-1.0, 1.0, 1.0])
+    w.set_flip(1, -1, -1)
+    assert np.allclose(w._flip, [1.0, -1.0, -1.0])
+
+    # Flipping an axis swaps that axis's letter pair in the atlas (L<->R here),
+    # so a mirrored render still reads upright.
+    a0 = _make_cube_atlas(16, (1.0, 1.0, 1.0))
+    a1 = _make_cube_atlas(16, (-1.0, 1.0, 1.0))
+    assert a0.shape == a1.shape
+    assert not np.array_equal(a0, a1)
+
+
+def test_native_flip_from_affine(qapp) -> None:
+    """The native storage flip is (1,1,1) for RAS and flags reversed axes."""
+    from bidsmgr.gui.widgets.nifti_viewer_pane import _native_flip_from_affine
+
+    assert _native_flip_from_affine(np.diag([2, 2, 2, 1.0])) == (1.0, 1.0, 1.0)
+    # LAS: L increases along +i -> the R/L axis is stored reversed.
+    assert _native_flip_from_affine(np.diag([-2, 2, 2, 1.0])) == (-1.0, 1.0, 1.0)
+    # RAI: S/I reversed.
+    assert _native_flip_from_affine(np.diag([2, 2, -2, 1.0])) == (1.0, 1.0, -1.0)
+
+
+def test_show_values_reflects_slider(qapp) -> None:
+    """The 'Show values' option appends each slider's live value to its label,
+    and updates when a preset changes the sliders."""
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECT_PRESET
+
+    view = Nifti3DView()
+    c = view.controls
+    chips = {base: chip for (_s, chip, base) in c._value_rows}
+    sliders = {base: s for (s, _c, base) in c._value_rows}
+
+    # Off: labels are the plain base text.
+    assert chips["Threshold low"].text() == "Threshold low"
+
+    c._values_en.setChecked(True)
+    assert chips["Threshold low"].text().endswith(str(sliders["Threshold low"].value()))
+
+    # A preset moves sliders; the label tracks the new value live.
+    c._effect.setCurrentText("Jelly")
+    assert chips["Density"].text().endswith(str(EFFECT_PRESET["Jelly"]["density"]))
+
+    c._values_en.setChecked(False)
+    assert chips["Density"].text() == "Density"
 
 
 def test_reset_params_current_effect_only(qapp) -> None:
