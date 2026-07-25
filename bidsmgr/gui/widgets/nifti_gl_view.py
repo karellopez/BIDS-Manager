@@ -122,14 +122,16 @@ def gpu_available() -> bool:
 # parameter presets of Opacity peeling). The display label is decoupled from
 # the shader ``uEffect`` index via :data:`EFFECT_FX`, so labels/order can change
 # without touching the shader.
-EFFECTS = ["Standard", "Matte", "Glass", "X-ray", "MIP", "Edges",
-           "Opacity peeling", "Opacity peeling 2", "Shell", "Topography",
-           "Jelly", "Skull"]
+EFFECTS = ["Standard", "Matte", "Juicy shiny", "Glass", "X-ray",
+           "Jelly", "Skull", "MIP", "Edges",
+           "Opacity peeling", "Opacity peeling 2", "Shell", "Topography"]
 
 # Label -> shader effect index (uEffect). "Standard" = flat Phong (shader fx 1),
-# "Matte" = waxy matcap (shader fx 0). Jelly/Skull reuse Opacity peeling (fx 6).
+# "Matte" = waxy matcap (shader fx 0). "Juicy shiny" is a Standard preset;
+# Jelly/Skull reuse Opacity peeling (fx 6).
 EFFECT_FX: dict[str, int] = {
-    "Standard": 1, "Matte": 0, "Glass": 2, "X-ray": 3, "MIP": 4, "Edges": 5,
+    "Standard": 1, "Matte": 0, "Juicy shiny": 1, "Glass": 2, "X-ray": 3,
+    "MIP": 4, "Edges": 5,
     "Opacity peeling": 6, "Opacity peeling 2": 7, "Shell": 8, "Topography": 9,
     "Jelly": 6, "Skull": 6,
 }
@@ -149,6 +151,7 @@ _PEEL_PARAMS = _COMMON | {"density", "ambient", "diffuse", "specular", "shinines
 EFFECT_PARAMS: dict[str, set] = {
     "Standard":          _PHONG_PARAMS,     # flat Phong (was "Matte")
     "Matte":             _MATCAP_PARAMS,    # waxy matcap (was "Default")
+    "Juicy shiny":       _PHONG_PARAMS,     # Standard preset (wet, glossy tissue)
     "Glass":             _COMMON | {"specular", "shininess", "edgethresh",
                                     "boundthresh", "edgemix", "colortemp",
                                     "lightaz", "lightel"},
@@ -169,11 +172,17 @@ EFFECT_PARAMS: dict[str, set] = {
     "Skull":             _PEEL_PARAMS,
 }
 # Effects whose cut-face intensity slice is ON by default.
-SLICE_DEFAULT_ON = {"Standard", "Matte", "Topography"}
+SLICE_DEFAULT_ON = {"Standard", "Matte", "Juicy shiny", "Topography"}
 
 # Named parameter presets (control key -> value) applied when a preset effect
 # is selected. Derived from the reference MRIcroGL-style looks.
 EFFECT_PRESET: dict[str, dict] = {
+    # Wet, glossy surface with a bright cut-face slice — a Standard (flat
+    # Phong) preset. The clip plane is deliberately NOT part of the preset:
+    # it is global state driven by its own controls / slicer shortcuts.
+    "Juicy shiny": dict(lo=36, hi=303, density=150, ambient=94, diffuse=50,
+                        specular=50, shininess=20, lightaz=0, lightel=30,
+                        overlay=True, overlaydepth=68, quality=1024),
     # Translucent, glassy tissue — the brain shows through the skin.
     "Jelly": dict(lo=110, hi=400, density=7, ambient=115, diffuse=65,
                   specular=35, shininess=45, peel=1, tlow=13, thigh=82,
@@ -1201,6 +1210,11 @@ class Nifti3DControls(QWidget):
         # slider units are exactly what the presets in EFFECT_PRESET use.
         self._value_rows: list = []
         self._show_values = False
+        # Every effect keeps its OWN parameter values: label -> {key: value}.
+        # Switching effects stashes the outgoing set and restores the incoming
+        # one, so tweaks to one effect never leak into another.
+        self._effect_values: dict[str, dict] = {}
+        self._current_effect: Optional[str] = None
         self._build_widgets()
         self._layout()
         self._apply_clip()
@@ -1259,6 +1273,14 @@ class Nifti3DControls(QWidget):
 
         self._refresh_btn = self._btn("Refresh image", lambda: self.gl.refresh())
         self._reset_params_btn = self._btn("Reset parameters", self.reset_params)
+        self._reset_params_btn.setToolTip(
+            "Reset THIS effect's parameters to its defaults (or its preset). "
+            "Other effects keep their own values."
+        )
+        self._reset_all_btn = self._btn("Reset all effects", self.reset_all_params)
+        self._reset_all_btn.setToolTip(
+            "Reset the parameters of EVERY effect back to their defaults / presets."
+        )
         self._reset_view_btn = self._btn("Reset view", self.gl.reset_view)
 
     def _layout(self) -> None:
@@ -1295,7 +1317,8 @@ class Nifti3DControls(QWidget):
                          ("Clip depth", self._cdepth), ("Clip thickness", self._cthick)):
             outer.addWidget(self._stacked(lbl, wdg))
         outer.addSpacing(6)
-        for b in (self._refresh_btn, self._reset_params_btn, self._reset_view_btn):
+        for b in (self._refresh_btn, self._reset_params_btn,
+                  self._reset_all_btn, self._reset_view_btn):
             outer.addWidget(b)
         outer.addStretch(1)
         hint = self._chip("Left-drag rotate · right-drag pan · scroll zoom · O = cube")
@@ -1356,35 +1379,43 @@ class Nifti3DControls(QWidget):
     # -- slots -------------------------------------------------------------
 
     def _on_effect(self, i):
+        """Switch effects, keeping every effect's parameters independent.
+
+        The outgoing effect's slider values are stashed and the incoming one's
+        are restored, so tweaking (say) Jelly never disturbs Skull. An effect
+        seen for the first time starts from its baseline — its preset if it has
+        one, otherwise the global defaults.
+        """
         label = EFFECTS[int(i)]
+        if self._current_effect is not None and self._current_effect != label:
+            self._effect_values[self._current_effect] = self._capture_values()
+        self._current_effect = label
         self.gl.effect = EFFECT_FX[label]         # display label -> shader fx
         self._sync_effect_params()
-        preset = EFFECT_PRESET.get(label)
-        if preset:                                # Jelly / Skull apply a preset
-            self._apply_values(preset)
+        self._apply_values(self._stored_values(label))
+        # setChecked/setValue only signal on a *change*, so push the overlay
+        # state explicitly — the incoming effect may share the outgoing one's
+        # checkbox state while the GL still holds a stale value.
+        self.gl.slice_overlay = 1 if self._overlay_en.isChecked() else 0
         self.gl.update()
 
     def _apply_values(self, values: dict) -> None:
-        """Push a preset's control values into the widgets (drives the GL)."""
-        setters = self._param_setters()
+        """Push control values into the widgets (which drive the GL)."""
+        widgets = self._param_widgets()
         for key, val in values.items():
-            if key in setters:
-                setters[key][0](val)
+            if key in widgets:
+                self._widget_set(widgets[key][0], val)
 
     def _sync_effect_params(self) -> None:
+        """Show only the rows this effect uses. The slice-overlay state itself
+        is per-effect parameter state (its baseline is :data:`SLICE_DEFAULT_ON`)
+        and is restored by :meth:`_apply_values`."""
         name = EFFECTS[self._effect.currentIndex()]
         keys = EFFECT_PARAMS[name]
         for key, row in self._rows.items():
             if key == "effect":
                 continue
             row.setVisible(key in keys)
-        # Per-effect default for the cut-face slice overlay (MRIcroGL-style):
-        # on for the opaque surface effects, off elsewhere.
-        want = name in SLICE_DEFAULT_ON
-        if self._overlay_en.isChecked() != want:
-            self._overlay_en.setChecked(want)     # slot pushes to gl
-        else:
-            self.gl.slice_overlay = 1 if want else 0
 
     def _on_light(self, i): self.gl.set_matcap(LIGHTINGS[int(i)])
 
@@ -1471,51 +1502,116 @@ class Nifti3DControls(QWidget):
             self._clip_en.setChecked(True)
         self.gl.invert_clip()           # Shift+X
 
-    # Control key -> (widget setter, default value). Used to reset only the
-    # parameters that belong to the currently-selected effect.
+    # -- per-effect parameter state ----------------------------------------
+
+    def _param_widgets(self):
+        """Control key -> (widget, default). Single source of truth for the
+        per-effect parameter state: getters, setters and defaults derive from
+        it, so a new parameter only has to be registered once."""
+        return {
+            "light": (self._light, DEFAULTS["light"]),
+            "lo": (self._lo, DEFAULTS["lo"]),
+            "hi": (self._hi, DEFAULTS["hi"]),
+            "density": (self._den, DEFAULTS["density"]),
+            "brighten": (self._bright, DEFAULTS["brighten"]),
+            "surface": (self._surf, DEFAULTS["surface"]),
+            "ambient": (self._amb, DEFAULTS["ambient"]),
+            "diffuse": (self._dif, DEFAULTS["diffuse"]),
+            "specular": (self._spec, DEFAULTS["specular"]),
+            "shininess": (self._shin, DEFAULTS["shininess"]),
+            "boundthresh": (self._bound, DEFAULTS["boundthresh"]),
+            "edgethresh": (self._edge, DEFAULTS["edgethresh"]),
+            "edgemix": (self._emix, DEFAULTS["edgemix"]),
+            "colortemp": (self._ctemp, DEFAULTS["colortemp"]),
+            "gradientmix": (self._gmix, DEFAULTS["gradientmix"]),
+            "intensitymix": (self._imix, DEFAULTS["intensitymix"]),
+            "hardness": (self._hard, DEFAULTS["hardness"]),
+            "peel": (self._peel, DEFAULTS["peel"]),
+            "tlow": (self._tlow, DEFAULTS["tlow"]),
+            "thigh": (self._thigh, DEFAULTS["thigh"]),
+            "lightaz": (self._laz, DEFAULTS["lightaz"]),
+            "lightel": (self._lel, DEFAULTS["lightel"]),
+            "overlay": (self._overlay_en, DEFAULTS["overlay"]),
+            "overlaydepth": (self._odepth, DEFAULTS["overlaydepth"]),
+            "quality": (self._q, DEFAULTS["quality"]),
+        }
+
+    @staticmethod
+    def _widget_get(w):
+        if isinstance(w, QSlider):
+            return w.value()
+        if isinstance(w, QComboBox):
+            return w.currentIndex()
+        return w.isChecked()            # QCheckBox
+
+    @staticmethod
+    def _widget_set(w, val) -> None:
+        if isinstance(w, QSlider):
+            w.setValue(int(val))
+        elif isinstance(w, QComboBox):
+            w.setCurrentIndex(int(val))
+        else:
+            w.setChecked(bool(val))     # QCheckBox
+
+    def _baseline_values(self, label: str) -> dict:
+        """Every parameter's starting value for ``label`` — its preset value if
+        the effect defines one, the per-effect slice-overlay default for
+        ``overlay``, otherwise the global default."""
+        preset = EFFECT_PRESET.get(label) or {}
+        vals = {}
+        for key, (_w, default) in self._param_widgets().items():
+            if key in preset:
+                vals[key] = preset[key]
+            elif key == "overlay":
+                vals[key] = label in SLICE_DEFAULT_ON
+            else:
+                vals[key] = default
+        return vals
+
+    def _capture_values(self) -> dict:
+        """Snapshot the current widget values (the active effect's state)."""
+        return {key: self._widget_get(w)
+                for key, (w, _d) in self._param_widgets().items()}
+
+    def _stored_values(self, label: str) -> dict:
+        """The remembered values for ``label``, seeded from its baseline."""
+        vals = self._effect_values.get(label)
+        if vals is None:
+            vals = self._baseline_values(label)
+            self._effect_values[label] = vals
+        return vals
+
+    # Control key -> (widget setter, default value). Derived from
+    # :meth:`_param_widgets` so the registry lives in exactly one place.
     def _param_setters(self):
         return {
-            "light": (self._light.setCurrentIndex, DEFAULTS["light"]),
-            "lo": (self._lo.setValue, DEFAULTS["lo"]),
-            "hi": (self._hi.setValue, DEFAULTS["hi"]),
-            "density": (self._den.setValue, DEFAULTS["density"]),
-            "brighten": (self._bright.setValue, DEFAULTS["brighten"]),
-            "surface": (self._surf.setValue, DEFAULTS["surface"]),
-            "ambient": (self._amb.setValue, DEFAULTS["ambient"]),
-            "diffuse": (self._dif.setValue, DEFAULTS["diffuse"]),
-            "specular": (self._spec.setValue, DEFAULTS["specular"]),
-            "shininess": (self._shin.setValue, DEFAULTS["shininess"]),
-            "boundthresh": (self._bound.setValue, DEFAULTS["boundthresh"]),
-            "edgethresh": (self._edge.setValue, DEFAULTS["edgethresh"]),
-            "edgemix": (self._emix.setValue, DEFAULTS["edgemix"]),
-            "colortemp": (self._ctemp.setValue, DEFAULTS["colortemp"]),
-            "gradientmix": (self._gmix.setValue, DEFAULTS["gradientmix"]),
-            "intensitymix": (self._imix.setValue, DEFAULTS["intensitymix"]),
-            "hardness": (self._hard.setValue, DEFAULTS["hardness"]),
-            "peel": (self._peel.setValue, DEFAULTS["peel"]),
-            "tlow": (self._tlow.setValue, DEFAULTS["tlow"]),
-            "thigh": (self._thigh.setValue, DEFAULTS["thigh"]),
-            "lightaz": (self._laz.setValue, DEFAULTS["lightaz"]),
-            "lightel": (self._lel.setValue, DEFAULTS["lightel"]),
-            "overlay": (self._overlay_en.setChecked, DEFAULTS["overlay"]),
-            "overlaydepth": (self._odepth.setValue, DEFAULTS["overlaydepth"]),
-            "quality": (self._q.setValue, DEFAULTS["quality"]),
+            key: ((lambda v, _w=w: self._widget_set(_w, v)), default)
+            for key, (w, default) in self._param_widgets().items()
         }
 
     def reset_params(self) -> None:
         """Reset ONLY the parameters that belong to the current effect back to
         their defaults (or, for a preset effect like Jelly/Skull, back to the
-        preset). The effect itself, the clip plane and the camera are left as
-        they are (there is a separate Reset view button)."""
+        preset). Other effects keep their own values, and the effect itself,
+        the clip plane and the camera are left as they are (there is a separate
+        Reset view button)."""
         label = EFFECTS[self._effect.currentIndex()]
-        keys = EFFECT_PARAMS[label]
-        preset = EFFECT_PRESET.get(label)
-        setters = self._param_setters()
-        for key in keys:
-            if key in setters:
-                setter, default = setters[key]
-                val = preset[key] if (preset and key in preset) else default
-                setter(val)
+        baseline = self._baseline_values(label)
+        stored = self._stored_values(label)
+        widgets = self._param_widgets()
+        for key in EFFECT_PARAMS[label]:
+            if key in baseline:
+                stored[key] = baseline[key]
+                self._widget_set(widgets[key][0], baseline[key])
+
+    def reset_all_params(self) -> None:
+        """Reset EVERY effect's parameters back to its baseline, then re-apply
+        the current effect's. Use when the per-effect tweaks have drifted and
+        you want a clean slate across the whole effect list."""
+        self._effect_values = {label: self._baseline_values(label)
+                               for label in EFFECTS}
+        label = EFFECTS[self._effect.currentIndex()]
+        self._apply_values(self._effect_values[label])
 
 
 # --------------------------------------------------------------------------

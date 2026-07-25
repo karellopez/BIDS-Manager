@@ -527,7 +527,7 @@ def test_show_values_reflects_slider(qapp) -> None:
 def test_reset_params_current_effect_only(qapp) -> None:
     """Reset parameters resets ONLY the current effect's params; the effect,
     clip and unrelated params are left alone."""
-    from bidsmgr.gui.widgets.nifti_gl_view import DEFAULTS, EFFECTS
+    from bidsmgr.gui.widgets.nifti_gl_view import DEFAULTS, EFFECTS, EFFECT_FX
 
     view = Nifti3DView()
     c = view.controls
@@ -536,11 +536,73 @@ def test_reset_params_current_effect_only(qapp) -> None:
     c._spec.setValue(95)          # a Glass parameter
     c._bright.setValue(260)       # NOT a Glass parameter
     c.reset_params()
-    assert view.gl.effect == EFFECTS.index("Glass")   # effect unchanged
+    assert view.gl.effect == EFFECT_FX["Glass"]        # effect unchanged
     assert view.gl.clip_active == 1                    # clip left as-is
     assert c._spec.value() == DEFAULTS["specular"]     # Glass param reset
     assert c._bright.value() == 260                    # unrelated param untouched
     view.gl.refresh()             # no-op without a live context, must not raise
+
+
+def test_effect_params_are_independent(qapp) -> None:
+    """Each effect owns its parameters: tweaking one never leaks into another,
+    and switching back restores what was left behind."""
+    from bidsmgr.gui.widgets.nifti_gl_view import EFFECT_PRESET
+
+    view = Nifti3DView()
+    c = view.controls
+
+    c._effect.setCurrentText("Jelly")
+    assert c._den.value() == EFFECT_PRESET["Jelly"]["density"]   # starts at preset
+    c._den.setValue(88)                                          # tweak Jelly
+
+    c._effect.setCurrentText("Skull")
+    # Skull starts from ITS preset, not Jelly's edited value.
+    assert c._den.value() == EFFECT_PRESET["Skull"]["density"]
+    c._den.setValue(11)                                          # tweak Skull
+
+    c._effect.setCurrentText("Jelly")
+    assert c._den.value() == 88                                  # Jelly remembered
+    c._effect.setCurrentText("Skull")
+    assert c._den.value() == 11                                  # Skull remembered
+
+    # Resetting one effect leaves the others' values alone.
+    c.reset_params()
+    assert c._den.value() == EFFECT_PRESET["Skull"]["density"]
+    c._effect.setCurrentText("Jelly")
+    assert c._den.value() == 88
+
+    # Reset-all clears every effect back to its baseline.
+    c.reset_all_params()
+    assert c._den.value() == EFFECT_PRESET["Jelly"]["density"]
+    c._effect.setCurrentText("Skull")
+    assert c._den.value() == EFFECT_PRESET["Skull"]["density"]
+
+
+def test_juicy_shiny_effect(qapp) -> None:
+    """Juicy shiny is a Standard (flat Phong) preset placed after Matte, and
+    Jelly / Skull sit after X-ray."""
+    from bidsmgr.gui.widgets.nifti_gl_view import (
+        EFFECTS, EFFECT_FX, EFFECT_PRESET, SLICE_DEFAULT_ON,
+    )
+
+    assert EFFECTS.index("Juicy shiny") == EFFECTS.index("Matte") + 1
+    assert EFFECTS.index("Jelly") == EFFECTS.index("X-ray") + 1
+    assert EFFECTS.index("Skull") == EFFECTS.index("Jelly") + 1
+    assert EFFECT_FX["Juicy shiny"] == EFFECT_FX["Standard"]
+    assert "Juicy shiny" in SLICE_DEFAULT_ON
+
+    view = Nifti3DView()
+    c = view.controls
+    c._effect.setCurrentText("Juicy shiny")
+    preset = EFFECT_PRESET["Juicy shiny"]
+    assert c._lo.value() == preset["lo"]
+    assert c._hi.value() == preset["hi"]
+    assert c._den.value() == preset["density"]
+    assert c._amb.value() == preset["ambient"]
+    assert c._shin.value() == preset["shininess"]
+    assert c._odepth.value() == preset["overlaydepth"]
+    assert view.gl.effect == EFFECT_FX["Juicy shiny"]
+    assert view.gl.slice_overlay == 1               # cut-face slice on
 
 
 def test_drag_right_increases_azimuth(qapp) -> None:
