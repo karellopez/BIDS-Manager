@@ -2,12 +2,14 @@
 
 Regression cover for the Windows + Python 3.14 failure, where loky's worker
 processes die during bootstrap and joblib raises ``TerminatedWorkerError``,
-taking a whole DICOM scan down with them.
+taking a whole DICOM scan down with it.
+
+The policy under test is *detect, don't predict*: always try the fast process
+backend, and only downgrade to threads once a pool has actually died — then
+remember that for the rest of the session.
 """
 
 from __future__ import annotations
-
-import sys
 
 import pytest
 from joblib import delayed
@@ -19,30 +21,60 @@ def _square(i: int) -> int:
     return i * i
 
 
-class TestBackendSelection:
-    def test_loky_is_used_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sys, "platform", "linux")
-        assert P.loky_is_broken() is False
-        assert P.preferred_backend() is None       # None == joblib's loky
+@pytest.fixture(autouse=True)
+def _clean_backend_state(monkeypatch: pytest.MonkeyPatch):
+    """Each test starts with the process backend considered healthy."""
+    monkeypatch.delenv(P.BACKEND_ENV_VAR, raising=False)
+    P.reset_backend_state()
+    yield
+    P.reset_backend_state()
 
-    def test_windows_py314_avoids_loky(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setattr(sys, "version_info", (3, 14, 0))
-        assert P.loky_is_broken() is True
+
+class _DeadPool:
+    """Stand-in for Parallel whose process pools always die."""
+
+    def __init__(self, seen: list, real):
+        self._seen, self._real = seen, real
+
+    def __call__(self, n_jobs=1, backend=None, **kw):
+        self._seen.append(backend)
+        outer = self
+
+        class _P:
+            def __call__(self, tasks):
+                from joblib.externals.loky.process_executor import (
+                    TerminatedWorkerError,
+                )
+                if backend != P.SAFE_BACKEND:
+                    raise TerminatedWorkerError("worker died")
+                return outer._real(n_jobs=1, backend=P.SAFE_BACKEND, **kw)(tasks)
+
+        return _P()
+
+
+class TestBackendSelection:
+    def test_process_backend_is_the_default_everywhere(self) -> None:
+        """No OS/version guessing — the fast backend is always tried first."""
+        assert P.process_backend_disabled() is False
+        assert P.preferred_backend() is None          # None == joblib's loky
+
+    def test_env_var_can_force_the_safe_backend(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(P.BACKEND_ENV_VAR, "threading")
         assert P.preferred_backend() == "threading"
 
-    @pytest.mark.parametrize(
-        ("platform", "version"),
-        [("win32", (3, 13, 0)), ("linux", (3, 14, 0)), ("darwin", (3, 14, 0))],
-    )
-    def test_only_the_broken_combination_is_downgraded(
-        self, monkeypatch: pytest.MonkeyPatch, platform: str, version: tuple,
+    def test_downgrades_only_after_a_real_failure(
+        self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Windows alone or 3.14 alone must keep the fast process backend."""
-        monkeypatch.setattr(sys, "platform", platform)
-        monkeypatch.setattr(sys, "version_info", version)
-        assert P.loky_is_broken() is False
         assert P.preferred_backend() is None
+        monkeypatch.setattr(P, "Parallel", _DeadPool([], P.Parallel))
+        P.run_parallel(
+            lambda: (delayed(_square)(i) for i in range(3)),
+            n_jobs=2, consume=list,
+        )
+        assert P.process_backend_disabled() is True
+        assert P.preferred_backend() == "threading"
 
 
 class TestRunParallel:
@@ -57,7 +89,7 @@ class TestRunParallel:
         """return_as="generator" is how the scan polls for cancellation."""
         out = P.run_parallel(
             lambda: (delayed(_square)(i) for i in range(4)),
-            n_jobs=2, consume=lambda gen: [x for x in gen],
+            n_jobs=2, consume=lambda gen: list(gen),
             return_as="generator",
         )
         assert out == [0, 1, 4, 9]
@@ -65,29 +97,28 @@ class TestRunParallel:
     def test_dead_pool_retries_on_threads(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from joblib.externals.loky.process_executor import TerminatedWorkerError
-
-        real = P.Parallel
         seen: list = []
-
-        class FlakyParallel:
-            def __init__(self, n_jobs=1, backend=None, **kw):
-                self.backend, self.kw = backend, kw
-                seen.append(backend)
-
-            def __call__(self, tasks):
-                if self.backend != "threading":
-                    raise TerminatedWorkerError("worker died")
-                return real(n_jobs=1, backend="threading", **self.kw)(tasks)
-
-        monkeypatch.setattr(P, "Parallel", FlakyParallel)
+        monkeypatch.setattr(P, "Parallel", _DeadPool(seen, P.Parallel))
         out = P.run_parallel(
             lambda: (delayed(_square)(i) for i in range(4)),
             n_jobs=2, consume=list,
         )
-        assert out == [0, 1, 4, 9]
-        assert seen[-1] == "threading"      # fell back
-        assert len(seen) == 2               # tried once, then retried
+        assert out == [0, 1, 4, 9]                 # complete, not partial
+        assert seen == [None, "threading"]         # tried fast, then fell back
+
+    def test_failure_is_remembered_across_runs(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The dead-pool cost is paid once per session, not once per pool."""
+        seen: list = []
+        monkeypatch.setattr(P, "Parallel", _DeadPool(seen, P.Parallel))
+        for _ in range(3):
+            P.run_parallel(
+                lambda: (delayed(_square)(i) for i in range(2)),
+                n_jobs=2, consume=list,
+            )
+        # First run probes and falls back; later runs go straight to threads.
+        assert seen == [None, "threading", "threading", "threading"]
 
     def test_task_errors_are_not_swallowed(self) -> None:
         """Only a dead pool triggers the retry — real failures propagate."""
@@ -99,6 +130,23 @@ class TestRunParallel:
                 lambda: (delayed(boom)(i) for i in range(2)),
                 n_jobs=1, consume=list,
             )
+        # A failing task must not be mistaken for a broken pool.
+        assert P.process_backend_disabled() is False
+
+    def test_consume_errors_propagate(self) -> None:
+        """Cancellation is raised from consume() and must not be retried."""
+        class Cancelled(Exception):
+            pass
+
+        def cancel(_gen):
+            raise Cancelled("cancelled by user")
+
+        with pytest.raises(Cancelled):
+            P.run_parallel(
+                lambda: (delayed(_square)(i) for i in range(2)),
+                n_jobs=1, consume=cancel,
+            )
+        assert P.process_backend_disabled() is False
 
     def test_threading_backend_does_not_retry(
         self, monkeypatch: pytest.MonkeyPatch,

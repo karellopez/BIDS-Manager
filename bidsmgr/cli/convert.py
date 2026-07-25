@@ -497,9 +497,9 @@ def _phase1_parallel_dcm2niix(
         else:
             from ..util.parallel import preferred_backend, run_parallel
 
-            # Few tasks aren't worth a process pool; otherwise use the fastest
-            # backend that works here (see bidsmgr.util.parallel — loky's
-            # workers die on Windows + Python 3.14).
+            # Few tasks aren't worth a process pool; otherwise take the fast
+            # one unless bidsmgr.util.parallel has already seen a pool die in
+            # this session (run_parallel falls back and remembers).
             if len(parallel_tasks) < 4:
                 parallel_backend = "threading"
             else:
