@@ -178,6 +178,35 @@ def test_ras_and_radiological_drive_shared_render(
     assert pane._display_labels(_AXIS_AXIAL)["left"] == "R"  # labels swap too
 
 
+def test_first_scan_opens_in_default_view(
+    qapp, qtbot, bids_root_with_nifti, isolated_settings,
+) -> None:
+    """The first volume of a session opens in Multi-Planar 3D with a GPU (plain
+    Multi-Planar without one); later scans keep whatever view the user is in."""
+    pane = NiftiViewerPane()
+    pane._gpu_ok = True
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._combo_view is True                 # landed in Multi-Planar 3D
+
+    # The user picks a different view; a later scan must not override it.
+    pane._set_view_mode("single")
+    qapp.processEvents()
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._combo_view is False
+    assert pane._tri_view is False                  # user's choice persisted
+
+
+def test_first_scan_default_view_without_gpu(
+    qapp, qtbot, bids_root_with_nifti, isolated_settings,
+) -> None:
+    """Without a GPU the default is the 2-D three-plane Multi-Planar view."""
+    pane = NiftiViewerPane()
+    pane._gpu_ok = False
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._tri_view is True
+    assert pane._combo_view is False
+
+
 def test_3d_and_multiview_mutually_exclusive(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
@@ -612,6 +641,32 @@ def test_juicy_shiny_effects(qapp) -> None:
     assert EFFECT_PRESET["Juicy shiny 2"] != EFFECT_PRESET["Juicy shiny"]
 
 
+def test_quality_defaults_to_half(qapp) -> None:
+    """Every effect starts at 50% quality (the user raises it when they want).
+    Quality is a performance knob, so no preset pins it."""
+    from bidsmgr.gui.widgets.nifti_gl_view import (
+        DEFAULTS, EFFECTS, EFFECT_PRESET, QUALITY_MAX,
+    )
+
+    assert DEFAULTS["quality"] == QUALITY_MAX // 2
+    assert not any("quality" in p for p in EFFECT_PRESET.values())
+
+    view = Nifti3DView()
+    c = view.controls
+    for name in EFFECTS:
+        c._effect.setCurrentText(name)
+        assert c._q.value() == DEFAULTS["quality"]
+        assert view.gl.steps == DEFAULTS["quality"]
+
+    # Raising it is per-effect, like every other parameter.
+    c._effect.setCurrentText("Jelly")
+    c._q.setValue(QUALITY_MAX)
+    c._effect.setCurrentText("Skull")
+    assert c._q.value() == DEFAULTS["quality"]
+    c._effect.setCurrentText("Jelly")
+    assert c._q.value() == QUALITY_MAX
+
+
 def test_render_background_is_black(qapp) -> None:
     """The GL clear / empty-space colour is pure black, matching the 2-D
     canvas (#nifti-canvas in theme.qss)."""
@@ -654,6 +709,10 @@ def test_ortho3d_toggle_shows_grid_and_keeps_slice_controls(
 ) -> None:
     pane = NiftiViewerPane()
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    # The first scan of a session lands in a GPU-dependent default view; start
+    # from a known state so clicking the toggle below always turns it ON.
+    pane._set_view_mode("single")
+    qapp.processEvents()
 
     pane._quad_btn.click()
     qapp.processEvents()
@@ -677,6 +736,9 @@ def test_three_3d_modes_mutually_exclusive(
 ) -> None:
     pane = NiftiViewerPane()
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    # Known starting point — see the session-default view above.
+    pane._set_view_mode("single")
+    qapp.processEvents()
 
     pane._quad_btn.click(); qapp.processEvents()
     assert pane._combo_view and not pane._three_d and not pane._tri_view

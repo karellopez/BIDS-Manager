@@ -293,6 +293,11 @@ class NiftiViewerPane(QWidget):
         self._ctrl_slot_combo = None
         self._gl_page_index: Optional[int] = None
         self._combo_page_index: Optional[int] = None
+        # The FIRST volume of the session lands in a default view — Multi-Planar
+        # 3-D when a GPU is available, plain Multi-Planar otherwise. Applied
+        # once; after that whichever view the user is in persists as they move
+        # between scans.
+        self._initial_view_applied: bool = False
         self._combo_labels: dict[int, ImageLabel] = {}
         self._combo_edge: dict = {}
         # Global display window (intensity low/high) for 2-D slices, computed
@@ -569,6 +574,14 @@ class NiftiViewerPane(QWidget):
         self._refresh()
         if self._graph_visible:
             self._update_graph()
+        # First real volume of the session opens in the default view; every
+        # later scan keeps whatever view the user is currently in.
+        if not self._initial_view_applied and data.ndim >= 3:
+            self._initial_view_applied = True
+            self._set_view_mode(
+                "combo" if (self._is_3d_capable and self._gpu_ok) else "multi"
+            )
+
         # If a 3-D mode is open, feed it the new volume; if the new file
         # can't be rendered in 3-D (e.g. RGB), drop back to plain 2-D.
         if (self._three_d or self._combo_view) and not self._is_3d_capable:

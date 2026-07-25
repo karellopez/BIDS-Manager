@@ -178,25 +178,30 @@ SLICE_DEFAULT_ON = {"Standard", "Matte", "Juicy shiny", "Juicy shiny 2",
 
 # Named parameter presets (control key -> value) applied when a preset effect
 # is selected. Derived from the reference MRIcroGL-style looks.
+#
+# Presets deliberately leave out two things, so each has ONE source of truth:
+#   * "quality" — a performance knob, not a look; every effect starts at
+#     DEFAULTS["quality"] (50%) and the user raises it when they want.
+#   * the clip plane — global state driven by its own controls / slicer
+#     shortcuts; baking it in would hijack the slicer on every effect change.
 EFFECT_PRESET: dict[str, dict] = {
     # Wet, glossy surface with a bright cut-face slice — a Standard (flat
-    # Phong) preset. The clip plane is deliberately NOT part of the preset:
-    # it is global state driven by its own controls / slicer shortcuts.
+    # Phong) preset.
     "Juicy shiny": dict(lo=36, hi=303, density=150, ambient=94, diffuse=50,
                         specular=50, shininess=20, lightaz=0, lightel=30,
-                        overlay=True, overlaydepth=68, quality=1024),
+                        overlay=True, overlaydepth=68),
     # Same window, but a much tighter/harder specular — a sharper wet sheen.
     "Juicy shiny 2": dict(lo=36, hi=303, density=150, ambient=94, diffuse=23,
                           specular=96, shininess=100, lightaz=0, lightel=30,
-                          overlay=True, overlaydepth=68, quality=1024),
+                          overlay=True, overlaydepth=68),
     # Translucent, glassy tissue — the brain shows through the skin.
     "Jelly": dict(lo=110, hi=400, density=7, ambient=115, diffuse=65,
                   specular=35, shininess=45, peel=1, tlow=13, thigh=82,
-                  lightaz=0, lightel=25, quality=1024),
+                  lightaz=0, lightel=25),
     # Peel the skin to reveal the deeper (facial / orbital / bony) anatomy.
     "Skull": dict(lo=36, hi=303, density=150, ambient=95, diffuse=50,
                   specular=50, shininess=20, peel=1, tlow=19, thigh=80,
-                  lightaz=0, lightel=30, quality=1024),
+                  lightaz=0, lightel=30),
 }
 
 # Matcap "lighting" materials: (ambient, key, fill, spec_power, spec_int, tint).
@@ -210,14 +215,21 @@ _LIGHTINGS: dict[str, tuple] = {
 }
 LIGHTINGS = list(_LIGHTINGS)
 
-# Default control values ("Reset parameters"). Quality defaults to the max.
+# Slider range for Quality (ray-march steps). QUALITY_DEFAULT is half of the
+# maximum: every effect starts at 50% so the first render is responsive on
+# modest GPUs, and the user can push the slider to full when they want it.
+QUALITY_MIN, QUALITY_MAX = 64, 1024
+QUALITY_DEFAULT = QUALITY_MAX // 2
+
+# Default control values ("Reset parameters").
 DEFAULTS = dict(
     effect=0, light=0, lo=100, hi=420, density=100, brighten=150, surface=70,
     ambient=60, diffuse=55, specular=30, shininess=40,
     boundthresh=30, edgethresh=12, edgemix=65, colortemp=50,
     gradientmix=60, intensitymix=35, hardness=50,
     peel=1, tlow=25, thigh=85, lightaz=0, lightel=0, overlay=True, overlaydepth=28,
-    quality=1024, clip=False, clipaz=0, clipel=0, depth=500, thick=1000, cube=True,
+    quality=QUALITY_DEFAULT, clip=False, clipaz=0, clipel=0, depth=500,
+    thick=1000, cube=True,
 )
 
 
@@ -1257,7 +1269,7 @@ class Nifti3DControls(QWidget):
         self._peel = self._sl(0, 6, DEFAULTS["peel"], self._on_peel)
         self._tlow = self._sl(0, 100, DEFAULTS["tlow"], self._on_tlow)
         self._thigh = self._sl(0, 100, DEFAULTS["thigh"], self._on_thigh)
-        self._q = self._sl(64, 1024, DEFAULTS["quality"], self._on_q)
+        self._q = self._sl(QUALITY_MIN, QUALITY_MAX, DEFAULTS["quality"], self._on_q)
         self._laz = self._sl(0, 360, DEFAULTS["lightaz"], self._on_light_dir)
         self._lel = self._sl(-90, 90, DEFAULTS["lightel"], self._on_light_dir)
         self._overlay_en = QCheckBox("Slice overlay")
