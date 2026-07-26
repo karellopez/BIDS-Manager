@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-from joblib import Parallel, delayed
+from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 from bidsmgr.util.paths import long_path
 

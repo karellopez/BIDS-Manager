@@ -34,7 +34,7 @@ from typing import Optional
 
 import pandas as pd
 import pydicom
-from joblib import Parallel, delayed
+from joblib import delayed  # pools are built by bidsmgr.util.parallel
 from pydicom.multival import MultiValue
 
 from ..classifier.sequence_dict import (

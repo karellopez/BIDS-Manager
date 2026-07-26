@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
-from joblib import Parallel, delayed
+from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 import bidsmgr
 
