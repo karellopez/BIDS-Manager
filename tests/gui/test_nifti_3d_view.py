@@ -740,6 +740,37 @@ def test_rgb_volume_float_keeps_hue(qapp) -> None:
     assert stored[..., 2].max() == 0
 
 
+def test_realistic_effect(qapp) -> None:
+    """Realistic is a living-tissue variant of Juicy shiny 2, sitting after it
+    and driven by its own shader branch (not the flat-Phong one)."""
+    from bidsmgr.gui.widgets.nifti_gl_view import (
+        EFFECTS, EFFECT_FX, EFFECT_PRESET, SLICE_DEFAULT_ON,
+    )
+
+    assert EFFECTS.index("Realistic") == EFFECTS.index("Juicy shiny 2") + 1
+    assert "Realistic" in SLICE_DEFAULT_ON
+    # Its own shader branch — the tissue colour ramp can't live in Standard's.
+    assert EFFECT_FX["Realistic"] not in (
+        EFFECT_FX["Standard"], EFFECT_FX["Matte"],
+    )
+
+    preset, parent = EFFECT_PRESET["Realistic"], EFFECT_PRESET["Juicy shiny 2"]
+    # Inherits the window / density from its parent...
+    for key in ("lo", "hi", "density", "overlaydepth"):
+        assert preset[key] == parent[key]
+    # ...but leans on directional light instead of ambient, or a coloured
+    # surface flattens into a featureless pink card.
+    assert preset["ambient"] < parent["ambient"]
+    assert preset["diffuse"] > parent["diffuse"]
+
+    view = Nifti3DView()
+    c = view.controls
+    c._effect.setCurrentText("Realistic")
+    assert view.gl.effect == EFFECT_FX["Realistic"]
+    assert c._amb.value() == preset["ambient"]
+    assert view.gl.slice_overlay == 1
+
+
 def test_render_background_is_black(qapp) -> None:
     """The GL clear / empty-space colour is pure black, matching the 2-D
     canvas (#nifti-canvas in theme.qss)."""

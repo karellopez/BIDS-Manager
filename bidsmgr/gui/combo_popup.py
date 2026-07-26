@@ -29,12 +29,27 @@ QApplication and theme are set up.
 from __future__ import annotations
 
 import logging
+import sys
 
-from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtCore import QEvent, QObject, QRectF, Qt
+from PyQt6.QtGui import QPainterPath, QRegion
 
 log = logging.getLogger(__name__)
 
 _FLAG = "_bidsmgr_round_popup"
+
+# Corner radius of the rounded popups. Keep in sync with the ``border-radius``
+# of ``QToolTip`` / ``QComboBox QAbstractItemView`` in theme.qss.
+_RADIUS = 6
+
+# A translucent window only yields clean rounded corners where the platform
+# COMPOSITES it. macOS always does, so the corners there are transparent and
+# antialiased. On Windows and on X11/Wayland sessions without a compositor the
+# pixels outside the rounded border are left unpainted and come out BLACK —
+# the "picky black background" behind the rounded tooltip. Masking cuts those
+# pixels out of the window entirely so nothing can show through; the trade-off
+# is aliased (hard) edges, which is why macOS keeps the nicer translucent path.
+_NEEDS_MASK = sys.platform != "darwin"
 
 
 class _PopupRounder(QObject):
@@ -42,16 +57,24 @@ class _PopupRounder(QObject):
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
         try:
-            if event.type() != QEvent.Type.Show or obj.property(_FLAG):
+            etype = event.type()
+            # Resize matters as much as Show: Qt REUSES one QTipLabel for every
+            # tooltip and just re-texts/resizes it, often without a fresh Show.
+            # A mask left at the previous tooltip's size would stop clipping
+            # the corners of a narrower one (black corners return) or clip the
+            # content of a wider one.
+            if etype not in (QEvent.Type.Show, QEvent.Type.Resize):
                 return False
             cls = obj.metaObject().className()
-            if cls == "QComboBoxPrivateContainer":
-                obj.setObjectName("combo-popup")
+            if cls not in ("QComboBoxPrivateContainer", "QTipLabel"):
+                return False
+            if etype == QEvent.Type.Show and not obj.property(_FLAG):
+                if cls == "QComboBoxPrivateContainer":
+                    obj.setObjectName("combo-popup")
+                # Same recipe for both so the QSS border-radius renders
+                # without a square OS frame behind it.
                 self._round(obj)
-            elif cls == "QTipLabel":
-                # Hover tooltips: same recipe so the QToolTip border-radius
-                # renders without square OS corners, matching the rounded GUI.
-                self._round(obj)
+            _mask(obj)
         except Exception as exc:  # noqa: BLE001 - never break a popup/tooltip
             log.debug("popup round failed: %s", exc)
         return False
@@ -73,6 +96,23 @@ class _PopupRounder(QObject):
         obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         obj.setGeometry(geo)
         obj.show()  # re-show so the new window flags take effect
+
+
+def _mask(obj, radius: int = _RADIUS) -> None:
+    """Clip *obj*'s window to a rounded rectangle.
+
+    No-op on macOS, where the translucent window already composites clean
+    antialiased corners. Elsewhere this removes the corner pixels from the
+    window so an uncomposited desktop cannot paint them black.
+    """
+    if not _NEEDS_MASK:
+        return
+    rect = obj.rect()
+    if rect.width() <= 0 or rect.height() <= 0:
+        return
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(rect), float(radius), float(radius))
+    obj.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
 
 _instance: _PopupRounder | None = None
@@ -101,6 +141,10 @@ def round_menu(menu) -> None:
         | Qt.WindowType.NoDropShadowWindowHint
     )
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    # Same uncomposited-desktop guard as the tooltips: mask once the menu has
+    # been laid out, so its corners can't paint black on Windows / X11.
+    if _NEEDS_MASK:
+        menu.aboutToShow.connect(lambda m=menu: _mask(m, _RADIUS))
 
 
 __all__ = ["install", "round_menu"]

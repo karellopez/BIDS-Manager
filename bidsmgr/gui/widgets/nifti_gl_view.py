@@ -122,8 +122,8 @@ def gpu_available() -> bool:
 # parameter presets of Opacity peeling). The display label is decoupled from
 # the shader ``uEffect`` index via :data:`EFFECT_FX`, so labels/order can change
 # without touching the shader.
-EFFECTS = ["Standard", "Matte", "Juicy shiny", "Juicy shiny 2", "Glass",
-           "X-ray", "Jelly", "Skull", "MIP", "Edges",
+EFFECTS = ["Standard", "Matte", "Juicy shiny", "Juicy shiny 2", "Realistic",
+           "Glass", "X-ray", "Jelly", "Skull", "MIP", "Edges",
            "Opacity peeling", "Opacity peeling 2", "Shell", "Topography"]
 
 # Label -> shader effect index (uEffect). "Standard" = flat Phong (shader fx 1),
@@ -131,6 +131,7 @@ EFFECTS = ["Standard", "Matte", "Juicy shiny", "Juicy shiny 2", "Glass",
 # Jelly/Skull reuse Opacity peeling (fx 6).
 EFFECT_FX: dict[str, int] = {
     "Standard": 1, "Matte": 0, "Juicy shiny": 1, "Juicy shiny 2": 1,
+    "Realistic": 10,
     "Glass": 2, "X-ray": 3, "MIP": 4, "Edges": 5,
     "Opacity peeling": 6, "Opacity peeling 2": 7, "Shell": 8, "Topography": 9,
     "Jelly": 6, "Skull": 6,
@@ -153,6 +154,7 @@ EFFECT_PARAMS: dict[str, set] = {
     "Matte":             _MATCAP_PARAMS,    # waxy matcap (was "Default")
     "Juicy shiny":       _PHONG_PARAMS,     # Standard preset (wet, glossy tissue)
     "Juicy shiny 2":     _PHONG_PARAMS,     # sharper, harder highlight
+    "Realistic":         _PHONG_PARAMS,     # living-tissue colour ramp
     "Glass":             _COMMON | {"specular", "shininess", "edgethresh",
                                     "boundthresh", "edgemix", "colortemp",
                                     "lightaz", "lightel"},
@@ -174,7 +176,7 @@ EFFECT_PARAMS: dict[str, set] = {
 }
 # Effects whose cut-face intensity slice is ON by default.
 SLICE_DEFAULT_ON = {"Standard", "Matte", "Juicy shiny", "Juicy shiny 2",
-                    "Topography"}
+                    "Realistic", "Topography"}
 
 # Named parameter presets (control key -> value) applied when a preset effect
 # is selected. Derived from the reference MRIcroGL-style looks.
@@ -194,6 +196,13 @@ EFFECT_PRESET: dict[str, dict] = {
     "Juicy shiny 2": dict(lo=36, hi=303, density=150, ambient=94, diffuse=23,
                           specular=96, shininess=100, lightaz=0, lightel=30,
                           overlay=True, overlaydepth=68),
+    # "Juicy shiny 2" lighting on the living-tissue shader. Ambient is pulled
+    # down and diffuse up versus its parent: the flat, heavily-ambient look
+    # that reads fine in grey turns a coloured surface into a flat pink card,
+    # so the form has to come from directional light instead.
+    "Realistic": dict(lo=36, hi=303, density=150, ambient=52, diffuse=78,
+                      specular=62, shininess=80, lightaz=0, lightel=30,
+                      overlay=True, overlaydepth=68),
     # Translucent, glassy tissue — the brain shows through the skin.
     "Jelly": dict(lo=110, hi=400, density=7, ambient=115, diffuse=65,
                   specular=35, shininess=45, peel=1, tlow=13, thigh=82,
@@ -476,6 +485,33 @@ vec3 grad(vec3 p) {
                 samp(p+vec3(0,0,e.z))-samp(p-vec3(0,0,e.z)));
 }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
+// Living-brain tissue colour by intensity. A fresh brain is not grey: pia and
+// the vessels over it are dark red, cortical grey matter is a dull pinkish
+// mauve, and white matter / fatty tissue is a pale warm cream. Ramping T1
+// intensity through those three anchors reads as real tissue instead of
+// tinted stone. Deliberately desaturated at the top end — pushing white
+// matter toward saturated pink is what makes fake-looking "meat" renders.
+vec3 brainTissue(float d) {
+    // Sampled from a fixed coronal specimen. Real brain is far LIGHTER and
+    // far LESS saturated than intuition suggests: white matter is close to
+    // ivory, cortex only a muted tan-grey, and only the vessels are properly
+    // red. Saturated pink everywhere is the classic "raw meat" failure.
+    //
+    // The floor is deliberately a dusky rose rather than anything near black:
+    // a cut brain has no black regions (sulci read as thin red lines, CSF as
+    // gaps), so letting the ramp fall to black paints holes in the tissue.
+    const vec3 DEEP   = vec3(0.55, 0.33, 0.30);   // sulcal shadow / vessel bed
+    const vec3 CORTEX = vec3(0.82, 0.69, 0.63);   // grey matter, muted tan
+    const vec3 WHITE  = vec3(0.97, 0.94, 0.89);   // white matter, ivory
+    // The white transition is centred on the measured grey/white boundary of
+    // a percentile-normalised T1 (grey matter lands near 0.40, white matter
+    // near 0.58 here). Starting it higher, as a first pass did, left white
+    // matter only a third of the way to ivory and the whole slice read as one
+    // flat tan — the grey/white contrast is most of what makes it legible.
+    float x = clamp(d, 0.0, 1.0);
+    vec3 c = mix(DEEP, CORTEX, smoothstep(0.02, 0.30, x));
+    return mix(c, WHITE, smoothstep(0.44, 0.62, x));
+}
 vec3 tempTint(float t){
     vec3 c = vec3(1.0);
     if (t < 0.5) { c.b = 1.0+(0.5-t); c.r = 1.0-(0.5-t)*0.6; }
@@ -592,7 +628,14 @@ void main() {
             float thr = mix(0.05, 0.42, uSliceDepth);
             float solid = smoothstep(thr, thr + 0.12, sd);
             if (solid > 0.003) {
-                acc.rgb += (1.0-acc.a) * vec3(pow(clamp(sd,0.0,1.0), 0.8)) * solid;
+                // The cut face is a windowed intensity slice — greyscale for
+                // every effect except Realistic, where a grey cross-section
+                // beside coloured tissue would break the illusion, so it runs
+                // through the same tissue ramp as the surface.
+                float sv = pow(clamp(sd,0.0,1.0), 0.8);
+                vec3 face = (uEffect==10) ? brainTissue(sv) * voxelTint(q)
+                                          : vec3(sv);
+                acc.rgb += (1.0-acc.a) * face * solid;
                 acc.a   += (1.0-acc.a) * solid;
             }
             t += dt;
@@ -643,6 +686,21 @@ void main() {
             float e = mix(bnd, edge, uEdgeMix);
             lit = edgeCol * (e * uBrighten + sp * uSpecular);
             a = e * (uEffect==2 ? 0.35 : 0.7);
+        } else if (uEffect==10) {                          // Realistic (living tissue)
+            // Same Phong response as Standard, but the base is tissue-coloured
+            // and gains two touches that sell "alive":
+            //  * a rim of subsurface red where the surface turns away from the
+            //    viewer, mimicking light scattering through thin tissue;
+            //  * a WHITE specular, because a wet surface reflects the light's
+            //    colour, not the tissue's — tinting it pink looks like plastic.
+            vec3 base = brainTissue(pow(d, 0.85));
+            // Subsurface warmth only at grazing angles, and gently: at the
+            // 0.45 it started out it tinted the whole surface salmon.
+            float rim = pow(1.0 - abs(nv.z), 4.0);
+            base = mix(base, base * vec3(1.14, 0.80, 0.75), 0.20 * rim);
+            lit = base * (uAmbient + uDiffuse*ndl) + vec3(1.0, 0.97, 0.94)*(sp*uSpecular);
+            lit *= 1.0 - 0.18 * depth01;
+            a = op;
         } else {                                           // fx1 = "Standard" label (flat Phong)
             vec3 base = vec3(mix(0.5, pow(d,0.8), 0.7));
             lit = base * (uAmbient + uDiffuse*ndl) + vec3(sp*uSpecular);
