@@ -1,39 +1,40 @@
 """Round ``QComboBox`` popups, hover tooltips and menus application-wide.
 
 Every rounded popup in the app uses ONE recipe, the same one the project
-switcher menu sets on itself in ``main_window`` (which renders clean rounded
-corners on macOS, Windows and Linux): make the top-level popup window
-**frameless + translucent + shadowless** so the QSS ``border-radius`` shows
-without a square OS frame or a black background behind it.
+switcher menu sets on itself in ``main_window``: make the top-level popup
+window **frameless + translucent + shadowless** so the QSS ``border-radius``
+shows without a square OS frame or a black background behind it.
 
-Two kinds of popup need help reaching that recipe:
+The subtlety is *when* the translucent attribute is set. A window only gets a
+real alpha channel on Windows and X11 if transparency is requested **before the
+OS window is created**; you cannot add an alpha channel to a window that already
+exists there (macOS composites every window with alpha regardless, which is why
+it never showed the problem). The menus get this for free: we build the
+``QMenu`` and set the attribute on it before it is ever shown, so its window is
+born translucent.
 
-1. ``QComboBox`` dropdowns. The QSS rule ``QComboBox { combobox-popup: 0; }``
-   (in ``theme.qss``) forces Qt's own ``QListView`` popup instead of the
-   native macOS ``NSMenu``, which ignores every stylesheet rule. With it the
-   popup view honours ``QComboBox QAbstractItemView`` (rounded list + rounded
-   selection). The popup still lives in a top-level container with a square OS
-   frame, so the application event filter below makes that container frameless
-   and translucent.
+Qt's own combo dropdown (``QComboBoxPrivateContainer``) and hover tooltip
+(``QTipLabel``) are created internally, so an application event filter is the
+only way to reach them. The key is to reach them on the ``Polish`` event, which
+Qt delivers **before** the native window is created (verified: the widget's
+``WA_WState_Created`` attribute is False at Polish and True by Show), not on the
+``Show`` event, which fires after. Setting the flags at Polish means the window
+is created translucent, with clean transparent corners on every platform, and
+needs no clip mask.
 
-2. Hover tooltips (``QTipLabel``). Same treatment so the ``QToolTip``
-   border-radius renders without square OS corners.
+An earlier version instead set the attribute at Show (too late off-macOS, so the
+corners came out black) and tried to paper over it with a rounded clip mask,
+which also mis-clipped tooltips whose size was not laid out yet. Both are gone:
+one Polish-time recipe now serves combos, tooltips and menus alike.
 
-Menus that the app constructs itself get the recipe directly through
-:func:`round_menu` (no event filter needed, since we own the widget).
-
-Why no clip mask: an earlier version clipped these windows to a rounded
-``QRegion`` on Windows / Linux, on the theory that a translucent window goes
-black in the corners without a compositor. On composited desktops (the norm)
-that is unnecessary, and the mask had to read the popup's size the instant it
-was shown, before Qt had laid a tooltip out, so it clipped popups to a stale,
-tiny rectangle and reintroduced exactly the black corners it meant to remove.
-The project switcher menu carries no mask and looks correct everywhere, so the
-whole app now relies on translucency alone.
+The QSS rule ``QComboBox { combobox-popup: 0; }`` (in ``theme.qss``) is still
+required so Qt uses its own stylesheet-aware ``QListView`` popup instead of the
+native macOS ``NSMenu``.
 
 Defensive: any failure is swallowed so a dropdown or tooltip can never be
-broken by this cosmetic pass. Call :func:`install` once, after the
-QApplication and theme are set up.
+broken by this cosmetic pass. Call :func:`install` once, right after the
+QApplication is created and before any window is built (so no combo or tooltip
+is polished before the filter is watching).
 """
 
 from __future__ import annotations
@@ -52,7 +53,12 @@ class _PopupRounder(QObject):
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
         try:
-            if event.type() != QEvent.Type.Show or obj.property(_FLAG):
+            # Polish, NOT Show: Polish is delivered BEFORE the widget's native
+            # window is created, so the translucent attribute we set here is in
+            # place when the OS creates the window and it gets a real alpha
+            # channel (clean corners on Windows / X11). At Show the window
+            # already exists and translucency can no longer be added off-macOS.
+            if event.type() != QEvent.Type.Polish or obj.property(_FLAG):
                 return False
             cls = obj.metaObject().className()
             if cls == "QComboBoxPrivateContainer":
@@ -68,21 +74,20 @@ class _PopupRounder(QObject):
 
     @staticmethod
     def _round(obj) -> None:
-        """Make *obj* a frameless, translucent, shadowless top-level window.
+        """Make *obj* frameless + translucent + shadowless before its window exists.
 
-        Geometry is captured and restored around the flag change so the popup
-        stays exactly where Qt placed it, then re-shown so the flags apply.
+        Called on Polish, so no native window has been created yet: we just set
+        the flags and the attribute and let Qt create the window translucent. No
+        geometry capture and no re-show are needed (the widget is not visible
+        yet), unlike the old Show-time path.
         """
         obj.setProperty(_FLAG, True)
-        geo = obj.geometry()
         obj.setWindowFlags(
             obj.windowFlags()
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.NoDropShadowWindowHint
         )
         obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        obj.setGeometry(geo)
-        obj.show()  # re-show so the new window flags take effect
 
 
 _instance: _PopupRounder | None = None
@@ -101,8 +106,10 @@ def round_menu(menu) -> None:
     """Give a ``QMenu`` rounded corners (the project-menu recipe).
 
     Frameless + translucent + no-shadow so the QSS ``QMenu#rounded-menu``
-    border-radius renders without a square OS frame behind it. Use for any
-    context / popup menu (e.g. the Welcome recents right-click menu).
+    border-radius renders without a square OS frame behind it. Call this right
+    after building the menu and before it is shown, so its window is created
+    translucent. Use for any context / popup menu (e.g. the Welcome recents
+    right-click menu).
     """
     menu.setObjectName("rounded-menu")
     menu.setWindowFlags(
