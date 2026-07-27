@@ -31,8 +31,8 @@ from __future__ import annotations
 import logging
 import sys
 
-from PyQt6.QtCore import QEvent, QObject, QRectF, Qt
-from PyQt6.QtGui import QPainterPath, QRegion
+from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtGui import QRegion
 
 log = logging.getLogger(__name__)
 
@@ -104,15 +104,35 @@ def _mask(obj, radius: int = _RADIUS) -> None:
     No-op on macOS, where the translucent window already composites clean
     antialiased corners. Elsewhere this removes the corner pixels from the
     window so an uncomposited desktop cannot paint them black.
+
+    The region is assembled from two overlapping rectangles (a plus/cross
+    shape) plus four ``Ellipse`` corner regions. That is the precise way to
+    build a rounded-rect ``QRegion``: the earlier ``QPainterPath`` ->
+    ``toFillPolygon().toPolygon()`` route flattened the arcs to a coarse,
+    integer-rounded polygon, so a few desktop pixels still peeked through the
+    corners as black on uncomposited Windows / X11. Rectangles + ellipses give
+    exact corners with none of that residue.
     """
     if not _NEEDS_MASK:
         return
     rect = obj.rect()
-    if rect.width() <= 0 or rect.height() <= 0:
+    w, h = rect.width(), rect.height()
+    if w <= 0 or h <= 0:
         return
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(rect), float(radius), float(radius))
-    obj.setMask(QRegion(path.toFillPolygon().toPolygon()))
+    x, y = rect.x(), rect.y()
+    r = max(0, min(radius, w // 2, h // 2))
+    if r == 0:
+        obj.clearMask()
+        return
+    d = 2 * r
+    Ellipse = QRegion.RegionType.Ellipse
+    region = QRegion(x + r, y, w - d, h)             # full-height centre band
+    region = region.united(QRegion(x, y + r, w, h - d))  # full-width centre band
+    region = region.united(QRegion(x, y, d, d, Ellipse))                  # top-left
+    region = region.united(QRegion(x + w - d, y, d, d, Ellipse))          # top-right
+    region = region.united(QRegion(x, y + h - d, d, d, Ellipse))          # bottom-left
+    region = region.united(QRegion(x + w - d, y + h - d, d, d, Ellipse))  # bottom-right
+    obj.setMask(region)
 
 
 _instance: _PopupRounder | None = None
