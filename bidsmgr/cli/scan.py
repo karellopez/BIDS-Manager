@@ -1308,7 +1308,10 @@ def _default_dataset_slug(dicom_root: Path) -> str:
 
 
 def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
-    """Seed a recording-metadata scaffold from detected EEG/MEG event codes.
+    """Seed a recording-metadata scaffold from what the scan detected.
+
+    Two sources feed it: EEG/MEG event codes, and the PET tracer facts every
+    PET row agrees on. Both are starting points for the user, never final.
 
     Reads the internal ``_event_codes`` column (populated by the EEG/MEG
     scanner, dropped from the TSV itself), unions the codes across recordings,
@@ -1325,23 +1328,21 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
     CLI re-scan does not clobber labels the user has filled in (the GUI resets a
     stale scaffold when it starts a fresh scan).
     """
-    if "source_file" not in merged.columns:
-        return None
-    eeg_rows = merged[merged["source_file"].astype(str).str.len() > 0]
-    if eeg_rows.empty:
-        return None
-
-    # Union of detected trigger/annotation codes across all recordings.
     codes: list[str] = []
-    for raw in eeg_rows.get("_event_codes", pd.Series([], dtype=object)):
-        try:
-            for c in json.loads(raw) if isinstance(raw, str) and raw else []:
-                if c and c not in codes:
-                    codes.append(c)
-        except (ValueError, TypeError):
-            continue
+    if "source_file" in merged.columns:
+        eeg_rows = merged[merged["source_file"].astype(str).str.len() > 0]
+        # Union of detected trigger/annotation codes across all recordings.
+        for raw in eeg_rows.get("_event_codes", pd.Series([], dtype=object)):
+            try:
+                for c in json.loads(raw) if isinstance(raw, str) and raw else []:
+                    if c and c not in codes:
+                        codes.append(c)
+            except (ValueError, TypeError):
+                continue
 
-    if not codes:
+    pet_defaults = _seed_pet_defaults(merged)
+
+    if not codes and pet_defaults is None:
         return None
 
     scaffold_path = scaffold_sidecar_path(output_tsv)
@@ -1350,10 +1351,49 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
         return None
 
     spec = RecordingMetaSpec(
-        event_maps={"*": {c: "" for c in sorted(codes)}},
+        event_maps={"*": {c: "" for c in sorted(codes)}} if codes else {},
     )
+    if pet_defaults is not None:
+        spec.pet_defaults = pet_defaults
     scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
     return scaffold_path
+
+
+def _seed_pet_defaults(merged: pd.DataFrame):
+    """Seed the scaffold's PET block from values the scan is sure of.
+
+    Only unambiguous facts are seeded, and only when every PET row in the
+    dataset agrees on them. A tracer or radionuclide that differs between rows
+    is a per-row property, not a dataset default, so seeding one would be
+    wrong for the others.
+
+    The dose is NOT seeded: it is per-injection by definition, and a shared
+    default would be actively misleading. It stays a per-row suggestion the
+    user adopts deliberately.
+
+    Returns ``None`` when there is no PET in the dataset or nothing agreed on.
+    """
+    if "bids_guess_datatype" not in merged.columns:
+        return None
+    pet_rows = merged[merged["bids_guess_datatype"].astype(str) == "pet"]
+    if pet_rows.empty:
+        return None
+
+    def _unanimous(column: str) -> Optional[str]:
+        if column not in pet_rows.columns:
+            return None
+        values = {
+            str(v).strip() for v in pet_rows[column] if str(v).strip()
+        }
+        return values.pop() if len(values) == 1 else None
+
+    from ..recording_meta import PetAcquisitionSpec
+
+    seeded = PetAcquisitionSpec(
+        tracer_name=_unanimous("tracer_suggestion"),
+        tracer_radionuclide=_unanimous("radionuclide_suggestion"),
+    )
+    return seeded if seeded.model_dump(exclude_none=True, exclude_defaults=True) else None
 
 
 def _unified_column_order(df: pd.DataFrame) -> list[str]:

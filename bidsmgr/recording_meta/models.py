@@ -58,6 +58,37 @@ COMMON_CAP_MANUFACTURERS: tuple[str, ...] = (
 )
 
 
+# PET controlled vocabularies, offered as dropdowns in the dataset dialog. The
+# user can always type another value: these are the common cases, not a closed
+# set. Positron-emitting radionuclides in routine clinical and research use.
+COMMON_RADIONUCLIDES: tuple[str, ...] = (
+    "F18", "C11", "O15", "N13", "Ga68", "Cu64", "Zr89", "Rb82", "I124",
+    "Br76", "Sc44", "Y86", "Ge68",
+)
+
+# Tracer short labels as they conventionally appear in BIDS PET datasets.
+COMMON_TRACERS: tuple[str, ...] = (
+    "FDG", "PIB", "AV45", "FBB", "FMM", "FTP", "MK6240", "RAC", "CFN",
+    "FDOPA", "FET", "FLT", "PSMA", "DOTATATE", "UCBJ", "SV2A", "FEOBV",
+)
+
+# BIDS ModeOfAdministration is a closed set in practice.
+MODES_OF_ADMINISTRATION: tuple[str, ...] = ("bolus", "infusion", "bolus-infusion")
+
+# BIDS AcquisitionMode.
+PET_ACQUISITION_MODES: tuple[str, ...] = ("list mode", "sinogram")
+
+# Unit vocabularies, one per quantity, so the dialog can offer the right list
+# beside each field instead of one undifferentiated pile.
+RADIOACTIVITY_UNITS: tuple[str, ...] = ("MBq", "kBq", "Bq", "mCi", "uCi", "nCi")
+MASS_UNITS: tuple[str, ...] = ("ug", "mg", "g", "umol", "nmol", "mol")
+SPECIFIC_RADIOACTIVITY_UNITS: tuple[str, ...] = (
+    "Bq/g", "MBq/ug", "GBq/umol", "MBq/nmol", "Bq/umol",
+)
+MOLAR_ACTIVITY_UNITS: tuple[str, ...] = ("GBq/umol", "MBq/nmol", "Bq/mol")
+PET_IMAGE_UNITS: tuple[str, ...] = ("Bq/mL", "kBq/mL", "MBq/mL", "SUV", "counts")
+
+
 class _Model(BaseModel):
     """Shared config: forbid unknown keys so typos surface at load time."""
 
@@ -187,6 +218,75 @@ class AcquisitionSpec(_Model):
     extras: Optional[ExtrasSpec] = None
 
 
+class PetAcquisitionSpec(_Model):
+    """The PET block: what a PET scan cannot record about itself.
+
+    PET is the modality where this subsystem earns its keep. The BIDS PET
+    sidecar requires around forty fields and the DICOM header carries only
+    about half of them: a scanner records how it reconstructed an image, but
+    not how much tracer went into the person, in what form, or when relative to
+    the scan. Those are facts from the radiochemistry lab and the injection
+    record, so they can only ever come from the user.
+
+    Grouped the way the acquisition itself divides, which is also how the
+    dataset dialog lays the fields out. Every field is optional and additive:
+    unset means "leave whatever the converter wrote".
+    """
+
+    # --- tracer -------------------------------------------------------
+    tracer_name: Optional[str] = None                  # -> TracerName
+    tracer_radionuclide: Optional[str] = None          # -> TracerRadionuclide
+    tracer_molecular_weight: Optional[float] = None    # -> TracerMolecularWeight
+    tracer_molecular_weight_units: Optional[str] = None
+    tracer_radlex: Optional[str] = None                # -> TracerRadLex
+    tracer_snomed: Optional[str] = None                # -> TracerSNOMED
+
+    # --- radiochemistry and dose --------------------------------------
+    injected_radioactivity: Optional[float] = None
+    injected_radioactivity_units: Optional[str] = None
+    injected_mass: Optional[float] = None
+    injected_mass_units: Optional[str] = None
+    specific_radioactivity: Optional[float] = None
+    specific_radioactivity_units: Optional[str] = None
+    molar_activity: Optional[float] = None
+    molar_activity_units: Optional[str] = None
+    injected_volume: Optional[float] = None            # -> InjectedVolume (mL)
+    purity: Optional[float] = None                     # -> Purity (percent)
+
+    # --- administration -----------------------------------------------
+    mode_of_administration: Optional[str] = None       # -> ModeOfAdministration
+    injection_start: Optional[float] = None            # -> InjectionStart (s)
+    injection_end: Optional[float] = None              # -> InjectionEnd (s)
+    infusion_radioactivity: Optional[float] = None
+    infusion_start: Optional[float] = None
+    infusion_speed: Optional[float] = None
+    infusion_speed_units: Optional[str] = None
+
+    # --- timing -------------------------------------------------------
+    time_zero: Optional[str] = None                    # -> TimeZero (hh:mm:ss)
+    scan_start: Optional[float] = None                 # -> ScanStart (s)
+
+    # --- acquisition --------------------------------------------------
+    acquisition_mode: Optional[str] = None             # -> AcquisitionMode
+    image_decay_corrected: Optional[bool] = None       # -> ImageDecayCorrected
+    image_decay_correction_time: Optional[float] = None
+    attenuation_correction: Optional[str] = None       # -> AttenuationCorrection
+    units: Optional[str] = None                        # -> Units
+    body_part: Optional[str] = None                    # -> BodyPart
+
+    # --- reconstruction -----------------------------------------------
+    recon_method_name: Optional[str] = None            # -> ReconMethodName
+    recon_method_parameter_labels: list[str] = []
+    recon_method_parameter_units: list[str] = []
+    recon_method_parameter_values: list[float] = []
+    recon_filter_type: Optional[str] = None            # -> ReconFilterType
+    recon_filter_size: Optional[float] = None          # -> ReconFilterSize
+
+    # --- device / site (PET-side mirrors of the agnostic block) -------
+    manufacturer: Optional[str] = None                 # -> Manufacturer
+    manufacturers_model_name: Optional[str] = None     # -> ManufacturersModelName
+
+
 class RecordingMetaSpec(_Model):
     """Root enrichment object for one dataset.
 
@@ -201,6 +301,15 @@ class RecordingMetaSpec(_Model):
     task_protocols: dict[str, TaskProtocol] = {}
     event_maps: dict[str, EventMap] = {}
     overrides: dict[str, AcquisitionSpec] = {}
+    # PET's equivalent pair. Kept as separate fields rather than folded into
+    # ``defaults`` because the two blocks share almost no fields: an EEG cap
+    # manufacturer and an injected dose have nothing to say to each other. One
+    # scaffold file still holds both, so a PET/MR study needs only one place
+    # for the site and event information they DO share.
+    # Older scaffolds have no PET section at all; the defaults here make those
+    # load unchanged.
+    pet_defaults: PetAcquisitionSpec = PetAcquisitionSpec()
+    pet_overrides: dict[str, PetAcquisitionSpec] = {}
     # Dataset-level phenotype measure tables (TSV/CSV/XLSX/ODS paths keyed by
     # participant_id). Written to ``phenotype/<measure>.tsv`` + ``.json`` by the
     # metadata engine. Agnostic: applies to any modality.
@@ -217,6 +326,15 @@ __all__ = [
     "EventMap",
     "COMMON_MANUFACTURERS",
     "COMMON_CAP_MANUFACTURERS",
+    "COMMON_RADIONUCLIDES",
+    "COMMON_TRACERS",
+    "MODES_OF_ADMINISTRATION",
+    "PET_ACQUISITION_MODES",
+    "RADIOACTIVITY_UNITS",
+    "MASS_UNITS",
+    "SPECIFIC_RADIOACTIVITY_UNITS",
+    "MOLAR_ACTIVITY_UNITS",
+    "PET_IMAGE_UNITS",
     "AcceptableImpedance",
     "LightingConditions",
     "ExtrasSpec",
@@ -224,5 +342,6 @@ __all__ = [
     "AuxChannelSpec",
     "TaskProtocol",
     "AcquisitionSpec",
+    "PetAcquisitionSpec",
     "RecordingMetaSpec",
 ]

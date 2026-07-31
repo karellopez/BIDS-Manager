@@ -15,7 +15,13 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from .models import AcquisitionSpec, EventMap, RecordingMetaSpec, TaskProtocol
+from .models import (
+    AcquisitionSpec,
+    EventMap,
+    PetAcquisitionSpec,
+    RecordingMetaSpec,
+    TaskProtocol,
+)
 
 _GLOBAL_EVENT_KEY = "*"
 
@@ -62,6 +68,36 @@ def merge_acquisition(
     return AcquisitionSpec.model_validate(merged)
 
 
+def merge_pet(
+    base: PetAcquisitionSpec, over: Optional[PetAcquisitionSpec]
+) -> PetAcquisitionSpec:
+    """Return ``base`` with every set field of ``over`` layered on top.
+
+    Same contract as :func:`merge_acquisition`: a non-None override wins. The
+    three ``recon_method_parameter_*`` lists are replaced as a unit rather than
+    merged element-wise, because their entries are positional (label N goes
+    with value N and unit N) and interleaving two lists would silently
+    mis-pair them.
+    """
+    if over is None:
+        return base.model_copy(deep=True)
+
+    merged = base.model_dump()
+    for key, value in over.model_dump(exclude_none=True).items():
+        if key.startswith("recon_method_parameter_"):
+            if value:
+                merged[key] = value
+        else:
+            merged[key] = value
+
+    return PetAcquisitionSpec.model_validate(merged)
+
+
+def resolve_pet(spec: RecordingMetaSpec, row_id: str) -> PetAcquisitionSpec:
+    """The effective PET block for one recording."""
+    return merge_pet(spec.pet_defaults, spec.pet_overrides.get(row_id))
+
+
 def resolve_effective(
     spec: RecordingMetaSpec,
     row_id: str,
@@ -89,4 +125,10 @@ def resolve_effective(
     )
 
 
-__all__ = ["EffectiveSpec", "merge_acquisition", "resolve_effective"]
+__all__ = [
+    "EffectiveSpec",
+    "merge_acquisition",
+    "merge_pet",
+    "resolve_effective",
+    "resolve_pet",
+]

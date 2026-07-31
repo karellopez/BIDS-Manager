@@ -61,6 +61,7 @@ from ..converter import (
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
     update_scans_tsv,
@@ -365,6 +366,12 @@ def _convert_subject(
         # EEG/MEG sidecar/channels/events enrichment from the recording-
         # metadata spec (no-op for MRI-only subjects or when spec is None).
         n_enriched = enrich_recording_sidecars(staging, tasks, spec)
+        # PET sidecar enrichment: rename DICOM-derived keys to their BIDS
+        # names, fill the radiochemistry the scanner cannot record, fix the
+        # fields BIDS types as per-frame arrays, and prune the patient
+        # identifiers dcm2niix leaves behind under ``-ba n``. Runs even with
+        # no spec, since the rename, type-fix and prune passes need no input.
+        n_enriched += enrich_pet_sidecars(staging, tasks, spec)
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
