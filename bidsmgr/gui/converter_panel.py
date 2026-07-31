@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from itertools import zip_longest
 from pathlib import Path
 from typing import Optional
 
@@ -1135,7 +1136,10 @@ class ConverterPanel(QWidget):
             self.set_columns_visible(dlg.result_visibility())
 
     def _open_recording_meta(self) -> None:
-        """Open the dataset-level EEG/MEG recording-metadata editor.
+        """Open the dataset-level recording-metadata editor.
+
+        Covers EEG/MEG and PET plus the modality-agnostic sections; the dialog
+        shows only the blocks whose modality the scan actually found.
 
         Edits the scaffold beside the inventory TSV (the same file the scan
         seeds and the convert verb auto-discovers). Requires a loaded scan so
@@ -1156,6 +1160,7 @@ class ConverterPanel(QWidget):
             scaffold, self._present_datatypes(), self,
             montage_suggestions=self._montage_suggestions(),
             manufacturer_suggestions=self._manufacturer_suggestions(),
+            pet_suggestions=self._pet_suggestions(),
         )
         if dlg.exec() and self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.
@@ -1217,6 +1222,23 @@ class ConverterPanel(QWidget):
         if "montage_suggestion" not in df.columns:
             return []
         return self._distinct_column("montage_suggestion")
+
+    def _pet_suggestions(self) -> dict[str, list[str]]:
+        """Distinct per-row PET scan hints, grouped for the dialog's summaries.
+
+        The tracer and radionuclide travel together because they are read from
+        the same DICOM sequence and mean little apart.
+        """
+        tracers = self._distinct_column("tracer_suggestion")
+        nuclides = self._distinct_column("radionuclide_suggestion")
+        return {
+            "tracer": [
+                " / ".join(p for p in pair if p)
+                for pair in zip_longest(tracers, nuclides, fillvalue="")
+            ],
+            "dose": self._distinct_column("injected_dose_suggestion"),
+            "recon": self._distinct_column("recon_method_suggestion"),
+        }
 
     def _manufacturer_suggestions(self) -> list[str]:
         """Distinct per-recording manufacturer suggestions found at scan (header

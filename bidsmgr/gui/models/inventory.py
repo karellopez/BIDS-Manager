@@ -45,7 +45,11 @@ from ...project import (
     UserToggleInclude,
 )
 from ...project.types import ProjectState
-from ...recording_meta import AcquisitionSpec, RecordingMetaSpec
+from ...recording_meta import (
+    AcquisitionSpec,
+    PetAcquisitionSpec,
+    RecordingMetaSpec,
+)
 from ..delegates import HIGHLIGHT_ROLE, INHERITED_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
 
 log = logging.getLogger(__name__)
@@ -73,6 +77,15 @@ _INHERITANCE_FIELDS: dict[str, str] = {
 # different devices); institution is agnostic and lives at dataset level in the
 # Dataset-metadata dialog, NOT here. MEG fields are only the ones mne-bids
 # cannot derive. All are string-valued.
+def _as_text(value) -> str:
+    """Render a spec value for a form field, without a float's trailing .0."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 _ACQ_OVERRIDE_FIELDS: dict[str, str] = {
     "manufacturer": "manufacturer",
     "amplifier_model": "amplifier_model",
@@ -83,6 +96,36 @@ _ACQ_OVERRIDE_FIELDS: dict[str, str] = {
     "associated_empty_room": "associated_empty_room",
     "subject_artefact_description": "subject_artefact_description",
 }
+
+# The PET equivalent. Kept as its own map because the two blocks live in
+# separate spec fields (pet_defaults / pet_overrides) and share no field names,
+# so one combined map would only invite a lookup into the wrong block.
+_PET_OVERRIDE_FIELDS: dict[str, str] = {
+    "tracer_name": "tracer_name",
+    "tracer_radionuclide": "tracer_radionuclide",
+    "injected_radioactivity": "injected_radioactivity",
+    "injected_radioactivity_units": "injected_radioactivity_units",
+    "injected_mass": "injected_mass",
+    "injected_mass_units": "injected_mass_units",
+    "specific_radioactivity": "specific_radioactivity",
+    "specific_radioactivity_units": "specific_radioactivity_units",
+    "mode_of_administration": "mode_of_administration",
+    "injection_start": "injection_start",
+    "time_zero": "time_zero",
+    "scan_start": "scan_start",
+    "acquisition_mode": "acquisition_mode",
+    "units": "units",
+    "body_part": "body_part",
+    "recon_method_name": "recon_method_name",
+    "recon_filter_type": "recon_filter_type",
+}
+
+# PET spec fields typed as numbers. A blank stays None; anything unparseable is
+# rejected rather than coerced, so a typo cannot become a silent zero.
+_PET_NUMERIC_FIELDS: frozenset[str] = frozenset({
+    "injected_radioactivity", "injected_mass", "specific_radioactivity",
+    "injection_start", "scan_start",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +508,78 @@ class InventoryTableModel(QAbstractTableModel):
         else:
             overrides[rid] = updated
         self._global_spec = self._global_spec.model_copy(update={"overrides": overrides})
+
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
+
+    # ------------------------------------------------------------------
+    # PET per-row overrides (same inheritance contract as acquisition)
+    # ------------------------------------------------------------------
+
+    def pet_default(self, field: str) -> str:
+        """The dataset default for a PET field, as a string."""
+        attr = _PET_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        return _as_text(getattr(self._global_spec.pet_defaults, attr, None))
+
+    def pet_override(self, row: int, field: str) -> str:
+        """The raw per-row PET override (``""`` if unset)."""
+        attr = _PET_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        over = self._global_spec.pet_overrides.get(self.row_id(row))
+        if over is None:
+            return ""
+        return _as_text(getattr(over, attr, None))
+
+    def pet_effective(self, row: int, field: str) -> str:
+        """Per-row override when set, else the inherited dataset default."""
+        ov = self.pet_override(row, field)
+        return ov if ov else self.pet_default(field)
+
+    def pet_is_inherited(self, row: int, field: str) -> bool:
+        return not self.pet_override(row, field) and bool(self.pet_default(field))
+
+    def set_pet_override(self, row: int, field: str, value: str) -> bool:
+        """Set or clear a per-row PET override in the scaffold spec.
+
+        Mirrors :meth:`set_acq_override`: writing the dataset default (or a
+        blank) clears the override so the row inherits again.
+        """
+        attr = _PET_OVERRIDE_FIELDS.get(field)
+        if attr is None or not (0 <= row < len(self._df)):
+            return False
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        new_val = (value or "").strip()
+        if new_val == self.pet_default(field):
+            new_val = ""
+        if new_val == self.pet_override(row, field):
+            return False
+
+        typed: object = new_val or None
+        if typed is not None and field in _PET_NUMERIC_FIELDS:
+            try:
+                typed = float(new_val)
+            except ValueError:
+                # Not a number: refuse rather than store a coerced value that
+                # would look deliberate in the sidecar.
+                return False
+
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.pet_overrides)
+        current = overrides.get(rid) or PetAcquisitionSpec()
+        updated = current.model_copy(update={attr: typed})
+
+        if updated == PetAcquisitionSpec():
+            overrides.pop(rid, None)
+        else:
+            overrides[rid] = updated
+        self._global_spec = self._global_spec.model_copy(
+            update={"pet_overrides": overrides})
 
         self.recordingSpecChanged.emit()
         self.refresh_row(row)

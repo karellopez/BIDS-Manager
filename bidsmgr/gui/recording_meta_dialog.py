@@ -41,7 +41,16 @@ from PyQt6.QtWidgets import (
 from ..recording_meta import (
     COMMON_CAP_MANUFACTURERS,
     COMMON_MANUFACTURERS,
+    COMMON_RADIONUCLIDES,
+    COMMON_TRACERS,
+    MASS_UNITS,
+    MODES_OF_ADMINISTRATION,
+    PET_ACQUISITION_MODES,
+    PET_IMAGE_UNITS,
+    RADIOACTIVITY_UNITS,
+    SPECIFIC_RADIOACTIVITY_UNITS,
     AcquisitionSpec,
+    PetAcquisitionSpec,
     RecordingMetaSpec,
     dump_spec,
     load_spec,
@@ -55,8 +64,13 @@ _BLANK = "(blank)"
 
 # Display names + an "EEG and MEG"-style joiner so a section whose field is
 # shared by several present modalities is labelled with all of them.
-_MODALITY_NAMES = {"eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS"}
-_MODALITY_ORDER = ("eeg", "meg", "ieeg", "nirs")
+_MODALITY_NAMES = {
+    "eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS", "pet": "PET",
+}
+_MODALITY_ORDER = ("eeg", "meg", "ieeg", "nirs", "pet")
+
+# Datatypes whose presence makes the modality-specific region worth showing.
+_SPECIFIC_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs", "pet"})
 
 
 def _join_modalities(mods: list[str]) -> str:
@@ -91,6 +105,7 @@ class RecordingMetaDialog(QDialog):
         parent: Optional[QWidget] = None,
         montage_suggestions: Optional[list[str]] = None,
         manufacturer_suggestions: Optional[list[str]] = None,
+        pet_suggestions: Optional[dict[str, list[str]]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Dataset metadata")
@@ -111,6 +126,13 @@ class RecordingMetaDialog(QDialog):
         # (reference / ground / montage / cap) are hidden for MEG-only. The
         # agnostic sections (events, phenotype) always show.
         self._present = set(present_datatypes or {"eeg", "meg", "ieeg", "nirs"})
+        # Read-only scan hints, shown beside the fields they inform. Same
+        # contract as the montage and manufacturer hints: proposed, never
+        # applied, because a vendor string can always parse wrongly.
+        pet_suggestions = pet_suggestions or {}
+        self._pet_tracer_suggestions = list(pet_suggestions.get("tracer", []))
+        self._pet_dose_suggestions = list(pet_suggestions.get("dose", []))
+        self._pet_recon_suggestions = list(pet_suggestions.get("recon", []))
         self._spec = self._load()
 
         outer = QVBoxLayout(self)
@@ -141,6 +163,16 @@ class RecordingMetaDialog(QDialog):
         bl.addWidget(self._device_box)
         bl.addWidget(self._eeg_box)
         bl.addWidget(self._meg_box)
+        # PET: four groups, split the way the acquisition itself divides, so
+        # the ~40 required fields read as four short forms instead of one wall.
+        self._pet_boxes = [
+            self._build_pet_tracer_group(),
+            self._build_pet_administration_group(),
+            self._build_pet_acquisition_group(),
+            self._build_pet_recon_group(),
+        ]
+        for box in self._pet_boxes:
+            bl.addWidget(box)
         # Region 2 - MODALITY-AGNOSTIC (apply to any dataset, incl. MRI):
         # institution (site info, written to every modality's sidecar), events
         # and phenotype, each writing to its own destination.
@@ -192,23 +224,28 @@ class RecordingMetaDialog(QDialog):
     def _apply_modality_constraints(self) -> None:
         """Show/hide modality-specific sections by what was scanned.
 
-        Both non-agnostic sections are hidden when the dataset has no
-        EEG/MEG/iEEG/NIRS. The EEG montage/reference section is additionally
-        hidden for a dataset with no scalp-EEG (e.g. MEG-only). The
-        modality-specific region header hides when neither block applies.
+        A section is shown only when its modality was actually scanned: the
+        EEG/MEG device block for electrophysiology, the montage and reference
+        block only with scalp EEG or iEEG, the MEG block only with MEG, and the
+        four PET blocks only with PET. The region header hides when none apply,
+        which is what an MRI-only dataset sees.
         """
         has_eeg_meg = bool(self._present & {"eeg", "meg", "ieeg", "nirs"})
         has_eeg = bool(self._present & {"eeg", "ieeg"})
         has_meg = "meg" in self._present
+        has_pet = "pet" in self._present
         # Flags consulted by build_spec so a hidden section's loaded values are
         # preserved (not clobbered by the empty, never-shown widgets).
         self._device_applies = has_eeg_meg
         self._eeg_applies = has_eeg
         self._meg_applies = has_meg
+        self._pet_applies = has_pet
         self._device_box.setVisible(has_eeg_meg)
         self._eeg_box.setVisible(has_eeg)
         self._meg_box.setVisible(has_meg)
-        self._specific_region.setVisible(has_eeg_meg)
+        for box in self._pet_boxes:
+            box.setVisible(has_pet)
+        self._specific_region.setVisible(has_eeg_meg or has_pet)
 
     # ------------------------------------------------------------------
     # build
@@ -340,6 +377,151 @@ class RecordingMetaDialog(QDialog):
         self._form_row(form, "Associated empty-room:", self._associated_empty_room, "associated_empty_room")
         self._form_row(form, "Subject artefact description:",
                        self._subject_artefact_description, "subject_artefact_description")
+        return box
+
+    # ------------------------------------------------------------------
+    # PET
+    # ------------------------------------------------------------------
+
+    def _pet_combo(self, options, *, editable: bool = True) -> QComboBox:
+        """A dropdown seeded with the common values but still free-text.
+
+        The vocabularies are the common cases, not a closed set: a study using
+        a tracer nobody has listed must still be describable.
+        """
+        combo = QComboBox()
+        combo.setEditable(editable)
+        combo.addItem("")
+        combo.addItems(options)
+        combo.setProperty("class", "ent-input")
+        return combo
+
+    def _build_pet_tracer_group(self) -> QGroupBox:
+        # What was injected. None of this is in the DICOM header in a form BIDS
+        # can use, so it comes from the radiochemistry record.
+        box = QGroupBox("Tracer  ·  PET  →  sub-..._pet.json")
+        form = QFormLayout(box)
+        _tighten_form(form)
+
+        self._pet_tracer_name = self._pet_combo(COMMON_TRACERS)
+        self._pet_radionuclide = self._pet_combo(COMMON_RADIONUCLIDES)
+
+        self._form_row(form, "Tracer name:", self._pet_tracer_name, "TracerName")
+        self._form_row(form, "Radionuclide:", self._pet_radionuclide,
+                       "TracerRadionuclide")
+        hint = self._suggestion_label(self._pet_tracer_suggestions)
+        if hint is not None:
+            form.addRow("", hint)
+        return box
+
+    def _build_pet_administration_group(self) -> QGroupBox:
+        # How much went in, in what form, and when. Purely from the injection
+        # record: a scanner cannot know any of it.
+        box = QGroupBox(
+            "Radiochemistry & administration  ·  PET  →  sub-..._pet.json"
+        )
+        form = QFormLayout(box)
+        _tighten_form(form)
+
+        self._pet_injected_radioactivity = QLineEdit()
+        self._pet_injected_radioactivity.setPlaceholderText("e.g. 44.4")
+        self._pet_injected_radioactivity_units = self._pet_combo(RADIOACTIVITY_UNITS)
+        self._pet_injected_mass = QLineEdit()
+        self._pet_injected_mass_units = self._pet_combo(MASS_UNITS)
+        self._pet_specific_radioactivity = QLineEdit()
+        self._pet_specific_radioactivity_units = self._pet_combo(
+            SPECIFIC_RADIOACTIVITY_UNITS)
+        self._pet_mode_of_administration = self._pet_combo(MODES_OF_ADMINISTRATION)
+        self._pet_injection_start = QLineEdit()
+        self._pet_injection_start.setPlaceholderText("seconds relative to TimeZero")
+
+        self._form_row(form, "Injected radioactivity:",
+                       self._pet_injected_radioactivity, "InjectedRadioactivity")
+        self._form_row(form, "     units:",
+                       self._pet_injected_radioactivity_units,
+                       "InjectedRadioactivityUnits")
+        self._form_row(form, "Injected mass:", self._pet_injected_mass,
+                       "InjectedMass")
+        self._form_row(form, "     units:", self._pet_injected_mass_units,
+                       "InjectedMassUnits")
+        self._form_row(form, "Specific radioactivity:",
+                       self._pet_specific_radioactivity, "SpecificRadioactivity")
+        self._form_row(form, "     units:",
+                       self._pet_specific_radioactivity_units,
+                       "SpecificRadioactivityUnits")
+        self._form_row(form, "Mode of administration:",
+                       self._pet_mode_of_administration, "ModeOfAdministration")
+        self._form_row(form, "Injection start:", self._pet_injection_start,
+                       "InjectionStart")
+        hint = self._suggestion_label(self._pet_dose_suggestions)
+        if hint is not None:
+            form.addRow("", hint)
+        return box
+
+    def _build_pet_acquisition_group(self) -> QGroupBox:
+        box = QGroupBox("Acquisition  ·  PET  →  sub-..._pet.json")
+        form = QFormLayout(box)
+        _tighten_form(form)
+
+        self._pet_time_zero = QLineEdit()
+        self._pet_time_zero.setPlaceholderText("hh:mm:ss")
+        self._pet_scan_start = QLineEdit()
+        self._pet_scan_start.setPlaceholderText("seconds relative to TimeZero")
+        self._pet_acquisition_mode = self._pet_combo(PET_ACQUISITION_MODES)
+        self._pet_units = self._pet_combo(PET_IMAGE_UNITS)
+        self._pet_body_part = QLineEdit()
+        self._pet_attenuation_correction = QLineEdit()
+        self._pet_image_decay_corrected = QComboBox()
+        self._pet_image_decay_corrected.addItems(["", "true", "false"])
+        self._pet_image_decay_correction_time = QLineEdit()
+
+        self._form_row(form, "Time zero:", self._pet_time_zero, "TimeZero")
+        self._form_row(form, "Scan start:", self._pet_scan_start, "ScanStart")
+        self._form_row(form, "Acquisition mode:", self._pet_acquisition_mode,
+                       "AcquisitionMode")
+        self._form_row(form, "Image units:", self._pet_units, "Units")
+        self._form_row(form, "Body part:", self._pet_body_part, "BodyPart")
+        self._form_row(form, "Attenuation correction:",
+                       self._pet_attenuation_correction, "AttenuationCorrection")
+        self._form_row(form, "Image decay corrected:",
+                       self._pet_image_decay_corrected, "ImageDecayCorrected")
+        self._form_row(form, "     correction time:",
+                       self._pet_image_decay_correction_time,
+                       "ImageDecayCorrectionTime")
+        return box
+
+    def _build_pet_recon_group(self) -> QGroupBox:
+        # The scanner DOES record this, but as free text whose grammar varies
+        # by manufacturer, so the scan offers a parse and the user confirms it.
+        box = QGroupBox("Reconstruction  ·  PET  →  sub-..._pet.json")
+        form = QFormLayout(box)
+        _tighten_form(form)
+
+        self._pet_recon_method = QLineEdit()
+        self._pet_recon_labels = QLineEdit()
+        self._pet_recon_labels.setPlaceholderText("comma separated, e.g. iterations, subsets")
+        self._pet_recon_values = QLineEdit()
+        self._pet_recon_values.setPlaceholderText("comma separated, e.g. 3, 21")
+        self._pet_recon_units = QLineEdit()
+        self._pet_recon_units.setPlaceholderText("comma separated, e.g. none, none")
+        self._pet_recon_filter_type = QLineEdit()
+        self._pet_recon_filter_size = QLineEdit()
+
+        self._form_row(form, "Method name:", self._pet_recon_method,
+                       "ReconMethodName")
+        self._form_row(form, "Parameter labels:", self._pet_recon_labels,
+                       "ReconMethodParameterLabels")
+        self._form_row(form, "Parameter values:", self._pet_recon_values,
+                       "ReconMethodParameterValues")
+        self._form_row(form, "Parameter units:", self._pet_recon_units,
+                       "ReconMethodParameterUnits")
+        self._form_row(form, "Filter type:", self._pet_recon_filter_type,
+                       "ReconFilterType")
+        self._form_row(form, "Filter size:", self._pet_recon_filter_size,
+                       "ReconFilterSize")
+        hint = self._suggestion_label(self._pet_recon_suggestions)
+        if hint is not None:
+            form.addRow("", hint)
         return box
 
     def _build_event_group(self) -> QGroupBox:
@@ -481,6 +663,8 @@ class RecordingMetaDialog(QDialog):
         self._associated_empty_room.setText(acq.associated_empty_room or "")
         self._subject_artefact_description.setText(acq.subject_artefact_description or "")
 
+        self._populate_pet()
+
         event_map = self._spec.event_maps.get("*", {})
         self._events.setRowCount(0)
         for code, label in event_map.items():
@@ -494,6 +678,139 @@ class RecordingMetaDialog(QDialog):
             self._phenotype.addItem(str(p))
 
         self._participants_file.setText(self._spec.participants_file or "")
+
+    @staticmethod
+    def _num_text(value) -> str:
+        """Render a number for a line edit without a trailing ``.0``."""
+        if value is None:
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    def _populate_pet(self) -> None:
+        pet = self._spec.pet_defaults
+        self._pet_tracer_name.setCurrentText(pet.tracer_name or "")
+        self._pet_radionuclide.setCurrentText(pet.tracer_radionuclide or "")
+        self._pet_injected_radioactivity.setText(
+            self._num_text(pet.injected_radioactivity))
+        self._pet_injected_radioactivity_units.setCurrentText(
+            pet.injected_radioactivity_units or "")
+        self._pet_injected_mass.setText(self._num_text(pet.injected_mass))
+        self._pet_injected_mass_units.setCurrentText(pet.injected_mass_units or "")
+        self._pet_specific_radioactivity.setText(
+            self._num_text(pet.specific_radioactivity))
+        self._pet_specific_radioactivity_units.setCurrentText(
+            pet.specific_radioactivity_units or "")
+        self._pet_mode_of_administration.setCurrentText(
+            pet.mode_of_administration or "")
+        self._pet_injection_start.setText(self._num_text(pet.injection_start))
+        self._pet_time_zero.setText(pet.time_zero or "")
+        self._pet_scan_start.setText(self._num_text(pet.scan_start))
+        self._pet_acquisition_mode.setCurrentText(pet.acquisition_mode or "")
+        self._pet_units.setCurrentText(pet.units or "")
+        self._pet_body_part.setText(pet.body_part or "")
+        self._pet_attenuation_correction.setText(pet.attenuation_correction or "")
+        self._pet_image_decay_corrected.setCurrentText(
+            "" if pet.image_decay_corrected is None
+            else ("true" if pet.image_decay_corrected else "false")
+        )
+        self._pet_image_decay_correction_time.setText(
+            self._num_text(pet.image_decay_correction_time))
+        self._pet_recon_method.setText(pet.recon_method_name or "")
+        self._pet_recon_labels.setText(", ".join(pet.recon_method_parameter_labels))
+        self._pet_recon_values.setText(
+            ", ".join(self._num_text(v) for v in pet.recon_method_parameter_values))
+        self._pet_recon_units.setText(", ".join(pet.recon_method_parameter_units))
+        self._pet_recon_filter_type.setText(pet.recon_filter_type or "")
+        self._pet_recon_filter_size.setText(self._num_text(pet.recon_filter_size))
+
+    def _build_pet_spec(self) -> PetAcquisitionSpec:
+        """Read the PET form back into a spec block.
+
+        A hidden PET section keeps its loaded values rather than reading the
+        empty widgets, so an EEG-only dataset sharing a scaffold never wipes
+        PET fields somebody else filled in.
+        """
+        if not self._pet_applies:
+            return self._spec.pet_defaults
+
+        def _txt(edit: QLineEdit) -> Optional[str]:
+            return edit.text().strip() or None
+
+        def _num(edit: QLineEdit) -> Optional[float]:
+            raw = edit.text().strip()
+            if not raw:
+                return None
+            try:
+                return float(raw)
+            except ValueError:
+                # Keep the previous value rather than dropping what the user
+                # typed on the floor; the field validates on the next edit.
+                return None
+
+        def _combo(combo: QComboBox) -> Optional[str]:
+            return combo.currentText().strip() or None
+
+        def _csv(edit: QLineEdit) -> list[str]:
+            return [p.strip() for p in edit.text().split(",") if p.strip()]
+
+        def _csv_num(edit: QLineEdit) -> list[float]:
+            out = []
+            for part in _csv(edit):
+                try:
+                    out.append(float(part))
+                except ValueError:
+                    continue
+            return out
+
+        decay = self._pet_image_decay_corrected.currentText().strip()
+
+        return PetAcquisitionSpec(
+            tracer_name=_combo(self._pet_tracer_name),
+            tracer_radionuclide=_combo(self._pet_radionuclide),
+            injected_radioactivity=_num(self._pet_injected_radioactivity),
+            injected_radioactivity_units=_combo(
+                self._pet_injected_radioactivity_units),
+            injected_mass=_num(self._pet_injected_mass),
+            injected_mass_units=_combo(self._pet_injected_mass_units),
+            specific_radioactivity=_num(self._pet_specific_radioactivity),
+            specific_radioactivity_units=_combo(
+                self._pet_specific_radioactivity_units),
+            mode_of_administration=_combo(self._pet_mode_of_administration),
+            injection_start=_num(self._pet_injection_start),
+            time_zero=_txt(self._pet_time_zero),
+            scan_start=_num(self._pet_scan_start),
+            acquisition_mode=_combo(self._pet_acquisition_mode),
+            units=_combo(self._pet_units),
+            body_part=_txt(self._pet_body_part),
+            attenuation_correction=_txt(self._pet_attenuation_correction),
+            image_decay_corrected=None if not decay else decay == "true",
+            image_decay_correction_time=_num(
+                self._pet_image_decay_correction_time),
+            recon_method_name=_txt(self._pet_recon_method),
+            recon_method_parameter_labels=_csv(self._pet_recon_labels),
+            recon_method_parameter_values=_csv_num(self._pet_recon_values),
+            recon_method_parameter_units=_csv(self._pet_recon_units),
+            recon_filter_type=_txt(self._pet_recon_filter_type),
+            recon_filter_size=_num(self._pet_recon_filter_size),
+            # Preserved: not exposed in this dialog.
+            tracer_molecular_weight=self._spec.pet_defaults.tracer_molecular_weight,
+            tracer_molecular_weight_units=self._spec.pet_defaults.tracer_molecular_weight_units,
+            tracer_radlex=self._spec.pet_defaults.tracer_radlex,
+            tracer_snomed=self._spec.pet_defaults.tracer_snomed,
+            molar_activity=self._spec.pet_defaults.molar_activity,
+            molar_activity_units=self._spec.pet_defaults.molar_activity_units,
+            injected_volume=self._spec.pet_defaults.injected_volume,
+            purity=self._spec.pet_defaults.purity,
+            injection_end=self._spec.pet_defaults.injection_end,
+            infusion_radioactivity=self._spec.pet_defaults.infusion_radioactivity,
+            infusion_start=self._spec.pet_defaults.infusion_start,
+            infusion_speed=self._spec.pet_defaults.infusion_speed,
+            infusion_speed_units=self._spec.pet_defaults.infusion_speed_units,
+            manufacturer=self._spec.pet_defaults.manufacturer,
+            manufacturers_model_name=self._spec.pet_defaults.manufacturers_model_name,
+        )
 
     @staticmethod
     def _set_combo(combo: QComboBox, value: Optional[str], blank: str) -> None:
@@ -610,6 +927,7 @@ class RecordingMetaDialog(QDialog):
 
         return self._spec.model_copy(update={
             "defaults": acq,
+            "pet_defaults": self._build_pet_spec(),
             "event_maps": event_maps,
             "phenotype_files": phenotype_files,
             "participants_file": self._participants_file.text().strip(),

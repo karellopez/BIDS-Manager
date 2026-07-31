@@ -54,7 +54,15 @@ import pandas as pd
 
 from .. import schema as schema_mod
 from ..project import Project
-from ..recording_meta import COMMON_CAP_MANUFACTURERS, COMMON_MANUFACTURERS
+from ..recording_meta import (
+    COMMON_CAP_MANUFACTURERS,
+    COMMON_MANUFACTURERS,
+    COMMON_RADIONUCLIDES,
+    COMMON_TRACERS,
+    MODES_OF_ADMINISTRATION,
+    PET_IMAGE_UNITS,
+    RADIOACTIVITY_UNITS,
+)
 from . import icons
 from .delegates import builtin_montages
 from .metadata_help import tooltip_for
@@ -67,7 +75,9 @@ from .widgets import BusySpinner, PaneHeader, ValMessage
 _EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 # Human display names for the datatypes that carry a recording sidecar.
-_MODALITY_NAMES = {"eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS"}
+_MODALITY_NAMES = {
+    "eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS", "pet": "PET",
+}
 
 
 def _modality_label(datatype: str) -> str:
@@ -366,8 +376,110 @@ class PropertiesPanel(QWidget):
         if datatype in _EEG_MEG_DATATYPES:
             self._append_region_label("Modality-specific", agnostic=False)
             self._append_recording_section(row, datatype)
+        elif datatype == "pet":
+            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_pet_section(row)
 
         self._body_layout.addStretch(1)
+
+    def _append_pet_section(self, row: int) -> None:
+        """Per-recording PET fields -> sub-..._pet.json.
+
+        Two sub-sections. TRACER & DOSE holds what only the injection record
+        knows, and it is the block most likely to vary per scan even inside one
+        study, which is why it is here rather than only in the dataset dialog.
+        ACQUISITION holds the timing and units.
+
+        Every field shows the EFFECTIVE value: the per-row override when set,
+        otherwise the inherited dataset default. Writing the default back
+        clears the override, exactly as the EEG/MEG device fields behave.
+
+        Reconstruction is deliberately NOT exposed per row: it is a property of
+        the scanner protocol rather than the injection, so it belongs in the
+        dataset dialog where one edit covers the study.
+        """
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "TRACER & DOSE", "sub-..._pet.json", agnostic=False, tag="PET"))
+
+        self._body_layout.addWidget(self._meta_combo_row(
+            "tracer", "tracer_name", [""] + list(COMMON_TRACERS),
+            self._pet_eff(row, "tracer_name"), "",
+            setter=self._on_pet_field_changed, editable=True,
+        ))
+        self._body_layout.addWidget(self._meta_combo_row(
+            "radionuclide", "tracer_radionuclide", [""] + list(COMMON_RADIONUCLIDES),
+            self._pet_eff(row, "tracer_radionuclide"), "",
+            setter=self._on_pet_field_changed, editable=True,
+        ))
+        # What the scan read out of this row's own header, shown read-only
+        # beside the editable field. Not auto-applied: a vendor spelling can
+        # always parse wrongly, and a wrong tracer is worse than a blank one.
+        for column, field in (
+            ("tracer_suggestion", "tracer"),
+            ("radionuclide_suggestion", "radionuclide"),
+            ("injected_dose_suggestion", "dose"),
+        ):
+            value = self._cell(row, column)
+            if value:
+                self._body_layout.addWidget(
+                    self._scan_hint(field, "scan read", value))
+
+        self._body_layout.addWidget(self._meta_edit_row(
+            "dose", "injected_radioactivity",
+            self._pet_eff(row, "injected_radioactivity"),
+            setter=self._on_pet_field_changed,
+        ))
+        self._body_layout.addWidget(self._meta_combo_row(
+            "dose units", "injected_radioactivity_units",
+            [""] + list(RADIOACTIVITY_UNITS),
+            self._pet_eff(row, "injected_radioactivity_units"), "",
+            setter=self._on_pet_field_changed, editable=True,
+        ))
+        self._body_layout.addWidget(self._meta_combo_row(
+            "administration", "mode_of_administration",
+            [""] + list(MODES_OF_ADMINISTRATION),
+            self._pet_eff(row, "mode_of_administration"), "",
+            setter=self._on_pet_field_changed, editable=True,
+        ))
+
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "ACQUISITION", "sub-..._pet.json", agnostic=False, tag="PET"))
+        self._body_layout.addWidget(self._meta_edit_row(
+            "time zero", "time_zero", self._pet_eff(row, "time_zero"),
+            setter=self._on_pet_field_changed,
+        ))
+        self._body_layout.addWidget(self._meta_edit_row(
+            "scan start", "scan_start", self._pet_eff(row, "scan_start"),
+            setter=self._on_pet_field_changed,
+        ))
+        self._body_layout.addWidget(self._meta_combo_row(
+            "units", "units", [""] + list(PET_IMAGE_UNITS),
+            self._pet_eff(row, "units"), "",
+            setter=self._on_pet_field_changed, editable=True,
+        ))
+        self._body_layout.addWidget(self._meta_edit_row(
+            "body part", "body_part", self._pet_eff(row, "body_part"),
+            setter=self._on_pet_field_changed,
+        ))
+        # PET can be 4-D; the PSD action is meaningless here, but a per-row
+        # metadata block still benefits from the same compute affordance the
+        # EEG/MEG rows have. Left out deliberately rather than stubbed.
+
+    def _pet_eff(self, row: int, field: str) -> str:
+        """Effective per-row PET value (scaffold override else dataset default)."""
+        if self._model is None:
+            return ""
+        return self._model.pet_effective(row, field)
+
+    def _on_pet_field_changed(self, key: str, value: str) -> None:
+        """Commit a per-row PET override into the scaffold spec."""
+        if self._suppress_writeback or self._model is None or self._row is None:
+            return
+        self._model.set_pet_override(self._row, key, value)
 
     def _build_combo_row(self, label_text: str, value: str, *, options: list[str],
                          required: bool, slot) -> QWidget:
