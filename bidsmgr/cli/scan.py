@@ -62,6 +62,7 @@ from ..inventory.mri_dicom import (
     TSV_COLUMNS,
     scan_dicoms_long,
 )
+from ..inventory.pet import PET_COLUMNS, derive_suggestions as derive_pet_suggestions
 from ..inventory.probe_convert import ProbeFileStats
 from ..inventory.types import InventoryRow
 from ..recording_meta import (
@@ -981,6 +982,13 @@ def _augment_dataframe(
                     annotated_issues.append(anomaly)
                     df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
 
+    # PET, from the DICOM Modality tag: classify anything the probe missed,
+    # derive the suggestion columns, then exclude the CT companion of a
+    # PET/CT study (which raw BIDS cannot hold).
+    _classify_pet_rows(df)
+    _fill_pet_suggestions(df)
+    _flag_ct_companion_rows(df)
+
     _flag_nonimage_rows(df)
     return df
 
@@ -1053,6 +1061,91 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
         df.at[df_idx, "proposed_issues"] = (
             f"{NONIMAGE_ISSUE} | {existing}" if existing else NONIMAGE_ISSUE
         )
+
+
+# A PET/CT or PET/MR study ships its attenuation-correction companion in the
+# same export. The MR half is ordinary anat/func and converts normally, but
+# BIDS 1.11 has no ``ct`` datatype, so a CT series has nowhere to go in a raw
+# dataset. Flag it the way non-image series are flagged: excluded but visible
+# and reversible, with the reason on the row.
+CT_COMPANION_ISSUE_TOKEN = "ct series"
+CT_COMPANION_ISSUE = (
+    "ct series: this is the CT half of a PET/CT study. BIDS 1.11 has no "
+    "'ct' datatype, so it cannot be placed in a raw BIDS dataset and is "
+    "excluded from conversion. Re-tick include only if you intend to route "
+    "it somewhere yourself."
+)
+
+
+def _flag_ct_companion_rows(df: pd.DataFrame) -> None:
+    """Exclude CT series, which raw BIDS has nowhere to put.
+
+    Keyed on the DICOM ``Modality`` tag rather than the series description,
+    because vendors name the CT half anything from ``AC_CT_Brain`` to
+    ``Topogram``. Reversible: the row stays in the inventory with ``include=0``
+    so the user can override.
+    """
+    if "_dicom_modality" not in df.columns:
+        return
+    for idx in df.index:
+        if str(df.at[idx, "_dicom_modality"] or "").strip().upper() != "CT":
+            continue
+        df.at[idx, "bids_guess_skip"] = True
+        df.at[idx, "include"] = 0
+        existing = str(df.at[idx, "proposed_issues"] or "").strip()
+        df.at[idx, "proposed_issues"] = (
+            f"{CT_COMPANION_ISSUE} | {existing}" if existing else CT_COMPANION_ISSUE
+        )
+
+
+def _classify_pet_rows(df: pd.DataFrame) -> None:
+    """Classify PET series the dcm2niix probe did not reach.
+
+    dcm2niix's BidsGuess already returns ``pet`` for PET series, but only when
+    the probe actually ran (it is opt-in, and it needs a successful trial
+    conversion). The DICOM ``Modality`` tag says ``PT`` unambiguously and costs
+    nothing, so it fills in for the probe here: any PET series still lacking a
+    guess gets ``pet``/``pet`` at a confidence just under BidsGuess's 0.85, so
+    a real probe result always wins.
+    """
+    if "_dicom_modality" not in df.columns:
+        return
+    for idx in df.index:
+        if str(df.at[idx, "_dicom_modality"] or "").strip().upper() != "PT":
+            continue
+        if str(df.at[idx, "bids_guess_datatype"] or "").strip():
+            continue  # the probe already classified it
+        df.at[idx, "bids_guess_datatype"] = "pet"
+        df.at[idx, "bids_guess_suffix"] = "pet"
+        df.at[idx, "bids_guess_source"] = "dicom_modality"
+        df.at[idx, "bids_guess_confidence"] = 0.80
+        df.at[idx, "bids_guess_rationale"] = "DICOM Modality tag is PT"
+        if "modality" in df.columns:
+            df.at[idx, "modality"] = "pet"
+
+
+def _fill_pet_suggestions(df: pd.DataFrame) -> None:
+    """Populate the read-only PET suggestion columns from the scanned tags.
+
+    Suggestions only: nothing here is written into a sidecar. The user adopts
+    or overrides them in the dataset-metadata dialog, exactly as with the
+    EEG/MEG montage and manufacturer suggestions.
+    """
+    if "_pet_tags" not in df.columns:
+        return
+    # The unified backfill runs later, so create the columns here. Object
+    # dtype on purpose: a bare ``df[col] = ""`` gives newer pandas a strict
+    # StringDtype that then rejects assignment (see _init_object_column).
+    for col in PET_COLUMNS:
+        if col not in df.columns:
+            _init_object_column(df, col)
+    for idx in df.index:
+        tags = df.at[idx, "_pet_tags"]
+        if not isinstance(tags, dict) or not tags:
+            continue
+        for col, value in derive_pet_suggestions(tags).items():
+            if col in df.columns:
+                df.at[idx, col] = value
 
 
 # Marker prepended to ``proposed_issues`` for a user-excluded series. Mirrors
@@ -1208,7 +1301,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
     """Final unified TSV column order. Locked contract:
 
     ``TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
-    EXTENDED(3) + EEG_MEG(16) = 57``.
+    EXTENDED(3) + EEG_MEG(16) + PET(5) = 62``.
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
@@ -1226,6 +1319,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
         + [c for c in PROBE_COLUMNS if c in df.columns]
         + [c for c in EXTENDED_COLUMNS if c in df.columns]
         + [c for c in EEG_MEG_COLUMNS if c in df.columns]
+        + [c for c in PET_COLUMNS if c in df.columns]
     )
 
 
@@ -1240,7 +1334,7 @@ def _finalize_unified_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     all_cols = (
         list(TSV_COLUMNS) + list(BIDS_GUESS_COLUMNS) + list(BIDS_ENTITIES_COLUMNS)
         + list(DATASET_COLUMNS) + list(PROBE_COLUMNS) + list(EXTENDED_COLUMNS)
-        + list(EEG_MEG_COLUMNS)
+        + list(EEG_MEG_COLUMNS) + list(PET_COLUMNS)
     )
     for col in all_cols:
         if col not in df.columns:
