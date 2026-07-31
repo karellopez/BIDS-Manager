@@ -75,6 +75,7 @@ from .converter_panel import ConverterPanel
 from .editor_panel import EditorPanel
 from .theme_manager import ThemeManager
 from .welcome_panel import WelcomePanel
+from .widgets import ElidedLabel
 
 log = logging.getLogger(__name__)
 
@@ -510,7 +511,10 @@ class MainWindow(QMainWindow):
         # via :func:`update_widgets.attach_update_widgets`.
         sb = QStatusBar()
         sb.setSizeGripEnabled(False)
-        self._status_text = QLabel("Ready")
+        # Elided: worker messages carry full paths and tracebacks, and a
+        # plain QLabel would raise the window's layout minimum by the
+        # width of whatever it was last handed.
+        self._status_text = ElidedLabel("Ready")
         sb.addWidget(self._status_text, 1)
         self.setStatusBar(sb)
 
@@ -660,12 +664,9 @@ class MainWindow(QMainWindow):
             tree.viewport().update()
 
     def _set_status(self, text: str) -> None:
-        # Truncate long single-line messages so the status bar doesn't
-        # blow up the window width on big tracebacks.
-        first_line = text.splitlines()[0] if text else ""
-        if len(first_line) > 200:
-            first_line = first_line[:197] + "…"
-        self._status_text.setText(first_line)
+        # Only the first line: the status bar is one row tall. Its width
+        # needs no guarding -- ``ElidedLabel`` clips to the room it has.
+        self._status_text.setText(text.splitlines()[0] if text else "")
 
 
 __all__ = ["MainWindow"]

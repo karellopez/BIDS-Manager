@@ -1376,12 +1376,10 @@ class ConverterPanel(QWidget):
         # the GUI responsive when the worker is firehose-logging.
         self._log_buffer.append(text)
         # Mirror the latest line into the spinner's status text so the
-        # user has a live one-liner of what's happening.
+        # user has a live one-liner of what's happening. No length guard
+        # needed: the spinner's label elides to the toolbar's own width.
         if self._spinner.is_busy():
-            first_line = text.splitlines()[0] if text else ""
-            if len(first_line) > 80:
-                first_line = first_line[:77] + "…"
-            self._spinner.set_message(first_line)
+            self._spinner.set_message(text.splitlines()[0])
 
     def _flush_log_buffer(self) -> None:
         if not self._log_buffer:
