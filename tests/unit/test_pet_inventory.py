@@ -158,9 +158,8 @@ def _frame(**cols) -> pd.DataFrame:
         "bids_guess_skip": [False],
         "bids_guess_datatype": [""],
         "bids_guess_suffix": [""],
-        "bids_guess_source": [""],
+        "bids_guess_classifier": [""],
         "bids_guess_confidence": [0.0],
-        "bids_guess_rationale": [""],
         "modality": ["unknown"],
     }
     base.update({k: [v] for k, v in cols.items()})
@@ -172,16 +171,16 @@ def test_pet_row_classified_from_modality_tag() -> None:
     _classify_pet_rows(df)
     assert df.at[0, "bids_guess_datatype"] == "pet"
     assert df.at[0, "bids_guess_suffix"] == "pet"
-    assert df.at[0, "bids_guess_source"] == "dicom_modality"
+    assert df.at[0, "bids_guess_classifier"] == "dicom_modality"
     assert df.at[0, "modality"] == "pet"
 
 
 def test_existing_probe_guess_wins_over_the_modality_tag() -> None:
     """dcm2niix ran and said something; the cheap fallback must not override."""
     df = _frame(_dicom_modality="PT", bids_guess_datatype="pet",
-                bids_guess_source="dcm2niix", bids_guess_confidence=0.85)
+                bids_guess_classifier="dcm2niix", bids_guess_confidence=0.85)
     _classify_pet_rows(df)
-    assert df.at[0, "bids_guess_source"] == "dcm2niix"
+    assert df.at[0, "bids_guess_classifier"] == "dcm2niix"
     assert df.at[0, "bids_guess_confidence"] == 0.85
 
 

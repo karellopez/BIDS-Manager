@@ -63,6 +63,7 @@ from ..inventory.mri_dicom import (
     scan_dicoms_long,
 )
 from ..inventory.pet import PET_COLUMNS, derive_suggestions as derive_pet_suggestions
+from ..inventory.pet_ecat import scan_ecat
 from ..inventory.probe_convert import ProbeFileStats
 from ..inventory.types import InventoryRow
 from ..recording_meta import (
@@ -1098,6 +1099,65 @@ def _flag_ct_companion_rows(df: pd.DataFrame) -> None:
         )
 
 
+_SUB_LABEL_RE = _re.compile(r"^sub-(\d+)$")
+
+
+def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
+    """Shift ``df``'s ``sub-NNN`` labels past those already used in ``others``.
+
+    Every modality scanner numbers its own subjects from ``sub-001``. Merging
+    two such blocks without reconciling them makes two different people share
+    one label, and at convert time the second write lands on top of the first.
+    Rather than reconcile identity across modalities (a much harder problem,
+    and a separate feature), simply give the incoming block a disjoint range;
+    the user renames rows in the inventory to merge them deliberately.
+
+    Rewrites ``BIDS_name`` plus the ``entities`` / basename columns derived
+    from it, so the row stays internally consistent.
+    """
+    if df.empty or "BIDS_name" not in df.columns:
+        return
+
+    used: set[int] = set()
+    for other in others:
+        if other is None or other.empty or "BIDS_name" not in other.columns:
+            continue
+        for label in other["BIDS_name"].astype(str):
+            m = _SUB_LABEL_RE.match(label.strip())
+            if m:
+                used.add(int(m.group(1)))
+    if not used:
+        return
+
+    offset = max(used)
+    remap: dict[str, str] = {}
+    for label in df["BIDS_name"].astype(str):
+        m = _SUB_LABEL_RE.match(label.strip())
+        if m and label not in remap:
+            remap[label] = f"sub-{int(m.group(1)) + offset:03d}"
+    if not remap:
+        return
+
+    for idx in df.index:
+        old = str(df.at[idx, "BIDS_name"]).strip()
+        new = remap.get(old)
+        if not new:
+            continue
+        df.at[idx, "BIDS_name"] = new
+        token = new[len("sub-"):]
+        if "entities" in df.columns:
+            try:
+                ents = json.loads(df.at[idx, "entities"] or "{}")
+            except (TypeError, ValueError):
+                ents = {}
+            if ents.get("subject"):
+                ents["subject"] = token
+                df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
+        for col in ("proposed_basename", "Proposed BIDS name"):
+            if col in df.columns:
+                df.at[idx, col] = str(df.at[idx, col]).replace(old, new, 1)
+
+
 def _classify_pet_rows(df: pd.DataFrame) -> None:
     """Classify PET series the dcm2niix probe did not reach.
 
@@ -1117,9 +1177,8 @@ def _classify_pet_rows(df: pd.DataFrame) -> None:
             continue  # the probe already classified it
         df.at[idx, "bids_guess_datatype"] = "pet"
         df.at[idx, "bids_guess_suffix"] = "pet"
-        df.at[idx, "bids_guess_source"] = "dicom_modality"
+        df.at[idx, "bids_guess_classifier"] = "dicom_modality"
         df.at[idx, "bids_guess_confidence"] = 0.80
-        df.at[idx, "bids_guess_rationale"] = "DICOM Modality tag is PT"
         if "modality" in df.columns:
             df.at[idx, "modality"] = "pet"
 
@@ -1456,8 +1515,11 @@ def run_scan(
 
     Walks ``dicom_root`` once for each enabled modality scanner:
 
-    * MRI scanner (``scan_dicoms_long``) — finds DICOM series.
+    * MRI scanner (``scan_dicoms_long``) — finds DICOM series, including
+      PET DICOM (which dcm2niix converts like any other).
     * EEG/MEG scanner (``scan_eeg_meg``) — finds raw EEG/MEG/iEEG/NIRS.
+    * ECAT scanner (``scan_ecat``) — finds ECAT PET, PET's non-DICOM
+      native format.
 
     Both branches run on the same input root; they look at non-
     overlapping file types so both can find their own content even in
@@ -1503,6 +1565,22 @@ def run_scan(
         line_freq=line_freq,
         montage=montage,
     )
+
+    # ECAT branch: a third independent walk. ECAT is PET's non-DICOM native
+    # format (Siemens HRRT and older CTI scanners), detected by signature
+    # rather than extension, so it cannot collide with the other two walks.
+    df_ecat = scan_ecat(Path(dicom_root), cancel_check=cancel_check)
+    if not df_ecat.empty:
+        df_ecat["dataset"] = dataset_slug or ""
+        # Each scanner numbers its subjects from sub-001 independently, so in a
+        # tree holding both ECAT and other sources the labels would collide and
+        # the later rows would silently overwrite the earlier ones at convert
+        # time. Shift the ECAT block past everything already claimed.
+        _renumber_subjects_after(df_ecat, (df, df_eeg))
+        df_eeg = (
+            df_ecat if df_eeg.empty
+            else pd.concat([df_eeg, df_ecat], ignore_index=True, sort=False)
+        )
 
     if df.empty and df_eeg.empty:
         log.warning("no DICOMs or EEG/MEG recordings found under %s", dicom_root)

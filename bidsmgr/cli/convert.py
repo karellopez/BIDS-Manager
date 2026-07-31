@@ -83,6 +83,12 @@ log = logging.getLogger(__name__)
 # dataset files (participants.tsv / scans.tsv) on every call.
 _MNE_BIDS_DATATYPES: frozenset[str] = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
+# Datatypes whose row points at a single source file rather than a DICOM
+# series. ECAT PET joins the EEG/MEG family here because one ECAT file holds a
+# whole dynamic study, frames included. Unlike them it does NOT go through
+# mne-bids, so it stays in the parallel phase.
+_FILE_BASED_DATATYPES: frozenset[str] = _MNE_BIDS_DATATYPES | frozenset({"pet"})
+
 
 # ---------------------------------------------------------------------------
 # Top-level orchestration
@@ -754,11 +760,13 @@ def _row_to_task(
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
-    """Detect MRI vs EEG/MEG row shape and dispatch to the right builder.
+    """Detect the row's shape and dispatch to the right builder.
 
-    MRI rows have a non-empty ``series_uid``; EEG/MEG rows have a
-    non-empty ``source_file`` and a datatype in {eeg, meg, ieeg, nirs}.
-    Anything else returns None and the caller skips it.
+    Two shapes exist. A DICOM series row carries a non-empty ``series_uid``
+    and many source files. A file-based row carries a single path in
+    ``source_file``: EEG, MEG, iEEG and NIRS recordings, and ECAT PET, whose
+    whole dynamic study lives in one file. Anything else returns None and the
+    caller skips it.
     """
     series_uid = str(row.get("series_uid", "")).strip()
     if series_uid:
@@ -768,7 +776,7 @@ def _row_to_task(
 
     source_file = str(row.get("source_file", "")).strip()
     if source_file:
-        return _row_to_task_eeg_meg(
+        return _row_to_task_file_based(
             row, bids_root, source_search_roots=source_search_roots,
             force_edf=force_edf, spec=spec,
         )
@@ -905,7 +913,7 @@ def _parse_entities_json(row: pd.Series) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
-def _row_to_task_eeg_meg(
+def _row_to_task_file_based(
     row: pd.Series,
     bids_root: Path,
     *,
@@ -913,12 +921,12 @@ def _row_to_task_eeg_meg(
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
-    """Build a :class:`ConvertTask` for an EEG/MEG/iEEG/NIRS row.
+    """Build a :class:`ConvertTask` for a row whose source is one file.
 
-    EEG/MEG rows carry the recording's path directly in ``source_file``
-    (relative to the scan input root or absolute). The mne-bids backend
-    reads it via ``mne.io.read_raw`` and writes BIDS via
-    ``write_raw_bids``.
+    That covers EEG, MEG, iEEG and NIRS recordings, which the mne-bids
+    backend reads, and ECAT PET, which the nibabel-based ``EcatDirect``
+    backend reads. Both carry the path directly in ``source_file``, relative
+    to the scan input root or absolute.
     """
     source_file = str(row.get("source_file", "")).strip()
     if not source_file:
@@ -938,9 +946,9 @@ def _row_to_task_eeg_meg(
         session = None
 
     datatype = str(row.get("proposed_datatype", "")).strip().lower()
-    if datatype not in {"eeg", "meg", "ieeg", "nirs"}:
-        # Either not actually an EEG/MEG row, or the user clobbered
-        # the column. Skip.
+    if datatype not in _FILE_BASED_DATATYPES:
+        # Either not actually a file-based row, or the user clobbered the
+        # column. Skip.
         return None
 
     suffix = (
