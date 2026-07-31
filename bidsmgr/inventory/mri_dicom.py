@@ -48,6 +48,27 @@ from .subject_identity import IdentityTuple, cluster_subjects, normalize_tuple
 
 DICOM_EXTS = (".dcm", ".ima")
 
+# Extensions that are never DICOM. Everything NOT on this list gets its ``DICM``
+# marker checked, because vendors ship DICOM under dotted names with no real
+# extension (Philips writes the SOP instance UID, GE Signa writes ``*.img``).
+# Listing the negatives rather than the positives is what makes those studies
+# visible; the list only exists to avoid opening files we can rule out cheaply.
+NON_DICOM_EXTS = (
+    # documents and archives
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ods", ".csv", ".tsv", ".txt",
+    ".rtf", ".zip", ".gz", ".bz2", ".xz", ".tar", ".7z", ".rar",
+    # images and media that are not DICOM
+    ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".svg",
+    ".mp4", ".mov", ".avi", ".mp3", ".wav",
+    # neuroimaging formats handled by other scanners
+    ".nii", ".mgz", ".mgh", ".hdr", ".brik", ".head",
+    ".fif", ".edf", ".bdf", ".gdf", ".set", ".fdt", ".vhdr", ".vmrk", ".eeg",
+    ".cnt", ".con", ".sqd", ".kdf", ".mef", ".nwb", ".mff", ".egi", ".ds",
+    # code and config
+    ".py", ".sh", ".json", ".yaml", ".yml", ".xml", ".html", ".md", ".log",
+    ".ini", ".cfg", ".toml",
+)
+
 MAGNITUDE_IMGTYPE = ["ORIGINAL", "PRIMARY", "M", "ND", "NORM"]
 PHASE_IMGTYPE = ["ORIGINAL", "PRIMARY", "P", "ND"]
 
@@ -97,13 +118,23 @@ BIDS_ENTITIES_COLUMNS: tuple[str, ...] = ("entities",)
 def is_dicom_file(path: str) -> bool:
     """Return True if ``path`` looks like a DICOM file.
 
-    Files with a known extension are accepted immediately; extensionless
-    files are accepted if they carry the standard ``DICM`` marker at byte 128.
+    Files with a known extension are accepted immediately. Everything else is
+    accepted only if it carries the standard ``DICM`` marker at byte 128.
+
+    The marker check deliberately also covers names that contain dots. Vendors
+    and PACS exports routinely write DICOM under a dotted name with no real
+    extension: Philips PET exports the SOP instance UID verbatim
+    (``1.3.46.670589.28...``) and GE Signa writes ``i439953.PTDC.89.img``.
+    Treating a dot as proof of "not DICOM" skipped those studies entirely.
+
+    Names carrying an extension we positively know is not DICOM are rejected
+    without opening the file, which keeps the scan fast on trees full of
+    reports, archives and images.
     """
     name = Path(path).name.lower()
     if name.endswith(DICOM_EXTS):
         return True
-    if "." in name:
+    if name.endswith(NON_DICOM_EXTS):
         return False
     try:
         with open(path, "rb") as f:
