@@ -23,6 +23,7 @@ from pathlib import Path
 from bidsval import Severity as BvSeverity
 
 from . import bidsmgr_checks as bm
+from . import pet_checks
 from .types import (
     FieldLevel,
     FileVerdict,
@@ -103,6 +104,10 @@ def to_bm_file_verdict(bv_verdict, bids_root: Path, *, flag_todos: bool = True) 
     if rel.name.lower().endswith(".json"):
         if flag_todos:
             issues.extend(bm.todo_issues_for(abs_path))
+        # PET cross-field consistency. A schema validator can only ask whether
+        # each field is present and well typed; whether the fields AGREE is
+        # arithmetic, so it lives here. All warnings, never errors.
+        issues.extend(pet_checks.pet_issues_for(abs_path))
         sidecar_fields = bm.sidecar_fields_for(abs_path, datatype, suffix)
 
     severity = rollup_severity([i.severity for i in issues])

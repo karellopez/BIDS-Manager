@@ -70,6 +70,7 @@ from ..recording_meta import (
     RecordingMetaSpec,
     default_spec,
     load_spec,
+    merge_pet,
     resolve_effective,
     scaffold_sidecar_path,
 )
@@ -96,6 +97,74 @@ _FILE_BASED_DATATYPES: frozenset[str] = _MNE_BIDS_DATATYPES | frozenset({"pet"})
 # ---------------------------------------------------------------------------
 
 
+
+def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
+    """Fold a PET metadata spreadsheet into ``spec`` as per-row overrides.
+
+    The spreadsheet keys on whatever identifier the study used, so each row is
+    matched against the inventory's participant label, BIDS name and source
+    filename in turn. A key that matches nothing is reported rather than
+    silently dropped: a typo in the spreadsheet is exactly the kind of mistake
+    that otherwise surfaces much later as a missing field.
+    """
+    from ..metadata.pet_spreadsheet import read_pet_spreadsheet
+    from ..project.orchestration import row_id as _row_id
+
+    table = read_pet_spreadsheet(path)
+    if not table:
+        return spec
+
+    # Every identifier an inventory row answers to, mapped to EVERY row that
+    # answers to it. A participant-level key must reach all of that
+    # participant's scans, not just the first: a subject with two runs got one
+    # of them enriched and the other left blank when this mapped one-to-one.
+    aliases: dict[str, list[str]] = {}
+
+    def _add(key: str, rid: str) -> None:
+        text = key.strip()
+        if text and rid not in aliases.setdefault(text, []):
+            aliases[text].append(rid)
+
+    for i in df.index:
+        rid = _row_id(df, i)
+        for column in ("BIDS_name", "subject", "source_file"):
+            if column not in df.columns:
+                continue
+            value = str(df.at[i, column] or "").strip()
+            if not value:
+                continue
+            _add(value, rid)
+            # A participant column may or may not carry the sub- prefix.
+            _add(value[4:] if value.startswith("sub-") else f"sub-{value}", rid)
+            _add(Path(value).name, rid)
+
+    overrides = dict(spec.pet_overrides)
+    matched = 0
+    for key, block in table.items():
+        rids = aliases.get(key) or aliases.get(Path(key).name) or []
+        if not rids:
+            log.warning(
+                "PET spreadsheet row %r matches no inventory row; ignoring", key,
+            )
+            continue
+        for rid in rids:
+            existing = overrides.get(rid)
+            if existing is None:
+                overrides[rid] = block
+            else:
+                # Spreadsheet wins over an earlier override: it is the more
+                # deliberate statement of the two.
+                overrides[rid] = merge_pet(existing, block)
+        matched += 1
+
+    log.info(
+        "PET spreadsheet: applied %d of %d row(s) to %d recording(s)",
+        matched, len(table),
+        sum(len(aliases.get(k, [])) for k in table),
+    )
+    return spec.model_copy(update={"pet_overrides": overrides})
+
+
 def run_convert(
     tsv: Path,
     bids_parent: Path,
@@ -107,6 +176,7 @@ def run_convert(
     dry_run: bool = False,
     dcm2niix_bin: Optional[Path] = None,
     recording_meta: Optional[Path] = None,
+    pet_spreadsheet: Optional[Path] = None,
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     force_edf: bool = False,
@@ -218,6 +288,14 @@ def run_convert(
             log.info("auto-loaded recording-metadata scaffold %s", auto_meta)
         else:
             spec = default_spec()
+
+    # A PET metadata spreadsheet layers on top of the spec. A study's
+    # radiochemistry usually already exists as a table exported from the lab's
+    # records, and retyping it is both tedious and a fresh chance to mistype a
+    # dose. Rows are matched on participant label or source filename, whichever
+    # the spreadsheet used.
+    if pet_spreadsheet is not None:
+        spec = _apply_pet_spreadsheet(spec, Path(pet_spreadsheet), df)
 
     backends = default_backends(dcm2niix_bin=dcm2niix_bin)
     # Capture dcm2niix version once for provenance — it's still the
@@ -1314,6 +1392,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--pet-spreadsheet", default=None, type=Path,
+        help=(
+            "Path to a PET metadata spreadsheet (.tsv / .csv / .xlsx / .ods). "
+            "One row per scan, keyed by participant label, BIDS name or source "
+            "filename, with columns for tracer, dose, mass, administration and "
+            "timing. Column names are matched loosely (Injected Dose, "
+            "injected_radioactivity and InjectedRadioactivity all work). Values "
+            "layer on top of the recording-metadata spec as per-row overrides."
+        ),
+    )
+    parser.add_argument(
         "--raw-root", default=None, type=Path,
         help=(
             "Folder the scan was run against. Used as the first "
@@ -1390,6 +1479,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             dry_run=args.dry_run,
             dcm2niix_bin=args.dcm2niix,
             recording_meta=args.recording_meta,
+            pet_spreadsheet=args.pet_spreadsheet,
             raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
             skip_residuals=not args.keep_residuals,
             force_edf=args.force_edf,
@@ -1408,6 +1498,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         dry_run=args.dry_run,
         dcm2niix_bin=args.dcm2niix,
         recording_meta=args.recording_meta,
+        pet_spreadsheet=args.pet_spreadsheet,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
         force_edf=args.force_edf,
