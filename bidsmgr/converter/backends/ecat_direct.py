@@ -24,6 +24,49 @@ from ..types import ConvertResult, ConvertTask
 log = logging.getLogger(__name__)
 
 
+# ECAT main-header ``patient_orientation`` codes 0 to 7 encode a real
+# orientation; 8 means the scanner did not record one. nibabel knows 0 to 7 and
+# flips the voxel data accordingly, but builds its affine from voxel size and
+# offsets ALONE, never consulting the field. So the affine describes one fixed
+# arrangement and the data only lands in it when the flip fires.
+#
+# Code 8 therefore produces an image whose data and affine disagree: nibabel
+# applies no flip, while the affine still assumes the flipped arrangement. The
+# result is upside down and mirrored.
+#
+# Siemens HRRT writes 8. Since HRRT is a brain-only scanner that subjects enter
+# head first supine, the orientation the scanner failed to record is code 3,
+# which is neurological, so apply the flip nibabel would have applied. Verified
+# against both the published OpenNeuroPET reference images and an independent
+# conversion of the same files.
+_ECAT_ORIENTATION_UNKNOWN = 8
+
+
+def _orient_to_affine(img, data):
+    """Put ECAT voxel data into the arrangement nibabel's affine describes.
+
+    A no-op for every file that records a patient orientation, because nibabel
+    has already done the flip. Only the unrecorded case is corrected, and it is
+    corrected towards head-first supine, the position the scanners writing that
+    code physically enforce.
+    """
+    import numpy as np
+
+    try:
+        orientation = int(img.header["patient_orientation"].item())
+    except (KeyError, TypeError, ValueError):
+        return data
+    if orientation != _ECAT_ORIENTATION_UNKNOWN:
+        return data
+
+    log.info(
+        "ECAT file records no patient orientation (code %d); assuming head "
+        "first supine so the voxel data matches the affine",
+        orientation,
+    )
+    return np.flip(data, axis=(0, 1, 2))
+
+
 class EcatDirect:
     """Convert an ECAT ``.v`` PET recording to NIfTI via nibabel.
 
@@ -92,7 +135,13 @@ class EcatDirect:
             # get_fdata applies the per-frame scale factors ECAT stores in its
             # subheaders. Reading the raw array would silently drop them and
             # leave the image in arbitrary units.
-            data = img.get_fdata()
+            data = _orient_to_affine(img, img.get_fdata())
+            # A single-frame acquisition is a 3-D image. nibabel reports ECAT
+            # as (x, y, z, frames) whatever the frame count, and carrying a
+            # trailing length-1 axis makes a static scan look dynamic to
+            # anything that keys on ndim, the time-series graph included.
+            if data.ndim == 4 and data.shape[3] == 1:
+                data = data[..., 0]
             nifti = nibabel.Nifti1Image(data, img.affine)
             nifti.header.set_xyzt_units("mm", "sec")
             nibabel.save(nifti, str(nii_path))

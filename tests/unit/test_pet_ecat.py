@@ -168,6 +168,68 @@ def test_real_phantoms_probe_cleanly() -> None:
         assert all(d > 0 for d in probe.frame_durations)
 
 
+def test_unrecorded_orientation_is_corrected(tmp_path) -> None:
+    """nibabel flips ECAT data by patient_orientation but builds its affine
+    without consulting it, so an unrecorded orientation (code 8) leaves data
+    and affine disagreeing. That image reads upside down and mirrored."""
+    import numpy as np
+
+    from bidsmgr.converter.backends.ecat_direct import _orient_to_affine
+
+    data = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+
+    class _Img:
+        def __init__(self, code):
+            self.header = {"patient_orientation": np.array(code)}
+
+    corrected = _orient_to_affine(_Img(8), data)
+    assert np.array_equal(corrected, np.flip(data, axis=(0, 1, 2)))
+
+
+@pytest.mark.parametrize("code", [0, 1, 2, 3, 4, 5, 6, 7])
+def test_a_recorded_orientation_is_left_to_nibabel(tmp_path, code) -> None:
+    """REGRESSION: nibabel already flipped these; flipping again would break
+    the files that are currently correct."""
+    import numpy as np
+
+    from bidsmgr.converter.backends.ecat_direct import _orient_to_affine
+
+    data = np.arange(24, dtype=float).reshape(2, 3, 4)
+
+    class _Img:
+        def __init__(self, c):
+            self.header = {"patient_orientation": np.array(c)}
+
+    assert np.array_equal(_orient_to_affine(_Img(code), data), data)
+
+
+def test_a_missing_orientation_field_is_survived() -> None:
+    import numpy as np
+
+    from bidsmgr.converter.backends.ecat_direct import _orient_to_affine
+
+    data = np.zeros((2, 2, 2))
+
+    class _Img:
+        header: dict = {}
+
+    assert np.array_equal(_orient_to_affine(_Img(), data), data)
+
+
+@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+def test_a_single_frame_scan_is_written_as_3d(tmp_path) -> None:
+    """A static scan must not look dynamic. nibabel reports ECAT as
+    (x, y, z, frames) whatever the count, and a trailing length-1 axis makes
+    anything keying on ndim treat a static image as a time series."""
+    import nibabel
+
+    src = find_ecat_files(PHANTOMS)[0]
+    result = EcatDirect().convert(_task(tmp_path, src), tmp_path / "staging")
+    assert result.success, result.error
+    nii = next(p for p in result.staged_files if p.name.endswith(".nii.gz"))
+    assert nibabel.load(str(nii)).ndim == 3
+
+
 @pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
 def test_real_phantom_converts_with_matching_voxels(tmp_path) -> None:
     """The written NIfTI must carry the ECAT's scaled data, not raw counts."""
@@ -180,6 +242,12 @@ def test_real_phantom_converts_with_matching_voxels(tmp_path) -> None:
 
     nii = next(p for p in result.staged_files if p.name.endswith(".nii.gz"))
     written = nibabel.load(str(nii)).get_fdata()
-    expected = nibabel.ecat.load(str(src)).get_fdata()
+    # Squeeze the frame axis and undo the orientation correction to recover
+    # exactly what nibabel read, so this checks the data path rather than
+    # restating the fix.
+    from bidsmgr.converter.backends.ecat_direct import _orient_to_affine
+
+    ecat = nibabel.ecat.load(str(src))
+    expected = np.squeeze(_orient_to_affine(ecat, ecat.get_fdata()))
     assert written.shape == expected.shape
     assert np.allclose(written, expected, rtol=1e-5, atol=1e-8)
