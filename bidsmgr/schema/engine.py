@@ -1,19 +1,28 @@
-"""Schema rules engine — the keystone API.
+"""Schema rules engine, the keystone API.
 
 Reference: architecture.md §3.
 
-Functions here read the BIDS schema (via ``bidsschematools``) and translate
-it into a small, strongly-typed surface. Every other layer of the package
-imports from here; this module imports nothing else from ``bidsmgr``.
+Functions here read the BIDS schema and translate it into a small,
+strongly-typed surface. Every other layer of the package imports from here;
+this module imports nothing else from ``bidsmgr``.
 
 The schema is the source of truth. We do not hand-curate rules.
+
+Which sidecar fields the standard declares for a datatype/suffix, and at what
+requirement level, is read from ``bidsval.schema`` rather than derived here.
+That is a fact about BIDS, and facts about BIDS get ONE implementation, so that
+a tool which fills metadata and a tool which checks it cannot drift apart. The
+rest of this module still reads ``bidsschematools`` directly for vocabulary and
+filename construction.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Mapping, Optional
+
+from bidsval import schema as bidsval_schema
 
 from .loader import get_schema
 from .types import Datatype, Entity, EntityFormat, EntityInfo, FieldInfo, Suffix
@@ -142,6 +151,35 @@ def optional_sidecar_fields(datatype: Datatype, suffix: Suffix) -> list[FieldInf
 
 def deprecated_sidecar_fields(datatype: Datatype, suffix: Suffix) -> list[FieldInfo]:
     return _sidecar_fields(datatype, suffix, levels={"deprecated"})
+
+
+def dataset_description_fields() -> list[FieldInfo]:
+    """Every field BIDS declares for ``dataset_description.json``.
+
+    A top-level dataset file has no datatype and no suffix, so it cannot be
+    addressed through :func:`required_sidecar_fields` and friends. Levels here
+    are easy to get wrong and were: ``Name`` and ``BIDSVersion`` are required,
+    ``License`` and ``DatasetType`` recommended, and ``Authors``, ``Funding``,
+    ``EthicsApprovals`` and ``ReferencesAndLinks`` merely optional.
+    """
+    try:
+        specs = bidsval_schema.dataset_description_fields()
+    except Exception:
+        return []
+    return [
+        FieldInfo(
+            name=spec.name,
+            display_name=spec.display_name or spec.name,
+            description=spec.description,
+            type=spec.type,
+            item_type=spec.item_type,
+            enum=tuple(spec.enum),
+            required=spec.is_required,
+            conditional=spec.conditional,
+            speculative=spec.speculative,
+        )
+        for spec in specs
+    ]
 
 
 def field_metadata(field_name: str) -> FieldInfo:
@@ -282,64 +320,39 @@ def _entities_with_kind(datatype: Datatype, suffix: Suffix, kind: str) -> list[E
 
 
 def _sidecar_fields(datatype: Datatype, suffix: Suffix, levels: set[str]) -> list[FieldInfo]:
-    schema = get_schema()
-    sidecars = schema.rules.sidecars.get(datatype) if hasattr(schema.rules.sidecars, "get") else None
-    if not sidecars:
+    """Ask bidsval which fields the standard declares, and at what level.
+
+    Which fields apply to a datatype/suffix is a fact about BIDS, so it is
+    interpreted once, in bidsval, and read here.
+
+    This used to be derived locally by reading ``rules.sidecars.<datatype>``,
+    which is not how BIDS files those rules. They are keyed by selector
+    expression, and the large MRI groups select on ``modality == "mri"``, so
+    ``rules.sidecars.mri.MRIHardware`` never mentions ``anat``. The local
+    version therefore found NOTHING for an anatomical scan, which is why the
+    Editor's sidecar form was empty for one.
+    """
+    try:
+        specs = bidsval_schema.sidecar_fields(datatype, suffix)
+    except Exception:
+        # An unknown datatype/suffix is a question, not a crash: callers audit
+        # rows whose classification the user is still editing.
         return []
-    out: list[FieldInfo] = []
-    seen: set[str] = set()
-    for _group_name, group in sidecars.items():
-        applies = group.get("selectors") or []
-        # Coarse selector check: sidecar group must mention this suffix in fields.
-        # bidsschematools selectors are jsonpath-ish; for now we just check
-        # ``suffix == "..."`` substring as a fast path. Errors on the side of
-        # over-inclusion, which is fine for required-field auditing.
-        if applies and not _selectors_match_suffix(applies, suffix):
-            continue
-        fields_block = group.get("fields") or {}
-        for fname, info in fields_block.items():
-            level = _field_level(info)
-            if level not in levels:
-                continue
-            if fname in seen:
-                continue
-            seen.add(fname)
-            out.append(
-                FieldInfo(
-                    name=fname,
-                    display_name=str(_meta_get(fname, "display_name", fname)),
-                    description=str(_meta_get(fname, "description", "")),
-                    type=str(_meta_get(fname, "type", "string")),
-                    required=(level == "required"),
-                )
-            )
-    return out
-
-
-def _field_level(info) -> str:
-    if isinstance(info, str):
-        return info
-    if hasattr(info, "get"):
-        lvl = info.get("level")
-        if isinstance(lvl, str):
-            return lvl
-    return "optional"
-
-
-def _selectors_match_suffix(selectors: Sequence, suffix: Suffix) -> bool:
-    needle = f'== "{suffix}"'
-    for sel in selectors:
-        if isinstance(sel, str) and (needle in sel or f'"{suffix}"' in sel):
-            return True
-    return False
-
-
-def _meta_get(field_name: str, key: str, default):
-    schema = get_schema()
-    info = schema.objects.metadata.get(field_name) if hasattr(schema.objects.metadata, "get") else None
-    if info is None:
-        return default
-    return info.get(key, default)
+    return [
+        FieldInfo(
+            name=spec.name,
+            display_name=spec.display_name or spec.name,
+            description=spec.description,
+            type=spec.type,
+            item_type=spec.item_type,
+            enum=tuple(spec.enum),
+            required=spec.is_required,
+            conditional=spec.conditional,
+            speculative=spec.speculative,
+        )
+        for spec in specs
+        if spec.level in levels
+    ]
 
 
 def _namespace_to_dict(ns) -> Mapping:
@@ -366,6 +379,7 @@ __all__ = [
     "recommended_sidecar_fields",
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
+    "dataset_description_fields",
     "field_metadata",
     "build_basename",
     "build_relative_path",

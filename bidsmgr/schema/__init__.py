@@ -11,7 +11,8 @@ Public API:
 * ``required_entities``, ``optional_entities``, ``deprecated_entities``,
   ``allowed_entities``, ``entity_info``, ``entity_format``, ``entity_order``
 * ``required_sidecar_fields``, ``recommended_sidecar_fields``,
-  ``optional_sidecar_fields``, ``deprecated_sidecar_fields``, ``field_metadata``
+  ``optional_sidecar_fields``, ``deprecated_sidecar_fields``,
+  ``dataset_description_fields``, ``field_metadata``
 * ``build_basename``, ``build_relative_path``
 * ``validate_entity_set``, ``validate_basename``, ``validate_dataset``
 * Loader: ``get_schema``, ``schema_version``, ``bids_version``
@@ -26,6 +27,7 @@ from .engine import (
     build_basename,
     build_relative_path,
     deprecated_entities,
+    dataset_description_fields,
     deprecated_sidecar_fields,
     entity_format,
     entity_info,
@@ -72,6 +74,7 @@ __all__ = [
     "recommended_sidecar_fields",
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
+    "dataset_description_fields",
     "field_metadata",
     # name building
     "build_basename",

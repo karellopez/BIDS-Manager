@@ -178,6 +178,50 @@ class TestSidecarBehaviour:
         # At least one schema field is missing (a recommended row, not present).
         assert any(not sf.present for sf in bold_json.sidecar_fields)
 
+    def test_requirement_levels_cover_the_whole_dataset(self, tmp_path: Path) -> None:
+        """Every kind of JSON gets its levels from the schema, not just the one
+        in a datatype folder.
+
+        Three cases, each of which used to come back with no schema rows at all:
+        an INHERITED sidecar at the dataset root, one at the subject level, and
+        ``dataset_description.json``. The inherited ones sit ABOVE the datatype
+        directories, so nothing in their path says ``func``; the suffix settles
+        it, since only ``func`` carries ``bold``.
+        """
+        root = tmp_path / "study"
+        root.mkdir()
+        _make_dd(root)
+        _write_pair(root / "sub-001" / "func", "sub-001_task-rest_bold",
+                    sidecar={"TaskName": "rest", "RepetitionTime": 2.0})
+        (root / "sub-001" / "func" / "sub-001_task-rest_events.tsv").write_text(
+            "onset\tduration\n0\t1\n"
+        )
+        (root / "task-rest_bold.json").write_text(json.dumps({"RepetitionTime": 2.0}))
+        (root / "sub-001" / "sub-001_task-rest_bold.json").write_text(
+            json.dumps({"TaskName": "rest"})
+        )
+
+        report = validate(root)
+        by_name = {str(f.path): f for f in report.files}
+
+        for rel in ("task-rest_bold.json", "sub-001/sub-001_task-rest_bold.json"):
+            fields = by_name[rel].sidecar_fields
+            assert fields, f"{rel} got no schema rows"
+            levels = {sf.name: sf.level for sf in fields}
+            assert levels["RepetitionTime"] is FieldLevel.REQUIRED, rel
+            assert FieldLevel.RECOMMENDED in levels.values(), rel
+
+        dd_levels = {
+            sf.name: sf.level
+            for sf in by_name["dataset_description.json"].sidecar_fields
+        }
+        assert dd_levels["Name"] is FieldLevel.REQUIRED
+        assert dd_levels["License"] is FieldLevel.RECOMMENDED
+        # The badge that was wrong: guessing a level from a finding's severity
+        # made these required. They are optional.
+        for field in ("Authors", "Funding", "EthicsApprovals", "ReferencesAndLinks"):
+            assert dd_levels[field] is FieldLevel.OPTIONAL, field
+
 
 class TestTodoPlaceholders:
     def test_todo_in_sidecar_is_warning_on_the_json(self, tmp_path: Path) -> None:

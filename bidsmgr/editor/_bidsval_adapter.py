@@ -203,9 +203,6 @@ def _mirror_sidecar_findings(files: list[FileVerdict]) -> None:
             target.severity = rollup_severity([i.severity for i in target.issues])
 
 
-_LEVEL_RANK = {Severity.ERR: 2, Severity.WARN: 1, Severity.OK: 0}
-
-
 def _ensure_field_rows(files: list[FileVerdict]) -> None:
     """For every ``.json`` verdict, add a sidecar form row for each field that a
     finding refers to but that has no row yet (in place).
@@ -213,26 +210,29 @@ def _ensure_field_rows(files: list[FileVerdict]) -> None:
     The schema-derived rows (``sidecar_fields``) cover only part of what bidsval
     flags - it warns about a broader set of recommended fields. Without a row a
     finding's field cannot be scrolled to / highlighted / focused, which is why
-    only already-present (e.g. TODO) fields could be highlighted before. Added
-    rows are missing fields, leveled by the finding's worst severity.
+    only already-present (e.g. TODO) fields could be highlighted before.
+
+    The level of an added row is ASKED of the schema, never inferred from the
+    finding's severity. That inference used to read an error as required and
+    anything else as recommended, which cannot be right: the mapping is not
+    reversible, since optional and prohibited are both silent. It painted seven
+    optional ``dataset_description.json`` fields as required. Where the schema
+    says nothing, the row is optional, which claims the least.
     """
     for f in files:
         if not str(f.path).lower().endswith(".json"):
             continue
         existing = {sf.name for sf in f.sidecar_fields}
-        worst: dict[str, Severity] = {}
-        for issue in f.issues:
-            if not issue.field or issue.field in existing:
-                continue
-            if _LEVEL_RANK.get(issue.severity, 0) > _LEVEL_RANK.get(
-                worst.get(issue.field, Severity.OK), 0
-            ):
-                worst[issue.field] = issue.severity
-        for name, sev in worst.items():
-            level = FieldLevel.REQUIRED if sev is Severity.ERR else FieldLevel.RECOMMENDED
+        is_dd = Path(f.path).name == "dataset_description.json"
+        for name in dict.fromkeys(
+            i.field for i in f.issues if i.field and i.field not in existing
+        ):
+            level = bm.schema_level_for(
+                name, f.datatype, f.suffix, dataset_description=is_dd
+            )
             f.sidecar_fields.append(SidecarField(
-                level=level, name=name, value=None, present=False,
-                value_kind="missing",
+                level=level or FieldLevel.OPTIONAL, name=name, value=None,
+                present=False, value_kind="missing",
             ))
 
 

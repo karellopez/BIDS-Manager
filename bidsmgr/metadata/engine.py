@@ -49,6 +49,40 @@ from ..recording_meta import load_spec, scaffold_sidecar_path
 # they can grep for, fill, and remove.
 _TODO_VALUE = "TODO"
 
+# Sentinel: this field gets no placeholder at all.
+_NO_TODO = object()
+
+
+def _todo_value_for(
+    field_type: str, item_type: str = "", enum: tuple = (),
+) -> object:
+    """The placeholder to write for a field, or ``_NO_TODO`` to write none.
+
+    A placeholder must not itself be invalid. Writing the string ``"TODO"``
+    into a numeric field produces a schema type error, so the dataset gains a
+    violation for a field that was merely absent, which is worse than the gap
+    it marks. Three things disqualify a field:
+
+    * a type the marker does not fit (number, boolean, object, array of those);
+    * NO declared type at all, which the schema uses for fields that accept
+      more than one (``EchoTime`` and ``FlipAngle`` are number-or-array), and
+      where a string is the one thing they never accept;
+    * a controlled vocabulary, since ``MRAcquisitionType`` admits only 1D, 2D
+      or 3D and ``PhaseEncodingDirection`` only the six axis codes.
+
+    What is left is a plain string field, and an array of plain strings. Those
+    take the marker; everything else is left absent and stays in the
+    missing-field report until a real value arrives.
+    """
+    if enum:
+        return _NO_TODO
+    if field_type == "string":
+        return _TODO_VALUE
+    if field_type == "array" and item_type == "string":
+        return [_TODO_VALUE]
+    return _NO_TODO
+
+
 log = logging.getLogger(__name__)
 
 
@@ -669,7 +703,16 @@ def _fill_and_audit_sidecars(
             required = schema_mod.required_sidecar_fields(datatype, suffix)
         except (KeyError, ValueError, AttributeError):
             required = []
-        required_names = {_canonical_field_name(f.name) for f in required}
+        # Speculative requirements are excluded. The schema requires
+        # SkullStripped only of a derivative and Units only of a phase image;
+        # neither is knowable from the datatype and suffix, and demanding them
+        # of an ordinary raw scan reports a violation that is not one. Merely
+        # CONDITIONAL requirements stay: RepetitionTime is excused only when
+        # VolumeTiming is present, which _REQUIRED_ALTERNATIVES below handles,
+        # so a bold run missing both is still flagged.
+        required_names = {
+            _canonical_field_name(f.name) for f in required if not f.speculative
+        }
         # Mutual exclusivity: if any alternative is already present,
         # drop the whole alternative group from required_names.
         for alternatives in _REQUIRED_ALTERNATIVES.get((datatype, suffix), ()):
@@ -707,10 +750,21 @@ def _fill_and_audit_sidecars(
         # Apply --fill-todos for everything still missing.
         todo_added: list[str] = []
         if fill_todos:
+            types = {
+                _canonical_field_name(f.name): (
+                    f.type, getattr(f, "item_type", ""), getattr(f, "enum", ()),
+                )
+                for f in list(required) + list(recommended)
+            }
             for name in missing_req + missing_rec:
-                if name not in data and name not in fills:
-                    fills[name] = _TODO_VALUE
-                    todo_added.append(name)
+                if name in data or name in fills:
+                    continue
+                field_type, item_type, enum = types.get(name, ("", "", ()))
+                value = _todo_value_for(field_type, item_type, enum)
+                if value is _NO_TODO:
+                    continue
+                fills[name] = value
+                todo_added.append(name)
 
         # Write back if anything changed.
         if fills:
@@ -724,7 +778,10 @@ def _fill_and_audit_sidecars(
                 continue
 
             # Record filename-derived fills (TaskName) separately from TODOs.
-            non_todo = {k: v for k, v in fills.items() if v != _TODO_VALUE}
+            # Keyed on what we actually recorded as a TODO, not on the value:
+            # an array placeholder is ``["TODO"]``, which no scalar comparison
+            # would catch, and it would then be reported as a real fill.
+            non_todo = {k: v for k, v in fills.items() if k not in set(todo_added)}
             if non_todo:
                 report.sidecar_fills.append(
                     SidecarFill(sidecar=json_path, fields=non_todo),
@@ -769,11 +826,30 @@ def _audit_dataset_description(
     if not (fill_todos and missing):
         return
 
+    # Types come from the schema: Authors is an array of strings and takes
+    # ``["TODO"]``, DatasetDOI is a string and takes ``"TODO"``, SourceDatasets
+    # is an array of objects and takes no placeholder at all.
+    try:
+        types = {
+            f.name: (f.type, f.item_type, f.enum)
+            for f in schema_mod.dataset_description_fields()
+        }
+    except Exception:
+        types = {}
+
+    filled: list[str] = []
     for name in missing:
-        data[name] = _TODO_VALUE
+        field_type, item_type, enum = types.get(name, ("", "", ()))
+        value = _todo_value_for(field_type, item_type, enum)
+        if value is _NO_TODO:
+            continue
+        data[name] = value
+        filled.append(name)
+    if not filled:
+        return
     try:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        report.todo_fills.append(TodoFill(sidecar=path, fields=sorted(missing)))
+        report.todo_fills.append(TodoFill(sidecar=path, fields=sorted(filled)))
     except OSError as exc:
         report.warnings.append(f"could not write {path}: {exc}")
 

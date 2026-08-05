@@ -49,12 +49,15 @@ dependencies = [
     "bidsschematools>=1.0,<=1.2.2",
     "ancpbids>=0.3,<=0.3.1",
 
-    # BIDS validation engine. The Editor validator + ``bidsmgr-validate`` delegate
-    # to bidsval (schema-driven, pydantic-typed, false-positive-verified against
-    # the reference validator). It pulls only deps BIDS Manager already ships
+    # BIDS validation engine, and the interpreter of the BIDS schema. The Editor
+    # validator + ``bidsmgr-validate`` delegate to bidsval (schema-driven,
+    # pydantic-typed, false-positive-verified against the reference validator),
+    # and since 0.1.0 ``bidsmgr/schema/`` reads which sidecar fields the standard
+    # declares from ``bidsval.schema`` rather than deriving them again here (see
+    # CLAUDE.md guard 8). It pulls only deps BIDS Manager already ships
     # (bidsschematools, pydantic, nibabel, pandas, mne), so the footprint barely
-    # changes. 0.0.x is pre-1.0; allow patch releases, not a 0.1 minor bump.
-    "bidsval>=0.0.2,<0.1.0",
+    # changes. 0.1.0 is the first release carrying that namespace.
+    "bidsval>=0.1.0,<0.2.0",
 
     # GUI.
     "pyqt6>=6.5,<=6.11.0",

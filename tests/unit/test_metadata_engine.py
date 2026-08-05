@@ -472,39 +472,67 @@ class TestJsonReport:
 
 
 class TestFillTodos:
-    def test_writes_todo_for_missing_required_sidecar_fields(
+    def test_writes_todo_for_a_string_typed_required_field(
         self, tmp_path: Path,
     ) -> None:
-        """fmap/phase2 needs EchoTime; without --fill-todos it's missing,
-        with --fill-todos the field appears with value ``"TODO"``.
+        """pet needs TracerName, a string, so the marker fits."""
+        root = tmp_path / "study"
+        root.mkdir()
+        _write_pair(root / "sub-001" / "pet", "sub-001_pet", sidecar={})
+
+        report = run_metadata(root, fill_todos=True)
+        sidecar = root / "sub-001" / "pet" / "sub-001_pet.json"
+        data = json.loads(sidecar.read_text())
+        assert data["TracerName"] == "TODO"
+
+        # And the report records the TODO insertion.
+        todo = next(t for t in report.todo_fills if t.sidecar == sidecar)
+        assert "TracerName" in todo.fields
+
+    def test_no_placeholder_for_a_field_a_string_would_not_fit(
+        self, tmp_path: Path,
+    ) -> None:
+        """fmap/phase2 needs EchoTime, which is a NUMBER.
+
+        Writing ``"EchoTime": "TODO"`` swaps a missing field for an invalid
+        one, and the validator rightly rejects the type. The field is still
+        reported as missing; it simply gets no placeholder to mark it with.
         """
         root = tmp_path / "study"
         root.mkdir()
         _write_pair(root / "sub-001" / "fmap", "sub-001_phase2", sidecar={})
 
         report = run_metadata(root, fill_todos=True)
-        sidecar = root / "sub-001" / "fmap" / "sub-001_phase2.json"
-        data = json.loads(sidecar.read_text())
-        assert data["EchoTime"] == "TODO"
-
-        # And the report records the TODO insertion.
-        todo = next(t for t in report.todo_fills if t.sidecar == sidecar)
-        assert "EchoTime" in todo.fields
+        data = json.loads(
+            (root / "sub-001" / "fmap" / "sub-001_phase2.json").read_text()
+        )
+        assert "EchoTime" not in data
+        assert any("EchoTime" in m for m in report.missing_required)
 
     def test_writes_todo_for_missing_recommended_sidecar_fields(
         self, tmp_path: Path,
     ) -> None:
-        """dwi has no required, but does have recommended fields."""
+        """dwi has no required, but does have recommended fields.
+
+        Three outcomes, one per reason a field can refuse the marker.
+        InstitutionName is free text and takes it. TotalReadoutTime is a
+        number. PhaseEncodingDirection is a string but a CONTROLLED one, and
+        "TODO" is not among the six axis codes it admits. All three stay in the
+        missing-field report either way.
+        """
         root = tmp_path / "study"
         root.mkdir()
         _write_pair(root / "sub-001" / "dwi", "sub-001_dwi", sidecar={})
 
-        run_metadata(root, fill_todos=True)
+        report = run_metadata(root, fill_todos=True)
         data = json.loads(
             (root / "sub-001" / "dwi" / "sub-001_dwi.json").read_text()
         )
-        assert data["PhaseEncodingDirection"] == "TODO"
-        assert data["TotalReadoutTime"] == "TODO"
+        assert data["InstitutionName"] == "TODO"
+        assert "TotalReadoutTime" not in data
+        assert "PhaseEncodingDirection" not in data
+        for field in ("TotalReadoutTime", "PhaseEncodingDirection"):
+            assert any(field in m for m in report.missing_recommended), field
 
     def test_never_overwrites_existing_value(self, tmp_path: Path) -> None:
         root = tmp_path / "study"
@@ -533,14 +561,21 @@ class TestFillTodos:
     def test_fills_dataset_description_recommended(
         self, tmp_path: Path,
     ) -> None:
-        """dataset_description.json gets License/Authors/etc. as TODO."""
+        """dataset_description.json gets License/Authors/etc. as TODO.
+
+        The marker takes the field's own shape: a bare string where the schema
+        wants a string, and a one-element list where it wants an array of them.
+        ``["TODO"]`` is as greppable as ``"TODO"`` and, unlike it, valid.
+        """
         root = _make_minimal_bids(tmp_path)
         report = run_metadata(root, fill_todos=True)
         dd = json.loads((root / "dataset_description.json").read_text())
-        for field in ("License", "Authors", "Acknowledgements",
-                      "HowToAcknowledge", "Funding", "EthicsApprovals",
-                      "ReferencesAndLinks", "DatasetDOI"):
+        for field in ("License", "Acknowledgements",
+                      "HowToAcknowledge", "DatasetDOI"):
             assert dd[field] == "TODO", f"{field!r} not filled"
+        for field in ("Authors", "Funding", "EthicsApprovals",
+                      "ReferencesAndLinks"):
+            assert dd[field] == ["TODO"], f"{field!r} not filled as an array"
 
         # And dataset_description.json appears in the todo_fills list.
         assert any(
@@ -560,9 +595,9 @@ class TestFillTodos:
         dd = json.loads((root / "dataset_description.json").read_text())
         assert dd["License"] == "CC0"
         assert dd["Authors"] == ["Alice"]
-        # Others got TODO.
-        assert dd["Funding"] == "TODO"
-        assert dd["EthicsApprovals"] == "TODO"
+        # Others got TODO, in the shape their type calls for.
+        assert dd["Funding"] == ["TODO"]
+        assert dd["EthicsApprovals"] == ["TODO"]
 
     def test_idempotent_rerun_does_not_pile_up_todos(
         self, tmp_path: Path,
