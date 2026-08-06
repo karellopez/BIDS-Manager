@@ -137,23 +137,31 @@ def _format_pattern(format_name: str) -> str:
 # -- sidecar fields -------------------------------------------------------
 
 
-def required_sidecar_fields(datatype: Datatype, suffix: Suffix) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"required"})
+def required_sidecar_fields(
+    datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+) -> list[FieldInfo]:
+    return _sidecar_fields(datatype, suffix, levels={"required"}, bids_root=bids_root)
 
 
-def recommended_sidecar_fields(datatype: Datatype, suffix: Suffix) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"recommended"})
+def recommended_sidecar_fields(
+    datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+) -> list[FieldInfo]:
+    return _sidecar_fields(datatype, suffix, levels={"recommended"}, bids_root=bids_root)
 
 
-def optional_sidecar_fields(datatype: Datatype, suffix: Suffix) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"optional"})
+def optional_sidecar_fields(
+    datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+) -> list[FieldInfo]:
+    return _sidecar_fields(datatype, suffix, levels={"optional"}, bids_root=bids_root)
 
 
-def deprecated_sidecar_fields(datatype: Datatype, suffix: Suffix) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"deprecated"})
+def deprecated_sidecar_fields(
+    datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+) -> list[FieldInfo]:
+    return _sidecar_fields(datatype, suffix, levels={"deprecated"}, bids_root=bids_root)
 
 
-def dataset_description_fields() -> list[FieldInfo]:
+def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldInfo]:
     """Every field BIDS declares for ``dataset_description.json``.
 
     A top-level dataset file has no datatype and no suffix, so it cannot be
@@ -163,7 +171,7 @@ def dataset_description_fields() -> list[FieldInfo]:
     ``EthicsApprovals`` and ``ReferencesAndLinks`` merely optional.
     """
     try:
-        specs = bidsval_schema.dataset_description_fields()
+        specs = bidsval_schema.dataset_description_fields(dataset_root=bids_root)
     except Exception:
         return []
     return [
@@ -180,6 +188,19 @@ def dataset_description_fields() -> list[FieldInfo]:
         )
         for spec in specs
     ]
+
+
+def field_applies(field_name: str, datatype: Datatype, suffix: Suffix) -> bool:
+    """True when BIDS declares ``field_name`` for this kind of file.
+
+    The question a table column or a form section asks before showing itself:
+    does ``PowerLineFrequency`` mean anything for an anatomical scan (no), or
+    ``TracerName`` for a MEG recording (no).
+    """
+    try:
+        return bool(bidsval_schema.field_applies(field_name, datatype, suffix))
+    except Exception:
+        return False
 
 
 def field_metadata(field_name: str) -> FieldInfo:
@@ -265,8 +286,16 @@ def build_relative_path(
 # -- internals ------------------------------------------------------------
 
 
-def _datatype_groups(datatype: Datatype) -> list[Mapping]:
+@lru_cache(maxsize=64)
+def _datatype_groups(datatype: Datatype) -> tuple[Mapping, ...]:
     """Return raw rule-group dicts that apply to ``datatype``.
+
+    Memoised: the schema does not change within a process, and the inventory
+    table asks this once per cell per repaint. Walking the bidsschematools
+    Namespace each time cost a viewport over a second.
+
+    The result is a tuple because it is shared between callers; treat the
+    dicts inside it as read-only.
 
     Includes both:
 
@@ -298,7 +327,7 @@ def _datatype_groups(datatype: Datatype) -> list[Mapping]:
             if datatype in datatypes:
                 out.append(grp)
 
-    return out
+    return tuple(out)
 
 
 def _entities_with_kind(datatype: Datatype, suffix: Suffix, kind: str) -> list[Entity]:
@@ -319,7 +348,12 @@ def _entities_with_kind(datatype: Datatype, suffix: Suffix, kind: str) -> list[E
     return seen
 
 
-def _sidecar_fields(datatype: Datatype, suffix: Suffix, levels: set[str]) -> list[FieldInfo]:
+def _sidecar_fields(
+    datatype: Datatype,
+    suffix: Suffix,
+    levels: set[str],
+    bids_root: Optional[Path] = None,
+) -> list[FieldInfo]:
     """Ask bidsval which fields the standard declares, and at what level.
 
     Which fields apply to a datatype/suffix is a fact about BIDS, so it is
@@ -333,7 +367,9 @@ def _sidecar_fields(datatype: Datatype, suffix: Suffix, levels: set[str]) -> lis
     Editor's sidecar form was empty for one.
     """
     try:
-        specs = bidsval_schema.sidecar_fields(datatype, suffix)
+        specs = bidsval_schema.sidecar_fields(
+            datatype, suffix, dataset_root=bids_root,
+        )
     except Exception:
         # An unknown datatype/suffix is a question, not a crash: callers audit
         # rows whose classification the user is still editing.
@@ -380,6 +416,7 @@ __all__ = [
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
     "dataset_description_fields",
+    "field_applies",
     "field_metadata",
     "build_basename",
     "build_relative_path",

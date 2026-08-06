@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bidsval import Severity as BvSeverity
+from bidsval import schema as bidsval_schema
 
 from . import bidsmgr_checks as bm
 from . import pet_checks
@@ -108,7 +109,9 @@ def to_bm_file_verdict(bv_verdict, bids_root: Path, *, flag_todos: bool = True) 
         # each field is present and well typed; whether the fields AGREE is
         # arithmetic, so it lives here. All warnings, never errors.
         issues.extend(pet_checks.pet_issues_for(abs_path))
-        sidecar_fields = bm.sidecar_fields_for(abs_path, datatype, suffix)
+        sidecar_fields = bm.sidecar_fields_for(
+            abs_path, datatype, suffix, Path(bids_root),
+        )
 
     severity = rollup_severity([i.severity for i in issues])
     return FileVerdict(
@@ -136,6 +139,12 @@ def to_bm_report(
     up with the same per-file + dataset-issue accounting the GUI's own
     ``_recompute_report_summary`` uses, so the chips and summary line are stable.
     """
+    # Forget anything read from this dataset on a previous run. The form asks
+    # the schema questions that a real tree answers ("is there a
+    # genetic_info.json?"), and the user may have just created the file the
+    # answer turns on.
+    bidsval_schema.invalidate_dataset_cache()
+
     files = [
         to_bm_file_verdict(fv, bids_root, flag_todos=flag_todos)
         for fv in bv_report.files
@@ -148,7 +157,7 @@ def to_bm_report(
     # highlight / fix can locate it. bidsval flags a broader set of recommended
     # fields than the schema-derived form rows, so without this only fields that
     # already had a row (incl. present TODO fields) could be highlighted.
-    _ensure_field_rows(files)
+    _ensure_field_rows(files, Path(bids_root))
     dataset_issues = [to_bm_issue(i) for i in bv_report.dataset_issues.issues]
 
     report = ValidationReport(
@@ -203,7 +212,7 @@ def _mirror_sidecar_findings(files: list[FileVerdict]) -> None:
             target.severity = rollup_severity([i.severity for i in target.issues])
 
 
-def _ensure_field_rows(files: list[FileVerdict]) -> None:
+def _ensure_field_rows(files: list[FileVerdict], bids_root: Path) -> None:
     """For every ``.json`` verdict, add a sidecar form row for each field that a
     finding refers to but that has no row yet (in place).
 
@@ -228,7 +237,8 @@ def _ensure_field_rows(files: list[FileVerdict]) -> None:
             i.field for i in f.issues if i.field and i.field not in existing
         ):
             level = bm.schema_level_for(
-                name, f.datatype, f.suffix, dataset_description=is_dd
+                name, f.datatype, f.suffix, dataset_description=is_dd,
+                bids_root=bids_root,
             )
             f.sidecar_fields.append(SidecarField(
                 level=level or FieldLevel.OPTIONAL, name=name, value=None,

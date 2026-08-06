@@ -155,6 +155,25 @@ def _resolve_datatype(datatype: Optional[str], suffix: Optional[str]) -> Optiona
     return _sole_datatype_by_suffix().get(suffix)
 
 
+def _shown_level(level: FieldLevel, spec) -> FieldLevel:
+    """Do not badge a speculative requirement as one.
+
+    A field is speculative when the rule demanding it may not describe this
+    file at all. ``SkullStripped`` is required of DERIVATIVES and ``Genetics``
+    only of a dataset that ships a ``genetic_info.json``; neither is knowable
+    from the file in front of us. Listing them is right, the form should show
+    everything the standard allows, but painting them RED as required is a
+    demand the standard is not making, and it sends the user hunting for a
+    field they must not add.
+    """
+    if getattr(spec, "speculative", False) and level in (
+        FieldLevel.REQUIRED,
+        FieldLevel.RECOMMENDED,
+    ):
+        return FieldLevel.OPTIONAL
+    return level
+
+
 def _load_json_object(fp: Path) -> Optional[dict]:
     """Parse ``fp`` as JSON, returning the object or ``None`` (unreadable / not
     an object). Errors are bidsval's job to report; here we just need the data."""
@@ -166,7 +185,10 @@ def _load_json_object(fp: Path) -> Optional[dict]:
 
 
 def sidecar_fields_for(
-    fp: Path, datatype: Optional[str], suffix: Optional[str],
+    fp: Path,
+    datatype: Optional[str],
+    suffix: Optional[str],
+    bids_root: Optional[Path] = None,
 ) -> list[SidecarField]:
     """Build the schema-aware sidecar form rows for a JSON file.
 
@@ -184,34 +206,18 @@ def sidecar_fields_for(
         # be addressed the same way, but it does have declared fields and they
         # were previously invented from finding severity. Ask the schema.
         if Path(fp).name == "dataset_description.json":
-            return _dataset_description_fields_for(fp)
+            return _dataset_description_fields_for(fp, bids_root)
         return []
     data = _load_json_object(fp)
     if data is None:
         return []
-
-    def _shown_level(level: FieldLevel, fi) -> FieldLevel:
-        """Do not badge a speculative requirement as one.
-
-        The schema requires ``SkullStripped`` of derivatives and ``Units`` of
-        phase images. Neither is knowable from a datatype and suffix, so
-        bidsval reports them as speculative. Showing them is right, the form
-        should list everything the standard allows, but showing them in RED as
-        required of an ordinary T1w is a demand the standard is not making.
-        """
-        if getattr(fi, "speculative", False) and level in (
-            FieldLevel.REQUIRED,
-            FieldLevel.RECOMMENDED,
-        ):
-            return FieldLevel.OPTIONAL
-        return level
 
     seen: set[str] = set()
     fields: list[SidecarField] = []
 
     def _add_level(level: FieldLevel, getter) -> None:
         try:
-            schema_fields = getter(datatype, suffix)
+            schema_fields = getter(datatype, suffix, bids_root)
         except (KeyError, ValueError, AttributeError):
             schema_fields = []
         for fi in schema_fields or []:
@@ -261,6 +267,7 @@ def schema_level_for(
     suffix: Optional[str],
     *,
     dataset_description: bool = False,
+    bids_root: Optional[Path] = None,
 ) -> Optional[FieldLevel]:
     """The level the standard declares for ``field``, if it says anything.
 
@@ -272,9 +279,11 @@ def schema_level_for(
     datatype = _resolve_datatype(datatype, suffix)
     try:
         if dataset_description:
-            specs = bidsval_schema.dataset_description_fields()
+            specs = bidsval_schema.dataset_description_fields(dataset_root=bids_root)
         elif datatype and suffix:
-            specs = bidsval_schema.sidecar_fields(datatype, suffix)
+            specs = bidsval_schema.sidecar_fields(
+                datatype, suffix, dataset_root=bids_root,
+            )
         else:
             return None
     except Exception:
@@ -282,11 +291,16 @@ def schema_level_for(
     canonical = _canonical(field)
     for spec in specs:
         if _canonical(spec.name) == canonical:
-            return _BIDSVAL_LEVEL_TO_FIELD_LEVEL.get(spec.level, FieldLevel.OPTIONAL)
+            return _shown_level(
+                _BIDSVAL_LEVEL_TO_FIELD_LEVEL.get(spec.level, FieldLevel.OPTIONAL),
+                spec,
+            )
     return None
 
 
-def _dataset_description_fields_for(fp: Path) -> list[SidecarField]:
+def _dataset_description_fields_for(
+    fp: Path, bids_root: Optional[Path] = None,
+) -> list[SidecarField]:
     """Form rows for ``dataset_description.json``.
 
     Its levels are widely mis-stated because they are easy to guess wrong:
@@ -298,7 +312,9 @@ def _dataset_description_fields_for(fp: Path) -> list[SidecarField]:
     if data is None:
         return []
     try:
-        specs = bidsval_schema.dataset_description_fields()
+        specs = bidsval_schema.dataset_description_fields(
+            dataset_root=bids_root or Path(fp).parent,
+        )
     except Exception:
         specs = []
 
@@ -311,7 +327,10 @@ def _dataset_description_fields_for(fp: Path) -> list[SidecarField]:
         present = spec.name in data
         value = data.get(spec.name) if present else None
         fields.append(SidecarField(
-            level=_BIDSVAL_LEVEL_TO_FIELD_LEVEL.get(spec.level, FieldLevel.OPTIONAL),
+            level=_shown_level(
+                _BIDSVAL_LEVEL_TO_FIELD_LEVEL.get(spec.level, FieldLevel.OPTIONAL),
+                spec,
+            ),
             name=spec.name, value=value, present=present,
             value_kind=value_kind(value) if present else "missing",
             description=spec.description or None,

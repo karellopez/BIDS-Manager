@@ -65,6 +65,30 @@ _INHERITANCE_FIELDS: dict[str, str] = {
     "eeg_ground": "eeg_ground",
 }
 
+# Which rows a metadata column means anything for.
+#
+# Without this every one of the columns below renders on every row, so with
+# dataset defaults set an anatomical scan showed a line frequency, a montage,
+# a reference and a ground. One row in nine was right.
+#
+# The answer comes from the schema wherever the column corresponds to a real
+# BIDS field, so it stays correct as the standard changes, and it is worth
+# noting where that disagrees with intuition: EEGReference applies to MEG as
+# well as EEG, because a MEG recording may carry simultaneous EEG, and iEEG
+# has its OWN pair of fields rather than reusing the EEG ones.
+_COLUMN_BIDS_FIELDS: dict[str, tuple[str, ...]] = {
+    "line_freq": ("PowerLineFrequency",),
+    "eeg_reference": ("EEGReference", "iEEGReference"),
+    "eeg_ground": ("EEGGround", "iEEGGround"),
+}
+
+# Columns with no BIDS field behind them. A montage is a BIDS Manager notion
+# (which standard electrode layout to apply on conversion), so the standard has
+# nothing to say and the scope is ours to state.
+_COLUMN_DATATYPES: dict[str, frozenset[str]] = {
+    "montage": frozenset({"eeg", "ieeg"}),
+}
+
 # Per-row recording-acquisition fields that live in the recording-metadata
 # scaffold's ``overrides[row_id]`` block rather than a TSV column (the convert
 # step's ``resolve_effective`` already layers them over the dataset defaults and
@@ -217,7 +241,14 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("task",      "task",                   "plain",    True,  60, df_column="task"),
     ColumnSpec("run",       "run",                    "mono",     True,  50, df_column="run"),
     ColumnSpec("conf",      "conf",                   "conf",     False, 50, df_column="bids_guess_confidence"),
-    ColumnSpec("sequence",  "sequence / source",      "mono",     False, 200, df_column="sequence"),
+    # WHERE a row came from, WHAT it was read from, and WHAT the scanner called
+    # it. These were three different answers hiding behind one header: the old
+    # "sequence / source" column carried only the sequence name, source_folder
+    # was correct in the TSV and absent from the table, and format was filled
+    # for EEG/MEG alone, so no modality ever showed both an origin and a format.
+    ColumnSpec("source_folder", "origin",             "plain",    False, 160, df_column="source_folder"),
+    ColumnSpec("format",    "format",                 "mono",     False, 80,  df_column="format"),
+    ColumnSpec("sequence",  "sequence",               "mono",     False, 200, df_column="sequence"),
     ColumnSpec("basename",  "predicted basename",     "basename", False, 320, stretch=True, df_column="proposed_basename"),
     # Default-hidden — show via the column-visibility menu.
     ColumnSpec("backend",      "backend",     "mono",  False, 90,  default_visible=False),
@@ -266,7 +297,9 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "task":      "Task entity (task-XXX) for func / eeg / meg rows.",
     "run":       "Run index (run-N) when a series was repeated.",
     "conf":      "Classifier confidence (0-1) for the predicted datatype + suffix.",
-    "sequence":  "Scanner sequence name / source description used for classification.",
+    "source_folder": "Where the row came from: the folder inside the raw tree that holds its files.",
+    "format":    "What the row was read from: DICOM, ECAT, FIF, EDF, BrainVision, EEGLAB, CTF.",
+    "sequence":  "Scanner sequence name used for classification. Empty for formats that do not name one.",
     "basename":  "Full predicted BIDS filename (without extension).",
     "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, or bidsphysio.",
     "source_file": "Source recording path (EEG / MEG). Blank for DICOM rows.",
@@ -344,6 +377,13 @@ class InventoryTableModel(QAbstractTableModel):
         # metadata dialog saves.
         self._global_spec: Optional[RecordingMetaSpec] = None
 
+        # Whether a metadata column means anything for a given kind of row,
+        # keyed by (column, datatype, suffix). Keyed on the TYPE rather than the
+        # row, so a row that changes datatype simply looks up a different entry
+        # and the cache never goes stale; it holds at most one entry per column
+        # per datatype seen.
+        self._applies_cache: dict[tuple[str, str, str], bool] = {}
+
         # Populate the mirror cells (session / task / run) from each row's
         # ``entities`` JSON on load. A fresh ``bidsmgr-scan`` TSV carries the
         # entities in JSON but leaves the mirror columns blank. Without this
@@ -357,6 +397,8 @@ class InventoryTableModel(QAbstractTableModel):
         # rows. Idempotent: ``proposed_basename`` is rebuilt from the same
         # entities, so a well-formed scan TSV is unchanged.
         rebuild_from_entities(self._df, in_place=True)
+
+        self._warm_applies_cache()
 
         if project is not None:
             self._apply_project_overlay(project.state())
@@ -418,9 +460,111 @@ class InventoryTableModel(QAbstractTableModel):
         v = self._df.at[row, df_col]
         return "" if pd.isna(v) else str(v)
 
+    def _warm_applies_cache(self) -> None:
+        """Decide the modality-scoped columns up front, once per row TYPE.
+
+        Answering costs a full walk of the schema's rules, and the answer is
+        the same for every row of a given datatype and suffix. Left to the
+        paint path, the first scroll that reveals these columns pays for one
+        walk per distinct type, which reads as a stall part-way across the
+        table. Doing it at bind time costs the same work where a wait is
+        already expected, and is bounded by the number of distinct types in
+        the scan rather than the number of rows.
+        """
+        if not len(self._df):
+            return
+        scoped = set(_COLUMN_BIDS_FIELDS) | set(_COLUMN_DATATYPES)
+        seen: set[tuple[str, str]] = set()
+        for row in range(len(self._df)):
+            pair = self.effective_datatype_suffix(row)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            for df_col in scoped:
+                self.column_applies(row, df_col)
+
+    def column_applies(self, row: int, df_col: str) -> bool:
+        """True when ``df_col`` means anything for this row's datatype.
+
+        A metadata column that does not apply is not merely empty, it is
+        inapplicable: an anatomical scan has no power line frequency, and
+        offering to inherit one is offering nonsense. Columns not covered by
+        either map apply everywhere, which keeps the identity and provenance
+        columns untouched.
+        """
+        datatypes = _COLUMN_DATATYPES.get(df_col)
+        fields = _COLUMN_BIDS_FIELDS.get(df_col)
+        if datatypes is None and fields is None:
+            return True
+        datatype, suffix = self.effective_datatype_suffix(row)
+        # Asked once per cell per repaint, and the answer depends only on the
+        # column and the row's type, not on the row. Without this a table of
+        # any size re-derives the same handful of answers thousands of times.
+        cache_key = (df_col, datatype, suffix)
+        cached = self._applies_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self._compute_applies(df_col, datatype, suffix, datatypes, fields)
+        self._applies_cache[cache_key] = result
+        return result
+
+    def effective_datatype_suffix(self, row: int) -> tuple[str, str]:
+        """``(datatype, suffix)`` for the row, falling back to the guess.
+
+        A blank ``proposed_datatype`` does not mean "undecided". Scanner
+        derivatives carry one: a Siemens scout, a PhoenixZIPReport or a TENSOR
+        map is excluded from conversion and left with no proposed datatype,
+        while the classifier's guess still records what it is (``anat``,
+        ``discard``, ``derivatives``). Reading only the proposed value made
+        those rows look like blank slates, which is how a bulk edit wrote a
+        power line frequency onto a localiser.
+        """
+        datatype, suffix = self.datatype_suffix(row)
+        if not datatype and "bids_guess_datatype" in self._df.columns:
+            if 0 <= row < len(self._df):
+                raw = self._df.at[row, "bids_guess_datatype"]
+                datatype = "" if pd.isna(raw) else str(raw)
+        return datatype, suffix
+
+    def _compute_applies(self, df_col, datatype, suffix, datatypes, fields) -> bool:
+        if not datatype:
+            # Nothing anywhere says what this row is. A metadata field cannot
+            # be meaningfully set on it either, and it becomes editable the
+            # moment the row is classified.
+            return False
+        if datatypes is not None:
+            return datatype in datatypes
+        if datatype not in set(schema_mod.list_datatypes()):
+            # ``discard`` and ``derivatives`` are BIDS Manager routing labels,
+            # not datatypes. The standard declares nothing for them, and the
+            # schema lookup below would find no suffixes and wave the row
+            # through.
+            return False
+
+        # Ask about the exact pair only when the two agree. Mid-edit they often
+        # do not: a user who switches a row's datatype before its suffix leaves
+        # an eeg row still carrying "bold", and asking about eeg/bold returns
+        # False for everything, which would silently refuse the very edit that
+        # fixes the row. Falling back to "does any suffix of this datatype take
+        # the field" keeps the answer stable while the row is in flux.
+        try:
+            suffixes = [suffix] if suffix in schema_mod.list_suffixes(datatype) \
+                else list(schema_mod.list_suffixes(datatype))
+        except Exception:
+            suffixes = [suffix] if suffix else []
+        if not suffixes:
+            return False
+        return any(
+            schema_mod.field_applies(name, datatype, sfx)
+            for sfx in suffixes
+            for name in fields
+        )
+
     def is_inherited(self, row: int, df_col: str) -> bool:
         """True when an inheritance-field cell is blank and a default exists."""
         if df_col not in _INHERITANCE_FIELDS:
+            return False
+        if not self.column_applies(row, df_col):
             return False
         return not self._raw_cell(row, df_col).strip() and bool(self._global_default(df_col))
 
@@ -606,6 +750,10 @@ class InventoryTableModel(QAbstractTableModel):
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         spec = self.COLUMNS[index.column()]
         if spec.editable:
+            # A column that means nothing for this row's datatype refuses the
+            # edit rather than accepting a value that would never be written.
+            if spec.df_column and not self.column_applies(index.row(), spec.df_column):
+                return f
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
@@ -651,6 +799,14 @@ class InventoryTableModel(QAbstractTableModel):
 
         # Inheritance fields: a blank cell shows the dataset default (and the
         # delegate paints it muted via INHERITED_ROLE).
+        if spec.df_column and not self.column_applies(row, spec.df_column):
+            # Blank, not "—": the em dash means "inherited and empty", which
+            # would imply the field could be filled in here. It cannot.
+            if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+                return ""
+            if role == INHERITED_ROLE:
+                return False
+
         if spec.df_column in _INHERITANCE_FIELDS:
             if role == INHERITED_ROLE:
                 return self.is_inherited(row, spec.df_column)
@@ -682,6 +838,8 @@ class InventoryTableModel(QAbstractTableModel):
 
         df_col = spec.df_column
         if df_col is None:
+            return False
+        if not self.column_applies(row, df_col):
             return False
         new_str = "" if value is None else str(value)
         # Inheritance fields: writing a value equal to the dataset default

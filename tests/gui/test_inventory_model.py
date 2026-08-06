@@ -185,13 +185,100 @@ def test_header_labels_match_spec() -> None:
         assert model.headerData(col, Qt.Orientation.Horizontal) == spec.header
 
 
+def test_origin_and_format_are_shown_by_default() -> None:
+    """Where a row came from and what it was read from are both visible.
+
+    They used to be neither: source_folder was correct in the TSV and absent
+    from the table, and one header read "sequence / source" while carrying only
+    the sequence name.
+    """
+    by_key = {c.key: c for c in COLUMNS}
+    for key in ("source_folder", "format"):
+        assert key in by_key, key
+        assert by_key[key].default_visible, key
+        assert by_key[key].df_column == key
+    assert by_key["sequence"].header == "sequence"
+
+
+# Metadata columns that only mean something for some datatypes. Editability is
+# the column's own flag AND whether the row's datatype has any use for it.
+_MODALITY_SCOPED = {"line_freq", "montage", "eeg_reference", "eeg_ground"}
+
+
 def test_flags_only_editable_columns_carry_edit_flag() -> None:
-    df = make_df([_ok_row()])
+    df = make_df([_ok_row()])  # an anat/T1w row
     model = InventoryTableModel(df)
     for col, spec in enumerate(COLUMNS):
         idx = model.index(0, col)
         editable = bool(model.flags(idx) & Qt.ItemFlag.ItemIsEditable)
-        assert editable == spec.editable, f"column {spec.key!r} editable mismatch"
+        expected = spec.editable and spec.key not in _MODALITY_SCOPED
+        assert editable == expected, f"column {spec.key!r} editable mismatch"
+
+
+def test_modality_scoped_columns_are_editable_where_they_apply() -> None:
+    """The other half: an anatomical scan has no power line frequency, but an
+    EEG recording does, and the same column must accept the edit there."""
+    df = make_df([_ok_row(
+        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        bids_guess_datatype="eeg", bids_guess_suffix="eeg",
+        proposed_basename="sub-001_ses-pre_task-rest_eeg",
+    )])
+    model = InventoryTableModel(df)
+    for key in ("line_freq", "montage", "eeg_reference", "eeg_ground"):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        idx = model.index(0, col)
+        assert bool(model.flags(idx) & Qt.ItemFlag.ItemIsEditable), key
+
+
+def test_bulk_edit_does_not_reach_scanner_derivatives() -> None:
+    """REGRESSION: a bulk edit put a line frequency on Siemens localisers.
+
+    A scout, a PhoenixZIPReport and a TENSOR map are excluded from conversion
+    and carry NO ``proposed_datatype``, only the classifier's guess. Reading
+    the proposed value alone made them look like blank slates, and blank was
+    being treated as "every column applies".
+    """
+    df = make_df([
+        _ok_row(BIDS_name="sub-001", proposed_datatype="eeg", line_freq="",
+                bids_guess_datatype="eeg", bids_guess_suffix="eeg",
+                proposed_basename="sub-001_task-rest_eeg"),
+        # A localiser: no proposed datatype, guess says anat, not converted.
+        _ok_row(BIDS_name="sub-001", sequence="AAHead_Scout_64ch", line_freq="",
+                proposed_datatype="", bids_guess_datatype="anat",
+                bids_guess_suffix="localizer", include=0),
+        # A scanner derivative routed away from the BIDS tree entirely.
+        _ok_row(BIDS_name="sub-001", sequence="dwi_TENSOR", line_freq="",
+                proposed_datatype="", bids_guess_datatype="derivatives",
+                bids_guess_suffix="TENSOR", include=0),
+    ])
+    model = InventoryTableModel(df)
+
+    changed = model.bulk_set([0, 1, 2], "line_freq", "60")
+    out = model.dataframe()
+    assert changed == 1, "only the EEG row should take a line frequency"
+    assert out.at[0, "line_freq"] == "60"
+    assert out.at[1, "line_freq"] == ""
+    assert out.at[2, "line_freq"] == ""
+
+
+def test_an_inapplicable_cell_renders_blank_not_inherited() -> None:
+    """With a dataset default set, an MRI row used to display that default in
+    all four electrophysiology columns. A blank says "not applicable"; the em
+    dash the inheritance display uses would say "inherited and empty", which
+    invites an edit that would never be written."""
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.power_line_freq = 50
+    spec.defaults.montage = "standard_1020"
+
+    model = InventoryTableModel(make_df([_ok_row()]))
+    model.set_global_spec(spec)
+    for key in ("line_freq", "montage"):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        idx = model.index(0, col)
+        assert model.data(idx, Qt.ItemDataRole.DisplayRole) == "", key
+        assert model.setData(idx, "60", Qt.ItemDataRole.EditRole) is False, key
 
 
 # ---------------------------------------------------------------------------

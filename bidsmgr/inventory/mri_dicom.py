@@ -580,6 +580,12 @@ def scan_dicoms_long(
     # the CLI orchestrator resolves a default and forwards it here.
     df["dataset"] = dataset or ""
 
+    # The on-disk format these rows came from. Every scanner fills this, so a
+    # table can show WHAT a row was read from next to WHERE it came from. The
+    # column lives in the EEG/MEG block of the unified TSV for historical
+    # ordering reasons only; it is modality-agnostic.
+    df["format"] = "DICOM"
+
     if not df.empty:
         df.sort_values(["BIDS_name", "subject", "session", "acq_time"], inplace=True)
 

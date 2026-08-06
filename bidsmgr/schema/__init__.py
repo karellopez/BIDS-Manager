@@ -32,6 +32,7 @@ from .engine import (
     entity_format,
     entity_info,
     entity_order,
+    field_applies,
     field_metadata,
     list_datatypes,
     list_extensions,
@@ -75,6 +76,7 @@ __all__ = [
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
     "dataset_description_fields",
+    "field_applies",
     "field_metadata",
     # name building
     "build_basename",

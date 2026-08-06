@@ -75,7 +75,16 @@ class ValidateWorker(QThread):
                 flag_todos=self._flag_todos,
                 html_report=self._html_report,
             )
-            verdict = "clean" if rc == 0 else f"errored (rc={rc})"
+            # rc=1 means the DATASET did not pass, which is an ordinary result
+            # and the whole point of running a validator. Only rc=2 means the
+            # validator could not run at all. Calling both "errored" told the
+            # user their tool had broken when it had in fact worked and found
+            # something.
+            verdict = {
+                0: "passed: no errors",
+                1: "finished: the dataset has errors, see the report",
+                2: "could not run: no BIDS dataset found at that path",
+            }.get(rc, f"finished with an unexpected status (rc={rc})")
             self.progress.emit(f"Validation {verdict}")
             self.finished_with_result.emit(rc, self._target)
         except Exception:

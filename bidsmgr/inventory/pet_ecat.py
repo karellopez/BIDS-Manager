@@ -241,6 +241,7 @@ def scan_ecat(
             "entities": json.dumps(entities, sort_keys=True),
             "source_folder": str(rel.parent) if rel.parent != Path(".") else root.name,
             "source_file": str(rel),
+            "format": "ECAT",
             "sequence": fp.stem,
             "include": 1,
             "n_files": 1,

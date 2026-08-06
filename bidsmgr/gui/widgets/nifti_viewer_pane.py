@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QImage,
@@ -255,6 +255,61 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
     return img, unstructured.astype(np.float32, copy=False), meta
 
 
+class _HotKeyWatcher(QObject):
+    """Mirrors the H key's state onto the pane, application-wide.
+
+    "H + scroll" has to work while the pointer is over the canvas without the
+    canvas holding keyboard focus, which needs an application-wide filter. What
+    it must NOT need is the pane itself acting as that filter: a pane is
+    destroyed every time the editor swaps the centre widget, and the filter
+    outlived it.
+
+    Never consumes an event; it only records the key state.
+    """
+
+    def __init__(self, pane: "NiftiViewerPane") -> None:
+        super().__init__(pane)
+        self._pane = pane
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
+        try:
+            et = event.type()
+            if et == QEvent.Type.KeyPress:
+                if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+                    self._pane._h_key_down = True
+            elif et == QEvent.Type.KeyRelease:
+                if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+                    self._pane._h_key_down = False
+            elif et == QEvent.Type.ApplicationDeactivate:
+                # Losing focus can swallow the key-release; reset so H doesn't
+                # get stuck "down" after an app switch.
+                self._pane._h_key_down = False
+        except RuntimeError:
+            # The pane went away between Qt dispatching this event and our
+            # reading it. Nothing to record, and nothing worth raising into
+            # the event loop, where an exception is fatal under PyQt6.
+            pass
+        return False
+
+
+def _uninstall_watcher(watcher: _HotKeyWatcher):
+    """A destroyed-handler that captures the WATCHER, never the pane.
+
+    Connecting a bound method of the pane would hand the signal a reference to
+    the very object being destroyed, which is what has to be avoided here.
+    """
+
+    def _handler(*_args) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(watcher)
+            except RuntimeError:
+                pass
+
+    return _handler
+
+
 class NiftiViewerPane(QWidget):
     """2-D slice viewer for ``.nii`` / ``.nii.gz`` files.
 
@@ -447,13 +502,23 @@ class NiftiViewerPane(QWidget):
         # canvas without it needing keyboard focus. The filter never
         # consumes events — it only mirrors the key state.
         app = QApplication.instance()
+        self._hotkey_watcher: Optional[_HotKeyWatcher] = None
         if app is not None:
-            app.installEventFilter(self)
-            # Remove the filter before the interpreter tears PyQt down.
-            # A QApplication holding an event-filter pointer to this pane
-            # during finalisation can leave sip visiting a freed wrapper
-            # (SIGBUS in sip_api_visit_wrappers at exit). Qt auto-drops
-            # this connection if the pane is destroyed first.
+            # The filter is a small CHILD object rather than the pane itself.
+            # Filtering with the pane left the QApplication holding a filter
+            # pointer to a pane that had already been destroyed, because the
+            # only teardown was on aboutToQuit and panes are destroyed long
+            # before the app quits (every time the editor swaps the centre
+            # widget). The next event dispatched then hit a dead wrapper:
+            # "RuntimeError: wrapped C/C++ object of type NiftiViewerPane has
+            # been deleted". A child dies with its parent, deterministically,
+            # and is unregistered on the way out.
+            self._hotkey_watcher = _HotKeyWatcher(self)
+            app.installEventFilter(self._hotkey_watcher)
+            self.destroyed.connect(_uninstall_watcher(self._hotkey_watcher))
+            # Also drop it before the interpreter tears PyQt down: a filter
+            # still registered at finalisation can leave sip visiting a freed
+            # wrapper (SIGBUS in sip_api_visit_wrappers at exit).
             app.aboutToQuit.connect(self._teardown_event_filter)
 
         # Single-key shortcuts (A/S/C/M/O). Scoped to the pane's focus,
@@ -475,22 +540,8 @@ class NiftiViewerPane(QWidget):
 
     def _teardown_event_filter(self) -> None:
         app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
-
-    def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
-        et = event.type()
-        if et == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
-                self._h_key_down = True
-        elif et == QEvent.Type.KeyRelease:
-            if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
-                self._h_key_down = False
-        elif et == QEvent.Type.ApplicationDeactivate:
-            # Losing focus can swallow the key-release; reset so H doesn't
-            # get stuck "down" after an app switch.
-            self._h_key_down = False
-        return super().eventFilter(obj, event)
+        if app is not None and self._hotkey_watcher is not None:
+            app.removeEventFilter(self._hotkey_watcher)
 
     # ------------------------------------------------------------------
     # Public API
