@@ -64,6 +64,7 @@ from ..fixups import (
     enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
+    repair_sidecars,
     update_scans_tsv,
 )
 from ..recording_meta import (
@@ -75,7 +76,7 @@ from ..recording_meta import (
     scaffold_sidecar_path,
 )
 from ..util.cancel import OperationCancelled, is_cancelled
-from ..util.paths import long_path, safe_path_component
+from ..util.paths import safe_path_component
 from ._scaffold import ensure_bidsignore, ensure_dataset_description
 
 log = logging.getLogger(__name__)
@@ -453,6 +454,13 @@ def _convert_subject(
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
+        # Schema-driven repairs that are not specific to any modality: fix a
+        # key whose spelling differs from the standard's only in case (mne-bids
+        # writes MEG's MiscChannelCount into EEG sidecars, where BIDS spells it
+        # MISCChannelCount), wrap a scalar where the schema wants an array, and
+        # write the dataset-wide values every datatype declares. Runs last so
+        # it sees what the modality fixups produced.
+        n_enriched += repair_sidecars(staging, tasks, spec)
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we

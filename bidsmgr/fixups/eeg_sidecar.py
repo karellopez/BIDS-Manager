@@ -30,6 +30,7 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .. import schema as schema_mod
 from ..recording_meta import RecordingMetaSpec, resolve_effective
 from ..recording_meta.resolve import EffectiveSpec
 
@@ -138,60 +139,73 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> int:
-    """Write reference/ground/filters/device/institution/extras into the JSON."""
+    """Write reference/ground/filters/device/institution/extras into the JSON.
+
+    WHICH key each spec value belongs under, and whether this datatype takes it
+    at all, is decided by the schema rather than by a branch per datatype. The
+    branches had already drifted from the standard in two places: NIRS was
+    given a ``SoftwareFilters`` the schema does not declare for it, and the cap
+    fields were written for EEG alone though the schema declares them for MEG
+    and NIRS too, so a cap the user entered for either was silently dropped.
+
+    The spec-attribute to BIDS-name mapping below stays hand-written, and has
+    to: the standard has no idea what our own model calls things. What it must
+    not also encode is which datatypes take which field.
+    """
     acq = eff.acquisition
+    data = _read_json(sidecar)
     updates: dict = {}
 
-    # Common keys (every EEG/MEG/iEEG/NIRS sidecar). Each is written only when
-    # the user supplied it (truthy), so a blank value never clobbers what the
-    # backend already wrote. mne-bids DOES auto-fill Manufacturer for MEG, so the
-    # truthy guard is what preserves it when the user leaves manufacturer blank;
-    # ManufacturersModelName / SoftwareVersions / InstitutionName are mne-bids
-    # omissions, so writing them here only adds information.
-    if acq.manufacturer:
-        updates["Manufacturer"] = acq.manufacturer
-    if acq.amplifier_model:
-        updates["ManufacturersModelName"] = acq.amplifier_model
-    if acq.software_versions or acq.software:
-        updates["SoftwareVersions"] = acq.software_versions or acq.software
-    if acq.institution_name:
-        updates["InstitutionName"] = acq.institution_name
-    if acq.institution_dept:
-        updates["InstitutionalDepartmentName"] = acq.institution_dept
+    # A MEG recording only carries an EEG reference if it carries EEG at all.
+    # The schema declares EEGReference for MEG because simultaneous EEG is
+    # common, not because every MEG run has it, and mne-bids has already
+    # counted the channels for us. Writing a dataset-wide reference into a MEG
+    # sidecar with no EEG channels states something untrue about the recording.
+    simultaneous_eeg = bool(data.get("EEGChannelCount") or 0)
 
-    hw = {f.name: f.info for f in acq.filters if f.kind == "Hardware"}
-    sw = {f.name: f.info for f in acq.filters if f.kind == "Software"}
-    if hw:
-        updates["HardwareFilters"] = hw
-    if sw:
-        updates["SoftwareFilters"] = sw
+    def _put(candidates: tuple[str, ...], value) -> None:
+        """Write ``value`` under the first candidate key this datatype takes.
 
-    # Datatype-scoped reference / ground / cap.
-    if datatype == "eeg":
-        if acq.eeg_reference:
-            updates["EEGReference"] = acq.eeg_reference
-        if acq.eeg_ground:
-            updates["EEGGround"] = acq.eeg_ground
-        if acq.cap_manufacturer:
-            updates["CapManufacturer"] = acq.cap_manufacturer
-        if acq.cap_model:
-            updates["CapManufacturersModelName"] = acq.cap_model
-    elif datatype == "ieeg":
-        if acq.eeg_reference:
-            updates["iEEGReference"] = acq.eeg_reference
-        if acq.eeg_ground:
-            updates["iEEGGround"] = acq.eeg_ground
-    elif datatype == "meg":
-        # MEG-specific fields mne-bids cannot derive from the recording. The
-        # channel-derived ones (ContinuousHeadLocalization / DigitizedLandmarks
-        # / DigitizedHeadPoints / HeadCoilFrequency) are intentionally NOT
-        # written here - mne-bids already computes them correctly.
-        if acq.dewar_position:
-            updates["DewarPosition"] = acq.dewar_position
-        if acq.associated_empty_room:
-            updates["AssociatedEmptyRoom"] = acq.associated_empty_room
-        if acq.subject_artefact_description:
-            updates["SubjectArtefactDescription"] = acq.subject_artefact_description
+        Reference and ground are the reason there is more than one candidate:
+        the same spec value is ``EEGReference`` on an EEG recording and
+        ``iEEGReference`` on an intracranial one.
+        """
+        if not value:
+            return
+        for key in candidates:
+            if schema_mod.field_applies(key, datatype, datatype):
+                updates[key] = value
+                return
+
+    # Device and site. Each is written only when the user supplied it, so a
+    # blank never clobbers what the backend already wrote: mne-bids auto-fills
+    # Manufacturer for MEG, and the truthy guard is what preserves it.
+    _put(("Manufacturer",), acq.manufacturer)
+    _put(("ManufacturersModelName",), acq.amplifier_model)
+    _put(("SoftwareVersions",), acq.software_versions or acq.software)
+    _put(("InstitutionName",), acq.institution_name)
+    _put(("InstitutionalDepartmentName",), acq.institution_dept)
+
+    _put(("HardwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Hardware"})
+    _put(("SoftwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Software"})
+
+    # Reference and ground, under whichever name this datatype uses.
+    if datatype != "meg" or simultaneous_eeg:
+        _put(("EEGReference", "iEEGReference"), acq.eeg_reference)
+        _put(("EEGGround", "iEEGGround"), acq.eeg_ground)
+
+    # The cap. Declared for EEG, MEG and NIRS; not for iEEG, which has
+    # electrodes rather than a cap.
+    _put(("CapManufacturer",), acq.cap_manufacturer)
+    _put(("CapManufacturersModelName",), acq.cap_model)
+
+    # MEG fields mne-bids cannot derive from the recording. The channel-derived
+    # ones (ContinuousHeadLocalization / DigitizedLandmarks / DigitizedHeadPoints
+    # / HeadCoilFrequency) are intentionally NOT written here: mne-bids already
+    # computes them correctly.
+    _put(("DewarPosition",), acq.dewar_position)
+    _put(("AssociatedEmptyRoom",), acq.associated_empty_room)
+    _put(("SubjectArtefactDescription",), acq.subject_artefact_description)
 
     # Extras (non-required keys) for non-MEG datatypes.
     if acq.extras is not None and datatype != "meg":
@@ -200,7 +214,6 @@ def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> i
     if not updates:
         return 0
 
-    data = _read_json(sidecar)
     data.update(updates)
     _write_json(sidecar, data)
     log.info("enrich: %s sidecar +%d field(s)", sidecar.name, len(updates))

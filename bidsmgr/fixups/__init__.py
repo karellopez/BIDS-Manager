@@ -25,10 +25,12 @@ from .pet_sidecar import enrich_pet_sidecars
 from .fieldmaps import apply_fieldmap_renames
 from .intended_for import populate_intended_for
 from .scans_tsv import update_scans_tsv
+from .sidecar_schema import repair_sidecars
 
 __all__ = [
     "apply_fieldmap_renames",
     "populate_intended_for",
+    "repair_sidecars",
     "update_scans_tsv",
     "enrich_pet_sidecars",
     "enrich_recording_sidecars",
