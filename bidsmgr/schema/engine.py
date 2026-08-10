@@ -161,6 +161,22 @@ def deprecated_sidecar_fields(
     return _sidecar_fields(datatype, suffix, levels={"deprecated"}, bids_root=bids_root)
 
 
+def sidecar_fields(
+    datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+) -> list[FieldInfo]:
+    """Every field BIDS declares for this kind of file, at every level.
+
+    The per-level accessors above answer "which fields are required here";
+    this answers "what may this file carry at all", which is what a form
+    building a whole section needs.
+    """
+    return _sidecar_fields(
+        datatype, suffix,
+        levels={"required", "recommended", "optional", "deprecated"},
+        bids_root=bids_root,
+    )
+
+
 def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldInfo]:
     """Every field BIDS declares for ``dataset_description.json``.
 
@@ -182,6 +198,8 @@ def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldIn
             type=spec.type,
             item_type=spec.item_type,
             enum=tuple(spec.enum),
+            level=spec.level,
+            unit=spec.unit,
             required=spec.is_required,
             conditional=spec.conditional,
             speculative=spec.speculative,
@@ -382,6 +400,8 @@ def _sidecar_fields(
             type=spec.type,
             item_type=spec.item_type,
             enum=tuple(spec.enum),
+            level=spec.level,
+            unit=spec.unit,
             required=spec.is_required,
             conditional=spec.conditional,
             speculative=spec.speculative,
@@ -416,6 +436,7 @@ __all__ = [
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
     "dataset_description_fields",
+    "sidecar_fields",
     "field_applies",
     "field_metadata",
     "build_basename",

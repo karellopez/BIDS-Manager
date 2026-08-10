@@ -42,6 +42,7 @@ from .engine import (
     recommended_sidecar_fields,
     required_entities,
     required_sidecar_fields,
+    sidecar_fields,
 )
 from .loader import bids_version, get_schema, schema_version
 from .types import (
@@ -76,6 +77,7 @@ __all__ = [
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
     "dataset_description_fields",
+    "sidecar_fields",
     "field_applies",
     "field_metadata",
     # name building

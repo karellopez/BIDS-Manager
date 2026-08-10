@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..metadata.template_plan import dataset_description_section
 from ..recording_meta import (
     COMMON_CAP_MANUFACTURERS,
     COMMON_MANUFACTURERS,
@@ -95,6 +96,82 @@ def _tighten_form(form: QFormLayout) -> None:
     form.setHorizontalSpacing(8)
 
 
+
+class _AuthorsEditor(QWidget):
+    """A row per author, family name and given name kept apart.
+
+    BIDS wants a list of strings and the convention is "Family, Given". A plain
+    text box makes that a trap: split on commas and "Lopez, Karel" becomes two
+    people; ask for one per line and the user has to guess the order. Two boxes
+    per row remove the guess, and the value is composed the way the standard
+    expects it.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._rows: list[tuple[QWidget, QLineEdit, QLineEdit]] = []
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+        self._rows_box = QVBoxLayout()
+        self._rows_box.setSpacing(2)
+        outer.addLayout(self._rows_box)
+        add = QPushButton("Add author")
+        add.clicked.connect(lambda: self._add_row())
+        outer.addWidget(add, 0, Qt.AlignmentFlag.AlignLeft)
+        self._add_row()
+
+    def _add_row(self, family: str = "", given: str = "") -> None:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        family_edit = QLineEdit(family)
+        family_edit.setPlaceholderText("Family name")
+        given_edit = QLineEdit(given)
+        given_edit.setPlaceholderText("Given name")
+        remove = QPushButton("\u2212")
+        remove.setFixedWidth(26)
+        remove.setToolTip("Remove this author")
+        layout.addWidget(family_edit, 3)
+        layout.addWidget(given_edit, 2)
+        layout.addWidget(remove, 0)
+        self._rows_box.addWidget(row)
+        entry = (row, family_edit, given_edit)
+        self._rows.append(entry)
+
+        def drop() -> None:
+            if entry in self._rows:
+                self._rows.remove(entry)
+            row.setParent(None)
+            if not self._rows:
+                self._add_row()
+
+        remove.clicked.connect(drop)
+
+    def value(self) -> list[str]:
+        """The authors as BIDS wants them, blanks dropped."""
+        out: list[str] = []
+        for _row, family_edit, given_edit in self._rows:
+            family = family_edit.text().strip()
+            given = given_edit.text().strip()
+            if family and given:
+                out.append(f"{family}, {given}")
+            elif family or given:
+                out.append(family or given)
+        return out
+
+    def set_value(self, values) -> None:
+        for row, _f, _g in list(self._rows):
+            row.setParent(None)
+        self._rows.clear()
+        for entry in values or []:
+            family, _, given = str(entry).partition(",")
+            self._add_row(family.strip(), given.strip())
+        if not self._rows:
+            self._add_row()
+
+
 class RecordingMetaDialog(QDialog):
     """Edit the dataset-level recording-metadata scaffold."""
 
@@ -106,6 +183,7 @@ class RecordingMetaDialog(QDialog):
         montage_suggestions: Optional[list[str]] = None,
         manufacturer_suggestions: Optional[list[str]] = None,
         pet_suggestions: Optional[dict[str, list[str]]] = None,
+        example_paths: Optional[dict] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Dataset metadata")
@@ -126,6 +204,9 @@ class RecordingMetaDialog(QDialog):
         # (reference / ground / montage / cap) are hidden for MEG-only. The
         # agnostic sections (events, phenotype) always show.
         self._present = set(present_datatypes or {"eeg", "meg", "ieeg", "nirs"})
+        # One real path per (datatype, suffix) from the scan, so a group can
+        # name the file its answers reach instead of "sub-..._<datatype>.json".
+        self._example_paths = dict(example_paths or {})
         # Read-only scan hints, shown beside the fields they inform. Same
         # contract as the montage and manufacturer hints: proposed, never
         # applied, because a vendor string can always parse wrongly.
@@ -157,10 +238,29 @@ class RecordingMetaDialog(QDialog):
         self._specific_region = self._region_label(
             "Modality-specific defaults", agnostic=False)
         bl.addWidget(self._specific_region)
-        self._device_box = self._build_device_group()
+        # One acquisition group per modality, not one shared between them: an
+        # EEG amplifier and a MEG dewar are different instruments, and a study
+        # running both could previously state only one manufacturer, one model
+        # and one mains frequency for the pair.
+        self._device_boxes: dict[str, QGroupBox] = {}
+        self._device_widgets: dict[str, dict] = {}
+        electrophysiology = [
+            m for m in _MODALITY_ORDER if m in self._present and m != "pet"
+        ]
+        # Even with no electrophysiology present the widgets must exist: a
+        # shared scaffold may carry EEG values, and build_spec preserves what it
+        # cannot show rather than wiping it.
+        for modality in electrophysiology or ["eeg"]:
+            box = self._build_device_group(modality)
+            self._device_boxes[modality] = box
+            if not electrophysiology:
+                box.setVisible(False)
+        self._device_box = next(iter(self._device_boxes.values()))
+
         self._eeg_box = self._build_eeg_group()
         self._meg_box = self._build_meg_group()
-        bl.addWidget(self._device_box)
+        for box in self._device_boxes.values():
+            bl.addWidget(box)
         bl.addWidget(self._eeg_box)
         bl.addWidget(self._meg_box)
         # PET: four groups, split the way the acquisition itself divides, so
@@ -177,6 +277,7 @@ class RecordingMetaDialog(QDialog):
         # institution (site info, written to every modality's sidecar), events
         # and phenotype, each writing to its own destination.
         bl.addWidget(self._region_label("Modality-agnostic", agnostic=True))
+        bl.addWidget(self._build_dataset_description_group())
         bl.addWidget(self._build_institution_group())
         bl.addWidget(self._build_event_group())
         bl.addWidget(self._build_participants_group())
@@ -185,6 +286,32 @@ class RecordingMetaDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(body)
+
+        # Jump straight to a section. The layout is unchanged, so everything is
+        # still there to scroll through if you prefer, but a dataset with four
+        # modalities makes a long window and hunting for the PET reconstruction
+        # box by dragging is not a good use of anyone's time.
+        self._section_picker = QComboBox()
+        self._section_picker.setToolTip("Jump to a section")
+        picker_row = QWidget()
+        picker_layout = QHBoxLayout(picker_row)
+        picker_layout.setContentsMargins(0, 0, 0, 0)
+        picker_layout.setSpacing(6)
+        picker_layout.addWidget(QLabel("Go to:"))
+        picker_layout.addWidget(self._section_picker, 1)
+        outer.addWidget(picker_row)
+
+        self._sections: list[QGroupBox] = [
+            box for box in body.findChildren(QGroupBox) if box.title()
+        ]
+        for box in self._sections:
+            self._section_picker.addItem(box.title())
+
+        def jump(index: int) -> None:
+            if 0 <= index < len(self._sections):
+                scroll.ensureWidgetVisible(self._sections[index], 0, 0)
+
+        self._section_picker.activated.connect(jump)
         outer.addWidget(scroll, 1)
 
         buttons = QDialogButtonBox(
@@ -195,6 +322,8 @@ class RecordingMetaDialog(QDialog):
         outer.addWidget(buttons)
 
         self._populate()
+        self._populate_dataset_description()
+        self._populate_device_groups()
         self._apply_modality_constraints()
 
     def _region_label(self, text: str, *, agnostic: bool) -> QLabel:
@@ -240,7 +369,8 @@ class RecordingMetaDialog(QDialog):
         self._eeg_applies = has_eeg
         self._meg_applies = has_meg
         self._pet_applies = has_pet
-        self._device_box.setVisible(has_eeg_meg)
+        for box in self._device_boxes.values():
+            box.setVisible(has_eeg_meg)
         self._eeg_box.setVisible(has_eeg)
         self._meg_box.setVisible(has_meg)
         for box in self._pet_boxes:
@@ -261,36 +391,179 @@ class RecordingMetaDialog(QDialog):
             widget.setToolTip(tip)
         form.addRow(label, widget)
 
-    def _build_device_group(self) -> QGroupBox:
-        # Acquisition-system fields - the DEVICE that produced the recording.
-        # These are modality-specific (the EEG amplifier and the MEG system are
-        # different devices). Institution is agnostic and lives in its own
-        # section. The title names every present modality (e.g. "EEG and MEG").
-        mods = self._modalities_label({"eeg", "meg", "ieeg", "nirs"}) or "EEG / MEG"
+    def _build_device_group(self, modality: str) -> QGroupBox:
+        """The DEVICE that produced one modality's recordings.
+
+        One group per modality: an EEG amplifier and a MEG dewar are different
+        instruments, so a shared group could record only one of them and the
+        other silently claimed it.
+        """
+        target = self._target_for(modality)
+        box = QGroupBox(f"Acquisition system  ·  {modality.upper()}  →  {target}")
+        form = QFormLayout(box)
+        _tighten_form(form)
+
+        manufacturer = QComboBox()
+        manufacturer.setEditable(True)  # pick a default OR type another
+        manufacturer.addItem("")
+        manufacturer.addItems(COMMON_MANUFACTURERS)
+        amplifier_model = QLineEdit()
+        software_versions = QLineEdit()
+        line_freq = QComboBox()
+        line_freq.addItems([_BLANK, "50", "60"])
+
+        self._form_row(form, "Manufacturer:", manufacturer, "manufacturer")
+        hint = self._suggestion_label(self._manufacturer_suggestions)
+        if hint is not None:
+            form.addRow("", hint)
+        self._form_row(form, "Amplifier / system model:", amplifier_model, "amplifier_model")
+        self._form_row(form, "Software versions:", software_versions, "software_versions")
+        self._form_row(form, "Power line frequency (Hz):", line_freq, "line_freq")
+
+        self._device_widgets[modality] = {
+            "manufacturer": manufacturer,
+            "amplifier_model": amplifier_model,
+            "software_versions": software_versions,
+            "power_line_freq": line_freq,
+        }
+        # The first modality keeps the historical attribute names so the rest
+        # of the dialog, and its tests, go on working unchanged.
+        if not hasattr(self, "_manufacturer"):
+            self._manufacturer = manufacturer
+            self._amplifier_model = amplifier_model
+            self._software_versions = software_versions
+            self._line_freq = line_freq
+        return box
+
+    def _target_for(self, modality: str, suffix: str = "") -> str:
+        """The file a modality's answers land in, from a real scanned row."""
+        suffix = suffix or modality
+        path = self._example_paths.get((modality, suffix), "")
+        return path.split("/")[-1] if path else f"sub-..._{suffix}.json"
+
+    def _read_device_groups(self, spec) -> None:
+        """Store each modality's acquisition system in its own block.
+
+        The shared block keeps what belongs to the whole study; an instrument
+        belongs to the modality that used it, so a study running two systems
+        records both instead of one overwriting the other.
+        """
+        for modality, widgets in self._device_widgets.items():
+            values: dict = {}
+            for attr, widget in widgets.items():
+                text = (
+                    widget.currentText() if isinstance(widget, QComboBox)
+                    else widget.text()
+                ).strip()
+                if not text or text == _BLANK:
+                    continue
+                if attr == "power_line_freq":
+                    try:
+                        values[attr] = float(text)
+                    except ValueError:
+                        continue
+                else:
+                    values[attr] = text
+            if values:
+                block = spec.modality_defaults.get(modality) or AcquisitionSpec()
+                spec.modality_defaults[modality] = block.model_copy(update=values)
+            else:
+                spec.modality_defaults.pop(modality, None)
+
+    def _populate_device_groups(self) -> None:
+        """Fill each modality's group from its own block, then the shared one."""
+        for modality, widgets in self._device_widgets.items():
+            block = self._spec.modality_defaults.get(modality)
+            for attr, widget in widgets.items():
+                value = getattr(block, attr, None) if block is not None else None
+                if value in (None, ""):
+                    value = getattr(self._spec.defaults, attr, None)
+                if value in (None, ""):
+                    continue
+                text = (
+                    str(int(value)) if attr == "power_line_freq" and float(value).is_integer()
+                    else str(value)
+                )
+                if isinstance(widget, QComboBox):
+                    widget.setCurrentText(text)
+                else:
+                    widget.setText(text)
+
+    def _build_dataset_description_group(self) -> QGroupBox:
+        """Who made the dataset and under what terms.
+
+        Nothing here can be read from a recording, and until now there was
+        nowhere to say it: the fields were modelled and writable from the
+        command line but never offered, which is why every dataset the tool
+        produced reported NO_AUTHORS.
+        """
         box = QGroupBox(
-            f"Acquisition system  ·  {mods}  →  sub-..._<datatype>.json"
+            "Dataset description  ·  modality-agnostic  →  dataset_description.json"
         )
         form = QFormLayout(box)
         _tighten_form(form)
 
-        self._manufacturer = QComboBox()
-        self._manufacturer.setEditable(True)  # pick a default OR type another
-        self._manufacturer.addItem("")
-        self._manufacturer.addItems(COMMON_MANUFACTURERS)
-        self._amplifier_model = QLineEdit()
-        self._software_versions = QLineEdit()
-        self._line_freq = QComboBox()
-        self._line_freq.addItems([_BLANK, "50", "60"])
+        self._dd_name = QLineEdit()
+        self._dd_name.setPlaceholderText("the study's title")
+        self._dd_authors = _AuthorsEditor()
+        self._dd_license = QComboBox()
+        self._dd_license.setEditable(True)
+        self._dd_license.addItems(["", "CC0-1.0", "CC-BY-4.0", "PDDL-1.0"])
+        self._dd_acknowledgements = QLineEdit()
+        self._dd_how_to_acknowledge = QLineEdit()
+        self._dd_funding = QLineEdit()
+        self._dd_funding.setPlaceholderText("one grant per line is also fine")
+        self._dd_ethics = QLineEdit()
+        self._dd_references = QLineEdit()
+        self._dd_doi = QLineEdit()
+        self._dd_doi.setPlaceholderText("doi:10.…")
 
-        self._form_row(form, "Manufacturer:", self._manufacturer, "manufacturer")
-        # Read-only summary of the manufacturers the scan detected/inferred.
-        hint = self._suggestion_label(self._manufacturer_suggestions)
-        if hint is not None:
-            form.addRow("", hint)
-        self._form_row(form, "Amplifier / system model:", self._amplifier_model, "amplifier_model")
-        self._form_row(form, "Software versions:", self._software_versions, "software_versions")
-        self._form_row(form, "Power line frequency (Hz):", self._line_freq, "line_freq")
+        # The level marks come from the schema, so they follow the BIDS version
+        # in use rather than being asserted here.
+        levels = {f.name: f.level for f in dataset_description_section().fields}
+
+        def label(field: str, text: str) -> str:
+            mark = {"required": " *", "recommended": " ·"}.get(levels.get(field, ""), "")
+            return f"{text}{mark}:"
+
+        form.addRow(label("Name", "Dataset name"), self._dd_name)
+        form.addRow(label("Authors", "Authors"), self._dd_authors)
+        form.addRow(label("License", "License"), self._dd_license)
+        form.addRow(label("Acknowledgements", "Acknowledgements"), self._dd_acknowledgements)
+        form.addRow(label("HowToAcknowledge", "How to acknowledge"), self._dd_how_to_acknowledge)
+        form.addRow(label("Funding", "Funding"), self._dd_funding)
+        form.addRow(label("EthicsApprovals", "Ethics approvals"), self._dd_ethics)
+        form.addRow(label("ReferencesAndLinks", "References and links"), self._dd_references)
+        form.addRow(label("DatasetDOI", "Dataset DOI"), self._dd_doi)
         return box
+
+    def _populate_dataset_description(self) -> None:
+        dd = self._spec.dataset_description
+        self._dd_name.setText(dd.name or "")
+        self._dd_authors.set_value(dd.authors)
+        self._dd_license.setCurrentText(dd.license or "")
+        self._dd_acknowledgements.setText(dd.acknowledgements or "")
+        self._dd_how_to_acknowledge.setText(dd.how_to_acknowledge or "")
+        self._dd_funding.setText("; ".join(dd.funding or []))
+        self._dd_ethics.setText("; ".join(dd.ethics_approvals or []))
+        self._dd_references.setText("; ".join(dd.references_and_links or []))
+        self._dd_doi.setText(dd.dataset_doi or "")
+
+    def _read_dataset_description(self, spec) -> None:
+        def split(text: str) -> list[str]:
+            # Semicolons, because a grant title may itself contain a comma.
+            return [p.strip() for p in text.split(";") if p.strip()]
+
+        dd = spec.dataset_description
+        dd.name = self._dd_name.text().strip() or None
+        dd.authors = self._dd_authors.value()
+        dd.license = self._dd_license.currentText().strip() or None
+        dd.acknowledgements = self._dd_acknowledgements.text().strip() or None
+        dd.how_to_acknowledge = self._dd_how_to_acknowledge.text().strip() or None
+        dd.funding = split(self._dd_funding.text())
+        dd.ethics_approvals = split(self._dd_ethics.text())
+        dd.references_and_links = split(self._dd_references.text())
+        dd.dataset_doi = self._dd_doi.text().strip() or None
 
     def _build_institution_group(self) -> QGroupBox:
         # Institution / site info is modality-AGNOSTIC: it belongs in every
@@ -935,6 +1208,8 @@ class RecordingMetaDialog(QDialog):
 
     def _on_save(self) -> None:
         spec = self.build_spec()
+        self._read_dataset_description(spec)
+        self._read_device_groups(spec)
         self._scaffold_path.parent.mkdir(parents=True, exist_ok=True)
         self._scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
         self.accept()

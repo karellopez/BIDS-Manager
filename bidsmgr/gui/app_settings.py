@@ -34,6 +34,7 @@ KEYS = {
     "editor_sidecar_view": "editor/sidecar_view",    # "bids" | "tree"
     "editor_strict_validate": "editor/strict_validate",  # "deep checks": bidsval read_headers on/off
     # Validation engine (bidsval) knobs, controllable from Settings.
+    "template_colour_levels": "ui/template_colour_levels",  # colour the level marks
     "validate_schema_version": "validate/schema_version",  # "" = bidsval bundled default
     "validate_max_rows": "validate/max_rows",              # TSV rows scanned per table
     "validate_show": "validate/show",                      # which severities the Editor lists
@@ -115,6 +116,10 @@ class AppSettings:
     # colour + thickness survives across sessions.
     nifti_crosshair_color: str = "#4FC3F7"
     nifti_crosshair_thickness: int = 1
+    # Colour the requirement-level marks in the metadata template. Off, the
+    # marks (* required, . recommended) remain, so the information does not
+    # depend on being able to see the colour.
+    template_colour_levels: bool = True
 
     # Recently-used paths (paths come back as str; callers wrap in Path).
     raw_root: Optional[str] = None
@@ -272,6 +277,10 @@ class AppSettings:
         )
         out.nifti_crosshair_thickness = max(
             1, min(out.nifti_crosshair_thickness, 5),
+        )
+        out.template_colour_levels = _as_bool(
+            s.value(KEYS["template_colour_levels"]),
+            out.template_colour_levels,
         )
         out.raw_root = s.value(KEYS["raw_root"]) or None
         out.bids_parent = s.value(KEYS["bids_parent"]) or None

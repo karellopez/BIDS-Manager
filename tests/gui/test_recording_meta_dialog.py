@@ -228,14 +228,27 @@ def test_dialog_uses_shared_manufacturer_vocab(qtbot, tmp_path):
     assert items[1:] == list(COMMON_MANUFACTURERS)
 
 
-def test_dialog_combined_modality_label(qtbot, tmp_path):
-    """A field shared by several present modalities is labelled with all of
-    them (e.g. 'EEG and MEG'); the device block names every electrophysiology
-    modality, the reference block only EEG/iEEG."""
+def test_each_modality_gets_its_own_acquisition_group(qtbot, tmp_path):
+    """REGRESSION: one "EEG and MEG" group held a single manufacturer and a
+    single power line frequency between the two.
+
+    They are different instruments and a study may run both, so whichever was
+    typed was claimed by the other as well. There is now one group per
+    modality, each naming the file its answers land in.
+    """
     scaffold = tmp_path / "inv.tsv.recording_meta.json"
     dlg = RecordingMetaDialog(scaffold, present_datatypes={"eeg", "meg"})
     qtbot.addWidget(dlg)
-    assert "EEG and MEG" in dlg._device_box.title()
+
+    assert set(dlg._device_boxes) == {"eeg", "meg"}
+    titles = [box.title() for box in dlg._device_boxes.values()]
+    assert any("EEG" in t and "MEG" not in t for t in titles)
+    assert any("MEG" in t for t in titles)
+    # Separate widgets, so a value typed for one is not the other's.
+    assert (
+        dlg._device_widgets["eeg"]["manufacturer"]
+        is not dlg._device_widgets["meg"]["manufacturer"]
+    )
     # MEG has no scalp reference/montage -> that block is EEG-only here.
     assert "EEG" in dlg._eeg_box.title() and "MEG" not in dlg._eeg_box.title()
 

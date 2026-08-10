@@ -77,6 +77,13 @@ class FieldInfo:
     # The controlled vocabulary, empty when the field is free text. A field with
     # an enum accepts nothing outside it, placeholders included.
     enum: tuple = ()
+    # The BIDS requirement level verbatim: required / recommended / optional /
+    # deprecated / prohibited. ``required`` below is the boolean shorthand;
+    # a form needs the word, to badge and to order by.
+    level: str = ""
+    # The unit the schema declares, empty when it declares none. A form shows
+    # it beside the box so nobody has to guess whether a dose is in MBq or Bq.
+    unit: str = ""
     required: bool = False
     # True when the level or the rule's applicability depends on something a
     # datatype and suffix cannot settle. Show such a field, but present it as
