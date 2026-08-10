@@ -1,0 +1,300 @@
+"""One inheritance chain, resolved to BIDS field names.
+
+The same fact about the same file could be stated in two places and two
+vocabularies: as a spec attribute (``modality_defaults["eeg"].manufacturer``)
+or as a BIDS field in a sequence template
+(``sequence_templates["eeg/eeg"]["Manufacturer"]``). Two write paths applied
+them independently, so which one won was decided by the order the fixups
+happened to run in, and the per-row surfaces in the GUI knew about only one of
+them: you could set a template, see nothing change in the table, and then find
+values in the sidecars afterwards.
+
+This module is the single answer. It walks every layer, weakest first, and
+returns one value per BIDS field together with WHERE it came from, so a form can
+say "from the EEG defaults" rather than a bare "inherited".
+
+The layers, least specific first:
+
+===============  ==========================================================
+``dataset``      the agnostic block: the site, and anything shared by all
+``modality``     that datatype's own block: the instrument
+``template``     the per-sequence template for this datatype/suffix
+``template@task`` the same, narrowed to one task
+``row``          this recording's override, from the properties panel
+``cell``         this recording's inventory cell, typed into the table
+===============  ==========================================================
+
+``row`` and ``cell`` are both "this one recording" and differ only in which
+surface the user typed into. The table cell wins, preserving the behaviour the
+enrichment always had, and because it is the value the user can see in front of
+them while the panel override is a level down.
+
+What the converter read out of the file is NOT a layer here: it is already in
+the sidecar, and the writer's rule is that it stands unless a ``row`` override
+contradicts it. A statement about a class of files should not overrule the
+file's own header; correcting one specific file is exactly what the row
+override is for.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Optional
+
+from .models import RecordingMetaSpec, is_varies
+from .templates import template_key
+
+# Weakest first. The order IS the precedence.
+LAYERS: tuple[str, ...] = (
+    "dataset", "modality", "template", "template@task", "row", "cell",
+)
+
+
+class _AttrView:
+    """Read a plain mapping as if it were an acquisition block."""
+
+    def __init__(self, values: dict) -> None:
+        self._values = values
+
+    def __getattr__(self, name: str) -> Any:
+        return self._values.get(name)
+
+    @property
+    def filters(self):
+        return self._values.get("filters") or []
+
+
+@dataclass(frozen=True)
+class ResolvedField:
+    """One field's answer, and which layer supplied it."""
+
+    name: str
+    value: Any
+    origin: str
+
+    @property
+    def is_row_override(self) -> bool:
+        """True when this recording states it directly, which beats the file."""
+        return self.origin in ("row", "cell")
+
+
+# Spec attribute -> the BIDS field names it can land under, most preferred
+# first. More than one candidate exists where datatypes disagree on the name:
+# the same value is ``EEGReference`` on a scalp recording and
+# ``iEEGReference`` on an intracranial one.
+_ACQ_TO_BIDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("manufacturer", ("Manufacturer",)),
+    ("amplifier_model", ("ManufacturersModelName",)),
+    ("institution_name", ("InstitutionName",)),
+    ("institution_dept", ("InstitutionalDepartmentName",)),
+    ("eeg_reference", ("EEGReference", "iEEGReference")),
+    ("eeg_ground", ("EEGGround", "iEEGGround")),
+    ("cap_manufacturer", ("CapManufacturer",)),
+    ("cap_model", ("CapManufacturersModelName",)),
+    ("dewar_position", ("DewarPosition",)),
+    ("associated_empty_room", ("AssociatedEmptyRoom",)),
+    ("subject_artefact_description", ("SubjectArtefactDescription",)),
+    ("power_line_freq", ("PowerLineFrequency",)),
+)
+
+
+def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
+    """Translate one acquisition block into the BIDS names this datatype uses.
+
+    Accepts an :class:`AcquisitionSpec` or a plain mapping of the same
+    attribute names, which is how the inventory's own cells join the chain.
+    """
+    if acq is None:
+        return {}
+    if isinstance(acq, dict):
+        acq = _AttrView(acq)
+
+    out: dict[str, Any] = {}
+
+    def put(candidates: tuple[str, ...], value: Any) -> None:
+        if value in (None, "", [], {}) or is_varies(value):
+            # VARIES points at where the answer lives; it is never the answer.
+            return
+        for name in candidates:
+            if field_applies(name, datatype, datatype):
+                out[name] = value
+                return
+
+    for attr, candidates in _ACQ_TO_BIDS:
+        put(candidates, getattr(acq, attr, None))
+
+    # Two fields the spec models as one list and BIDS splits in two.
+    put(("SoftwareVersions",), acq.software_versions or acq.software)
+    put(("HardwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Hardware"})
+    put(("SoftwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Software"})
+    return out
+
+
+def _template_as_bids(values: Any, datatype: str, suffix: str, field_applies) -> dict[str, Any]:
+    """A template's fields, minus anything this datatype does not accept."""
+    if not isinstance(values, dict):
+        return {}
+    return {
+        name: value
+        for name, value in values.items()
+        if value not in (None, "", [], {})
+        and not is_varies(value)
+        and field_applies(name, datatype, suffix)
+    }
+
+
+def resolve_sidecar_fields(
+    spec: Optional[RecordingMetaSpec],
+    datatype: str,
+    suffix: str,
+    row_id: str = "",
+    task: Optional[str] = None,
+    row_values: Optional[dict] = None,
+    field_applies=None,
+) -> dict[str, ResolvedField]:
+    """Every field the user has stated for this file, and which layer said it.
+
+    ``field_applies`` is injected so this stays a pure-data module; the default
+    resolves it lazily from the schema layer.
+    """
+    if spec is None:
+        return {}
+    if field_applies is None:
+        from .. import schema as schema_mod
+
+        field_applies = schema_mod.field_applies
+
+    contributions: list[tuple[str, dict[str, Any]]] = [
+        ("dataset", _acquisition_as_bids(spec.defaults, datatype, field_applies)),
+        (
+            "modality",
+            _acquisition_as_bids(
+                spec.modality_defaults.get(datatype), datatype, field_applies,
+            ),
+        ),
+        (
+            "template",
+            _template_as_bids(
+                spec.sequence_templates.get(template_key(datatype, suffix)),
+                datatype, suffix, field_applies,
+            ),
+        ),
+    ]
+    if task:
+        contributions.append((
+            "template@task",
+            _template_as_bids(
+                spec.sequence_templates.get(template_key(datatype, suffix, task)),
+                datatype, suffix, field_applies,
+            ),
+        ))
+    if row_id:
+        contributions.append((
+            "row",
+            _acquisition_as_bids(
+                spec.overrides.get(row_id), datatype, field_applies,
+            ),
+        ))
+    if row_values:
+        contributions.append((
+            "cell",
+            _acquisition_as_bids(
+                {k: v for k, v in row_values.items() if v not in (None, "")},
+                datatype, field_applies,
+            ),
+        ))
+
+    resolved: dict[str, ResolvedField] = {}
+    for origin, values in contributions:
+        for name, value in values.items():
+            resolved[name] = ResolvedField(name=name, value=value, origin=origin)
+    return resolved
+
+
+# How each layer reads in a form or a tooltip.
+LAYER_LABELS: dict[str, str] = {
+    "dataset": "the dataset defaults",
+    "modality": "the {datatype} defaults",
+    "template": "the {datatype}/{suffix} template",
+    "template@task": "the {datatype}/{suffix} template for task {task}",
+    "row": "this recording",
+    "cell": "this row",
+}
+
+
+def describe_origin(
+    origin: str, datatype: str = "", suffix: str = "", task: str = "",
+) -> str:
+    """A phrase a user can read, e.g. "the eeg defaults"."""
+    template = LAYER_LABELS.get(origin, origin)
+    return template.format(datatype=datatype or "?", suffix=suffix or "?", task=task or "?")
+
+
+def resolve_attribute(
+    spec: Optional[RecordingMetaSpec],
+    attr: str,
+    datatype: str,
+    suffix: str = "",
+    row_id: str = "",
+    task: Optional[str] = None,
+    row_values: Optional[dict] = None,
+    field_applies=None,
+) -> Optional[ResolvedField]:
+    """The same chain, asked about one of OUR attribute names.
+
+    The GUI works in the spec's own vocabulary, and one of its fields has no
+    BIDS name at all: a montage is which electrode layout to apply on
+    conversion, which the standard has no opinion about. So this walks the same
+    layers reading the attribute directly, and consults a template only where
+    the attribute does have a BIDS name to look up.
+    """
+    if spec is None:
+        return None
+    if field_applies is None:
+        from .. import schema as schema_mod
+
+        field_applies = schema_mod.field_applies
+
+    bids_names = dict(_ACQ_TO_BIDS).get(attr, ())
+    suffix = suffix or datatype
+
+    def from_block(block) -> Any:
+        return getattr(block, attr, None) if block is not None else None
+
+    def from_template(key: str) -> Any:
+        values = spec.sequence_templates.get(key)
+        if not isinstance(values, dict):
+            return None
+        for name in bids_names:
+            if name in values and field_applies(name, datatype, suffix):
+                return values[name]
+        return None
+
+    candidates: list[tuple[str, Any]] = [
+        ("dataset", from_block(spec.defaults)),
+        ("modality", from_block(spec.modality_defaults.get(datatype))),
+        ("template", from_template(template_key(datatype, suffix))),
+    ]
+    if task:
+        candidates.append(("template@task", from_template(template_key(datatype, suffix, task))))
+    if row_id:
+        candidates.append(("row", from_block(spec.overrides.get(row_id))))
+    if row_values:
+        candidates.append(("cell", row_values.get(attr)))
+
+    winner: Optional[ResolvedField] = None
+    for origin, value in candidates:
+        if value in (None, "", [], {}):
+            continue
+        winner = ResolvedField(name=attr, value=value, origin=origin)
+    return winner
+
+
+__all__ = [
+    "LAYERS",
+    "LAYER_LABELS",
+    "ResolvedField",
+    "describe_origin",
+    "resolve_attribute",
+    "resolve_sidecar_fields",
+]

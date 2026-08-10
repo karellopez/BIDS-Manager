@@ -30,9 +30,11 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
-from .. import schema as schema_mod
-from ..recording_meta import is_varies
-from ..recording_meta import RecordingMetaSpec, resolve_effective
+from ..recording_meta import (
+    RecordingMetaSpec,
+    resolve_effective,
+    resolve_sidecar_fields,
+)
 from ..recording_meta.resolve import EffectiveSpec
 
 log = logging.getLogger(__name__)
@@ -91,16 +93,24 @@ def enrich_recording_sidecars(
             datatype,
         )
 
-        # Per-row inventory cells (eeg_reference / eeg_ground) take final
-        # precedence over the resolved spec value.
-        row_ref = getattr(task, "eeg_reference", None)
-        row_gnd = getattr(task, "eeg_ground", None)
-        if row_ref:
-            eff.acquisition.eeg_reference = row_ref
-        if row_gnd:
-            eff.acquisition.eeg_ground = row_gnd
+        # The row's own inventory cells. These are the strongest layer of the
+        # chain: the user typed them against this one recording, in the table,
+        # where they can see them.
+        row_values = {
+            "eeg_reference": getattr(task, "eeg_reference", None),
+            "eeg_ground": getattr(task, "eeg_ground", None),
+            "power_line_freq": getattr(task, "line_freq", None),
+        }
 
-        n_modified += _apply_sidecar_fields(sidecar, eff, datatype)
+        n_modified += _apply_sidecar_fields(
+            sidecar,
+            spec,
+            datatype,
+            suffix=str(getattr(task, "suffix", "") or datatype),
+            row_id=getattr(task, "row_id", "") or "",
+            task=(getattr(task, "entities", {}) or {}).get("task"),
+            row_values=row_values,
+        )
         n_modified += _retype_channels(sidecar, basename, eff)
         n_modified += _map_events(sidecar, basename, eff)
         n_modified += _apply_task_protocol(sidecar, eff)
@@ -140,23 +150,24 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=4) + "\n", encoding="utf-8")
 
 
-def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> int:
-    """Write reference/ground/filters/device/institution/extras into the JSON.
+def _apply_sidecar_fields(
+    sidecar: Path,
+    spec: Optional[RecordingMetaSpec],
+    datatype: str,
+    suffix: str = "",
+    row_id: str = "",
+    task: Optional[str] = None,
+    row_values: Optional[dict] = None,
+) -> int:
+    """Write the resolved metadata into this recording's sidecar.
 
-    WHICH key each spec value belongs under, and whether this datatype takes it
-    at all, is decided by the schema rather than by a branch per datatype. The
-    branches had already drifted from the standard in two places: NIRS was
-    given a ``SoftwareFilters`` the schema does not declare for it, and the cap
-    fields were written for EEG alone though the schema declares them for MEG
-    and NIRS too, so a cap the user entered for either was silently dropped.
-
-    The spec-attribute to BIDS-name mapping below stays hand-written, and has
-    to: the standard has no idea what our own model calls things. What it must
-    not also encode is which datatypes take which field.
+    The values come from :func:`resolve_sidecar_fields`, the one chain that
+    knows every layer. This function used to read the acquisition block
+    directly, while sequence templates were applied by a separate pass in
+    another fixup, so the same field could be stated twice and which statement
+    won depended on the order the two passes happened to run in.
     """
-    acq = eff.acquisition
     data = _read_json(sidecar)
-    updates: dict = {}
 
     # A MEG recording only carries an EEG reference if it carries EEG at all.
     # The schema declares EEGReference for MEG because simultaneous EEG is
@@ -165,55 +176,28 @@ def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> i
     # sidecar with no EEG channels states something untrue about the recording.
     simultaneous_eeg = bool(data.get("EEGChannelCount") or 0)
 
-    def _put(candidates: tuple[str, ...], value) -> None:
-        """Write ``value`` under the first candidate key this datatype takes.
+    resolved = resolve_sidecar_fields(
+        spec, datatype, suffix or datatype, row_id, task, row_values,
+    )
+    updates: dict = {}
+    for name, field in resolved.items():
+        if name in ("EEGReference", "EEGGround") and datatype == "meg" and not simultaneous_eeg:
+            continue
+        # What the converter read from the file stands, unless this recording
+        # says otherwise: correcting one specific file is what a row override
+        # is for, and a statement about a class of files is not that.
+        if name in data and not field.is_row_override:
+            continue
+        updates[name] = field.value
 
-        Reference and ground are the reason there is more than one candidate:
-        the same spec value is ``EEGReference`` on an EEG recording and
-        ``iEEGReference`` on an intracranial one.
-        """
-        if not value or is_varies(value):
-            # VARIES declares that the answer differs per recording. It is a
-            # pointer to where the answer lives, never the answer, so it must
-            # not be written.
-            return
-        for key in candidates:
-            if schema_mod.field_applies(key, datatype, datatype):
-                updates[key] = value
-                return
-
-    # Device and site. Each is written only when the user supplied it, so a
-    # blank never clobbers what the backend already wrote: mne-bids auto-fills
-    # Manufacturer for MEG, and the truthy guard is what preserves it.
-    _put(("Manufacturer",), acq.manufacturer)
-    _put(("ManufacturersModelName",), acq.amplifier_model)
-    _put(("SoftwareVersions",), acq.software_versions or acq.software)
-    _put(("InstitutionName",), acq.institution_name)
-    _put(("InstitutionalDepartmentName",), acq.institution_dept)
-
-    _put(("HardwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Hardware"})
-    _put(("SoftwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Software"})
-
-    # Reference and ground, under whichever name this datatype uses.
-    if datatype != "meg" or simultaneous_eeg:
-        _put(("EEGReference", "iEEGReference"), acq.eeg_reference)
-        _put(("EEGGround", "iEEGGround"), acq.eeg_ground)
-
-    # The cap. Declared for EEG, MEG and NIRS; not for iEEG, which has
-    # electrodes rather than a cap.
-    _put(("CapManufacturer",), acq.cap_manufacturer)
-    _put(("CapManufacturersModelName",), acq.cap_model)
-
-    # MEG fields mne-bids cannot derive from the recording. The channel-derived
-    # ones (ContinuousHeadLocalization / DigitizedLandmarks / DigitizedHeadPoints
-    # / HeadCoilFrequency) are intentionally NOT written here: mne-bids already
-    # computes them correctly.
-    _put(("DewarPosition",), acq.dewar_position)
-    _put(("AssociatedEmptyRoom",), acq.associated_empty_room)
-    _put(("SubjectArtefactDescription",), acq.subject_artefact_description)
-
-    # Extras (non-required keys) for non-MEG datatypes.
-    if acq.extras is not None and datatype != "meg":
+    # Extras (non-required keys) for non-MEG datatypes. These are the
+    # arbitrary values a user supplies for keys the spec models explicitly, so
+    # they come from the merged acquisition rather than the BIDS-named chain.
+    acq = (
+        resolve_effective(spec, row_id, task, datatype).acquisition
+        if spec is not None else None
+    )
+    if acq is not None and acq.extras is not None and datatype != "meg":
         updates.update(_extras_to_keys(acq.extras))
 
     if not updates:

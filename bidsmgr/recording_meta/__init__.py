@@ -22,6 +22,13 @@ subpackage only describes and resolves.
 
 from __future__ import annotations
 
+from .chain import (
+    LAYERS,
+    describe_origin,
+    resolve_attribute,
+    ResolvedField,
+    resolve_sidecar_fields,
+)
 from .templates import (
     parse_template_key,
     resolve_sequence_template,
@@ -73,6 +80,11 @@ from .serialize import (
 )
 
 __all__ = [
+    "LAYERS",
+    "describe_origin",
+    "resolve_attribute",
+    "ResolvedField",
+    "resolve_sidecar_fields",
     "VARIES",
     "is_varies",
     "parse_template_key",

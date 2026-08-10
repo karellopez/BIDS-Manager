@@ -174,7 +174,6 @@ def test_varies_is_never_written_to_a_sidecar(tmp_path: Path) -> None:
 
 def test_varies_in_the_eeg_enrichment_is_not_written(tmp_path: Path) -> None:
     from bidsmgr.fixups.eeg_sidecar import _apply_sidecar_fields
-    from bidsmgr.recording_meta import resolve_effective
 
     spec = RecordingMetaSpec()
     spec.defaults.eeg_reference = VARIES
@@ -182,7 +181,7 @@ def test_varies_in_the_eeg_enrichment_is_not_written(tmp_path: Path) -> None:
 
     p = tmp_path / "eeg.json"
     p.write_text("{}")
-    _apply_sidecar_fields(p, resolve_effective(spec, None), "eeg")
+    _apply_sidecar_fields(p, spec, "eeg", suffix="eeg")
 
     data = json.loads(p.read_text())
     assert data.get("Manufacturer") == "Brain Products"
@@ -233,3 +232,67 @@ def test_a_scaffold_with_no_per_modality_block_behaves_as_before() -> None:
     for datatype in ("eeg", "meg", None):
         acq = resolve_effective(spec, "row", None, datatype).acquisition
         assert acq.manufacturer == "Brain Products"
+
+
+# ---------------------------------------------------------------------------
+# One chain, one answer
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_field_stated_twice_has_a_defined_winner() -> None:
+    """REGRESSION: the same fact could be stated as a spec attribute or as a
+    BIDS field in a template, and two independent write passes applied them, so
+    which one won depended on the order the fixups happened to run in. Nothing
+    declared a precedence; swapping the passes flipped the answer."""
+    from bidsmgr.recording_meta import AcquisitionSpec, resolve_sidecar_fields
+
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
+    spec.sequence_templates = {"eeg/eeg": {"Manufacturer": "Elekta"}}
+
+    resolved = resolve_sidecar_fields(spec, "eeg", "eeg")
+    # More specific wins, and says so.
+    assert resolved["Manufacturer"].value == "Elekta"
+    assert resolved["Manufacturer"].origin == "template"
+
+
+def test_every_layer_beats_the_one_above_it() -> None:
+    from bidsmgr.recording_meta import AcquisitionSpec, resolve_sidecar_fields
+
+    spec = RecordingMetaSpec()
+    spec.defaults.manufacturer = "from dataset"
+    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="from modality")
+    spec.sequence_templates = {
+        "eeg/eeg": {"Manufacturer": "from template"},
+        "eeg/eeg@rest": {"Manufacturer": "from task template"},
+    }
+    spec.overrides["r1"] = AcquisitionSpec(manufacturer="from row")
+
+    def winner(**kw):
+        return resolve_sidecar_fields(spec, "eeg", "eeg", **kw)["Manufacturer"]
+
+    assert winner().value == "from template"
+    assert winner(task="rest").value == "from task template"
+    assert winner(task="rest", row_id="r1").value == "from row"
+    # The inventory cell is what the user can see while typing, so it wins.
+    cell = winner(task="rest", row_id="r1", row_values={"manufacturer": "from cell"})
+    assert cell.value == "from cell" and cell.origin == "cell"
+
+
+def test_a_row_cell_survives_the_chain(tmp_path: Path) -> None:
+    """The behaviour the enrichment always had, now expressed as a layer: a
+    reference typed into the inventory beats every template and default."""
+    import json as _json
+
+    from bidsmgr.fixups.eeg_sidecar import _apply_sidecar_fields
+    from bidsmgr.recording_meta import AcquisitionSpec
+
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["eeg"] = AcquisitionSpec(eeg_reference="Cz")
+    p = tmp_path / "eeg.json"
+    p.write_text("{}")
+    _apply_sidecar_fields(
+        p, spec, "eeg", suffix="eeg",
+        row_values={"eeg_reference": "linked mastoids"},
+    )
+    assert _json.loads(p.read_text())["EEGReference"] == "linked mastoids"

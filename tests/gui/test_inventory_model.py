@@ -950,3 +950,79 @@ def test_backend_column_names_the_tool_that_will_run() -> None:
     assert [model._backend(r) for r in range(5)] == [
         "ecat", "dcm2niix", "mne-bids", "dcm2niix", "bidsphysio",
     ]
+
+
+def test_a_cell_says_which_layer_its_value_came_from() -> None:
+    """"Inherited" alone does not tell a user enough to act on: the value may
+    come from the dataset defaults, this modality's block, or a sequence
+    template, and which one decides where to go and change it.
+
+    This also covers a disconnect: a template value never used to reach the
+    table at all, so you could set one, see nothing, and find it in the
+    sidecars after converting."""
+    from bidsmgr.recording_meta import VARIES, AcquisitionSpec, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.montage = "standard_1020"
+    spec.modality_defaults["eeg"] = AcquisitionSpec(power_line_freq=50)
+    spec.sequence_templates = {"eeg/eeg": {"EEGReference": "Cz"}}
+    spec.defaults.eeg_ground = VARIES
+
+    df = make_df([_ok_row(
+        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        bids_guess_datatype="eeg", bids_guess_suffix="eeg", task="rest",
+        line_freq="", eeg_reference="", montage="", eeg_ground="",
+        proposed_basename="sub-001_task-rest_eeg",
+    )])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+
+    def cell(key):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        idx = model.index(0, col)
+        return (
+            model.data(idx, Qt.ItemDataRole.DisplayRole),
+            model.data(idx, Qt.ItemDataRole.ToolTipRole) or "",
+        )
+
+    value, tip = cell("montage")
+    assert value == "standard_1020" and "dataset defaults" in tip
+
+    value, tip = cell("line_freq")
+    assert value == "50" and "eeg defaults" in tip
+
+    # The template reaches the table, and says so.
+    value, tip = cell("eeg_reference")
+    assert value == "Cz" and "eeg/eeg template" in tip
+
+    # VARIES asks rather than reports.
+    value, tip = cell("eeg_ground")
+    assert value == "varies?" and "differs per recording" in tip
+
+
+def test_the_properties_panel_resolves_per_modality() -> None:
+    """A study running both instruments sees each one's own answer, and is told
+    where it came from."""
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
+    spec.modality_defaults["meg"] = AcquisitionSpec(manufacturer="Elekta")
+    spec.sequence_templates = {"eeg/eeg": {"ManufacturersModelName": "actiCHamp"}}
+
+    df = make_df([
+        _ok_row(proposed_datatype="eeg", bids_guess_datatype="eeg",
+                bids_guess_suffix="eeg", source_file="a.set"),
+        _ok_row(proposed_datatype="meg", bids_guess_datatype="meg",
+                bids_guess_suffix="meg", source_file="a.fif"),
+    ])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+
+    assert model.acq_effective(0, "manufacturer") == "Brain Products"
+    assert model.acq_effective(1, "manufacturer") == "Elekta"
+    assert "eeg defaults" in model.acq_inherited_from(0, "manufacturer")
+    assert "meg defaults" in model.acq_inherited_from(1, "manufacturer")
+    # A template value reaches the panel too.
+    assert model.acq_effective(0, "amplifier_model") == "actiCHamp"
+    assert "template" in model.acq_inherited_from(0, "amplifier_model")

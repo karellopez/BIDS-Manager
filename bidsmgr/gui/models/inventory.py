@@ -47,7 +47,9 @@ from ...project import (
 from ...project.types import ProjectState
 from ...recording_meta import (
     AcquisitionSpec,
+    describe_origin,
     is_varies,
+    resolve_attribute,
     PetAcquisitionSpec,
     RecordingMetaSpec,
 )
@@ -443,24 +445,46 @@ class InventoryTableModel(QAbstractTableModel):
                 self.index(len(self._df) - 1, len(self.COLUMNS) - 1),
             )
 
-    def _global_default(self, df_col: str, datatype: str = "") -> str:
-        """The dataset default for an inheritance field, as a display string.
+    def inherited_from(self, row: int, df_col: str) -> str:
+        """Which layer supplies this cell's value, as a phrase for a tooltip.
 
-        ``datatype`` selects the per-modality block. A study running both an
-        EEG amplifier and a MEG dewar states each separately, so an EEG row
-        must show the EEG answer and a MEG row the MEG one; what neither states
-        falls back to the shared block.
+        "Inherited" alone does not tell a user enough to act: the value could
+        come from the dataset defaults, from this modality's block, or from a
+        sequence template, and which one it is decides where to go and change
+        it.
         """
         attr = _INHERITANCE_FIELDS.get(df_col)
         if attr is None or self._global_spec is None:
             return ""
-        val = None
-        if datatype:
-            per_modality = self._global_spec.modality_defaults.get(datatype)
-            if per_modality is not None:
-                val = getattr(per_modality, attr, None)
-        if val is None:
-            val = getattr(self._global_spec.defaults, attr, None)
+        datatype, suffix = self.effective_datatype_suffix(row)
+        field = resolve_attribute(
+            self._global_spec, attr, datatype, suffix,
+            task=self._raw_cell(row, "task") or None,
+        )
+        if field is None:
+            return ""
+        return describe_origin(field.origin, datatype, suffix)
+
+    def _global_default(self, df_col: str, datatype: str = "", row: int = -1) -> str:
+        """The inherited value for a cell, resolved through the one chain.
+
+        ``datatype`` selects the per-modality block, and the chain then layers
+        any sequence template over it, so the table shows the same answer the
+        converter will write rather than only the part of it the dataset block
+        knows about.
+        """
+        attr = _INHERITANCE_FIELDS.get(df_col)
+        if attr is None or self._global_spec is None:
+            return ""
+        suffix = ""
+        task = None
+        if row >= 0:
+            datatype, suffix = self.effective_datatype_suffix(row)
+            task = self._raw_cell(row, "task") or None
+        field = resolve_attribute(
+            self._global_spec, attr, datatype, suffix, task=task,
+        )
+        val = field.value if field is not None else None
         if val is None:
             return ""
         if isinstance(val, float):
@@ -586,7 +610,7 @@ class InventoryTableModel(QAbstractTableModel):
             return False
         if self._raw_cell(row, df_col).strip():
             return False  # answered for this row already
-        return is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0]))
+        return is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0], row))
 
     def is_inherited(self, row: int, df_col: str) -> bool:
         """True when an inheritance-field cell is blank and a default exists."""
@@ -594,11 +618,11 @@ class InventoryTableModel(QAbstractTableModel):
             return False
         if not self.column_applies(row, df_col):
             return False
-        if is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0])):
+        if is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0], row)):
             # Not inherited: there is nothing to inherit yet.
             return False
         return not self._raw_cell(row, df_col).strip() and bool(
-            self._global_default(df_col, self.effective_datatype_suffix(row)[0])
+            self._global_default(df_col, self.effective_datatype_suffix(row)[0], row)
         )
 
     def effective_value(self, row: int, df_col: str) -> str:
@@ -610,7 +634,7 @@ class InventoryTableModel(QAbstractTableModel):
         cell = self._raw_cell(row, df_col).strip()
         if cell:
             return cell
-        default = self._global_default(df_col, self.effective_datatype_suffix(row)[0])
+        default = self._global_default(df_col, self.effective_datatype_suffix(row)[0], row)
         return "" if is_varies(default) else default
 
     # ------------------------------------------------------------------
@@ -627,13 +651,44 @@ class InventoryTableModel(QAbstractTableModel):
         """The live recording-metadata spec (defaults + per-row overrides)."""
         return self._global_spec
 
-    def acq_default(self, field: str) -> str:
-        """The dataset default for an acquisition-override field, as a string."""
+    def acq_default(self, field: str, row: int = -1) -> str:
+        """What this field inherits, resolved through the one chain.
+
+        ``row`` supplies the datatype, suffix and task, without which the chain
+        cannot pick the per-modality block or the sequence template. Reading
+        only ``spec.defaults``, as this used to, meant the panel showed the
+        shared answer while the converter wrote the modality's or the
+        template's, which is the disconnect this chain exists to close.
+        """
         attr = _ACQ_OVERRIDE_FIELDS.get(field)
         if attr is None or self._global_spec is None:
             return ""
-        val = getattr(self._global_spec.defaults, attr, None)
+        datatype = suffix = ""
+        task = None
+        if row >= 0:
+            datatype, suffix = self.effective_datatype_suffix(row)
+            task = self._raw_cell(row, "task") or None
+        # No row id is passed, so the chain stops above the row layers: this
+        # is what the field INHERITS, and acq_effective adds the override.
+        resolved = resolve_attribute(
+            self._global_spec, attr, datatype, suffix, task=task,
+        )
+        val = resolved.value if resolved is not None else None
         return "" if val is None else str(val)
+
+    def acq_inherited_from(self, row: int, field: str) -> str:
+        """Which layer supplies this panel field, as a readable phrase."""
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        datatype, suffix = self.effective_datatype_suffix(row)
+        resolved = resolve_attribute(
+            self._global_spec, attr, datatype, suffix,
+            task=self._raw_cell(row, "task") or None,
+        )
+        if resolved is None:
+            return ""
+        return describe_origin(resolved.origin, datatype, suffix)
 
     def _row_override(self, row: int) -> Optional[AcquisitionSpec]:
         if self._global_spec is None:
@@ -652,13 +707,13 @@ class InventoryTableModel(QAbstractTableModel):
         return "" if val is None else str(val)
 
     def acq_effective(self, row: int, field: str) -> str:
-        """Per-row override when set, else the inherited dataset default."""
+        """Per-row override when set, else what the chain resolves for it."""
         ov = self.acq_override(row, field)
-        return ov if ov else self.acq_default(field)
+        return ov if ov else self.acq_default(field, row)
 
     def acq_is_inherited(self, row: int, field: str) -> bool:
-        """True when no per-row override is set and a dataset default exists."""
-        return not self.acq_override(row, field) and bool(self.acq_default(field))
+        """True when no per-row override is set and something is inherited."""
+        return not self.acq_override(row, field) and bool(self.acq_default(field, row))
 
     def set_acq_override(self, row: int, field: str, value: str) -> bool:
         """Set or clear a per-row acquisition override in the scaffold spec.
@@ -820,6 +875,19 @@ class InventoryTableModel(QAbstractTableModel):
         # user sees *why* a row is highlighted without unhiding the issues
         # column. Newline-split the `` | ``-joined notes for readability.
         if role == Qt.ItemDataRole.ToolTipRole:
+            # An inherited metadata cell says where its value came from, so a
+            # user knows which level to go and change.
+            spec_col = self.COLUMNS[col].df_column
+            if spec_col in _INHERITANCE_FIELDS and self.column_applies(row, spec_col):
+                if self.needs_per_row_answer(row, spec_col):
+                    return (
+                        "The dataset says this differs per recording.\n"
+                        "Type the value for this one."
+                    )
+                if self.is_inherited(row, spec_col):
+                    where = self.inherited_from(row, spec_col)
+                    if where:
+                        return f"Inherited from {where}.\nType here to override it."
             if "proposed_issues" in self._df.columns:
                 issues = str(self._df.at[row, "proposed_issues"] or "").strip()
                 if issues:

@@ -34,11 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import schema as schema_mod
-from ..recording_meta import (
-    RecordingMetaSpec,
-    is_varies,
-    resolve_sequence_template,
-)
+from ..recording_meta import RecordingMetaSpec, is_varies, resolve_sidecar_fields
 
 log = logging.getLogger(__name__)
 
@@ -164,35 +160,25 @@ def apply_sequence_template(
     task: Optional[str],
     spec: Optional[RecordingMetaSpec],
 ) -> int:
-    """Write the per-sequence template's fields. Returns how many were written.
+    """Write what the chain resolved for this file. Returns how many landed.
 
-    Two guards, and both matter. A field the schema does not define for this
-    datatype is REFUSED, however plainly the user asked for it, because the
-    point of this layer is to stop the same field landing where it does not
-    belong. And an existing value is never replaced: the converter read its
-    answer from the file itself, which beats a statement made about a class of
-    files.
+    Reads :func:`resolve_sidecar_fields`, the single chain, rather than the
+    templates alone. Before this, templates were applied here while the
+    acquisition blocks were applied in the EEG/MEG fixup, so the same field
+    could be written by either pass and the winner depended on their order.
+
+    An existing value stands unless this recording itself contradicts it: the
+    file's own header beats a statement about a class of files, and correcting
+    one specific file is what a row override is for.
     """
-    template = resolve_sequence_template(spec, datatype, suffix, task)
-    if not template:
-        return 0
-
+    resolved = resolve_sidecar_fields(spec, datatype, suffix, task=task)
     written = 0
-    for field, value in template.items():
-        if field in data or value in (None, "", [], {}):
+    for name, field in resolved.items():
+        if name in data and not field.is_row_override:
             continue
-        if is_varies(value):
-            # A declaration that the answer differs per recording, not an
-            # answer. Writing the word into the sidecar would be worse than
-            # leaving the field out.
+        if data.get(name) == field.value:
             continue
-        if not schema_mod.field_applies(field, datatype, suffix):
-            log.warning(
-                "sequence template for %s/%s: BIDS does not define %r there, skipping",
-                datatype, suffix, field,
-            )
-            continue
-        data[field] = value
+        data[name] = field.value
         written += 1
     return written
 

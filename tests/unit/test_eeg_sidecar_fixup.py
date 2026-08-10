@@ -200,10 +200,9 @@ def _spec_with_everything():
 def _apply(tmp_path, datatype, existing=None):
     import json
     from bidsmgr.fixups.eeg_sidecar import _apply_sidecar_fields
-    from bidsmgr.recording_meta import resolve_effective
     p = tmp_path / f"{datatype}.json"
     p.write_text(json.dumps(existing or {}))
-    _apply_sidecar_fields(p, resolve_effective(_spec_with_everything(), None), datatype)
+    _apply_sidecar_fields(p, _spec_with_everything(), datatype, suffix=datatype)
     return json.loads(p.read_text())
 
 
