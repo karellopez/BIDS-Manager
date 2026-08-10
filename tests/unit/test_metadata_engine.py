@@ -227,7 +227,8 @@ class TestParticipants:
         assert row["given_name"] == "Alice"
         assert row["family_name"] == "Smith"
         assert row["patient_id"] == "PID42"
-        assert row["age"] == "030Y"
+        # Normalised out of DICOM's "030Y" into the number BIDS asks for.
+        assert row["age"] == "30"
         assert row["sex"] == "F"
 
     def test_participants_json_describes_only_present_columns(
@@ -269,7 +270,8 @@ class TestParticipants:
         # User column preserved.
         assert row["handedness"] == "right"
         # Empty cells got filled by the inventory.
-        assert row["age"] == "030Y"
+        # Normalised out of DICOM's "030Y" into the number BIDS asks for.
+        assert row["age"] == "30"
         assert row["sex"] == "F"
 
 
@@ -681,3 +683,142 @@ class TestParticipantsExtraColumns:
         pj = json.loads((root / "participants.json").read_text())
         assert pj["cohort"] == {"Description": "cohort"}
         assert "cohort" in (root / "participants.tsv").read_text().splitlines()[0]
+
+
+class TestDatasetDescriptionFromScaffold:
+    """The dataset's own description, stated once and kept.
+
+    Every field here was already writable through ``bidsmgr-metadata`` flags
+    and already modelled. What did not exist was anywhere to KEEP the answers,
+    so the metadata run that happens by itself after a conversion never had
+    them and every dataset came out reporting NO_AUTHORS.
+    """
+
+    @staticmethod
+    def _scaffold(tmp_path: Path, **fields) -> Path:
+        from bidsmgr.recording_meta import (
+            RecordingMetaSpec, dump_spec, scaffold_sidecar_path,
+        )
+        inv = tmp_path / "inv.tsv"
+        inv.write_text("BIDS_name\nsub-001\n")
+        spec = RecordingMetaSpec()
+        for key, value in fields.items():
+            setattr(spec.dataset_description, key, value)
+        scaffold_sidecar_path(inv).write_text(dump_spec(spec))
+        return inv
+
+    def test_authors_reach_dataset_description(self, tmp_path: Path) -> None:
+        inv = self._scaffold(
+            tmp_path, authors=["Lopez, Karel"], license="CC0-1.0",
+            funding=["DFG 12345"],
+        )
+        root = _make_minimal_bids(tmp_path)
+        run_metadata(root, inventory_tsv=inv, write_report=False)
+        dd = json.loads((root / "dataset_description.json").read_text())
+        assert dd["Authors"] == ["Lopez, Karel"]
+        assert dd["License"] == "CC0-1.0"
+        assert dd["Funding"] == ["DFG 12345"]
+
+    def test_this_is_what_clears_no_authors(self, tmp_path: Path) -> None:
+        """The defect in one assertion: the validator warned on every dataset
+        we produced, because nothing carried the answer this far."""
+        from bidsmgr.editor.validator import validate
+
+        root = _make_minimal_bids(tmp_path)
+        inv = self._scaffold(tmp_path, authors=["Lopez, Karel"])
+        run_metadata(root, inventory_tsv=inv, write_report=False)
+        report = validate(root)
+        found = [
+            i.rule_id for i in report.dataset_issues if i.rule_id == "NO_AUTHORS"
+        ] + [
+            i.rule_id for f in report.files for i in f.issues
+            if i.rule_id == "NO_AUTHORS"
+        ]
+        assert found == []
+
+    def test_an_explicit_argument_beats_the_stored_one(self, tmp_path: Path) -> None:
+        """Precedence: what this run was told, then what was stored, then what
+        is already on disk. A --author on the command line must not be quietly
+        replaced by last month's answer."""
+        inv = self._scaffold(tmp_path, authors=["Stored"], license="CC0-1.0")
+        root = _make_minimal_bids(tmp_path)
+        run_metadata(
+            root, inventory_tsv=inv, write_report=False,
+            dataset_meta=DatasetMetadata(authors=["Explicit"]),
+        )
+        dd = json.loads((root / "dataset_description.json").read_text())
+        assert dd["Authors"] == ["Explicit"]
+        # and the fields the caller did not mention still come from the scaffold
+        assert dd["License"] == "CC0-1.0"
+
+    def test_a_scaffold_without_the_block_changes_nothing(self, tmp_path: Path) -> None:
+        """Older scaffolds have no such block, and must load unchanged."""
+        inv = self._scaffold(tmp_path)  # every field left blank
+        root = _make_minimal_bids(tmp_path)
+        run_metadata(root, inventory_tsv=inv, write_report=False)
+        dd = json.loads((root / "dataset_description.json").read_text())
+        assert "Authors" not in dd or dd["Authors"] == []
+
+
+class TestAgeNormalisation:
+    """DICOM writes an age as three digits and a unit; BIDS wants a number.
+
+    The raw ``PatientAge`` string was copied into participants.tsv unchanged,
+    so a 65-year-old appeared as ``065Y`` and the validator rejected the whole
+    column as not numeric. It only showed up once the inventory was passed to
+    the metadata step, which is what populates the age column at all.
+    """
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("065Y", "65"),      # the ordinary case
+        ("065y", "65"),      # case does not matter
+        ("018M", "1.5"),     # an infant, in months
+        ("65", "65"),        # already a number
+        ("65.5", "65.5"),
+        ("", ""),
+        ("n/a", ""),         # not a guess
+        ("abc", ""),
+        (None, ""),
+    ])
+    def test_normalize_age(self, raw, expected) -> None:
+        from bidsmgr.metadata.demographics import normalize_age
+        assert normalize_age(raw) == expected
+
+    def test_participants_tsv_age_is_numeric(self, tmp_path: Path) -> None:
+        """End to end: the column the validator reads must be a number."""
+        import pandas as pd
+
+        root = _make_minimal_bids(tmp_path)
+        inv = tmp_path / "inv.tsv"
+        pd.DataFrame([{
+            "BIDS_name": "sub-001", "PatientAge": "065Y", "PatientSex": "M",
+            "include": 1,
+        }]).to_csv(inv, sep="\t", index=False)
+
+        run_metadata(root, inventory_tsv=inv, write_report=False)
+        table = pd.read_csv(root / "participants.tsv", sep="\t", dtype=str)
+        age = table.loc[table["participant_id"] == "sub-001", "age"].iloc[0]
+        assert age == "65"
+        float(age)  # must parse as a number, which is what BIDS asks for
+
+    def test_an_age_left_by_an_earlier_run_is_repaired(self, tmp_path: Path) -> None:
+        """The merge prefers what is already on disk, so fixing only the fresh
+        path would leave every existing dataset broken for ever. A rerun has to
+        repair the file it finds. "n/a" is a real answer and survives."""
+        import pandas as pd
+
+        root = _make_minimal_bids(tmp_path)
+        (root / "participants.tsv").write_text(
+            "participant_id\tage\tsex\n"
+            "sub-001\t065Y\tM\n"
+            "sub-002\tn/a\tF\n"
+        )
+        run_metadata(root, write_report=False)
+        # keep_default_na: the literal "n/a" IS the BIDS answer for unknown,
+        # and pandas would otherwise read it back as a missing value.
+        table = pd.read_csv(
+            root / "participants.tsv", sep="\t", dtype=str, keep_default_na=False,
+        )
+        ages = dict(zip(table["participant_id"], table["age"]))
+        assert ages["sub-001"] == "65"
+        assert ages["sub-002"] == "n/a"

@@ -102,13 +102,24 @@ def resolve_effective(
     spec: RecordingMetaSpec,
     row_id: str,
     task_label: Optional[str] = None,
+    datatype: Optional[str] = None,
 ) -> EffectiveSpec:
     """Resolve the effective enrichment for the recording identified by ``row_id``.
 
     ``task_label`` selects the task protocol and event map; the event map falls
     back to the ``"*"`` global map when no task-specific map exists.
+
+    ``datatype`` selects the per-modality block. EEG and MEG are different
+    instruments and a study may run both, so what is stated for one must not
+    leak into the other. The layers, weakest first: the shared defaults, then
+    this datatype's own, then the per-recording override.
     """
-    acquisition = merge_acquisition(spec.defaults, spec.overrides.get(row_id))
+    base = spec.defaults
+    if datatype:
+        per_modality = spec.modality_defaults.get(datatype)
+        if per_modality is not None:
+            base = merge_acquisition(base, per_modality)
+    acquisition = merge_acquisition(base, spec.overrides.get(row_id))
 
     task_protocol = spec.task_protocols.get(task_label) if task_label else None
 

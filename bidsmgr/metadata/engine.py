@@ -35,6 +35,7 @@ import bidsmgr
 from .. import schema as schema_mod
 from .demographics import (
     load_participants_table,
+    normalize_age,
     merge_demographics,
     normalize_handedness,
     normalize_sex,
@@ -186,6 +187,11 @@ def run_metadata(
     if not bids_root.is_dir():
         raise FileNotFoundError(f"BIDS root not found: {bids_root}")
 
+    # The dataset's own description, from the scaffold when this run was not
+    # told one directly. Without this the metadata step that runs itself after
+    # a conversion had no authors, no licence and no funding to write, which is
+    # why every dataset came out reporting NO_AUTHORS.
+    dataset_meta = _dataset_meta_from_scaffold(inventory_tsv, dataset_meta)
     meta = dataset_meta or DatasetMetadata()
     # Resolve the dataset Name without clobbering one already on disk. An
     # explicit caller-supplied Name wins; otherwise preserve an existing
@@ -354,6 +360,49 @@ _PARTICIPANT_DESCRIPTIONS: dict[str, dict[str, object]] = {
 }
 
 
+def _dataset_meta_from_scaffold(
+    inventory_tsv: Optional[Path], supplied: Optional[DatasetMetadata],
+) -> Optional[DatasetMetadata]:
+    """Merge the scaffold's dataset_description block under what the caller gave.
+
+    Precedence is caller, then scaffold, then whatever is already on disk. An
+    explicit ``--author`` on this run therefore wins over the stored answer,
+    and the stored answer wins over nothing at all, which is what the automatic
+    post-convert metadata run used to have.
+
+    Only fields the scaffold actually states are merged, so a half-filled block
+    contributes its half rather than blanking the rest.
+    """
+    if inventory_tsv is None:
+        return supplied
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return supplied
+        stored = load_spec(scaffold).dataset_description
+    except Exception:
+        return supplied
+
+    stated = {
+        field: value
+        for field, value in stored.model_dump().items()
+        if value not in (None, "", [], {})
+    }
+    if not stated:
+        return supplied
+    if supplied is None:
+        return DatasetMetadata(**stated)
+
+    # The caller's own answers stay on top of the stored ones.
+    given = {
+        field: value
+        for field, value in supplied.model_dump().items()
+        if value not in (None, "", [], {})
+        and not (field == "name" and value == "Untitled BIDS Dataset")
+    }
+    return DatasetMetadata(**{**stated, **given})
+
+
 def _phenotype_files_from_scaffold(inventory_tsv: Path) -> Optional[list[Path]]:
     """Read phenotype table paths from the inventory's recording-meta scaffold.
 
@@ -443,6 +492,8 @@ def _write_participants(
                 v = normalize_sex(v)
             elif col == "handedness":
                 v = normalize_handedness(v)
+            elif col == "age":
+                v = normalize_age(v)
             row[col] = v if v else "n/a"
         for col in extra_cols:
             v = str(extra.get(col, "") or "").strip()
@@ -461,6 +512,17 @@ def _write_participants(
         except OSError as exc:
             report.warnings.append(f"could not read {out_tsv}: {exc}")
             df_existing = None
+        else:
+            # Repair an age left by an earlier run, or by another tool, in
+            # DICOM's "065Y" form. BIDS wants a number, and the merge below
+            # prefers what is already on disk, so without this a bad value
+            # survives every rerun. "n/a" is a legitimate answer and stays.
+            if df_existing is not None and "age" in df_existing.columns:
+                df_existing["age"] = [
+                    value if str(value).strip() in ("", "n/a")
+                    else (normalize_age(value) or "n/a")
+                    for value in df_existing["age"]
+                ]
 
     df_out, merged = _merge_participants(df_existing, df_new)
 
@@ -536,7 +598,10 @@ def _load_demographics_from_inventory(
             "given_name": str(head.get("GivenName", "") or ""),
             "family_name": str(head.get("FamilyName", "") or ""),
             "patient_id": str(head.get("PatientID", "") or ""),
-            "age": str(head.get("PatientAge", "") or head.get("age", "") or ""),
+            # DICOM writes an age as "065Y"; BIDS wants a number of years.
+            "age": normalize_age(
+                head.get("PatientAge", "") or head.get("age", "") or ""
+            ),
             "sex": str(head.get("PatientSex", "") or head.get("sex", "") or ""),
             "handedness": str(head.get("Handedness", "") or head.get("handedness", "") or ""),
         }

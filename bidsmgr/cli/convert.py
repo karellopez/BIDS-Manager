@@ -1099,7 +1099,12 @@ def _row_to_task_file_based(
     # source path); line_freq finally falls back to 50 Hz so
     # PowerLineFrequency is always populated (preserves prior behaviour now
     # that the dataset-wide --line-freq flag is gone).
-    eff_acq = resolve_effective(spec, source_file).acquisition if spec is not None else None
+    # The datatype selects the per-modality block: what a study says about its
+    # EEG amplifier must not reach its MEG recordings.
+    eff_acq = (
+        resolve_effective(spec, source_file, None, str(row.get("bids_guess_datatype", "") or "") or None).acquisition
+        if spec is not None else None
+    )
 
     line_freq_raw = str(row.get("line_freq", "")).strip()
     try:

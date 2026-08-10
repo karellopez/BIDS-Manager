@@ -47,6 +47,7 @@ from ...project import (
 from ...project.types import ProjectState
 from ...recording_meta import (
     AcquisitionSpec,
+    is_varies,
     PetAcquisitionSpec,
     RecordingMetaSpec,
 )
@@ -301,7 +302,7 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "format":    "What the row was read from: DICOM, ECAT, FIF, EDF, BrainVision, EEGLAB, CTF.",
     "sequence":  "Scanner sequence name used for classification. Empty for formats that do not name one.",
     "basename":  "Full predicted BIDS filename (without extension).",
-    "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, or bidsphysio.",
+    "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, ecat, or bidsphysio.",
     "source_file": "Source recording path (EEG / MEG). Blank for DICOM rows.",
     "n_files":   "Number of source files in the series.",
     "acq_time":  "Acquisition time from the DICOM / recording header.",
@@ -442,12 +443,24 @@ class InventoryTableModel(QAbstractTableModel):
                 self.index(len(self._df) - 1, len(self.COLUMNS) - 1),
             )
 
-    def _global_default(self, df_col: str) -> str:
-        """The dataset default for an inheritance field, as a display string."""
+    def _global_default(self, df_col: str, datatype: str = "") -> str:
+        """The dataset default for an inheritance field, as a display string.
+
+        ``datatype`` selects the per-modality block. A study running both an
+        EEG amplifier and a MEG dewar states each separately, so an EEG row
+        must show the EEG answer and a MEG row the MEG one; what neither states
+        falls back to the shared block.
+        """
         attr = _INHERITANCE_FIELDS.get(df_col)
         if attr is None or self._global_spec is None:
             return ""
-        val = getattr(self._global_spec.defaults, attr, None)
+        val = None
+        if datatype:
+            per_modality = self._global_spec.modality_defaults.get(datatype)
+            if per_modality is not None:
+                val = getattr(per_modality, attr, None)
+        if val is None:
+            val = getattr(self._global_spec.defaults, attr, None)
         if val is None:
             return ""
         if isinstance(val, float):
@@ -560,18 +573,45 @@ class InventoryTableModel(QAbstractTableModel):
             for name in fields
         )
 
+    def needs_per_row_answer(self, row: int, df_col: str) -> bool:
+        """True when the dataset says this field differs per recording.
+
+        The cell then wants a prompt rather than a value: the dataset-wide
+        answer is VARIES, which is a statement about where the answer lives,
+        not an answer. Distinct from blank, which means nobody has said
+        anything, and from not-applicable, which means the datatype has no
+        such field.
+        """
+        if df_col not in _INHERITANCE_FIELDS or not self.column_applies(row, df_col):
+            return False
+        if self._raw_cell(row, df_col).strip():
+            return False  # answered for this row already
+        return is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0]))
+
     def is_inherited(self, row: int, df_col: str) -> bool:
         """True when an inheritance-field cell is blank and a default exists."""
         if df_col not in _INHERITANCE_FIELDS:
             return False
         if not self.column_applies(row, df_col):
             return False
-        return not self._raw_cell(row, df_col).strip() and bool(self._global_default(df_col))
+        if is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0])):
+            # Not inherited: there is nothing to inherit yet.
+            return False
+        return not self._raw_cell(row, df_col).strip() and bool(
+            self._global_default(df_col, self.effective_datatype_suffix(row)[0])
+        )
 
     def effective_value(self, row: int, df_col: str) -> str:
-        """The per-row override (cell) when set, else the inherited default."""
+        """The per-row override (cell) when set, else the inherited default.
+
+        A VARIES default resolves to nothing: it says the answer differs per
+        recording, so until this row supplies one there is no value here.
+        """
         cell = self._raw_cell(row, df_col).strip()
-        return cell if cell else self._global_default(df_col)
+        if cell:
+            return cell
+        default = self._global_default(df_col, self.effective_datatype_suffix(row)[0])
+        return "" if is_varies(default) else default
 
     # ------------------------------------------------------------------
     # Per-row acquisition overrides (recording-metadata scaffold-backed)
@@ -814,7 +854,14 @@ class InventoryTableModel(QAbstractTableModel):
                 eff = self.effective_value(row, spec.df_column)
                 if eff:
                     return eff
-                return "—" if role == Qt.ItemDataRole.DisplayRole else ""
+                if role == Qt.ItemDataRole.DisplayRole:
+                    # Three empties that mean different things. "varies" asks
+                    # for an answer, the em dash reports an empty inherited
+                    # default, and a truly blank cell says nothing was stated.
+                    return "varies?" if self.needs_per_row_answer(
+                        row, spec.df_column,
+                    ) else "—"
+                return ""
 
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_value(row, spec)
@@ -845,7 +892,9 @@ class InventoryTableModel(QAbstractTableModel):
         # Inheritance fields: writing a value equal to the dataset default
         # clears the cell back to "inherited" instead of storing a redundant
         # per-row override (the convert/display layers re-resolve the default).
-        if df_col in _INHERITANCE_FIELDS and new_str == self._global_default(df_col):
+        if df_col in _INHERITANCE_FIELDS and new_str == self._global_default(
+            df_col, self.effective_datatype_suffix(row)[0]
+        ):
             new_str = ""
         old_str = "" if pd.isna(self._df.at[row, df_col]) else str(self._df.at[row, df_col])
         if new_str == old_str:
@@ -1337,17 +1386,33 @@ class InventoryTableModel(QAbstractTableModel):
             text = text[len("ses-"):]
         return "" if text == "—" else text
 
+    # Datatypes MneBidsBackend claims, mirroring its own ``can_handle``.
+    _MNE_BIDS_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
+
     def _backend(self, row: int) -> str:
-        """Derive the converter backend that will handle this row."""
+        """Which converter backend will handle this row.
+
+        Mirrors ``converter.registry`` in the same order the dispatcher uses:
+        physio, then ECAT, then mne-bids, then dcm2niix as the broad fallback.
+
+        This used to read "any row with a source file goes to mne-bids", which
+        is not what the registry does. An ECAT PET scan has a source file and
+        is converted by EcatDirect through nibabel, so the table named the
+        wrong tool for every ECAT row. The registry decides ECAT by reading the
+        file's signature, which is far too expensive to do per cell per
+        repaint; the ``format`` column records the same fact at scan time.
+        """
         suffix = ""
         if "bids_guess_suffix" in self._df.columns:
             suffix = str(self._df.at[row, "bids_guess_suffix"] or "")
         if suffix == "physio":
             return "bidsphysio"
-        if "source_file" in self._df.columns:
-            src = self._df.at[row, "source_file"]
-            if isinstance(src, str) and src.strip():
-                return "mne-bids"
+
+        datatype, _ = self.effective_datatype_suffix(row)
+        if datatype == "pet" and self._raw_cell(row, "format").strip().upper() == "ECAT":
+            return "ecat"
+        if datatype in self._MNE_BIDS_DATATYPES:
+            return "mne-bids"
         return "dcm2niix"
 
     @staticmethod

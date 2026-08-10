@@ -868,3 +868,85 @@ def test_acq_override_meg_string_field() -> None:
     # Clear -> override dropped (back to unset).
     assert m.set_acq_override(0, "dewar_position", "") is True
     assert "a.edf" not in m.global_spec().overrides
+
+
+def test_four_states_render_distinctly() -> None:
+    """A metadata cell can be in four states and they must not look alike.
+
+    An inherited value shows the value. VARIES asks for an answer this row has
+    not given. An empty inherited default shows the em dash. A field the
+    datatype does not have shows nothing at all and refuses edits. Before this,
+    the middle two were both blank and the last one showed a value that was
+    simply wrong for the row.
+    """
+    from bidsmgr.recording_meta import VARIES, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.power_line_freq = 50      # the same for every recording
+    spec.defaults.eeg_reference = VARIES    # differs per recording
+
+    df = make_df([
+        _ok_row(modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+                bids_guess_datatype="eeg", bids_guess_suffix="eeg",
+                line_freq="", eeg_reference="",
+                proposed_basename="sub-001_task-rest_eeg"),
+        _ok_row(line_freq="", eeg_reference=""),  # an anat/T1w row
+    ])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+
+    def shown(row, key):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        return model.data(model.index(row, col), Qt.ItemDataRole.DisplayRole)
+
+    # EEG: an inherited value, and a field that wants a per-row answer.
+    assert shown(0, "line_freq") == "50"
+    assert shown(0, "eeg_reference") == "varies?"
+    assert model.needs_per_row_answer(0, "eeg_reference")
+    assert not model.is_inherited(0, "eeg_reference")
+
+    # MRI: neither field applies, so both are blank and neither prompts.
+    assert shown(1, "line_freq") == ""
+    assert shown(1, "eeg_reference") == ""
+    assert not model.needs_per_row_answer(1, "eeg_reference")
+
+
+def test_answering_a_varies_field_clears_the_prompt() -> None:
+    from bidsmgr.recording_meta import VARIES, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.eeg_reference = VARIES
+    df = make_df([_ok_row(
+        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        bids_guess_datatype="eeg", bids_guess_suffix="eeg", eeg_reference="",
+        proposed_basename="sub-001_task-rest_eeg",
+    )])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+    col = next(i for i, c in enumerate(COLUMNS) if c.key == "eeg_reference")
+
+    assert model.needs_per_row_answer(0, "eeg_reference")
+    assert model.setData(model.index(0, col), "Cz", Qt.ItemDataRole.EditRole)
+    assert not model.needs_per_row_answer(0, "eeg_reference")
+    assert model.data(model.index(0, col), Qt.ItemDataRole.DisplayRole) == "Cz"
+
+
+def test_backend_column_names_the_tool_that_will_run() -> None:
+    """REGRESSION: the column read "any row with a source file is mne-bids",
+    which is not what the converter's registry does. An ECAT PET scan has a
+    source file and is converted by EcatDirect through nibabel, so the table
+    named the wrong tool for every ECAT row."""
+    df = make_df([
+        _ok_row(proposed_datatype="pet", bids_guess_datatype="pet",
+                bids_guess_suffix="pet", format="ECAT", source_file="Hoffman.v"),
+        _ok_row(proposed_datatype="pet", bids_guess_datatype="pet",
+                bids_guess_suffix="pet", format="DICOM", source_file=""),
+        _ok_row(proposed_datatype="eeg", bids_guess_datatype="eeg",
+                bids_guess_suffix="eeg", format="EEGLAB", source_file="a.set"),
+        _ok_row(format="DICOM", source_file=""),                    # anat
+        _ok_row(bids_guess_suffix="physio", format="DICOM", source_file=""),
+    ])
+    model = InventoryTableModel(df)
+    assert [model._backend(r) for r in range(5)] == [
+        "ecat", "dcm2niix", "mne-bids", "dcm2niix", "bidsphysio",
+    ]

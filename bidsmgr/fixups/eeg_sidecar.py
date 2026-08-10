@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .. import schema as schema_mod
+from ..recording_meta import is_varies
 from ..recording_meta import RecordingMetaSpec, resolve_effective
 from ..recording_meta.resolve import EffectiveSpec
 
@@ -87,6 +88,7 @@ def enrich_recording_sidecars(
             spec,
             getattr(task, "row_id", "") or "",
             (getattr(task, "entities", {}) or {}).get("task"),
+            datatype,
         )
 
         # Per-row inventory cells (eeg_reference / eeg_ground) take final
@@ -170,7 +172,10 @@ def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> i
         the same spec value is ``EEGReference`` on an EEG recording and
         ``iEEGReference`` on an intracranial one.
         """
-        if not value:
+        if not value or is_varies(value):
+            # VARIES declares that the answer differs per recording. It is a
+            # pointer to where the answer lives, never the answer, so it must
+            # not be written.
             return
         for key in candidates:
             if schema_mod.field_applies(key, datatype, datatype):

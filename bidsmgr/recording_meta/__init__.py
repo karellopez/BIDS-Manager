@@ -22,7 +22,16 @@ subpackage only describes and resolves.
 
 from __future__ import annotations
 
+from .templates import (
+    parse_template_key,
+    resolve_sequence_template,
+    template_key,
+    validate_sequence_templates,
+)
 from .models import (
+    VARIES,
+    is_varies,
+    DatasetDescriptionSpec,
     COMMON_CAP_MANUFACTURERS,
     COMMON_MANUFACTURERS,
     COMMON_RADIONUCLIDES,
@@ -64,6 +73,13 @@ from .serialize import (
 )
 
 __all__ = [
+    "VARIES",
+    "is_varies",
+    "parse_template_key",
+    "resolve_sequence_template",
+    "template_key",
+    "validate_sequence_templates",
+    "DatasetDescriptionSpec",
     "COMMON_MANUFACTURERS",
     "COMMON_CAP_MANUFACTURERS",
     "COMMON_RADIONUCLIDES",

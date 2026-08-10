@@ -28,12 +28,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 from .. import schema as schema_mod
-from ..recording_meta import RecordingMetaSpec
+from ..recording_meta import (
+    RecordingMetaSpec,
+    is_varies,
+    resolve_sequence_template,
+)
 
 log = logging.getLogger(__name__)
 
@@ -145,9 +150,49 @@ def fill_agnostic_fields(
         if key not in declared or key in data:
             continue
         value = getattr(spec.defaults, attr, None)
-        if value in (None, ""):
+        if value in (None, "") or is_varies(value):
             continue
         data[key] = value
+        written += 1
+    return written
+
+
+def apply_sequence_template(
+    data: dict,
+    datatype: str,
+    suffix: str,
+    task: Optional[str],
+    spec: Optional[RecordingMetaSpec],
+) -> int:
+    """Write the per-sequence template's fields. Returns how many were written.
+
+    Two guards, and both matter. A field the schema does not define for this
+    datatype is REFUSED, however plainly the user asked for it, because the
+    point of this layer is to stop the same field landing where it does not
+    belong. And an existing value is never replaced: the converter read its
+    answer from the file itself, which beats a statement made about a class of
+    files.
+    """
+    template = resolve_sequence_template(spec, datatype, suffix, task)
+    if not template:
+        return 0
+
+    written = 0
+    for field, value in template.items():
+        if field in data or value in (None, "", [], {}):
+            continue
+        if is_varies(value):
+            # A declaration that the answer differs per recording, not an
+            # answer. Writing the word into the sidecar would be worse than
+            # leaving the field out.
+            continue
+        if not schema_mod.field_applies(field, datatype, suffix):
+            log.warning(
+                "sequence template for %s/%s: BIDS does not define %r there, skipping",
+                datatype, suffix, field,
+            )
+            continue
+        data[field] = value
         written += 1
     return written
 
@@ -182,6 +227,9 @@ def repair_sidecars(
         before = json.dumps(data, sort_keys=True)
         n = repair_key_names(data, datatype, suffix)
         n += repair_array_types(data, datatype, suffix)
+        n += apply_sequence_template(
+            data, datatype, suffix, _task_of(sidecar), spec,
+        )
         n += fill_agnostic_fields(data, datatype, suffix, spec)
         if not n or json.dumps(data, sort_keys=True) == before:
             continue
@@ -197,7 +245,17 @@ def repair_sidecars(
     return changed
 
 
+_TASK_RE = re.compile(r"_task-([A-Za-z0-9]+)")
+
+
+def _task_of(path: Path) -> Optional[str]:
+    """The BIDS task label in a filename, if it carries one."""
+    m = _TASK_RE.search(path.name)
+    return m.group(1) if m else None
+
+
 __all__ = [
+    "apply_sequence_template",
     "fill_agnostic_fields",
     "repair_array_types",
     "repair_key_names",

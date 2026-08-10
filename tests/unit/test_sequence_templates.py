@@ -1,0 +1,235 @@
+"""Per-sequence templates and the VARIES sentinel.
+
+Two additions to the metadata model, both about scope. A template says what a
+CLASS of recordings shares, which is where most of what a study knows actually
+lives. VARIES says a field's answer differs per recording, which the model
+previously had no way to express at all.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from bidsmgr.fixups.sidecar_schema import apply_sequence_template, repair_sidecars
+from bidsmgr.recording_meta import (
+    VARIES,
+    RecordingMetaSpec,
+    is_varies,
+    parse_template_key,
+    resolve_sequence_template,
+    template_key,
+    validate_sequence_templates,
+)
+
+
+def _spec(**templates) -> RecordingMetaSpec:
+    spec = RecordingMetaSpec()
+    spec.sequence_templates = dict(templates)
+    return spec
+
+
+# ---------------------------------------------------------------------------
+# Keys and resolution
+# ---------------------------------------------------------------------------
+
+
+def test_keys_round_trip() -> None:
+    assert template_key("func", "bold") == "func/bold"
+    assert template_key("func", "bold", "rest") == "func/bold@rest"
+    assert parse_template_key("func/bold") == ("func", "bold", None)
+    assert parse_template_key("func/bold@rest") == ("func", "bold", "rest")
+
+
+def test_a_task_template_refines_the_general_one() -> None:
+    """Least specific first: a study says what every bold run shares, then what
+    is different about one task, rather than restating the whole thing."""
+    spec = _spec(**{
+        "func/bold": {"TaskDescription": "general", "Instructions": "Lie still"},
+        "func/bold@rest": {"TaskDescription": "eyes open"},
+    })
+    general = resolve_sequence_template(spec, "func", "bold")
+    assert general == {"TaskDescription": "general", "Instructions": "Lie still"}
+
+    rest = resolve_sequence_template(spec, "func", "bold", "rest")
+    assert rest["TaskDescription"] == "eyes open"   # refined
+    assert rest["Instructions"] == "Lie still"      # inherited
+
+
+def test_no_templates_resolves_to_nothing() -> None:
+    assert resolve_sequence_template(None, "func", "bold") == {}
+    assert resolve_sequence_template(RecordingMetaSpec(), "func", "bold") == {}
+
+
+# ---------------------------------------------------------------------------
+# Validation: a template cannot carry a field its datatype rejects
+# ---------------------------------------------------------------------------
+
+
+def test_a_field_the_datatype_rejects_is_reported() -> None:
+    """The check that stops this layer becoming a second place to put a field
+    where it does not belong."""
+    spec = _spec(**{"anat/T2w": {"EEGReference": "Cz"}})
+    problems = validate_sequence_templates(spec)
+    assert len(problems) == 1
+    assert "EEGReference" in problems[0] and "anat/T2w" in problems[0]
+
+
+def test_a_malformed_key_is_reported_not_raised() -> None:
+    """The scaffold is a file a user may hand-edit; one bad line must not stop
+    the rest of it loading."""
+    spec = _spec(**{"nonsense": {"TaskName": "x"}})
+    problems = validate_sequence_templates(spec)
+    assert problems and "nonsense" in problems[0]
+
+
+def test_a_good_template_reports_nothing() -> None:
+    spec = _spec(**{"func/bold": {"TaskDescription": "resting state"}})
+    assert validate_sequence_templates(spec) == []
+
+
+# ---------------------------------------------------------------------------
+# Applying
+# ---------------------------------------------------------------------------
+
+
+def test_an_inapplicable_field_is_refused_however_plainly_asked_for() -> None:
+    spec = _spec(**{"anat/T1w": {"EEGReference": "Cz", "PulseSequenceType": "MPRAGE"}})
+    data: dict = {}
+    assert apply_sequence_template(data, "anat", "T1w", None, spec) == 1
+    assert data == {"PulseSequenceType": "MPRAGE"}
+
+
+def test_an_existing_value_is_never_replaced() -> None:
+    """The converter read its answer out of the file itself, which beats a
+    statement made about a class of files."""
+    spec = _spec(**{"anat/T1w": {"PulseSequenceType": "MPRAGE"}})
+    data = {"PulseSequenceType": "FromTheDicom"}
+    assert apply_sequence_template(data, "anat", "T1w", None, spec) == 0
+    assert data["PulseSequenceType"] == "FromTheDicom"
+
+
+def test_a_template_reaches_its_own_scope_and_nothing_else(tmp_path: Path) -> None:
+    """The gate for this feature: a bold template reaches every bold run, the
+    task-qualified one reaches only that task, and neither touches anat."""
+    spec = _spec(**{
+        "func/bold": {"Instructions": "Lie still"},
+        "func/bold@rest": {"TaskDescription": "eyes open"},
+        "anat/T1w": {"PulseSequenceType": "MPRAGE"},
+    })
+    root = tmp_path / "staging"
+    for rel in (
+        "sub-001/func/sub-001_task-rest_bold.json",
+        "sub-001/func/sub-001_task-nback_bold.json",
+        "sub-001/anat/sub-001_T1w.json",
+    ):
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+    repair_sidecars(root, [], spec)
+
+    rest = json.loads((root / "sub-001/func/sub-001_task-rest_bold.json").read_text())
+    nback = json.loads((root / "sub-001/func/sub-001_task-nback_bold.json").read_text())
+    anat = json.loads((root / "sub-001/anat/sub-001_T1w.json").read_text())
+
+    assert rest["Instructions"] == "Lie still"
+    assert rest["TaskDescription"] == "eyes open"
+    assert nback["Instructions"] == "Lie still"
+    assert "TaskDescription" not in nback
+    assert anat == {"PulseSequenceType": "MPRAGE"}
+
+
+# ---------------------------------------------------------------------------
+# VARIES
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("VARIES", True), ("varies", True), (" Varies ", True),
+    ("Cz", False), ("", False), (None, False), (50, False),
+])
+def test_is_varies(value, expected) -> None:
+    assert is_varies(value) is expected
+
+
+def test_varies_is_never_written_to_a_sidecar(tmp_path: Path) -> None:
+    """The entire point of the sentinel. It says where the answer lives; it is
+    not the answer, and writing the word into a published sidecar would be
+    worse than leaving the field out."""
+    spec = _spec(**{"func/bold": {"TaskDescription": VARIES, "Instructions": "Lie still"}})
+    spec.defaults.institution_name = VARIES
+
+    root = tmp_path / "staging"
+    p = root / "sub-001/func/sub-001_task-rest_bold.json"
+    p.parent.mkdir(parents=True)
+    p.write_text("{}")
+    repair_sidecars(root, [], spec)
+
+    data = json.loads(p.read_text())
+    assert data == {"Instructions": "Lie still"}
+    assert "VARIES" not in json.dumps(data)
+
+
+def test_varies_in_the_eeg_enrichment_is_not_written(tmp_path: Path) -> None:
+    from bidsmgr.fixups.eeg_sidecar import _apply_sidecar_fields
+    from bidsmgr.recording_meta import resolve_effective
+
+    spec = RecordingMetaSpec()
+    spec.defaults.eeg_reference = VARIES
+    spec.defaults.manufacturer = "Brain Products"
+
+    p = tmp_path / "eeg.json"
+    p.write_text("{}")
+    _apply_sidecar_fields(p, resolve_effective(spec, None), "eeg")
+
+    data = json.loads(p.read_text())
+    assert data.get("Manufacturer") == "Brain Products"
+    assert "EEGReference" not in data
+
+
+# ---------------------------------------------------------------------------
+# EEG and MEG are different instruments
+# ---------------------------------------------------------------------------
+
+
+def test_each_modality_keeps_its_own_hardware() -> None:
+    """REGRESSION: one shared block served eeg, meg, ieeg and nirs, so a study
+    running a Brain Products amplifier AND an Elekta dewar could state only one
+    manufacturer, and whichever it stated was claimed by both."""
+    from bidsmgr.recording_meta import AcquisitionSpec, resolve_effective
+
+    spec = RecordingMetaSpec()
+    spec.defaults.institution_name = "Uni Oldenburg"   # the building: shared
+    spec.defaults.power_line_freq = 50                 # the mains: shared
+    spec.modality_defaults["eeg"] = AcquisitionSpec(
+        manufacturer="Brain Products", cap_manufacturer="EasyCap",
+    )
+    spec.modality_defaults["meg"] = AcquisitionSpec(
+        manufacturer="Elekta", dewar_position="upright",
+    )
+
+    eeg = resolve_effective(spec, "row", None, "eeg").acquisition
+    meg = resolve_effective(spec, "row", None, "meg").acquisition
+
+    assert eeg.manufacturer == "Brain Products"
+    assert meg.manufacturer == "Elekta"
+    assert eeg.cap_manufacturer == "EasyCap" and meg.cap_manufacturer is None
+    assert meg.dewar_position == "upright" and eeg.dewar_position is None
+    # What genuinely belongs to the study still reaches both.
+    for acq in (eeg, meg):
+        assert acq.institution_name == "Uni Oldenburg"
+        assert acq.power_line_freq == 50
+
+
+def test_a_scaffold_with_no_per_modality_block_behaves_as_before() -> None:
+    """Every scaffold ever written has only the shared block, and must keep
+    resolving exactly as it did."""
+    from bidsmgr.recording_meta import resolve_effective
+
+    spec = RecordingMetaSpec()
+    spec.defaults.manufacturer = "Brain Products"
+    for datatype in ("eeg", "meg", None):
+        acq = resolve_effective(spec, "row", None, datatype).acquisition
+        assert acq.manufacturer == "Brain Products"

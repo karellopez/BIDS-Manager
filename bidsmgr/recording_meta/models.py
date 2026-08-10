@@ -287,6 +287,57 @@ class PetAcquisitionSpec(_Model):
     manufacturers_model_name: Optional[str] = None     # -> ManufacturersModelName
 
 
+# The third state a metadata field can be in.
+#
+# A field used to be either answered or blank, which forces a bad choice when
+# the answer differs between recordings. Put one value in the dataset default
+# and every recording claims it, including the ones it is wrong for, and a
+# wrong value is indistinguishable from a right one once written. Leave it
+# blank and the answer is lost for the recordings you DID know.
+#
+# ``VARIES`` says "this differs per recording; the answer lives further down".
+# It is never itself written to a sidecar: it is a statement about where to
+# look, not a value. With the applicability check from the schema layer, a
+# field then has four honest states: a value, VARIES, not stated, and not
+# applicable to this datatype.
+VARIES = "VARIES"
+
+
+def is_varies(value: Any) -> bool:
+    """True when ``value`` is the VARIES sentinel rather than an answer."""
+    return isinstance(value, str) and value.strip().upper() == VARIES
+
+
+class DatasetDescriptionSpec(_Model):
+    """What goes in ``dataset_description.json``, held where it can persist.
+
+    Every field here was already writable through ``bidsmgr-metadata``
+    (``--author``, ``--license``, ``--funding`` and friends) and already
+    modelled by ``metadata.DatasetMetadata``. What did not exist was anywhere
+    to KEEP the answers: they lived only in the flags of one command. So the
+    automatic metadata run that follows a conversion never had them, the GUI
+    had nothing to offer, and re-running metadata lost whatever the last run
+    was told. That is why every dataset we produce reports NO_AUTHORS.
+
+    Holding them in the scaffold, beside the modality blocks, means they are
+    stated once for the dataset and survive every later step.
+
+    Blank fields are omitted from the written JSON rather than emitted empty,
+    so an unanswered field stays absent instead of becoming an empty string
+    that looks answered.
+    """
+
+    name: Optional[str] = None
+    authors: list[str] = []
+    license: Optional[str] = None
+    acknowledgements: Optional[str] = None
+    how_to_acknowledge: Optional[str] = None
+    funding: list[str] = []
+    ethics_approvals: list[str] = []
+    references_and_links: list[str] = []
+    dataset_doi: Optional[str] = None
+
+
 class RecordingMetaSpec(_Model):
     """Root enrichment object for one dataset.
 
@@ -297,7 +348,21 @@ class RecordingMetaSpec(_Model):
     """
 
     schema_version: int = 1
+    # The electrophysiology defaults shared by every such datatype. Kept
+    # because every scaffold ever written has one, and because the genuinely
+    # shared facts (the site, the mains frequency of the building) do belong
+    # to all of them.
     defaults: AcquisitionSpec = AcquisitionSpec()
+    # Per-datatype electrophysiology defaults, keyed "eeg" / "meg" / "ieeg" /
+    # "nirs", layered ON TOP of ``defaults``.
+    #
+    # EEG and MEG are different modalities recorded on different instruments.
+    # A study can run a Brain Products amplifier and an Elekta dewar, and one
+    # shared block forced a single answer for both: state the amplifier and the
+    # MEG sidecars claim it too. Anything stated here belongs to that datatype
+    # alone; anything left blank falls back to ``defaults``, so a study with
+    # one modality never has to say where it goes.
+    modality_defaults: dict[str, AcquisitionSpec] = {}
     task_protocols: dict[str, TaskProtocol] = {}
     event_maps: dict[str, EventMap] = {}
     overrides: dict[str, AcquisitionSpec] = {}
@@ -310,6 +375,25 @@ class RecordingMetaSpec(_Model):
     # load unchanged.
     pet_defaults: PetAcquisitionSpec = PetAcquisitionSpec()
     pet_overrides: dict[str, PetAcquisitionSpec] = {}
+    # The dataset's own description. Agnostic: it says who made the dataset and
+    # under what terms, which has nothing to do with what recorded it. Older
+    # scaffolds have no such block and load unchanged.
+    dataset_description: DatasetDescriptionSpec = DatasetDescriptionSpec()
+    # Per-sequence metadata: the scope between "the whole dataset" and "this one
+    # recording", which is where most of what a study knows actually lives. All
+    # of a study's bold runs share a TaskDescription and a set of Instructions;
+    # its T1w runs share none of that with them.
+    #
+    # Keyed ``"<datatype>/<suffix>"``, optionally narrowed to one task with
+    # ``"<datatype>/<suffix>@<task>"``. The general key applies first and the
+    # task-specific one refines it, so a study can state what every bold run
+    # shares once and then say what is different about the localiser task.
+    #
+    # Values are plain ``{BIDS field: value}`` dicts. They are checked against
+    # the schema before anything is written, so a template cannot smuggle in a
+    # field its datatype does not accept: that check is what stops this from
+    # becoming a second place to make the mistake the table used to make.
+    sequence_templates: dict[str, dict[str, Any]] = {}
     # Dataset-level phenotype measure tables (TSV/CSV/XLSX/ODS paths keyed by
     # participant_id). Written to ``phenotype/<measure>.tsv`` + ``.json`` by the
     # metadata engine. Agnostic: applies to any modality.
