@@ -69,6 +69,7 @@ from ..fixups import (
 )
 from ..recording_meta import (
     RecordingMetaSpec,
+    dataset_description_as_bids,
     default_spec,
     load_spec,
     merge_pet,
@@ -319,12 +320,19 @@ def run_convert(
         bids_root = bids_parent / str(dataset_name)
         if not dry_run:
             bids_root.mkdir(parents=True, exist_ok=True)
-            ensure_dataset_description(bids_root, generated_by={
-                "Name": "bidsmgr",
-                "Version": bidsmgr.__version__,
-                "Description": "dcm2niix-direct backend",
-                "Container": {"Type": "binary", "Tag": dcm2niix_version},
-            })
+            ensure_dataset_description(
+                bids_root,
+                generated_by={
+                    "Name": "bidsmgr",
+                    "Version": bidsmgr.__version__,
+                    "Description": "dcm2niix-direct backend",
+                    "Container": {"Type": "binary", "Tag": dcm2niix_version},
+                },
+                # What the user stated in the metadata template's agnostic
+                # section. It belongs to the conversion, not to a later step:
+                # they filled it in before pressing convert.
+                fields=dataset_description_as_bids(spec.dataset_description),
+            )
             # Keep .bidsmgr/ + .tmp_bidsmgr/ out of the official bids-validator.
             ensure_bidsignore(bids_root)
             # Pre-convert collision summary: which incoming subjects already

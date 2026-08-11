@@ -682,6 +682,7 @@ class ConverterPanel(QWidget):
         montage: Optional[str] = None,
         n_jobs: int = 1,
         probe_convert: bool = False,
+        preview_converter_fields: bool = True,
         skip_bids_guess: bool = False,
         user_hints=None,
         exclusions=None,
@@ -721,6 +722,7 @@ class ConverterPanel(QWidget):
             dataset=dataset, line_freq=line_freq, montage=montage,
             n_jobs=n_jobs,
             probe_convert=probe_convert,
+            preview_converter_fields=preview_converter_fields,
             skip_bids_guess=skip_bids_guess,
             user_hints=user_hints,
             exclusions=exclusions,
@@ -1546,6 +1548,7 @@ class ConverterPanel(QWidget):
             # columns + the Recording-metadata editor), not scan settings.
             n_jobs=s.scan_n_jobs,
             probe_convert=s.scan_probe_convert,
+            preview_converter_fields=s.scan_converter_preview,
             skip_bids_guess=s.scan_skip_bids_guess,
             user_hints=s.to_user_hints(),
             exclusions=s.to_exclusions(),

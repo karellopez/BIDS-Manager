@@ -69,6 +69,11 @@ class ProbeFileStats:
     n_volumes_max: int = 0
     extensions: list[str] = field(default_factory=list)
     sidecar_count: int = 0
+    # What the sidecar dcm2niix wrote actually contained. The probe already
+    # parses these to find the SeriesInstanceUID and used to throw the rest
+    # away, which is why the metadata template could not say "the converter
+    # answers this, with this value" and instead showed a blank box.
+    sidecar_fields: dict = field(default_factory=dict)
 
 
 def _run_dcm2niix_full(
@@ -153,6 +158,11 @@ def collect_probe_stats(directory: Path) -> dict[str, ProbeFileStats]:
         stats = by_uid.setdefault(uid, ProbeFileStats(series_uid=uid))
         stats.output_files.append(json_path.name)
         stats.sidecar_count += 1
+        # First sidecar wins for a series that split into several outputs
+        # (multi-echo, phase): they agree about the acquisition, which is what
+        # this is for.
+        for key, value in data.items():
+            stats.sidecar_fields.setdefault(key, value)
 
         stem = json_path.name[: -len(".json")]
 

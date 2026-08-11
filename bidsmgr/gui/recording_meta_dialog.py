@@ -176,11 +176,17 @@ class RecordingMetaDialog(QDialog):
         # fields in code and could not follow a change of BIDS version.
         self._tree_nodes = build_template_tree(
             self._present_pairs, self._example_paths,
+            # Do not ask for what the scan saw the conversion answer on THIS
+            # dataset. The measured default list came from one tree with one
+            # scanner; this came from theirs.
+            answered=dict(self._spec.converter_preview or {}),
         )
         self._template = TemplateTree(
             self._tree_nodes,
             values=self._stored_template_values(),
             suggestions=self._field_suggestions(),
+            # What the scan learned the conversion will fill in by itself.
+            answered=dict(self._spec.converter_preview or {}),
             colour_levels=self._colour_levels,
             collapsed_keys=self._collapsed_keys,
         )

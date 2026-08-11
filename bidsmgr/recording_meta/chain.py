@@ -435,14 +435,28 @@ def dataset_description_as_bids(dd) -> dict[str, Any]:
         value = getattr(dd, attr, None)
         if value not in (None, "", [], {}):
             out[name] = value
+    for name, value in (getattr(dd, "extra", None) or {}).items():
+        if value not in (None, "", [], {}):
+            out.setdefault(name, value)
     return out
 
 
 def dataset_description_from_bids(dd, answers: dict) -> None:
-    """Write a form's answers back onto a ``DatasetDescriptionSpec``, in place."""
+    """Write a form's answers back onto a ``DatasetDescriptionSpec``, in place.
+
+    An answer to a field the model does not name is kept rather than dropped:
+    the schema declares more fields than the CLI has flags for, and a form built
+    from the schema offers all of them.
+    """
+    named = set(DATASET_DESCRIPTION_TO_BIDS.values())
     for attr, name in DATASET_DESCRIPTION_TO_BIDS.items():
         value = answers.get(name)
         if attr in _DATASET_DESCRIPTION_LISTS:
             setattr(dd, attr, list(value or []))
         else:
             setattr(dd, attr, value or None)
+    dd.extra = {
+        name: value
+        for name, value in answers.items()
+        if name not in named and value not in (None, "", [], {})
+    }

@@ -516,6 +516,7 @@ class TemplateTree(QWidget):
         *,
         values: Optional[dict] = None,
         suggestions: Optional[dict] = None,
+        answered: Optional[dict] = None,
         colour_levels: bool = True,
         collapsed_keys: Optional[set] = None,
         parent: Optional[QWidget] = None,
@@ -523,6 +524,11 @@ class TemplateTree(QWidget):
         super().__init__(parent)
         self._colour = colour_levels
         self._suggestions = suggestions or {}
+        # What the conversion will fill in by itself, per node key. Shown, not
+        # asked: a required field left out of the form looks like a form that
+        # forgot it, and an empty box looks like missing metadata, when in fact
+        # dcm2niix read the value out of the header before anyone opened this.
+        self._answered = answered or {}
         self._widgets: dict[str, dict[str, QWidget]] = {}
         self._sections: dict[str, "CollapsibleSection"] = {}
         self._fields: dict[str, dict] = {}
@@ -573,6 +579,9 @@ class TemplateTree(QWidget):
 
         if node.is_leaf:
             section.add(self._render_fields(node, values.get(node.key, {})))
+            already = self._answered.get(node.key) or {}
+            if already:
+                section.add(self._render_answered(already))
         for child in node.children:
             section.add(
                 self._render(child, values, collapsed, level + 1, open_files)
@@ -612,6 +621,44 @@ class TemplateTree(QWidget):
         self._widgets[node.key] = widgets
         self._fields[node.key] = fields
         return holder
+
+    def _render_answered(self, already: dict) -> QWidget:
+        """The fields the conversion answers, listed read-only.
+
+        Folded away by default: it is reassurance, not work. VARIES means the
+        probed files disagreed, so the answer is per recording rather than one
+        value for the whole kind.
+        """
+        pal = CUR()
+        box = CollapsibleSection(
+            "Filled in by the conversion",
+            badge=f"{len(already)} fields",
+            level=2,
+            expanded=False,
+        )
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setContentsMargins(2, 2, 2, 2)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(4)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        for name, value in sorted(already.items()):
+            shown = (
+                "differs per recording" if str(value).strip().upper() == "VARIES"
+                else ", ".join(str(v) for v in value)
+                if isinstance(value, list) else str(value)
+            )
+            label = QLabel(f"{name}:")
+            label.setStyleSheet(f"color: {pal['muted']};")
+            read_only = QLabel(shown)
+            read_only.setWordWrap(True)
+            read_only.setStyleSheet(f"color: {pal['dim']};")
+            read_only.setToolTip(
+                "Read from the data by the converter. Nothing to fill in."
+            )
+            form.addRow(label, read_only)
+        box.add(body)
+        return box
 
     # -- reading -------------------------------------------------------
 

@@ -44,6 +44,7 @@ KEYS = {
     # Scan defaults
     "scan_n_jobs":        "scan/n_jobs",
     "scan_probe_convert": "scan/probe_convert",
+    "scan_converter_preview": "scan/converter_preview",
     "scan_skip_bids_guess": "scan/skip_bids_guess",
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
@@ -136,6 +137,9 @@ class AppSettings:
     # Default on: probe-convert runs dcm2niix per series at scan time to
     # enrich the BIDS guess with sidecar-derived hints.
     scan_probe_convert: bool = True
+    # Record what the conversion answers by itself, so the metadata form
+    # shows it instead of an empty box for a field nobody has to fill in.
+    scan_converter_preview: bool = True
     scan_skip_bids_guess: bool = False
 
     # Convert defaults
@@ -294,6 +298,9 @@ class AppSettings:
         out.scan_n_jobs = _as_int(s.value(KEYS["scan_n_jobs"]), out.scan_n_jobs)
         out.scan_probe_convert = _as_bool(s.value(KEYS["scan_probe_convert"]),
                                           out.scan_probe_convert)
+        out.scan_converter_preview = _as_bool(
+            s.value(KEYS["scan_converter_preview"]), out.scan_converter_preview,
+        )
         out.scan_skip_bids_guess = _as_bool(s.value(KEYS["scan_skip_bids_guess"]),
                                             out.scan_skip_bids_guess)
 
@@ -361,6 +368,7 @@ class AppSettings:
         # platform-specific QVariant→Python bool quirks.
         for key, val in (
             ("scan_probe_convert",       self.scan_probe_convert),
+            ("scan_converter_preview",   self.scan_converter_preview),
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
             ("convert_skip_residuals",   self.convert_skip_residuals),

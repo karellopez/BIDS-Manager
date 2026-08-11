@@ -156,12 +156,18 @@ def sidecar_section(
     example_path: str = "",
     bids_root=None,
     include_derived: bool = False,
+    answered: Optional[dict] = None,
 ) -> TemplateSection:
     """The questions for one kind of sidecar, e.g. every ``*_eeg.json``.
 
     ``include_derived`` keeps the fields a conversion fills by itself, which is
     useful for showing a user the whole picture but is not what the form asks
     for by default.
+
+    ``answered`` is what the scan observed the conversion actually producing FOR
+    THIS DATASET, and it is the better authority: ``derivable`` was measured on
+    one tree with one scanner, so a field a user's scanner supplies but ours did
+    not was being asked for AND reported as already filled in, in the same form.
     """
     try:
         specs = schema_mod.sidecar_fields(datatype, suffix, bids_root)
@@ -169,6 +175,11 @@ def sidecar_section(
         specs = []
 
     skip = set() if include_derived else derived_fields(datatype) | CONVERTER_PRIVATE
+    if not include_derived:
+        skip |= {
+            name for name, value in (answered or {}).items()
+            if value not in (None, "", [], {})
+        }
     fields = [
         _as_template_field(s)
         for s in specs
@@ -323,6 +334,7 @@ def build_template_tree(
     example_paths: Optional[dict[tuple[str, str], str]] = None,
     bids_root=None,
     include_derived: bool = False,
+    answered: Optional[dict] = None,
 ) -> list[TemplateNode]:
     """The whole template as a tree, agnostic region first.
 
@@ -357,6 +369,7 @@ def build_template_tree(
         section = sidecar_section(
             datatype, suffix, example_paths.get((datatype, suffix), ""),
             bids_root, include_derived,
+            answered=(answered or {}).get(f"{datatype}/{suffix}"),
         )
         if not section.fields:
             # Nothing left to ask about this file: the converter answers it all.

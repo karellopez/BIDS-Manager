@@ -69,6 +69,7 @@ from ..inventory.types import InventoryRow
 from ..recording_meta import (
     RecordingMetaSpec,
     dump_spec,
+    load_spec,
     scaffold_sidecar_path,
 )
 
@@ -1359,6 +1360,39 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
     return scaffold_path
 
 
+def _write_converter_preview(
+    merged: pd.DataFrame,
+    probe_stats,
+    output_tsv: Path,
+) -> None:
+    """Record what the conversion will answer by itself, per kind of file.
+
+    Written on every scan, into an existing scaffold if there is one, because
+    unlike the event map this is DERIVED: it describes the data as it is now,
+    so a rescan should refresh it rather than preserve a stale copy. It is
+    never merged into a user's answers and never written to a sidecar.
+
+    Two sources, and the cheap one always runs: the header facts the scan read
+    out of each recording anyway, and, when the user asked for a probe
+    conversion, the sidecars dcm2niix actually produced.
+    """
+    from ..metadata.converter_preview import (
+        merge_previews, preview_from_inventory, preview_from_probe,
+    )
+
+    preview = merge_previews(
+        preview_from_inventory(merged),
+        preview_from_probe(merged, probe_stats),
+    )
+    if not preview:
+        return
+
+    scaffold_path = scaffold_sidecar_path(output_tsv)
+    spec = load_spec(scaffold_path) if scaffold_path.exists() else RecordingMetaSpec()
+    spec.converter_preview = preview
+    scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
+
+
 def _seed_pet_defaults(merged: pd.DataFrame):
     """Seed the scaffold's PET block from values the scan is sure of.
 
@@ -1544,6 +1578,7 @@ def run_scan(
     n_jobs: int = 1,
     skip_bids_guess: bool = False,
     probe_convert: bool = False,
+    preview_converter_fields: bool = True,
     dataset: Optional[str] = None,
     line_freq: Optional[float] = None,
     montage: Optional[str] = None,
@@ -1640,6 +1675,8 @@ def run_scan(
         scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
         if scaffold_path is not None:
             print(f"Recording-metadata scaffold written to: {scaffold_path}")
+        if preview_converter_fields:
+            _write_converter_preview(merged, None, Path(output_tsv))
         log.warning(
             "no DICOMs found; the inventory has only EEG/MEG rows. "
             "files_by_uid sidecar will not be written."
@@ -1733,6 +1770,11 @@ def run_scan(
     scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
     if scaffold_path is not None:
         print(f"Recording-metadata scaffold written to: {scaffold_path}")
+
+    # What the conversion will answer by itself, so the metadata template can
+    # show it instead of an empty box for a field nobody has to fill in.
+    if preview_converter_fields:
+        _write_converter_preview(merged, probe_stats, Path(output_tsv))
 
     # Always write the per-UID DICOM file map next to the TSV. ``bidsmgr-convert``
     # reads this sidecar to find the source files for each MRI row's dcm2niix call.
@@ -1845,6 +1887,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     parser.add_argument(
+        "--no-converter-preview", action="store_true",
+        help=(
+            "Do not record what the conversion will fill in by itself. By "
+            "default the scan notes, per kind of file, the values dcm2niix and "
+            "mne-bids produce, so the metadata form can show them instead of "
+            "an empty box for a field nobody has to answer. Costs nothing "
+            "extra: it reads what the scan and any probe conversion already "
+            "produced."
+        ),
+    )
+    parser.add_argument(
         "--schema", default=None, metavar="VERSION",
         help=(
             "Which BIDS version to work to (for example 1.11.1). Decides which "
@@ -1906,6 +1959,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             Path(args.dicom_root), staged_tsv,
             n_jobs=args.jobs, skip_bids_guess=args.no_bids_guess,
             probe_convert=args.probe_convert,
+            preview_converter_fields=not args.no_converter_preview,
             dataset=args.dataset or bids_root.name,
             line_freq=args.line_freq, montage=args.montage,
             user_hints=user_hints, exclusions=exclusions,
@@ -1927,6 +1981,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         n_jobs=args.jobs,
         skip_bids_guess=args.no_bids_guess,
         probe_convert=args.probe_convert,
+        preview_converter_fields=not args.no_converter_preview,
         dataset=args.dataset,
         line_freq=args.line_freq,
         montage=args.montage,

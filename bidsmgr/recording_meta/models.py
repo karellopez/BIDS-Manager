@@ -336,6 +336,16 @@ class DatasetDescriptionSpec(_Model):
     ethics_approvals: list[str] = []
     references_and_links: list[str] = []
     dataset_doi: Optional[str] = None
+    # Everything else the standard declares for this file.
+    #
+    # The nine above are named because the CLI has a flag for each. The schema
+    # declares more than nine and will declare more again, and a form built from
+    # the schema offers all of them, so a model that could hold only its named
+    # nine ACCEPTED three answers and threw them away on save: HEDVersion,
+    # DatasetLinks and Keywords went in and never came out. Anything the form
+    # asks for that has no attribute here lands in this dict instead of on the
+    # floor.
+    extra: dict[str, Any] = {}
 
 
 class RecordingMetaSpec(_Model):
@@ -408,6 +418,14 @@ class RecordingMetaSpec(_Model):
     # ``overrides`` stays: every scaffold ever written has one, and the montage
     # it carries has no BIDS name to move to.
     row_templates: dict[str, dict[str, Any]] = {}
+    # What the conversion will answer by itself, keyed like the templates.
+    #
+    # NOT user input and never written to a sidecar: the converter writes these
+    # anyway. It is here so a form can show "EchoTime 0.03, read from the DICOM"
+    # where it would otherwise show an empty box for a required field and look
+    # like a dataset missing its metadata. Filled by the scan; VARIES where the
+    # probed files of one kind disagreed.
+    converter_preview: dict[str, dict[str, Any]] = {}
     # Dataset-level phenotype measure tables (TSV/CSV/XLSX/ODS paths keyed by
     # participant_id). Written to ``phenotype/<measure>.tsv`` + ``.json`` by the
     # metadata engine. Agnostic: applies to any modality.

@@ -216,7 +216,10 @@ def run_metadata(
     if participants_file is None and inventory_tsv is not None:
         participants_file = _participants_file_from_scaffold(inventory_tsv)
 
-    _write_dataset_description(bids_root, meta, generator_label, report)
+    _write_dataset_description(
+        bids_root, meta, generator_label, report,
+        extra_fields=_dataset_extras_from_scaffold(inventory_tsv),
+    )
     _write_participants(bids_root, inventory_tsv, report, participants_file=participants_file)
     write_phenotype(bids_root, phenotype_files, report)
     _write_readme(bids_root, meta.name, report)
@@ -258,6 +261,7 @@ def _write_dataset_description(
     meta: DatasetMetadata,
     generator_label: str,
     report: MetadataReport,
+    extra_fields: Optional[dict] = None,
 ) -> None:
     """Write/merge ``dataset_description.json``.
 
@@ -306,6 +310,14 @@ def _write_dataset_description(
         merged["DatasetDOI"] = meta.dataset_doi
     if meta.source_datasets:
         merged["SourceDatasets"] = list(meta.source_datasets)
+
+    # Fields the user stated that DatasetMetadata does not model. It has one
+    # attribute per CLI flag; the schema declares more, and the metadata form
+    # offers all of them. Without this they reached the file at conversion and
+    # were then absent from a metadata-only run, which is worse than either.
+    for key, value in (extra_fields or {}).items():
+        if value not in (None, "", [], {}):
+            merged[key] = value
 
     # GeneratedBy: preserve everything already there (the converter wrote
     # one entry per convert run), append the metadata-engine entry once.
@@ -401,6 +413,19 @@ def _dataset_meta_from_scaffold(
         and not (field == "name" and value == "Untitled BIDS Dataset")
     }
     return DatasetMetadata(**{**stated, **given})
+
+
+def _dataset_extras_from_scaffold(inventory_tsv: Optional[Path]) -> dict:
+    """The stated dataset_description fields DatasetMetadata has no attribute for."""
+    if inventory_tsv is None:
+        return {}
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return {}
+        return dict(load_spec(scaffold).dataset_description.extra or {})
+    except Exception:
+        return {}
 
 
 def _phenotype_files_from_scaffold(inventory_tsv: Path) -> Optional[list[Path]]:
