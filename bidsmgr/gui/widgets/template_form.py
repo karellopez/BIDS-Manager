@@ -366,26 +366,35 @@ def write_field_widget(widget: QWidget, value: Any) -> None:
         widget.setText(text)
 
 
-def field_label(field, *, colour: bool = True) -> str:
-    """The label for a field: its name, its level, and its unit.
+def field_text(field) -> str:
+    """The words in a field's label: its name, its level mark, its unit."""
+    mark = {"required": " *", "recommended": " \u00b7"}.get(field.level, "")
+    unit = " (%s)" % field.unit if field.unit else ""
+    return "%s%s%s:" % (field.name, mark, unit)
 
-    The level is shown as a mark AND, optionally, a colour. The mark stays when
-    colour is off, so the information does not depend on being able to see it.
-    """
-    mark = {"required": " *", "recommended": " ·"}.get(field.level, "")
-    unit = f" ({field.unit})" if field.unit else ""
-    if not colour:
-        return f"{field.name}{mark}{unit}:"
+
+def _level_colour(field, colour: bool) -> str:
+    """The colour that says what the standard asks of this field."""
     pal = CUR()
-    tone = {
+    if not colour:
+        return pal["text"]
+    return {
         "required": pal["error"],
         "recommended": pal["warning"],
         "deprecated": pal["muted"],
     }.get(field.level, pal["text"])
-    return (
-        f'<span style="color:{tone};">{field.name}{mark}</span>'
-        f'<span style="color:{pal["muted"]};">{unit}</span>:'
-    )
+
+
+def field_label(field, *, colour: bool = True) -> str:
+    """A field's label as rich text, for callers that place their own.
+
+    The form itself uses :class:`FieldLabel`, which elides into a fixed column
+    so the rows line up.
+    """
+    text = field_text(field)
+    if not colour:
+        return text
+    return '<span style="color:%s;">%s</span>' % (_level_colour(field, True), text)
 
 
 def level_legend(*, colour: bool = True) -> QLabel:
@@ -573,7 +582,9 @@ __all__ = [
     "build_field_widget",
     "connect_field_widget",
     "fit_popup_to_contents",
+    "FieldLabel",
     "field_label",
+    "field_text",
     "level_legend",
     "read_field_widget",
     "write_field_widget",
@@ -585,19 +596,65 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def _field_label_widget(rich_text: str) -> QLabel:
-    """A field name that cannot stop the pane from narrowing.
+# How wide the label column is. Fixed, so every row in a section lines up; the
+# names elide into it rather than widening it.
+LABEL_COLUMN_PX = 150
 
-    A plain QLabel reports its full text width as its MINIMUM, and field names
-    run to 33 characters, so one row set a floor for the whole dialog. This one
-    wraps instead and asks for nothing.
+
+class FieldLabel(QLabel):
+    """A field name that lines up and never sets a floor.
+
+    Two requirements that pull against each other. Every row in a section shares
+    one label column, or the form reads as a jumble. And a field name runs to 33
+    characters, which a plain QLabel reports as its MINIMUM width, so one row
+    would stop the whole pane from narrowing.
+
+    So the column is fixed and the name ELIDES into it, with the full text in the
+    tooltip. An earlier attempt gave the label an Ignored size policy instead,
+    which let Qt shrink it to nothing: the names disappeared and the fields drew
+    over where they had been.
     """
-    label = QLabel(rich_text)
-    label.setTextFormat(Qt.TextFormat.RichText)
-    label.setWordWrap(True)
-    label.setMinimumWidth(0)
-    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-    return label
+
+    def __init__(self, text, colour, width=LABEL_COLUMN_PX) -> None:
+        super().__init__()
+        self._full = text
+        self.setToolTip(text)
+        self.setStyleSheet("color: %s; background: transparent;" % colour)
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(width)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._elide()
+
+    def sizeHint(self):  # noqa: N802 - Qt override
+        # Always ask for the whole column, never for the width of this
+        # particular name. That is what makes every row in a section line up
+        # instead of each label ending wherever its own text does.
+        hint = super().sizeHint()
+        hint.setWidth(self.maximumWidth())
+        return hint
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        room = self.width() or self.maximumWidth()
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, max(0, room),
+        )
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+
+
+def _field_label_widget(field, colour=True, width=LABEL_COLUMN_PX):
+    """The label for one field: name, level mark, unit, in the level's colour."""
+    return FieldLabel(field_text(field), _level_colour(field, colour), width)
 
 
 def _origin_tooltip(origin: str) -> str:
@@ -738,9 +795,6 @@ class TemplateTree(QWidget):
         form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
-        # Below a certain width the label moves above its field instead of
-        # squeezing both into nothing, so the form keeps shrinking usefully.
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         widgets: dict[str, QWidget] = {}
         fields: dict[str, object] = {}
@@ -753,7 +807,7 @@ class TemplateTree(QWidget):
             if field.name in stored:
                 write_field_widget(widget, stored[field.name])
 
-            label = _field_label_widget(field_label(field, colour=self._colour))
+            label = _field_label_widget(field, colour=self._colour)
             tip = field.description or ""
             origin = getattr(field, "origin", "")
             if origin:
@@ -796,7 +850,6 @@ class TemplateTree(QWidget):
         form.setVerticalSpacing(6)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         widgets = self._widgets.setdefault(node.key, {})
         fields = self._fields.setdefault(node.key, {})
@@ -815,8 +868,7 @@ class TemplateTree(QWidget):
                    "The conversion reads this from the data and will write the "
                    "value shown. Type here only to correct it.")
             )
-            label = _field_label_widget(field_label(spec, colour=self._colour))
-            label.setStyleSheet(f"color: {pal['muted']};")
+            label = _field_label_widget(spec, colour=self._colour)
             if varies:
                 hint = QLabel("differs per recording")
                 hint.setStyleSheet(f"color: {pal['dim']};")

@@ -156,3 +156,91 @@ def test_a_side_pane_sets_no_floor_of_its_own(qtbot, factory):
     qtbot.addWidget(pane)
     pane.show()
     assert pane.minimumSizeHint().width() <= pane.minimumWidth()
+
+
+# ---------------------------------------------------------------------------
+# The labels themselves
+#
+# Making the panes shrink first cost the field names entirely: an Ignored size
+# policy lets Qt take a label to zero width, so the names vanished and the
+# fields drew over where they had been. These pin both halves of the
+# requirement, which pull against each other.
+# ---------------------------------------------------------------------------
+
+
+def _expand_all(widget):
+    from bidsmgr.gui.widgets.template_form import CollapsibleSection
+
+    for section in widget.findChildren(CollapsibleSection):
+        section.set_expanded(True)
+
+
+def test_every_field_name_is_visible(qtbot, tmp_path):
+    from bidsmgr.gui.widgets.template_form import FieldLabel
+
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    dlg.resize(700, 800)
+    dlg.show()
+    _expand_all(dlg)
+    qtbot.waitUntil(lambda: dlg.isVisible(), timeout=2000)
+
+    labels = [w for w in dlg.findChildren(FieldLabel) if w.isVisible()]
+    assert labels, "the form must show its field names"
+    assert all(w.width() > 0 for w in labels)
+    assert all(w.text() for w in labels)
+
+
+def test_the_names_share_one_column(qtbot, tmp_path):
+    """Every row in a section lines up. Each label asks for the column width
+    rather than for the width of its own text, or the form reads as a jumble."""
+    from bidsmgr.gui.widgets.template_form import FieldLabel
+
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    dlg.resize(700, 800)
+    dlg.show()
+    _expand_all(dlg)
+    labels = [w for w in dlg.findChildren(FieldLabel) if w.isVisible()]
+    assert len({w.width() for w in labels}) == 1
+
+
+def test_a_long_name_elides_and_keeps_the_whole_thing_in_the_tooltip(qtbot):
+    from bidsmgr.gui.widgets.template_form import FieldLabel
+
+    label = FieldLabel("ElectricalStimulationParameters:", "#fff", 120)
+    qtbot.addWidget(label)
+    label.resize(120, 20)
+    assert label.text() != "ElectricalStimulationParameters:"
+    assert label.text().endswith("…")
+    assert label.toolTip() == "ElectricalStimulationParameters:"
+
+
+def test_the_panel_lines_up_across_its_two_halves(qtbot):
+    """The hand-built rows used a 76 px column and the schema-driven section
+    140, so the two halves of the panel did not line up with each other."""
+    from bidsmgr.gui.widgets.template_form import FieldLabel
+
+    df = pd.DataFrame([{
+        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "BIDS_name": "sub-001", "line_freq": "", "montage": "",
+        "eeg_reference": "", "eeg_ground": "",
+    }])
+    panel = PropertiesPanel()
+    qtbot.addWidget(panel)
+    panel.bind_model(InventoryTableModel(df))
+    panel.set_selected_row(0)
+    panel.resize(480, 900)
+    panel.show()
+    _expand_all(panel)
+
+    labels = [w for w in panel.findChildren(FieldLabel) if w.isVisible()]
+    assert len(labels) > 5
+    assert len({w.width() for w in labels}) == 1

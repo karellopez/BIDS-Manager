@@ -64,13 +64,30 @@ from .theme_manager import CUR, scaled_px
 from .widgets import BusySpinner, PaneHeader, ValMessage
 from .widgets.template_form import (
     CollapsibleSection,
+    FieldLabel,
     build_field_widget,
     connect_field_widget,
-    field_label,
+    field_text,
     level_legend,
     read_field_widget,
     write_field_widget,
 )
+
+# ONE label column for the whole panel. The hand-built rows used 76 and the
+# schema-driven section 140, so the two halves of the panel did not line up with
+# each other. A field name like EEGReference does not fit in 76, so the shared
+# column is wider than the old one and long names elide into it.
+_LABEL_COL = 120
+
+
+def _level_tone(field) -> str:
+    """The colour that says what BIDS asks of this field."""
+    pal = CUR()
+    return {
+        "required": pal["error"],
+        "recommended": pal["warning"],
+        "deprecated": pal["muted"],
+    }.get(field.level, pal["text"])
 
 # Datatypes that carry recording-metadata (the per-row section appears only
 # for these). MEG has no scalp montage / reference / ground concept.
@@ -834,24 +851,17 @@ class PropertiesPanel(QWidget):
             connect_field_widget(
                 widget, lambda f=field, w=widget: self._on_sidecar_field_changed(f, w),
             )
-            label = QLabel(field_label(field, colour=True))
-            label.setTextFormat(Qt.TextFormat.RichText)
+            label = FieldLabel(
+                field_text(field), _level_tone(field), _LABEL_COL,
+            )
             if tip:
-                label.setToolTip(tip)
+                label.setToolTip(f"{field.name}\n\n{tip}")
             holder = QWidget()
             holder.setObjectName("meta-row")
             holder.setStyleSheet("#meta-row { background: transparent; }")
             line = QHBoxLayout(holder)
             line.setContentsMargins(0, 0, 0, 0)
             line.setSpacing(8)
-            # No fixed column: a 33-character field name would set a floor for
-            # the whole pane. It wraps and asks for nothing instead.
-            label.setWordWrap(True)
-            label.setMinimumWidth(0)
-            label.setMaximumWidth(160)
-            label.setSizePolicy(
-                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
-            )
             line.addWidget(label)
             line.addWidget(widget, 1)
             box.add(holder)
@@ -1157,10 +1167,7 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         tip = tooltip_for(key)
-        lbl = QLabel(label)
-        lbl.setMinimumWidth(0)
-        lbl.setMaximumWidth(76)
-        lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL)
         if tip:
             lbl.setToolTip(tip)
         h.addWidget(lbl)
@@ -1205,10 +1212,7 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         tip = tooltip_for(key)
-        lbl = QLabel(label)
-        lbl.setMinimumWidth(0)
-        lbl.setMaximumWidth(76)
-        lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL)
         if tip:
             lbl.setToolTip(tip)
         h.addWidget(lbl)
