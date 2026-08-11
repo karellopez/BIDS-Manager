@@ -159,12 +159,10 @@ class RecordingMetaDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setSpacing(6)
         intro = QLabel(
-            "What will still be missing after conversion, so you can answer it "
-            "now rather than find it later. Each section speaks for EVERY file "
-            "of its kind: answer it once and it is written to all of them. "
-            "What the conversion already reads out of the data is folded away "
-            "at the end of each section, and can be edited there to correct it. "
-            "To state something about ONE recording, use the inspection table."
+            "What will still be missing after conversion. Each section speaks "
+            "for EVERY file of its kind: answer it once and it is written to "
+            "all of them. What the conversion reads out of the data is folded "
+            "away at the end of each section. For ONE recording, use the table."
         )
         intro.setWordWrap(True)
         outer.addWidget(intro)
@@ -235,7 +233,7 @@ class RecordingMetaDialog(QDialog):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self._section_picker.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         picker_row = QWidget()
         picker_layout = QHBoxLayout(picker_row)

@@ -221,7 +221,26 @@ not depend on being able to see colour.
 
 ---
 
-## 9. Where the code is
+## 9. Looking at it
+
+Layout bugs are invisible to a test suite. A pane can pass every assertion about
+its widths and still show a field with no box beside it, a column that does not
+line up, or a name cut mid-word. All three of those shipped.
+
+```bash
+QT_QPA_PLATFORM=offscreen python tools/screenshot_gui.py dark
+QT_QPA_PLATFORM=offscreen python tools/screenshot_gui.py light
+```
+
+Qt's offscreen platform draws into memory and `QWidget.grab()` returns the
+pixels, so this needs no display. It writes the metadata dialog and the
+properties panel at several widths, opened and scrolled. Look at them before
+believing a layout change worked, and look at both themes: a colour that reads
+on the near-black surface can vanish on the light one.
+
+---
+
+## 10. Where the code is
 
 | you want | look in |
 |---|---|

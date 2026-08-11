@@ -194,11 +194,10 @@ def test_every_field_name_is_visible(qtbot, tmp_path):
     assert all(w.text() for w in labels)
 
 
-def test_the_names_share_one_column(qtbot, tmp_path):
-    """Every row in a section lines up. Each label asks for the column width
-    rather than for the width of its own text, or the form reads as a jumble."""
-    from bidsmgr.gui.widgets.template_form import FieldLabel
-
+def test_the_fields_share_one_column(qtbot, tmp_path):
+    """Every control in a section starts at the same x, or the form reads as a
+    jumble. What matters is where the FIELDS begin: the labels sit left-aligned
+    within a shared column, so their own widths differ by design."""
     dlg = RecordingMetaDialog(
         tmp_path / "inv.tsv.recording_meta.json",
         present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
@@ -207,19 +206,45 @@ def test_the_names_share_one_column(qtbot, tmp_path):
     dlg.resize(700, 800)
     dlg.show()
     _expand_all(dlg)
-    labels = [w for w in dlg.findChildren(FieldLabel) if w.isVisible()]
-    assert len({w.width() for w in labels}) == 1
+
+    for key in ("dataset_description", "eeg/eeg"):
+        # The questions, which share one form. The fields folded away under
+        # "already answered" sit in their own, one level deeper, so they start
+        # further right by design.
+        asked = dlg._template.asked(key)
+        widgets = [
+            w for name, w in dlg._template._widgets[key].items()
+            if name in asked and w.isVisible()
+        ]
+        assert len(widgets) > 5
+        lefts = {w.mapTo(dlg, w.rect().topLeft()).x() for w in widgets}
+        assert len(lefts) == 1, f"{key}: controls start at {sorted(lefts)}"
 
 
 def test_a_long_name_elides_and_keeps_the_whole_thing_in_the_tooltip(qtbot):
+    """The label is rich text, because the name and its level mark are coloured
+    differently, so the ellipsis is inside the markup."""
     from bidsmgr.gui.widgets.template_form import FieldLabel
 
     label = FieldLabel("ElectricalStimulationParameters:", "#fff", 120)
     qtbot.addWidget(label)
     label.resize(120, 20)
-    assert label.text() != "ElectricalStimulationParameters:"
-    assert label.text().endswith("…")
+    assert "…" in label.text()
+    assert "ElectricalStimulationParameters" not in label.text()
     assert label.toolTip() == "ElectricalStimulationParameters:"
+
+
+def test_the_level_mark_survives_elision(qtbot):
+    """The mark is why the label is coloured at all: it says what the standard
+    asks. Eliding name and mark together would drop the mark first."""
+    from bidsmgr.gui.widgets.template_form import FieldLabel
+
+    label = FieldLabel("AVeryLongFieldNameIndeed:", "#fff", 90, mark=" *",
+                       mark_colour="#f00")
+    qtbot.addWidget(label)
+    label.resize(90, 20)
+    assert "*" in label.text()
+    assert "#f00" in label.text()
 
 
 def test_the_panel_lines_up_across_its_two_halves(qtbot):
@@ -243,6 +268,8 @@ def test_the_panel_lines_up_across_its_two_halves(qtbot):
 
     labels = [w for w in panel.findChildren(FieldLabel) if w.isVisible()]
     assert len(labels) > 5
+    # Hand-built rows have no form column, so each label pins the same width and
+    # every control after it starts at the same x.
     assert len({w.width() for w in labels}) == 1
 
 

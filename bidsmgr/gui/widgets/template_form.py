@@ -186,7 +186,11 @@ def _let_it_shrink(combo: QComboBox) -> None:
     combo.setSizeAdjustPolicy(
         QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
     )
-    combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+    # Expanding, NOT Ignored. Ignored lets Qt give the widget zero width, and it
+    # does: HEDVersion and License rendered as a label with nothing beside it.
+    # Expanding plus a zero minimum shrinks just as far without disappearing.
+    combo.setMinimumWidth(0)
+    combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
 
 def fit_popup_to_contents(combo: QComboBox) -> None:
@@ -437,7 +441,7 @@ class _ShrinkableButton(QPushButton):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._full = ""
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt override
         self._full = text
@@ -590,6 +594,7 @@ __all__ = [
     "fit_popup_to_contents",
     "FieldLabel",
     "field_label",
+    "field_label_widget",
     "field_text",
     "level_legend",
     "read_field_widget",
@@ -602,9 +607,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-# How wide the label column is. Fixed, so every row in a section lines up; the
-# names elide into it rather than widening it.
-LABEL_COLUMN_PX = 150
+# The widest a label column may get. A form fits its column to the longest name
+# it holds and stops here; past that the names elide, because one 45-character
+# field should not push every control across the pane.
+LABEL_COLUMN_PX = 200
 
 
 class FieldLabel(QLabel):
@@ -621,10 +627,19 @@ class FieldLabel(QLabel):
     over where they had been.
     """
 
-    def __init__(self, text, colour, width=LABEL_COLUMN_PX) -> None:
+    def __init__(
+        self, text, colour, width=LABEL_COLUMN_PX, mark="", mark_colour="",
+        fixed=False,
+    ) -> None:
         super().__init__()
-        self._full = text
-        self.setToolTip(text)
+        self._full = f"{text}{mark}"
+        self._name = text
+        self._mark = mark
+        self._colour = colour
+        self._mark_colour = mark_colour or colour
+        self._fixed = fixed
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setToolTip(self._full)
         # Scoped to this label. An unscoped "background: transparent" cascades
         # into the tooltip Qt raises for this widget, and the tooltip renders
         # see-through over whatever is behind it.
@@ -635,15 +650,26 @@ class FieldLabel(QLabel):
         self.setMinimumWidth(0)
         self.setMaximumWidth(width)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._elide()
 
     def sizeHint(self):  # noqa: N802 - Qt override
-        # Always ask for the whole column, never for the width of this
-        # particular name. That is what makes every row in a section line up
-        # instead of each label ending wherever its own text does.
+        """How much room this label would like.
+
+        In a QFormLayout every label is given the column width, which the layout
+        takes as the widest of them, so asking for just this name is enough and
+        the column ends up as wide as it needs to be and no wider.
+
+        Rows built by hand out of a QHBoxLayout have no such column: each label
+        gets what it asks for, so there ``fixed`` makes them all ask for the
+        same thing.
+        """
         hint = super().sizeHint()
-        hint.setWidth(self.maximumWidth())
+        room = self.fontMetrics().horizontalAdvance(self._full) + 4
+        hint.setWidth(
+            self.maximumWidth() if self._fixed
+            else min(room, self.maximumWidth())
+        )
         return hint
 
     def minimumSizeHint(self):  # noqa: N802 - Qt override
@@ -656,17 +682,40 @@ class FieldLabel(QLabel):
         self._elide()
 
     def _elide(self) -> None:
-        room = self.width() or self.maximumWidth()
-        shown = self.fontMetrics().elidedText(
-            self._full, Qt.TextElideMode.ElideRight, max(0, room),
+        """Elide the NAME, keep the mark.
+
+        The mark is the whole point of the label being coloured: it says what
+        the standard asks of this field. Eliding the two together would drop it
+        first, which is the one part that must not go.
+        """
+        room = max(0, (self.width() or self.maximumWidth()))
+        metrics = self.fontMetrics()
+        mark_px = metrics.horizontalAdvance(self._mark) if self._mark else 0
+        name = metrics.elidedText(
+            self._name, Qt.TextElideMode.ElideRight, max(0, room - mark_px),
         )
-        if shown != QLabel.text(self):
-            QLabel.setText(self, shown)
+        html = f'<span style="color:{self._colour};">{name}</span>'
+        if self._mark:
+            html += f'<span style="color:{self._mark_colour};">{self._mark}</span>'
+        if html != QLabel.text(self):
+            QLabel.setText(self, html)
 
 
-def _field_label_widget(field, colour=True, width=LABEL_COLUMN_PX):
-    """The label for one field: name, level mark, unit, in the level's colour."""
-    return FieldLabel(field_text(field), _level_colour(field, colour), width)
+def field_label_widget(field, colour=True, width=LABEL_COLUMN_PX, fixed=False):
+    """The label for one field.
+
+    The NAME stays in the ordinary text colour and the MARK carries the level.
+    Colouring the whole name by level turns a form of required fields into a
+    wall of red, and the mark is what the legend explains.
+    """
+    pal = CUR()
+    mark = {"required": " *", "recommended": " \u00b7"}.get(field.level, "")
+    unit = f" ({field.unit})" if field.unit else ""
+    tone = pal["muted"] if field.level == "deprecated" else pal["text"]
+    return FieldLabel(
+        f"{field.name}{unit}:", tone, width,
+        mark=mark, mark_colour=_level_colour(field, colour), fixed=fixed,
+    )
 
 
 def _origin_tooltip(origin: str) -> str:
@@ -812,7 +861,7 @@ class TemplateTree(QWidget):
         form.setContentsMargins(2, 2, 2, 2)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(7)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
@@ -828,7 +877,7 @@ class TemplateTree(QWidget):
             if field.name in stored:
                 write_field_widget(widget, stored[field.name])
 
-            label = _field_label_widget(field, colour=self._colour)
+            label = field_label_widget(field, colour=self._colour)
             tip = field.description or ""
             origin = getattr(field, "origin", "")
             if origin:
@@ -869,7 +918,7 @@ class TemplateTree(QWidget):
         form.setContentsMargins(2, 2, 2, 2)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(6)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         widgets = self._widgets.setdefault(node.key, {})
@@ -893,7 +942,7 @@ class TemplateTree(QWidget):
                    "The conversion reads this from the data and will write the "
                    "value shown. Type here only to correct it.")
             )
-            label = _field_label_widget(spec, colour=self._colour)
+            label = field_label_widget(spec, colour=self._colour)
             if varies or unknown:
                 hint = QLabel(
                     "read from the data" if unknown else "differs per recording"

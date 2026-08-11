@@ -67,7 +67,7 @@ from .widgets.template_form import (
     FieldLabel,
     build_field_widget,
     connect_field_widget,
-    field_text,
+    field_label_widget,
     level_legend,
     read_field_widget,
     write_field_widget,
@@ -79,18 +79,8 @@ from .widgets.template_form import (
 # column is wider than the old one and long names elide into it.
 _LABEL_COL = 120
 
-
-def _level_tone(field) -> str:
-    """The colour that says what BIDS asks of this field."""
-    pal = CUR()
-    return {
-        "required": pal["error"],
-        "recommended": pal["warning"],
-        "deprecated": pal["muted"],
-    }.get(field.level, pal["text"])
-
-# Datatypes that carry recording-metadata (the per-row section appears only
-# for these). MEG has no scalp montage / reference / ground concept.
+# Datatypes that carry a recording sidecar: the per-row metadata section and the
+# Compute-PSD action appear only for these.
 _EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 # Human display names for the datatypes that carry a recording sidecar.
@@ -148,13 +138,13 @@ class _EntityRow(QWidget):
         # entities line up with everything below them and a long name like
         # "reconstruction" ends in an ellipsis rather than being cut mid-word.
         pal = CUR()
-        tone = pal["text"] if required else pal["dim"]
-        text = f"{entity_name} *" if required else entity_name
-        if required:
-            tone = pal["error"]
-        if deprecated:
-            tone = pal["muted"]
-        lbl = FieldLabel(text, tone, _LABEL_COL)
+        tone = pal["muted"] if deprecated else (
+            pal["text"] if required else pal["dim"]
+        )
+        lbl = FieldLabel(
+            entity_name, tone, _LABEL_COL,
+            mark=" *" if required else "", mark_colour=pal["error"], fixed=True,
+        )
         if deprecated:
             lbl.setStyleSheet(
                 "#field-label { color: %s; background: transparent; "
@@ -442,13 +432,14 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
 
+        # The same column every other row in the panel uses, so datatype and
+        # suffix line up with the entities and the metadata below them instead
+        # of starting their own column.
         pal = CUR()
-        lbl = QLabel(label_text)
-        lbl.setMinimumWidth(0)
-        lbl.setMaximumWidth(76)
-        suffix = f' <span style="color:{pal["error"]}">*</span>' if required else ""
-        lbl.setText(f'<span style="color:{pal["text"]}">{label_text}</span>{suffix}')
-        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl = FieldLabel(
+            label_text, pal["text"], _LABEL_COL,
+            mark=" *" if required else "", mark_colour=pal["error"], fixed=True,
+        )
         h.addWidget(lbl)
 
         combo = QComboBox()
@@ -744,7 +735,7 @@ class PropertiesPanel(QWidget):
         # path, and a plain QLabel reports all of it as its minimum width.
         lbl.setWordWrap(True)
         lbl.setMinimumWidth(0)
-        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         return lbl
 
     def _append_participant_section(self, row: int) -> None:
@@ -863,9 +854,7 @@ class PropertiesPanel(QWidget):
             connect_field_widget(
                 widget, lambda f=field, w=widget: self._on_sidecar_field_changed(f, w),
             )
-            label = FieldLabel(
-                field_text(field), _level_tone(field), _LABEL_COL,
-            )
+            label = field_label_widget(field, width=_LABEL_COL, fixed=True)
             if tip:
                 label.setToolTip(f"{field.name}\n\n{tip}")
             holder = QWidget()
@@ -1179,7 +1168,7 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         tip = tooltip_for(key)
-        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL)
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL, fixed=True)
         if tip:
             lbl.setToolTip(tip)
         h.addWidget(lbl)
@@ -1224,7 +1213,7 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         tip = tooltip_for(key)
-        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL)
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL, fixed=True)
         if tip:
             lbl.setToolTip(tip)
         h.addWidget(lbl)
