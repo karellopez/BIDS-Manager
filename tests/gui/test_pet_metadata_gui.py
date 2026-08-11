@@ -14,6 +14,7 @@ import pytest
 from bidsmgr.gui.models import InventoryTableModel
 from bidsmgr.gui.properties_panel import PropertiesPanel
 from bidsmgr.gui.recording_meta_dialog import RecordingMetaDialog
+from bidsmgr.recording_meta import load_spec
 from bidsmgr.recording_meta import PetAcquisitionSpec, RecordingMetaSpec
 
 pytestmark = pytest.mark.gui
@@ -52,59 +53,6 @@ def _pet_row(**extra) -> dict:
 # ---------------------------------------------------------------------------
 # Dataset dialog
 # ---------------------------------------------------------------------------
-
-
-def test_pet_blocks_show_only_for_a_pet_dataset(qtbot, tmp_path) -> None:
-    dlg = _dialog(tmp_path, {"pet"})
-    qtbot.addWidget(dlg)
-    assert all(box.isVisibleTo(dlg) for box in dlg._pet_boxes)
-    assert not dlg._eeg_box.isVisibleTo(dlg)
-    assert dlg._specific_region.isVisibleTo(dlg)
-
-
-def test_pet_blocks_hidden_for_an_eeg_dataset(qtbot, tmp_path) -> None:
-    """REGRESSION: an EEG user must see exactly what they saw before."""
-    dlg = _dialog(tmp_path, {"eeg", "meg"})
-    qtbot.addWidget(dlg)
-    assert not any(box.isVisibleTo(dlg) for box in dlg._pet_boxes)
-    assert dlg._eeg_box.isVisibleTo(dlg)
-
-
-def test_both_families_show_for_a_hybrid_dataset(qtbot, tmp_path) -> None:
-    dlg = _dialog(tmp_path, {"pet", "eeg"})
-    qtbot.addWidget(dlg)
-    assert all(box.isVisibleTo(dlg) for box in dlg._pet_boxes)
-    assert dlg._eeg_box.isVisibleTo(dlg)
-
-
-def test_specific_region_hidden_for_mri_only(qtbot, tmp_path) -> None:
-    """REGRESSION: MRI needs no modality-specific metadata at all."""
-    dlg = _dialog(tmp_path, {"anat", "func"})
-    qtbot.addWidget(dlg)
-    assert not dlg._specific_region.isVisibleTo(dlg)
-    assert not any(box.isVisibleTo(dlg) for box in dlg._pet_boxes)
-
-
-def test_pet_fields_round_trip_through_the_spec(qtbot, tmp_path) -> None:
-    dlg = _dialog(tmp_path, {"pet"})
-    qtbot.addWidget(dlg)
-
-    dlg._pet_tracer_name.setCurrentText("FDG")
-    dlg._pet_radionuclide.setCurrentText("F18")
-    dlg._pet_injected_radioactivity.setText("44.4")
-    dlg._pet_injected_radioactivity_units.setCurrentText("MBq")
-    dlg._pet_mode_of_administration.setCurrentText("bolus")
-    dlg._pet_image_decay_corrected.setCurrentText("true")
-    dlg._pet_recon_labels.setText("iterations, subsets")
-    dlg._pet_recon_values.setText("3, 21")
-
-    pet = dlg.build_spec().pet_defaults
-    assert pet.tracer_name == "FDG"
-    assert pet.injected_radioactivity == 44.4
-    assert pet.mode_of_administration == "bolus"
-    assert pet.image_decay_corrected is True
-    assert pet.recon_method_parameter_labels == ["iterations", "subsets"]
-    assert pet.recon_method_parameter_values == [3.0, 21.0]
 
 
 def test_a_hidden_pet_block_keeps_its_loaded_values(qtbot, tmp_path) -> None:
@@ -222,3 +170,60 @@ def test_properties_panel_still_renders_an_mri_row(qtbot) -> None:
     qtbot.addWidget(panel)
     panel.bind_model(model)
     panel.set_selected_row(0)
+
+
+# ---------------------------------------------------------------------------
+# PET in the template
+#
+# The four hand-built PET groups are gone: PET is one file, so it is one
+# section, built from the schema like every other. These replace the tests that
+# asserted those groups' widgets.
+# ---------------------------------------------------------------------------
+
+
+def test_pet_is_one_section_named_after_its_file(qtbot, tmp_path):
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"pet"},
+        present_pairs=[("pet", "pet")],
+        example_paths={("pet", "pet"): "sub-001/pet/sub-001_trc-FDG_pet.json"},
+    )
+    qtbot.addWidget(dlg)
+    leaves = {n.key: n.label for n in dlg._all_nodes() if n.is_leaf}
+    assert leaves["pet/pet"] == "sub-001_trc-FDG_pet.json"
+
+
+def test_pet_asks_only_what_the_scanner_cannot_answer(qtbot, tmp_path):
+    """The dose sheet, not the header. TracerName and the frame timings come
+    out of the DICOM; the injected mass and the administration mode do not."""
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"pet"}, present_pairs=[("pet", "pet")],
+    )
+    qtbot.addWidget(dlg)
+    asked = set(dlg._template._widgets["pet/pet"])
+    for from_the_scanner in ("TracerName", "FrameDuration", "FrameTimesStart"):
+        assert from_the_scanner not in asked
+    for from_the_lab in ("InjectedMass", "ModeOfAdministration", "SpecificRadioactivity"):
+        assert from_the_lab in asked
+
+
+def test_pet_answers_round_trip(qtbot, tmp_path):
+    from bidsmgr.gui.widgets.template_form import write_field_widget
+
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    kw = dict(present_datatypes={"pet"}, present_pairs=[("pet", "pet")])
+    dlg = RecordingMetaDialog(scaffold, **kw)
+    qtbot.addWidget(dlg)
+    write_field_widget(dlg._template._widgets["pet/pet"]["ModeOfAdministration"], "bolus")
+    dlg._on_save()
+    assert load_spec(scaffold).sequence_templates["pet/pet"]["ModeOfAdministration"] == "bolus"
+
+
+def test_a_dataset_without_pet_is_never_asked_about_it(qtbot, tmp_path):
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    assert "pet/pet" not in {n.key for n in dlg._all_nodes()}

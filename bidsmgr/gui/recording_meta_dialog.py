@@ -38,7 +38,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..metadata.template_plan import dataset_description_section
+from ..metadata.template_plan import build_template_tree
+from .widgets.template_form import TemplateTree
 from ..recording_meta import (
     COMMON_CAP_MANUFACTURERS,
     COMMON_MANUFACTURERS,
@@ -58,6 +59,7 @@ from ..recording_meta import (
 )
 from .delegates import builtin_montages
 from .metadata_help import tooltip_for
+from .app_settings import AppSettings
 from .theme_manager import CUR
 
 _NONE = "(none)"
@@ -97,81 +99,6 @@ def _tighten_form(form: QFormLayout) -> None:
 
 
 
-class _AuthorsEditor(QWidget):
-    """A row per author, family name and given name kept apart.
-
-    BIDS wants a list of strings and the convention is "Family, Given". A plain
-    text box makes that a trap: split on commas and "Lopez, Karel" becomes two
-    people; ask for one per line and the user has to guess the order. Two boxes
-    per row remove the guess, and the value is composed the way the standard
-    expects it.
-    """
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._rows: list[tuple[QWidget, QLineEdit, QLineEdit]] = []
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(2)
-        self._rows_box = QVBoxLayout()
-        self._rows_box.setSpacing(2)
-        outer.addLayout(self._rows_box)
-        add = QPushButton("Add author")
-        add.clicked.connect(lambda: self._add_row())
-        outer.addWidget(add, 0, Qt.AlignmentFlag.AlignLeft)
-        self._add_row()
-
-    def _add_row(self, family: str = "", given: str = "") -> None:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        family_edit = QLineEdit(family)
-        family_edit.setPlaceholderText("Family name")
-        given_edit = QLineEdit(given)
-        given_edit.setPlaceholderText("Given name")
-        remove = QPushButton("\u2212")
-        remove.setFixedWidth(26)
-        remove.setToolTip("Remove this author")
-        layout.addWidget(family_edit, 3)
-        layout.addWidget(given_edit, 2)
-        layout.addWidget(remove, 0)
-        self._rows_box.addWidget(row)
-        entry = (row, family_edit, given_edit)
-        self._rows.append(entry)
-
-        def drop() -> None:
-            if entry in self._rows:
-                self._rows.remove(entry)
-            row.setParent(None)
-            if not self._rows:
-                self._add_row()
-
-        remove.clicked.connect(drop)
-
-    def value(self) -> list[str]:
-        """The authors as BIDS wants them, blanks dropped."""
-        out: list[str] = []
-        for _row, family_edit, given_edit in self._rows:
-            family = family_edit.text().strip()
-            given = given_edit.text().strip()
-            if family and given:
-                out.append(f"{family}, {given}")
-            elif family or given:
-                out.append(family or given)
-        return out
-
-    def set_value(self, values) -> None:
-        for row, _f, _g in list(self._rows):
-            row.setParent(None)
-        self._rows.clear()
-        for entry in values or []:
-            family, _, given = str(entry).partition(",")
-            self._add_row(family.strip(), given.strip())
-        if not self._rows:
-            self._add_row()
-
-
 class RecordingMetaDialog(QDialog):
     """Edit the dataset-level recording-metadata scaffold."""
 
@@ -184,6 +111,7 @@ class RecordingMetaDialog(QDialog):
         manufacturer_suggestions: Optional[list[str]] = None,
         pet_suggestions: Optional[dict[str, list[str]]] = None,
         example_paths: Optional[dict] = None,
+        present_pairs: Optional[list] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Dataset metadata")
@@ -207,6 +135,18 @@ class RecordingMetaDialog(QDialog):
         # One real path per (datatype, suffix) from the scan, so a group can
         # name the file its answers reach instead of "sub-..._<datatype>.json".
         self._example_paths = dict(example_paths or {})
+        # The (datatype, suffix) pairs the scan found. Without them the tree
+        # falls back to one node per present datatype, which still works but
+        # cannot name a real file.
+        self._present_pairs = list(present_pairs or []) or [
+            (dt, dt) for dt in sorted(self._present)
+        ]
+        # Which sections the user folded last time, and whether levels are
+        # coloured. Both are read from settings so the window opens the way it
+        # was left.
+        settings = AppSettings.load()
+        self._colour_levels = settings.template_colour_levels
+        self._collapsed_keys: set = set()
         # Read-only scan hints, shown beside the fields they inform. Same
         # contract as the montage and manufacturer hints: proposed, never
         # applied, because a vendor string can always parse wrongly.
@@ -235,50 +175,34 @@ class RecordingMetaDialog(QDialog):
         # device/site block (all electrophysiology) + an EEG/iEEG reference &
         # montage block. The region header is hidden for a dataset with no
         # EEG/MEG (only the agnostic region then shows).
-        self._specific_region = self._region_label(
-            "Modality-specific defaults", agnostic=False)
-        bl.addWidget(self._specific_region)
         # One acquisition group per modality, not one shared between them: an
         # EEG amplifier and a MEG dewar are different instruments, and a study
         # running both could previously state only one manufacturer, one model
         # and one mains frequency for the pair.
-        self._device_boxes: dict[str, QGroupBox] = {}
-        self._device_widgets: dict[str, dict] = {}
-        electrophysiology = [
-            m for m in _MODALITY_ORDER if m in self._present and m != "pet"
-        ]
-        # Even with no electrophysiology present the widgets must exist: a
-        # shared scaffold may carry EEG values, and build_spec preserves what it
-        # cannot show rather than wiping it.
-        for modality in electrophysiology or ["eeg"]:
-            box = self._build_device_group(modality)
-            self._device_boxes[modality] = box
-            if not electrophysiology:
-                box.setVisible(False)
-        self._device_box = next(iter(self._device_boxes.values()))
+        # THE TEMPLATE, built from the schema and the scan rather than written
+        # out here. One node per file, agnostic first, each collapsible, each
+        # naming the file it writes in full. Replaces the hand-built groups for
+        # the acquisition system, the EEG reference block, the MEG block, the
+        # four PET blocks and the institution block, which between them named
+        # fields in code and could not follow a change of BIDS version.
+        self._tree_nodes = build_template_tree(
+            self._present_pairs, self._example_paths,
+        )
+        self._template = TemplateTree(
+            self._tree_nodes,
+            values=self._stored_template_values(),
+            suggestions=self._field_suggestions(),
+            colour_levels=self._colour_levels,
+            collapsed_keys=self._collapsed_keys,
+        )
+        bl.addWidget(self._template)
 
+        # What the standard has no field for, and so cannot come from it: which
+        # montage to apply on conversion, how trigger codes read, and the two
+        # spreadsheets that feed participants and phenotype.
+        bl.addWidget(self._region_label("BIDS Manager settings", agnostic=True))
         self._eeg_box = self._build_eeg_group()
-        self._meg_box = self._build_meg_group()
-        for box in self._device_boxes.values():
-            bl.addWidget(box)
         bl.addWidget(self._eeg_box)
-        bl.addWidget(self._meg_box)
-        # PET: four groups, split the way the acquisition itself divides, so
-        # the ~40 required fields read as four short forms instead of one wall.
-        self._pet_boxes = [
-            self._build_pet_tracer_group(),
-            self._build_pet_administration_group(),
-            self._build_pet_acquisition_group(),
-            self._build_pet_recon_group(),
-        ]
-        for box in self._pet_boxes:
-            bl.addWidget(box)
-        # Region 2 - MODALITY-AGNOSTIC (apply to any dataset, incl. MRI):
-        # institution (site info, written to every modality's sidecar), events
-        # and phenotype, each writing to its own destination.
-        bl.addWidget(self._region_label("Modality-agnostic", agnostic=True))
-        bl.addWidget(self._build_dataset_description_group())
-        bl.addWidget(self._build_institution_group())
         bl.addWidget(self._build_event_group())
         bl.addWidget(self._build_participants_group())
         bl.addWidget(self._build_phenotype_group())
@@ -301,15 +225,29 @@ class RecordingMetaDialog(QDialog):
         picker_layout.addWidget(self._section_picker, 1)
         outer.addWidget(picker_row)
 
-        self._sections: list[QGroupBox] = [
-            box for box in body.findChildren(QGroupBox) if box.title()
-        ]
-        for box in self._sections:
-            self._section_picker.addItem(box.title())
+        # Every destination, in the order they appear: the template's own file
+        # nodes first, then the settings BIDS has no field for. Choosing one
+        # unfolds it and scrolls to it, so a long window never has to be dragged.
+        self._jump_targets: list[tuple[str, object]] = []
+        for node in self._all_nodes():
+            if node.is_leaf:
+                section = self._template.section_widget(node.key)
+                if section is not None:
+                    self._jump_targets.append((node.label, section))
+        for box in body.findChildren(QGroupBox):
+            if box.title():
+                self._jump_targets.append((box.title(), box))
+        for label, _widget in self._jump_targets:
+            self._section_picker.addItem(label)
 
         def jump(index: int) -> None:
-            if 0 <= index < len(self._sections):
-                scroll.ensureWidgetVisible(self._sections[index], 0, 0)
+            if not (0 <= index < len(self._jump_targets)):
+                return
+            _label, widget = self._jump_targets[index]
+            if hasattr(widget, "set_expanded"):
+                widget.set_expanded(True)
+            self._template.reveal(widget)
+            scroll.ensureWidgetVisible(widget, 0, 0)
 
         self._section_picker.activated.connect(jump)
         outer.addWidget(scroll, 1)
@@ -322,8 +260,6 @@ class RecordingMetaDialog(QDialog):
         outer.addWidget(buttons)
 
         self._populate()
-        self._populate_dataset_description()
-        self._populate_device_groups()
         self._apply_modality_constraints()
 
     def _region_label(self, text: str, *, agnostic: bool) -> QLabel:
@@ -342,14 +278,6 @@ class RecordingMetaDialog(QDialog):
         )
         return lbl
 
-    def _modalities_label(self, applicable: set[str]) -> str:
-        """"EEG and MEG"-style label of the PRESENT modalities a field applies
-        to (so a field shared by several modalities names them all)."""
-        present_app = [
-            m for m in _MODALITY_ORDER if m in self._present and m in applicable
-        ]
-        return _join_modalities(present_app)
-
     def _apply_modality_constraints(self) -> None:
         """Show/hide modality-specific sections by what was scanned.
 
@@ -359,27 +287,98 @@ class RecordingMetaDialog(QDialog):
         four PET blocks only with PET. The region header hides when none apply,
         which is what an MRI-only dataset sees.
         """
-        has_eeg_meg = bool(self._present & {"eeg", "meg", "ieeg", "nirs"})
         has_eeg = bool(self._present & {"eeg", "ieeg"})
-        has_meg = "meg" in self._present
-        has_pet = "pet" in self._present
-        # Flags consulted by build_spec so a hidden section's loaded values are
-        # preserved (not clobbered by the empty, never-shown widgets).
-        self._device_applies = has_eeg_meg
+        # Flags consulted by build_spec so a section that is not shown keeps its
+        # loaded values rather than being cleared by widgets nobody saw.
         self._eeg_applies = has_eeg
-        self._meg_applies = has_meg
-        self._pet_applies = has_pet
-        for box in self._device_boxes.values():
-            box.setVisible(has_eeg_meg)
+        # The template itself decides what to show: a section exists only for a
+        # file the scan says will be written. Only the montage block, which BIDS
+        # has no field for, still needs hiding by hand.
         self._eeg_box.setVisible(has_eeg)
-        self._meg_box.setVisible(has_meg)
-        for box in self._pet_boxes:
-            box.setVisible(has_pet)
-        self._specific_region.setVisible(has_eeg_meg or has_pet)
 
     # ------------------------------------------------------------------
     # build
     # ------------------------------------------------------------------
+
+    def _field_suggestions(self) -> dict:
+        """Values we offer that the standard does not list.
+
+        Two kinds, both suggestions and neither a restriction: vocabularies
+        BIDS Manager curates because BIDS leaves the field free, and what the
+        scan actually detected in THIS dataset, which is the better hint of the
+        two and the reason it is offered rather than applied.
+        """
+        return {
+            "Manufacturer": list(self._manufacturer_suggestions) + list(COMMON_MANUFACTURERS),
+            "CapManufacturer": list(COMMON_CAP_MANUFACTURERS),
+            "TracerName": list(self._pet_tracer_suggestions) + list(COMMON_TRACERS),
+            "TracerRadionuclide": list(COMMON_RADIONUCLIDES),
+            "ReconMethodName": list(self._pet_recon_suggestions),
+            "InjectedRadioactivity": list(self._pet_dose_suggestions),
+            # PET units and modes: BIDS leaves these free text, and a lab that
+            # types "mbq" instead of "MBq" fails validation for no good reason.
+            "InjectedRadioactivityUnits": list(RADIOACTIVITY_UNITS),
+            "InjectedMassUnits": list(MASS_UNITS),
+            "SpecificRadioactivityUnits": list(SPECIFIC_RADIOACTIVITY_UNITS),
+            "ModeOfAdministration": list(MODES_OF_ADMINISTRATION),
+            "AcquisitionMode": list(PET_ACQUISITION_MODES),
+            "Units": list(PET_IMAGE_UNITS),
+        }
+
+    def _stored_template_values(self) -> dict:
+        """What the scaffold already holds, keyed as the tree's nodes are."""
+        values = dict(self._spec.sequence_templates or {})
+        dd = self._spec.dataset_description
+        agnostic = {
+            "Name": dd.name,
+            "Authors": dd.authors,
+            "License": dd.license,
+            "Acknowledgements": dd.acknowledgements,
+            "HowToAcknowledge": dd.how_to_acknowledge,
+            "Funding": dd.funding,
+            "EthicsApprovals": dd.ethics_approvals,
+            "ReferencesAndLinks": dd.references_and_links,
+            "DatasetDOI": dd.dataset_doi,
+        }
+        values["dataset_description"] = {
+            k: v for k, v in agnostic.items() if v not in (None, "", [], {})
+        }
+        return values
+
+    def _read_template(self, spec) -> None:
+        """Put the tree's answers back where the converter reads them.
+
+        Nothing new is invented to store them: the agnostic answers go to the
+        dataset_description block, and a file's answers to the sequence template
+        keyed exactly as its node is.
+        """
+        answers = self._template.values_by_key()
+
+        agnostic = answers.pop("dataset_description", {})
+        dd = spec.dataset_description
+        dd.name = agnostic.get("Name") or None
+        dd.authors = list(agnostic.get("Authors") or [])
+        dd.license = agnostic.get("License") or None
+        dd.acknowledgements = agnostic.get("Acknowledgements") or None
+        dd.how_to_acknowledge = agnostic.get("HowToAcknowledge") or None
+        dd.funding = list(agnostic.get("Funding") or [])
+        dd.ethics_approvals = list(agnostic.get("EthicsApprovals") or [])
+        dd.references_and_links = list(agnostic.get("ReferencesAndLinks") or [])
+        dd.dataset_doi = agnostic.get("DatasetDOI") or None
+
+        # Templates the tree did not show (another modality's, from a shared
+        # scaffold) are kept: the dialog only speaks for what it displayed.
+        shown = {n.key for n in self._all_nodes() if n.is_leaf}
+        kept = {
+            key: value for key, value in (spec.sequence_templates or {}).items()
+            if key not in shown
+        }
+        kept.update(answers)
+        spec.sequence_templates = kept
+
+    def _all_nodes(self):
+        for root in self._tree_nodes:
+            yield from root.walk()
 
     def _form_row(self, form: QFormLayout, label_text: str, widget, ui_key: str) -> None:
         """Add a labelled field row with the schema tooltip on BOTH the label
@@ -391,408 +390,40 @@ class RecordingMetaDialog(QDialog):
             widget.setToolTip(tip)
         form.addRow(label, widget)
 
-    def _build_device_group(self, modality: str) -> QGroupBox:
-        """The DEVICE that produced one modality's recordings.
+    def _suggestion_label(self, values: list[str]) -> Optional[QLabel]:
+        """A read-only summary of what the scan detected, never applied.
 
-        One group per modality: an EEG amplifier and a MEG dewar are different
-        instruments, so a shared group could record only one of them and the
-        other silently claimed it.
+        A vendor string can always parse wrongly, so a suggestion is shown
+        beside the field and left for the user to accept.
         """
-        target = self._target_for(modality)
-        box = QGroupBox(f"Acquisition system  ·  {modality.upper()}  →  {target}")
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        manufacturer = QComboBox()
-        manufacturer.setEditable(True)  # pick a default OR type another
-        manufacturer.addItem("")
-        manufacturer.addItems(COMMON_MANUFACTURERS)
-        amplifier_model = QLineEdit()
-        software_versions = QLineEdit()
-        line_freq = QComboBox()
-        line_freq.addItems([_BLANK, "50", "60"])
-
-        self._form_row(form, "Manufacturer:", manufacturer, "manufacturer")
-        hint = self._suggestion_label(self._manufacturer_suggestions)
-        if hint is not None:
-            form.addRow("", hint)
-        self._form_row(form, "Amplifier / system model:", amplifier_model, "amplifier_model")
-        self._form_row(form, "Software versions:", software_versions, "software_versions")
-        self._form_row(form, "Power line frequency (Hz):", line_freq, "line_freq")
-
-        self._device_widgets[modality] = {
-            "manufacturer": manufacturer,
-            "amplifier_model": amplifier_model,
-            "software_versions": software_versions,
-            "power_line_freq": line_freq,
-        }
-        # The first modality keeps the historical attribute names so the rest
-        # of the dialog, and its tests, go on working unchanged.
-        if not hasattr(self, "_manufacturer"):
-            self._manufacturer = manufacturer
-            self._amplifier_model = amplifier_model
-            self._software_versions = software_versions
-            self._line_freq = line_freq
-        return box
-
-    def _target_for(self, modality: str, suffix: str = "") -> str:
-        """The file a modality's answers land in, from a real scanned row."""
-        suffix = suffix or modality
-        path = self._example_paths.get((modality, suffix), "")
-        return path.split("/")[-1] if path else f"sub-..._{suffix}.json"
-
-    def _read_device_groups(self, spec) -> None:
-        """Store each modality's acquisition system in its own block.
-
-        The shared block keeps what belongs to the whole study; an instrument
-        belongs to the modality that used it, so a study running two systems
-        records both instead of one overwriting the other.
-        """
-        for modality, widgets in self._device_widgets.items():
-            values: dict = {}
-            for attr, widget in widgets.items():
-                text = (
-                    widget.currentText() if isinstance(widget, QComboBox)
-                    else widget.text()
-                ).strip()
-                if not text or text == _BLANK:
-                    continue
-                if attr == "power_line_freq":
-                    try:
-                        values[attr] = float(text)
-                    except ValueError:
-                        continue
-                else:
-                    values[attr] = text
-            if values:
-                block = spec.modality_defaults.get(modality) or AcquisitionSpec()
-                spec.modality_defaults[modality] = block.model_copy(update=values)
-            else:
-                spec.modality_defaults.pop(modality, None)
-
-    def _populate_device_groups(self) -> None:
-        """Fill each modality's group from its own block, then the shared one."""
-        for modality, widgets in self._device_widgets.items():
-            block = self._spec.modality_defaults.get(modality)
-            for attr, widget in widgets.items():
-                value = getattr(block, attr, None) if block is not None else None
-                if value in (None, ""):
-                    value = getattr(self._spec.defaults, attr, None)
-                if value in (None, ""):
-                    continue
-                text = (
-                    str(int(value)) if attr == "power_line_freq" and float(value).is_integer()
-                    else str(value)
-                )
-                if isinstance(widget, QComboBox):
-                    widget.setCurrentText(text)
-                else:
-                    widget.setText(text)
-
-    def _build_dataset_description_group(self) -> QGroupBox:
-        """Who made the dataset and under what terms.
-
-        Nothing here can be read from a recording, and until now there was
-        nowhere to say it: the fields were modelled and writable from the
-        command line but never offered, which is why every dataset the tool
-        produced reported NO_AUTHORS.
-        """
-        box = QGroupBox(
-            "Dataset description  ·  modality-agnostic  →  dataset_description.json"
+        values = [v for v in values if v]
+        if not values:
+            return None
+        shown = ", ".join(sorted(set(values))[:4])
+        label = QLabel(f"scan suggests: {shown}")
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            f"color:{CUR()['muted']}; background: transparent; font-style: italic;"
         )
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        self._dd_name = QLineEdit()
-        self._dd_name.setPlaceholderText("the study's title")
-        self._dd_authors = _AuthorsEditor()
-        self._dd_license = QComboBox()
-        self._dd_license.setEditable(True)
-        self._dd_license.addItems(["", "CC0-1.0", "CC-BY-4.0", "PDDL-1.0"])
-        self._dd_acknowledgements = QLineEdit()
-        self._dd_how_to_acknowledge = QLineEdit()
-        self._dd_funding = QLineEdit()
-        self._dd_funding.setPlaceholderText("one grant per line is also fine")
-        self._dd_ethics = QLineEdit()
-        self._dd_references = QLineEdit()
-        self._dd_doi = QLineEdit()
-        self._dd_doi.setPlaceholderText("doi:10.…")
-
-        # The level marks come from the schema, so they follow the BIDS version
-        # in use rather than being asserted here.
-        levels = {f.name: f.level for f in dataset_description_section().fields}
-
-        def label(field: str, text: str) -> str:
-            mark = {"required": " *", "recommended": " ·"}.get(levels.get(field, ""), "")
-            return f"{text}{mark}:"
-
-        form.addRow(label("Name", "Dataset name"), self._dd_name)
-        form.addRow(label("Authors", "Authors"), self._dd_authors)
-        form.addRow(label("License", "License"), self._dd_license)
-        form.addRow(label("Acknowledgements", "Acknowledgements"), self._dd_acknowledgements)
-        form.addRow(label("HowToAcknowledge", "How to acknowledge"), self._dd_how_to_acknowledge)
-        form.addRow(label("Funding", "Funding"), self._dd_funding)
-        form.addRow(label("EthicsApprovals", "Ethics approvals"), self._dd_ethics)
-        form.addRow(label("ReferencesAndLinks", "References and links"), self._dd_references)
-        form.addRow(label("DatasetDOI", "Dataset DOI"), self._dd_doi)
-        return box
-
-    def _populate_dataset_description(self) -> None:
-        dd = self._spec.dataset_description
-        self._dd_name.setText(dd.name or "")
-        self._dd_authors.set_value(dd.authors)
-        self._dd_license.setCurrentText(dd.license or "")
-        self._dd_acknowledgements.setText(dd.acknowledgements or "")
-        self._dd_how_to_acknowledge.setText(dd.how_to_acknowledge or "")
-        self._dd_funding.setText("; ".join(dd.funding or []))
-        self._dd_ethics.setText("; ".join(dd.ethics_approvals or []))
-        self._dd_references.setText("; ".join(dd.references_and_links or []))
-        self._dd_doi.setText(dd.dataset_doi or "")
-
-    def _read_dataset_description(self, spec) -> None:
-        def split(text: str) -> list[str]:
-            # Semicolons, because a grant title may itself contain a comma.
-            return [p.strip() for p in text.split(";") if p.strip()]
-
-        dd = spec.dataset_description
-        dd.name = self._dd_name.text().strip() or None
-        dd.authors = self._dd_authors.value()
-        dd.license = self._dd_license.currentText().strip() or None
-        dd.acknowledgements = self._dd_acknowledgements.text().strip() or None
-        dd.how_to_acknowledge = self._dd_how_to_acknowledge.text().strip() or None
-        dd.funding = split(self._dd_funding.text())
-        dd.ethics_approvals = split(self._dd_ethics.text())
-        dd.references_and_links = split(self._dd_references.text())
-        dd.dataset_doi = self._dd_doi.text().strip() or None
-
-    def _build_institution_group(self) -> QGroupBox:
-        # Institution / site info is modality-AGNOSTIC: it belongs in every
-        # modality's sidecar (MRI gets it from DICOM; EEG/MEG from this default).
-        box = QGroupBox("Institution / site  ·  any modality  →  sidecar / dataset")
-        form = QFormLayout(box)
-        _tighten_form(form)
-        self._institution_name = QLineEdit()
-        self._institution_dept = QLineEdit()
-        self._form_row(form, "Institution name:", self._institution_name, "institution_name")
-        self._form_row(form, "Institution department:", self._institution_dept, "institution_dept")
-        return box
+        return label
 
     def _build_eeg_group(self) -> QGroupBox:
-        # Scalp-EEG / iEEG only sidecar fields (MEG has no scalp reference /
-        # ground / montage). The title names the present EEG/iEEG modalities.
-        mods = self._modalities_label({"eeg", "ieeg"}) or "EEG / iEEG"
-        box = QGroupBox(
-            f"Reference, ground & montage  ·  {mods}  →  sub-..._eeg.json + electrodes.tsv"
-        )
+        """The montage, which BIDS has no field for.
+
+        Everything else that used to live here (reference, ground, cap) IS a
+        BIDS field and is asked once, in the section for the file it lands in.
+        A montage is our own notion: which standard electrode layout mne-bids
+        should apply during conversion, which the standard has no opinion about.
+        """
+        box = QGroupBox("Montage  ·  EEG / iEEG  →  applied during conversion")
         form = QFormLayout(box)
         _tighten_form(form)
 
-        self._cap_manufacturer = QComboBox()
-        self._cap_manufacturer.setEditable(True)  # pick a default OR type another
-        self._cap_manufacturer.addItem("")
-        self._cap_manufacturer.addItems(COMMON_CAP_MANUFACTURERS)
-        self._eeg_reference = QLineEdit()
-        self._eeg_ground = QLineEdit()
         self._montage = QComboBox()
         self._montage.addItem(_NONE)
         self._montage.addItems(builtin_montages())
-
-        self._form_row(form, "Default EEG reference:", self._eeg_reference, "eeg_reference")
-        self._form_row(form, "Default EEG ground:", self._eeg_ground, "eeg_ground")
-        self._form_row(form, "Default montage:", self._montage, "montage")
-        # Read-only summary of the per-recording montage matches the scan found
-        # (the dataset default applies to all; this shows what was detected).
+        self._form_row(form, "Montage:", self._montage, "montage")
         hint = self._suggestion_label(self._montage_suggestions)
-        if hint is not None:
-            form.addRow("", hint)
-        self._form_row(form, "Cap manufacturer:", self._cap_manufacturer, "cap_manufacturer")
-        return box
-
-    def _suggestion_label(self, suggestions: list[str]) -> Optional[QLabel]:
-        """A dim 'scan suggests: ...' summary of distinct per-recording scan
-        suggestions (montage or manufacturer), or ``None`` when there are none."""
-        if not suggestions:
-            return None
-        pal = CUR()
-        shown = suggestions[:3]
-        more = len(suggestions) - len(shown)
-        text = "; ".join(shown) + (f" (+{more} more)" if more > 0 else "")
-        lbl = QLabel(
-            f'<span style="color:{pal["dim"]};">scan suggests: </span>'
-            f'<span style="color:{pal["teal"]};">{text}</span>'
-        )
-        lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setWordWrap(True)
-        lbl.setToolTip(
-            "Detected per recording at scan. Set a dataset default above, or "
-            "override per recording in the inspection table; not auto-applied."
-        )
-        return lbl
-
-    def _build_meg_group(self) -> QGroupBox:
-        # MEG-only fields mne-bids CANNOT derive from the recording. The
-        # channel-derived MEG facts (continuous head localization, digitized
-        # landmarks / head points, head-coil frequency, ...) are filled by
-        # mne-bids and are intentionally NOT exposed here.
-        box = QGroupBox(
-            "MEG acquisition  ·  MEG  →  sub-..._meg.json"
-        )
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        self._dewar_position = QComboBox()
-        self._dewar_position.setEditable(True)
-        self._dewar_position.addItems(["", "upright", "supine"])
-        self._associated_empty_room = QLineEdit()
-        self._subject_artefact_description = QLineEdit()
-
-        self._form_row(form, "Dewar position:", self._dewar_position, "dewar_position")
-        self._form_row(form, "Associated empty-room:", self._associated_empty_room, "associated_empty_room")
-        self._form_row(form, "Subject artefact description:",
-                       self._subject_artefact_description, "subject_artefact_description")
-        return box
-
-    # ------------------------------------------------------------------
-    # PET
-    # ------------------------------------------------------------------
-
-    def _pet_combo(self, options, *, editable: bool = True) -> QComboBox:
-        """A dropdown seeded with the common values but still free-text.
-
-        The vocabularies are the common cases, not a closed set: a study using
-        a tracer nobody has listed must still be describable.
-        """
-        combo = QComboBox()
-        combo.setEditable(editable)
-        combo.addItem("")
-        combo.addItems(options)
-        combo.setProperty("class", "ent-input")
-        return combo
-
-    def _build_pet_tracer_group(self) -> QGroupBox:
-        # What was injected. None of this is in the DICOM header in a form BIDS
-        # can use, so it comes from the radiochemistry record.
-        box = QGroupBox("Tracer  ·  PET  →  sub-..._pet.json")
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        self._pet_tracer_name = self._pet_combo(COMMON_TRACERS)
-        self._pet_radionuclide = self._pet_combo(COMMON_RADIONUCLIDES)
-
-        self._form_row(form, "Tracer name:", self._pet_tracer_name, "TracerName")
-        self._form_row(form, "Radionuclide:", self._pet_radionuclide,
-                       "TracerRadionuclide")
-        hint = self._suggestion_label(self._pet_tracer_suggestions)
-        if hint is not None:
-            form.addRow("", hint)
-        return box
-
-    def _build_pet_administration_group(self) -> QGroupBox:
-        # How much went in, in what form, and when. Purely from the injection
-        # record: a scanner cannot know any of it.
-        box = QGroupBox(
-            "Radiochemistry & administration  ·  PET  →  sub-..._pet.json"
-        )
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        self._pet_injected_radioactivity = QLineEdit()
-        self._pet_injected_radioactivity.setPlaceholderText("e.g. 44.4")
-        self._pet_injected_radioactivity_units = self._pet_combo(RADIOACTIVITY_UNITS)
-        self._pet_injected_mass = QLineEdit()
-        self._pet_injected_mass_units = self._pet_combo(MASS_UNITS)
-        self._pet_specific_radioactivity = QLineEdit()
-        self._pet_specific_radioactivity_units = self._pet_combo(
-            SPECIFIC_RADIOACTIVITY_UNITS)
-        self._pet_mode_of_administration = self._pet_combo(MODES_OF_ADMINISTRATION)
-        self._pet_injection_start = QLineEdit()
-        self._pet_injection_start.setPlaceholderText("seconds relative to TimeZero")
-
-        self._form_row(form, "Injected radioactivity:",
-                       self._pet_injected_radioactivity, "InjectedRadioactivity")
-        self._form_row(form, "     units:",
-                       self._pet_injected_radioactivity_units,
-                       "InjectedRadioactivityUnits")
-        self._form_row(form, "Injected mass:", self._pet_injected_mass,
-                       "InjectedMass")
-        self._form_row(form, "     units:", self._pet_injected_mass_units,
-                       "InjectedMassUnits")
-        self._form_row(form, "Specific radioactivity:",
-                       self._pet_specific_radioactivity, "SpecificRadioactivity")
-        self._form_row(form, "     units:",
-                       self._pet_specific_radioactivity_units,
-                       "SpecificRadioactivityUnits")
-        self._form_row(form, "Mode of administration:",
-                       self._pet_mode_of_administration, "ModeOfAdministration")
-        self._form_row(form, "Injection start:", self._pet_injection_start,
-                       "InjectionStart")
-        hint = self._suggestion_label(self._pet_dose_suggestions)
-        if hint is not None:
-            form.addRow("", hint)
-        return box
-
-    def _build_pet_acquisition_group(self) -> QGroupBox:
-        box = QGroupBox("Acquisition  ·  PET  →  sub-..._pet.json")
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        self._pet_time_zero = QLineEdit()
-        self._pet_time_zero.setPlaceholderText("hh:mm:ss")
-        self._pet_scan_start = QLineEdit()
-        self._pet_scan_start.setPlaceholderText("seconds relative to TimeZero")
-        self._pet_acquisition_mode = self._pet_combo(PET_ACQUISITION_MODES)
-        self._pet_units = self._pet_combo(PET_IMAGE_UNITS)
-        self._pet_body_part = QLineEdit()
-        self._pet_attenuation_correction = QLineEdit()
-        self._pet_image_decay_corrected = QComboBox()
-        self._pet_image_decay_corrected.addItems(["", "true", "false"])
-        self._pet_image_decay_correction_time = QLineEdit()
-
-        self._form_row(form, "Time zero:", self._pet_time_zero, "TimeZero")
-        self._form_row(form, "Scan start:", self._pet_scan_start, "ScanStart")
-        self._form_row(form, "Acquisition mode:", self._pet_acquisition_mode,
-                       "AcquisitionMode")
-        self._form_row(form, "Image units:", self._pet_units, "Units")
-        self._form_row(form, "Body part:", self._pet_body_part, "BodyPart")
-        self._form_row(form, "Attenuation correction:",
-                       self._pet_attenuation_correction, "AttenuationCorrection")
-        self._form_row(form, "Image decay corrected:",
-                       self._pet_image_decay_corrected, "ImageDecayCorrected")
-        self._form_row(form, "     correction time:",
-                       self._pet_image_decay_correction_time,
-                       "ImageDecayCorrectionTime")
-        return box
-
-    def _build_pet_recon_group(self) -> QGroupBox:
-        # The scanner DOES record this, but as free text whose grammar varies
-        # by manufacturer, so the scan offers a parse and the user confirms it.
-        box = QGroupBox("Reconstruction  ·  PET  →  sub-..._pet.json")
-        form = QFormLayout(box)
-        _tighten_form(form)
-
-        self._pet_recon_method = QLineEdit()
-        self._pet_recon_labels = QLineEdit()
-        self._pet_recon_labels.setPlaceholderText("comma separated, e.g. iterations, subsets")
-        self._pet_recon_values = QLineEdit()
-        self._pet_recon_values.setPlaceholderText("comma separated, e.g. 3, 21")
-        self._pet_recon_units = QLineEdit()
-        self._pet_recon_units.setPlaceholderText("comma separated, e.g. none, none")
-        self._pet_recon_filter_type = QLineEdit()
-        self._pet_recon_filter_size = QLineEdit()
-
-        self._form_row(form, "Method name:", self._pet_recon_method,
-                       "ReconMethodName")
-        self._form_row(form, "Parameter labels:", self._pet_recon_labels,
-                       "ReconMethodParameterLabels")
-        self._form_row(form, "Parameter values:", self._pet_recon_values,
-                       "ReconMethodParameterValues")
-        self._form_row(form, "Parameter units:", self._pet_recon_units,
-                       "ReconMethodParameterUnits")
-        self._form_row(form, "Filter type:", self._pet_recon_filter_type,
-                       "ReconFilterType")
-        self._form_row(form, "Filter size:", self._pet_recon_filter_size,
-                       "ReconFilterSize")
-        hint = self._suggestion_label(self._pet_recon_suggestions)
         if hint is not None:
             form.addRow("", hint)
         return box
@@ -916,27 +547,13 @@ class RecordingMetaDialog(QDialog):
         return RecordingMetaSpec()
 
     def _populate(self) -> None:
-        acq = self._spec.defaults
-        self._manufacturer.setCurrentText(acq.manufacturer or "")
-        self._amplifier_model.setText(acq.amplifier_model or "")
-        self._software_versions.setText(acq.software_versions or "")
-        self._cap_manufacturer.setCurrentText(acq.cap_manufacturer or "")
-        self._institution_name.setText(acq.institution_name or "")
-        self._institution_dept.setText(acq.institution_dept or "")
-        self._eeg_reference.setText(acq.eeg_reference or "")
-        self._eeg_ground.setText(acq.eeg_ground or "")
-        self._set_combo(self._montage, acq.montage, _NONE)
-        self._set_combo(
-            self._line_freq,
-            str(int(acq.power_line_freq)) if acq.power_line_freq else "",
-            _BLANK,
-        )
-        # MEG-specific manual fields.
-        self._dewar_position.setCurrentText(acq.dewar_position or "")
-        self._associated_empty_room.setText(acq.associated_empty_room or "")
-        self._subject_artefact_description.setText(acq.subject_artefact_description or "")
+        """Fill the parts BIDS has no field for. The rest is the tree's.
 
-        self._populate_pet()
+        Every sidecar field now lives in a template section, filled from the
+        scaffold by :class:`TemplateTree` itself, so the only things left to
+        restore here are the montage, the event map, and the two spreadsheets.
+        """
+        self._set_combo(self._montage, self._spec.defaults.montage, _NONE)
 
         event_map = self._spec.event_maps.get("*", {})
         self._events.setRowCount(0)
@@ -961,129 +578,14 @@ class RecordingMetaDialog(QDialog):
             return str(int(value))
         return str(value)
 
-    def _populate_pet(self) -> None:
-        pet = self._spec.pet_defaults
-        self._pet_tracer_name.setCurrentText(pet.tracer_name or "")
-        self._pet_radionuclide.setCurrentText(pet.tracer_radionuclide or "")
-        self._pet_injected_radioactivity.setText(
-            self._num_text(pet.injected_radioactivity))
-        self._pet_injected_radioactivity_units.setCurrentText(
-            pet.injected_radioactivity_units or "")
-        self._pet_injected_mass.setText(self._num_text(pet.injected_mass))
-        self._pet_injected_mass_units.setCurrentText(pet.injected_mass_units or "")
-        self._pet_specific_radioactivity.setText(
-            self._num_text(pet.specific_radioactivity))
-        self._pet_specific_radioactivity_units.setCurrentText(
-            pet.specific_radioactivity_units or "")
-        self._pet_mode_of_administration.setCurrentText(
-            pet.mode_of_administration or "")
-        self._pet_injection_start.setText(self._num_text(pet.injection_start))
-        self._pet_time_zero.setText(pet.time_zero or "")
-        self._pet_scan_start.setText(self._num_text(pet.scan_start))
-        self._pet_acquisition_mode.setCurrentText(pet.acquisition_mode or "")
-        self._pet_units.setCurrentText(pet.units or "")
-        self._pet_body_part.setText(pet.body_part or "")
-        self._pet_attenuation_correction.setText(pet.attenuation_correction or "")
-        self._pet_image_decay_corrected.setCurrentText(
-            "" if pet.image_decay_corrected is None
-            else ("true" if pet.image_decay_corrected else "false")
-        )
-        self._pet_image_decay_correction_time.setText(
-            self._num_text(pet.image_decay_correction_time))
-        self._pet_recon_method.setText(pet.recon_method_name or "")
-        self._pet_recon_labels.setText(", ".join(pet.recon_method_parameter_labels))
-        self._pet_recon_values.setText(
-            ", ".join(self._num_text(v) for v in pet.recon_method_parameter_values))
-        self._pet_recon_units.setText(", ".join(pet.recon_method_parameter_units))
-        self._pet_recon_filter_type.setText(pet.recon_filter_type or "")
-        self._pet_recon_filter_size.setText(self._num_text(pet.recon_filter_size))
-
     def _build_pet_spec(self) -> PetAcquisitionSpec:
-        """Read the PET form back into a spec block.
+        """Keep whatever the scaffold carried for PET.
 
-        A hidden PET section keeps its loaded values rather than reading the
-        empty widgets, so an EEG-only dataset sharing a scaffold never wipes
-        PET fields somebody else filled in.
+        The PET fields are asked once, in the section for the pet/pet file, and
+        stored as a sequence template like every other file's. This block is no
+        longer edited here, so it is preserved rather than rebuilt.
         """
-        if not self._pet_applies:
-            return self._spec.pet_defaults
-
-        def _txt(edit: QLineEdit) -> Optional[str]:
-            return edit.text().strip() or None
-
-        def _num(edit: QLineEdit) -> Optional[float]:
-            raw = edit.text().strip()
-            if not raw:
-                return None
-            try:
-                return float(raw)
-            except ValueError:
-                # Keep the previous value rather than dropping what the user
-                # typed on the floor; the field validates on the next edit.
-                return None
-
-        def _combo(combo: QComboBox) -> Optional[str]:
-            return combo.currentText().strip() or None
-
-        def _csv(edit: QLineEdit) -> list[str]:
-            return [p.strip() for p in edit.text().split(",") if p.strip()]
-
-        def _csv_num(edit: QLineEdit) -> list[float]:
-            out = []
-            for part in _csv(edit):
-                try:
-                    out.append(float(part))
-                except ValueError:
-                    continue
-            return out
-
-        decay = self._pet_image_decay_corrected.currentText().strip()
-
-        return PetAcquisitionSpec(
-            tracer_name=_combo(self._pet_tracer_name),
-            tracer_radionuclide=_combo(self._pet_radionuclide),
-            injected_radioactivity=_num(self._pet_injected_radioactivity),
-            injected_radioactivity_units=_combo(
-                self._pet_injected_radioactivity_units),
-            injected_mass=_num(self._pet_injected_mass),
-            injected_mass_units=_combo(self._pet_injected_mass_units),
-            specific_radioactivity=_num(self._pet_specific_radioactivity),
-            specific_radioactivity_units=_combo(
-                self._pet_specific_radioactivity_units),
-            mode_of_administration=_combo(self._pet_mode_of_administration),
-            injection_start=_num(self._pet_injection_start),
-            time_zero=_txt(self._pet_time_zero),
-            scan_start=_num(self._pet_scan_start),
-            acquisition_mode=_combo(self._pet_acquisition_mode),
-            units=_combo(self._pet_units),
-            body_part=_txt(self._pet_body_part),
-            attenuation_correction=_txt(self._pet_attenuation_correction),
-            image_decay_corrected=None if not decay else decay == "true",
-            image_decay_correction_time=_num(
-                self._pet_image_decay_correction_time),
-            recon_method_name=_txt(self._pet_recon_method),
-            recon_method_parameter_labels=_csv(self._pet_recon_labels),
-            recon_method_parameter_values=_csv_num(self._pet_recon_values),
-            recon_method_parameter_units=_csv(self._pet_recon_units),
-            recon_filter_type=_txt(self._pet_recon_filter_type),
-            recon_filter_size=_num(self._pet_recon_filter_size),
-            # Preserved: not exposed in this dialog.
-            tracer_molecular_weight=self._spec.pet_defaults.tracer_molecular_weight,
-            tracer_molecular_weight_units=self._spec.pet_defaults.tracer_molecular_weight_units,
-            tracer_radlex=self._spec.pet_defaults.tracer_radlex,
-            tracer_snomed=self._spec.pet_defaults.tracer_snomed,
-            molar_activity=self._spec.pet_defaults.molar_activity,
-            molar_activity_units=self._spec.pet_defaults.molar_activity_units,
-            injected_volume=self._spec.pet_defaults.injected_volume,
-            purity=self._spec.pet_defaults.purity,
-            injection_end=self._spec.pet_defaults.injection_end,
-            infusion_radioactivity=self._spec.pet_defaults.infusion_radioactivity,
-            infusion_start=self._spec.pet_defaults.infusion_start,
-            infusion_speed=self._spec.pet_defaults.infusion_speed,
-            infusion_speed_units=self._spec.pet_defaults.infusion_speed_units,
-            manufacturer=self._spec.pet_defaults.manufacturer,
-            manufacturers_model_name=self._spec.pet_defaults.manufacturers_model_name,
-        )
+        return self._spec.pet_defaults.model_copy(deep=True)
 
     @staticmethod
     def _set_combo(combo: QComboBox, value: Optional[str], blank: str) -> None:
@@ -1116,62 +618,41 @@ class RecordingMetaDialog(QDialog):
 
         prev = self._spec.defaults
 
-        # Institution / site is agnostic - its group is always shown, so read it
-        # unconditionally.
-        institution_name = _opt(self._institution_name)
-        institution_dept = _opt(self._institution_dept)
-
-        # Device block (modality-specific; all EEG/MEG).
-        if self._device_applies:
-            manufacturer = self._manufacturer.currentText().strip() or None
-            amplifier_model = _opt(self._amplifier_model)
-            software_versions = _opt(self._software_versions)
-            lf = self._combo_value(self._line_freq, _BLANK)
-            power_line_freq = float(lf) if lf else None
-        else:
-            manufacturer = prev.manufacturer
-            amplifier_model = prev.amplifier_model
-            software_versions = prev.software_versions
-            power_line_freq = prev.power_line_freq
-
-        # EEG montage & references block (EEG/iEEG only).
-        if self._eeg_applies:
-            eeg_ref = _opt(self._eeg_reference)
-            eeg_gnd = _opt(self._eeg_ground)
-            cap = self._cap_manufacturer.currentText().strip() or None
-            montage = self._combo_value(self._montage, _NONE)
-        else:
-            eeg_ref = prev.eeg_reference
-            eeg_gnd = prev.eeg_ground
-            cap = prev.cap_manufacturer
-            montage = prev.montage
-
-        # MEG-specific block (MEG only) - manual fields mne-bids cannot derive.
-        if self._meg_applies:
-            dewar_position = self._dewar_position.currentText().strip() or None
-            associated_empty_room = _opt(self._associated_empty_room)
-            subject_artefact_description = _opt(self._subject_artefact_description)
-        else:
-            dewar_position = prev.dewar_position
-            associated_empty_room = prev.associated_empty_room
-            subject_artefact_description = prev.subject_artefact_description
+        # Every sidecar field is now asked once, in the section for the file it
+        # lands in, and stored by _read_template. What survives here is the one
+        # value the standard has no field for, the montage, plus whatever the
+        # scaffold already carried, which this dialog does not speak for.
+        montage = (
+            self._combo_value(self._montage, _NONE)
+            if self._eeg_applies else prev.montage
+        )
+        institution_name = prev.institution_name
+        institution_dept = prev.institution_dept
+        manufacturer = prev.manufacturer
+        amplifier_model = prev.amplifier_model
+        software_versions = prev.software_versions
+        power_line_freq = prev.power_line_freq
+        eeg_ref = prev.eeg_reference
+        eeg_gnd = prev.eeg_ground
+        cap = prev.cap_manufacturer
+        dewar_position = prev.dewar_position
+        associated_empty_room = prev.associated_empty_room
+        subject_artefact_description = prev.subject_artefact_description
 
         acq = AcquisitionSpec(
             manufacturer=manufacturer,
             amplifier_model=amplifier_model,
             software_versions=software_versions,
+            power_line_freq=power_line_freq,
+            montage=montage,
+            eeg_reference=eeg_ref,
+            eeg_ground=eeg_gnd,
             cap_manufacturer=cap,
             institution_name=institution_name,
             institution_dept=institution_dept,
-            eeg_reference=eeg_ref,
-            eeg_ground=eeg_gnd,
-            montage=montage,
-            power_line_freq=power_line_freq,
             dewar_position=dewar_position,
             associated_empty_room=associated_empty_room,
             subject_artefact_description=subject_artefact_description,
-            # Preserve fields/blocks this dialog does not edit (legacy `software`,
-            # aux channels, filters, extras, cap_model).
             software=self._spec.defaults.software,
             cap_model=self._spec.defaults.cap_model,
             aux_channels=self._spec.defaults.aux_channels,
@@ -1208,8 +689,7 @@ class RecordingMetaDialog(QDialog):
 
     def _on_save(self) -> None:
         spec = self.build_spec()
-        self._read_dataset_description(spec)
-        self._read_device_groups(spec)
+        self._read_template(spec)
         self._scaffold_path.parent.mkdir(parents=True, exist_ok=True)
         self._scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
         self.accept()

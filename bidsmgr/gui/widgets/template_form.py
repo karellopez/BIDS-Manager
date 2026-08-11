@@ -164,8 +164,33 @@ def _person_row() -> tuple[QWidget, Callable[[], Any], Callable[[Any], None]]:
     return row, read, write
 
 
-def build_field_widget(field) -> QWidget:
-    """The control for one :class:`TemplateField`."""
+def fit_popup_to_contents(combo: QComboBox) -> None:
+    """Let the dropdown be as wide as its widest option.
+
+    A combo sized to its layout is often much narrower than the values it
+    offers, and the popup inherits that width, so "bolus followed by infusion"
+    arrives as "bolus followed by...". The box stays compact; only the list
+    opens wide enough to read, which is the part that has to be legible to
+    choose from.
+    """
+    if combo.count() == 0:
+        return
+    metrics = combo.fontMetrics()
+    widest = max(
+        metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())
+    )
+    # Room for the frame, the scrollbar and a little breathing space.
+    combo.view().setMinimumWidth(widest + 44)
+
+
+def build_field_widget(field, suggestions: tuple = ()) -> QWidget:
+    """The control for one :class:`TemplateField`.
+
+    ``suggestions`` are values BIDS Manager offers that the standard does not:
+    the manufacturers we have seen, the tracers a PET lab typically uses, what
+    the scan detected in this dataset. They are added to an editable box, never
+    used in place of a schema vocabulary, and never restrict what can be typed.
+    """
     if field.name in PEOPLE_FIELDS:
         widget = _RowList(_person_row, add_label="Add author")
         widget.setProperty("template_kind", "people")
@@ -177,12 +202,28 @@ def build_field_widget(field) -> QWidget:
         combo.addItem("")
         combo.addItems([str(v) for v in field.enum])
         combo.setProperty("template_kind", "enum")
+        fit_popup_to_contents(combo)
+        return combo
+
+    if suggestions and field.type in ("", "string"):
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem("")
+        combo.addItems([str(v) for v in suggestions])
+        combo.setProperty("template_kind", "enum")
+        combo.setToolTip(
+            (field.description or "")
+            + ("\n\n" if field.description else "")
+            + "Suggestions, not a fixed list: anything may be typed."
+        )
+        fit_popup_to_contents(combo)
         return combo
 
     if field.type == "boolean":
         combo = QComboBox()
         combo.addItems([_UNSET, "true", "false"])
         combo.setProperty("template_kind", "boolean")
+        fit_popup_to_contents(combo)
         return combo
 
     if field.type == "array" and field.item_type in ("", "string"):
@@ -324,15 +365,27 @@ class CollapsibleSection(QWidget):
         outer.setSpacing(2)
 
         pal = CUR()
+        # A region reads as a heading, a file as a row you open. Giving them the
+        # same weight made the tree a flat list of identical bars, which is what
+        # made the structure hard to see even though it was correct.
+        tint = {
+            0: (pal["accent"], pal["surface3"], "700", 1),
+            1: (pal["text"], pal["surface2"], "600", 0),
+        }.get(level, (pal["text"], "transparent", "500", 0))
+        colour, back, weight, rule = tint
+
         self._header = QPushButton()
         self._header.setObjectName("template-section-header")
         self._header.setCheckable(True)
         self._header.setChecked(expanded)
         self._header.setCursor(Qt.CursorShape.PointingHandCursor)
         self._header.setStyleSheet(
-            "QPushButton{text-align:left; padding:4px 6px; border:none; "
-            f"background: transparent; color:{pal['text']};}}"
-            f"QPushButton:hover{{background:{pal['surface2']};}}"
+            "QPushButton{text-align:left; padding:5px 8px; border:none;"
+            f"border-radius:6px; background:{back}; color:{colour};"
+            f"font-weight:{weight};"
+            + (f"border-bottom:1px solid {pal['accent_border']};" if rule else "")
+            + "}"
+            f"QPushButton:hover{{background:{pal['accent_bg']};}}"
         )
         self._title_text = title
         self._subtitle = subtitle
@@ -341,7 +394,14 @@ class CollapsibleSection(QWidget):
 
         self._body = QWidget()
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(12, 0, 0, 6)
+        # An indent plus a hairline down the left says "this belongs to the
+        # heading above" without drawing a box around every level, which at
+        # three levels deep becomes nested boxes and unreadable.
+        self._body.setStyleSheet(
+            f"QWidget{{border-left:1px solid {pal['border']};}}"
+            if level else ""
+        )
+        self._body_layout.setContentsMargins(14, 4, 0, 8)
         self._body_layout.setSpacing(6)
         outer.addWidget(self._body)
 
@@ -395,6 +455,7 @@ __all__ = [
     "TemplateTree",
     "PEOPLE_FIELDS",
     "build_field_widget",
+    "fit_popup_to_contents",
     "field_label",
     "level_legend",
     "read_field_widget",
@@ -423,12 +484,14 @@ class TemplateTree(QWidget):
         nodes,
         *,
         values: Optional[dict] = None,
+        suggestions: Optional[dict] = None,
         colour_levels: bool = True,
         collapsed_keys: Optional[set] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._colour = colour_levels
+        self._suggestions = suggestions or {}
         self._widgets: dict[str, dict[str, QWidget]] = {}
         self._sections: dict[str, "CollapsibleSection"] = {}
         self._fields: dict[str, dict] = {}
@@ -436,8 +499,10 @@ class TemplateTree(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
-        outer.addWidget(level_legend(colour=colour_levels))
+        outer.setSpacing(6)
+        legend = level_legend(colour=colour_levels)
+        legend.setContentsMargins(2, 0, 0, 2)
+        outer.addWidget(legend)
         for node in nodes:
             outer.addWidget(
                 self._render(
@@ -486,14 +551,20 @@ class TemplateTree(QWidget):
     def _render_fields(self, node, stored: dict) -> QWidget:
         holder = QWidget()
         form = QFormLayout(holder)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(4)
+        form.setContentsMargins(2, 2, 2, 2)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(7)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
 
         widgets: dict[str, QWidget] = {}
         fields: dict[str, object] = {}
         for field in node.section.fields:
-            widget = build_field_widget(field)
+            widget = build_field_widget(
+                field, tuple(self._suggestions.get(field.name, ())),
+            )
             if field.description:
                 widget.setToolTip(field.description)
             if field.name in stored:
@@ -525,6 +596,18 @@ class TemplateTree(QWidget):
             if answers:
                 out[key] = answers
         return out
+
+    def section_widget(self, key: str):
+        """The section for a node key, so a caller can scroll to or open it."""
+        return self._sections.get(key)
+
+    def reveal(self, section) -> None:
+        """Open every section above one, so jumping to it actually shows it."""
+        widget = section
+        while widget is not None:
+            if isinstance(widget, CollapsibleSection):
+                widget.set_expanded(True)
+            widget = widget.parentWidget()
 
     def collapsed_keys(self) -> set:
         """Which sections the user folded, to restore next time."""
