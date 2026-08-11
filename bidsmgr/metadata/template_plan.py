@@ -88,10 +88,14 @@ class TemplateSection:
     datatype: str         # "" for agnostic sections
     suffix: str
     title: str
-    target: str           # the concrete path an answer reaches
+    target: str           # one real path, as an example of what this covers
     storage: str
     storage_key: str = ""
     fields: tuple[TemplateField, ...] = field(default_factory=tuple)
+    # How many files of this kind the scan found. A section is a statement
+    # about a CLASS of files, and saying how many it covers is the difference
+    # between "here is a form for one file" and "answer this once for all 61".
+    n_files: int = 0
 
     @property
     def required_fields(self) -> tuple[TemplateField, ...]:
@@ -157,6 +161,7 @@ def sidecar_section(
     bids_root=None,
     include_derived: bool = False,
     answered: Optional[dict] = None,
+    n_files: int = 0,
 ) -> TemplateSection:
     """The questions for one kind of sidecar, e.g. every ``*_eeg.json``.
 
@@ -207,6 +212,7 @@ def sidecar_section(
         storage=STORAGE_SEQUENCE_TEMPLATE,
         storage_key=f"{datatype}/{suffix}",
         fields=_sorted_fields(fields),
+        n_files=n_files,
     )
 
 
@@ -280,6 +286,25 @@ def present_pairs(df) -> list[tuple[str, str]]:
         if datatype and suffix:
             out.add((datatype, suffix))
     return sorted(out)
+
+
+def pair_counts(df) -> dict[tuple[str, str], int]:
+    """How many files of each kind the scan found, included rows only.
+
+    So a section can say it speaks for 61 files rather than looking like a form
+    about the one whose name it borrowed.
+    """
+    out: dict[tuple[str, str], int] = {}
+    if df is None or not len(df):
+        return out
+    for _, row in df.iterrows():
+        if str(row.get("include", "1")).strip() in ("0", "False", "false"):
+            continue
+        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        suffix = str(row.get("bids_guess_suffix", "") or "").strip()
+        if datatype and suffix:
+            out[(datatype, suffix)] = out.get((datatype, suffix), 0) + 1
+    return out
 
 
 def example_paths_for(df) -> dict[tuple[str, str], str]:
@@ -366,16 +391,27 @@ def _is_real_pair(datatype: str, suffix: str) -> bool:
 
 
 def _file_label(section: TemplateSection) -> tuple[str, str]:
-    """``(filename, directory)`` for a section, both stated in full.
+    """``(what this section covers, the detail under it)``.
 
-    The name a user recognises is the file's, not the datatype's, and half a
-    name ("sub-..._eeg.json") is worse than none: it looks like a real answer.
+    A section is a class of files, not one file. Titling it with a real
+    filename, which is what it used to do, reads as a list of individual files
+    and hides the whole point: answer it once and every file of that kind gets
+    it.
+
+    So the title is the pattern, and the real name goes underneath as an
+    example, with how many files it covers.
     """
-    target = section.target
-    if "/" in target:
-        directory, _, filename = target.rpartition("/")
-        return filename, directory
-    return target, ""
+    if not section.datatype:
+        return section.target, ""
+
+    title = f"every *_{section.suffix}.json"
+    detail = f"in {section.datatype}/"
+    if section.n_files:
+        detail += f"  ·  {section.n_files} file{'s' if section.n_files != 1 else ''}"
+    example = section.target.rpartition("/")[2]
+    if example and not example.startswith("sub-<label>"):
+        detail += f"  ·  e.g. {example}"
+    return title, detail
 
 
 def build_template_tree(
@@ -384,6 +420,7 @@ def build_template_tree(
     bids_root=None,
     include_derived: bool = False,
     answered: Optional[dict] = None,
+    counts: Optional[dict[tuple[str, str], int]] = None,
 ) -> list[TemplateNode]:
     """The whole template as a tree, agnostic region first.
 
@@ -424,6 +461,7 @@ def build_template_tree(
             datatype, suffix, example_paths.get((datatype, suffix), ""),
             bids_root, include_derived,
             answered=(answered or {}).get(f"{datatype}/{suffix}"),
+            n_files=(counts or {}).get((datatype, suffix), 0),
         )
         if not section.fields:
             # Nothing left to ask about this file: the converter answers it all.
@@ -477,6 +515,7 @@ __all__ = [
     "build_template_plan",
     "dataset_description_section",
     "example_paths_for",
+    "pair_counts",
     "present_pairs",
     "sidecar_section",
 ]

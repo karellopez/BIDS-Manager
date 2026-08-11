@@ -104,6 +104,7 @@ class RecordingMetaDialog(QDialog):
         montage_suggestions: Optional[list[str]] = None,
         scan_suggestions: Optional[dict[str, list[str]]] = None,
         example_paths: Optional[dict] = None,
+        pair_counts: Optional[dict] = None,
         present_pairs: Optional[list] = None,
     ) -> None:
         super().__init__(parent)
@@ -132,6 +133,8 @@ class RecordingMetaDialog(QDialog):
         # One real path per (datatype, suffix) from the scan, so a group can
         # name the file its answers reach instead of "sub-..._<datatype>.json".
         self._example_paths = dict(example_paths or {})
+        # How many files each section speaks for, so it can say so.
+        self._pair_counts = dict(pair_counts or {})
         # The (datatype, suffix) pairs the scan found. Without them the tree
         # falls back to one node per present datatype, which still works but
         # cannot name a real file.
@@ -155,10 +158,12 @@ class RecordingMetaDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setSpacing(6)
         intro = QLabel(
-            "Dataset-wide metadata, grouped by where it is written. "
-            "Modality-agnostic sections apply to any dataset; modality-specific "
-            "sections only affect their datatype's sidecars. Per-recording "
-            "overrides live in the inspection table."
+            "What will still be missing after conversion, so you can answer it "
+            "now rather than find it later. Each section speaks for EVERY file "
+            "of its kind: answer it once and it is written to all of them. "
+            "What the conversion already reads out of the data is folded away "
+            "at the end of each section, and can be edited there to correct it. "
+            "To state something about ONE recording, use the inspection table."
         )
         intro.setWordWrap(True)
         outer.addWidget(intro)
@@ -183,6 +188,7 @@ class RecordingMetaDialog(QDialog):
         # fields in code and could not follow a change of BIDS version.
         self._tree_nodes = build_template_tree(
             self._present_pairs, self._example_paths,
+            counts=self._pair_counts,
             # Do not ask for what the scan saw the conversion answer on THIS
             # dataset. The measured default list came from one tree with one
             # scanner; this came from theirs.

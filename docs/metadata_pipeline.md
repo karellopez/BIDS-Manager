@@ -36,13 +36,27 @@ after convert, so from the Run button it is one step.
 
 ---
 
-## 2. What the template asks, and why it is not everything
+## 2. A section speaks for every file of its kind
+
+This is the thing to understand before anything else. A section headed
+
+> **every `*_bold.json`**  ·  in `func/`  ·  61 files  ·  e.g. `sub-003_task-bernd_bold.json`
+
+is not a form about `sub-003`. It is the statement you are making about all 61
+functional runs in the dataset. Answer it once and it is written to every one of
+them.
+
+The real filename is shown only as an example of what the section covers. To say
+something about ONE recording, select its row in the inspection table and use the
+properties panel; that answer overrides this one for that recording alone.
+
+## 3. What the template asks, and why it is not everything
 
 ```mermaid
 flowchart TD
     S[The BIDS schema at your chosen version] -->|every field this file may carry| A
     A[Fields declared for datatype/suffix] --> B{Does the conversion<br/>already answer it?}
-    B -->|yes, on YOUR data| SHOWN[Shown read-only:<br/>Filled in by the conversion]
+    B -->|yes, on YOUR data| SHOWN[Folded away, with the value:<br/>Already answered by the conversion<br/>still editable, to correct the data]
     B -->|no| C{Does the rule depend on<br/>a scenario this file<br/>may not be in?}
     C -->|yes, speculative| DROP[Not asked]
     C -->|no| ASK[Asked, at the schema's<br/>requirement level]
@@ -51,6 +65,13 @@ flowchart TD
 Nothing in that diagram is a list kept in code. The fields, their types, their
 vocabularies, their requirement levels and their descriptions all come from the
 schema, at the version chosen in **Settings, BIDS version**.
+
+A field the conversion answers is not hidden. It moves into a folded
+**Already answered by the conversion** block at the end of the section, showing
+the value that will be written, and it stays editable: the converter reads these
+out of the data, and when the data is wrong or a legacy file carries nothing,
+that block is the only place to correct it. Typing nothing there stores nothing,
+so opening it and closing it again changes no file.
 
 ### What counts as "the conversion answers it"
 
@@ -77,7 +98,7 @@ once, on one tree, with one scanner.
 
 ---
 
-## 3. Where an answer goes when you type it
+## 4. Where an answer goes when you type it
 
 ```mermaid
 flowchart TD
@@ -109,7 +130,7 @@ converter, not a fact about the recording, which is why BIDS has no field for it
 
 ---
 
-## 4. Which answer wins
+## 5. Which answer wins
 
 Every layer is resolved by one function, `recording_meta/chain.py`, weakest
 first:
@@ -138,7 +159,7 @@ written to a sidecar.
 
 ---
 
-## 5. Who writes what
+## 6. Who writes what
 
 ```mermaid
 flowchart TD
@@ -164,7 +185,7 @@ puts your template into the files.
 
 ---
 
-## 6. The BIDS version
+## 7. The BIDS version
 
 One control, in **Settings, BIDS version**, and one flag, `--schema`, on every
 CLI verb. It governs:
@@ -183,7 +204,7 @@ validation. Several versions ship with BIDS Manager; the default is the newest.
 
 ---
 
-## 7. Reading the form
+## 8. Reading the form
 
 | mark | meaning |
 |---|---|
@@ -191,7 +212,8 @@ validation. Several versions ship with BIDS Manager; the default is the newest.
 | `·` amber | the standard RECOMMENDS it |
 | unmarked | optional |
 | greyed value | inherited, from the layer named in the tooltip |
-| **Filled in by the conversion** | folded section: the converter answers these, with the value it will write |
+| **Already answered by the conversion** | folded block: the converter fills these from the data, showing the value; editable, to correct what the data says |
+| `N to answer, M required by BIDS` | the section heading: what is still missing, which is the point of the form |
 | `differs per recording` | the probed files disagreed; the answer is per recording |
 
 Colour can be turned off in Settings; the marks remain, so the information does
@@ -199,7 +221,7 @@ not depend on being able to see colour.
 
 ---
 
-## 8. Where the code is
+## 9. Where the code is
 
 | you want | look in |
 |---|---|

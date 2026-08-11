@@ -499,6 +499,24 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _plain_field(name: str, value):
+    """A stand-in for a field the schema does not declare for this file.
+
+    The converter can write keys BIDS never mentions. They are still shown, so
+    nothing appears from nowhere, but there is no level or vocabulary to show.
+    """
+    from ...metadata.template_plan import TemplateField
+
+    kind = (
+        "boolean" if isinstance(value, bool)
+        else "number" if isinstance(value, (int, float))
+        else "array" if isinstance(value, list)
+        else "object" if isinstance(value, dict)
+        else "string"
+    )
+    return TemplateField(name=name, level="optional", type=kind)
+
+
 class TemplateTree(QWidget):
     """Renders a template tree: regions, modalities, then one node per file.
 
@@ -532,6 +550,9 @@ class TemplateTree(QWidget):
         self._widgets: dict[str, dict[str, QWidget]] = {}
         self._sections: dict[str, "CollapsibleSection"] = {}
         self._fields: dict[str, dict] = {}
+        # What the conversion will write, per node, so an answer that merely
+        # repeats it is not mistaken for a statement.
+        self._answered_values: dict[str, dict] = {}
         collapsed_keys = collapsed_keys or set()
 
         outer = QVBoxLayout(self)
@@ -558,11 +579,16 @@ class TemplateTree(QWidget):
         self, node, values: dict, collapsed: set, level: int,
         open_files: bool = False,
     ) -> QWidget:
+        # What this section is FOR: the fields that will still be missing after
+        # conversion. A bare field count said nothing about whether there was
+        # any work to do.
         badge = ""
         if node.field_count:
-            badge = f"{node.field_count} fields"
+            badge = f"{node.field_count} to answer"
             if node.required_count:
-                badge += f", {node.required_count} required"
+                badge += f", {node.required_count} required by BIDS"
+        elif node.is_leaf:
+            badge = "nothing to answer"
 
         section = CollapsibleSection(
             node.label,
@@ -581,7 +607,7 @@ class TemplateTree(QWidget):
             section.add(self._render_fields(node, values.get(node.key, {})))
             already = self._answered.get(node.key) or {}
             if already:
-                section.add(self._render_answered(already))
+                section.add(self._render_answered(node, already))
         for child in node.children:
             section.add(
                 self._render(child, values, collapsed, level + 1, open_files)
@@ -622,16 +648,22 @@ class TemplateTree(QWidget):
         self._fields[node.key] = fields
         return holder
 
-    def _render_answered(self, already: dict) -> QWidget:
-        """The fields the conversion answers, listed read-only.
+    def _render_answered(self, node, already: dict) -> QWidget:
+        """The fields the conversion answers, shown with the value it will write.
 
-        Folded away by default: it is reassurance, not work. VARIES means the
-        probed files disagreed, so the answer is per recording rather than one
-        value for the whole kind.
+        Folded away, because the point of the form is what will still be
+        MISSING. But editable, not read-only: the converter reads these from the
+        data, and when the data is wrong, or a legacy file carries nothing, the
+        only way to correct it is here. Hiding a field a user wants to set is
+        worse than showing one they need not.
+
+        Nothing typed here is stored unless it differs from what the conversion
+        would write, so opening the section and closing it again changes nothing.
         """
         pal = CUR()
         box = CollapsibleSection(
-            "Filled in by the conversion",
+            "Already answered by the conversion",
+            subtitle="edit only to correct what the data says",
             badge=f"{len(already)} fields",
             level=2,
             expanded=False,
@@ -640,23 +672,45 @@ class TemplateTree(QWidget):
         form = QFormLayout(body)
         form.setContentsMargins(2, 2, 2, 2)
         form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(4)
+        form.setVerticalSpacing(6)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        widgets = self._widgets.setdefault(node.key, {})
+        fields = self._fields.setdefault(node.key, {})
+        declared = {f.name: f for f in node.section.fields}
         for name, value in sorted(already.items()):
-            shown = (
-                "differs per recording" if str(value).strip().upper() == "VARIES"
-                else ", ".join(str(v) for v in value)
-                if isinstance(value, list) else str(value)
+            spec = declared.get(name) or _plain_field(name, value)
+            widget = build_field_widget(spec, tuple(self._suggestions.get(name, ())))
+            varies = str(value).strip().upper() == "VARIES"
+            if not varies:
+                write_field_widget(widget, value)
+            widget.setToolTip(
+                (spec.description + "\n\n" if spec.description else "")
+                + ("The recordings disagree, so the conversion writes each one's "
+                   "own value. Type here only to give them all the same one."
+                   if varies else
+                   "The conversion reads this from the data and will write the "
+                   "value shown. Type here only to correct it.")
             )
-            label = QLabel(f"{name}:")
+            label = QLabel(field_label(spec, colour=self._colour))
+            label.setTextFormat(Qt.TextFormat.RichText)
             label.setStyleSheet(f"color: {pal['muted']};")
-            read_only = QLabel(shown)
-            read_only.setWordWrap(True)
-            read_only.setStyleSheet(f"color: {pal['dim']};")
-            read_only.setToolTip(
-                "Read from the data by the converter. Nothing to fill in."
-            )
-            form.addRow(label, read_only)
+            if varies:
+                hint = QLabel("differs per recording")
+                hint.setStyleSheet(f"color: {pal['dim']};")
+                row = QWidget()
+                line = QHBoxLayout(row)
+                line.setContentsMargins(0, 0, 0, 0)
+                line.setSpacing(6)
+                line.addWidget(widget, 1)
+                line.addWidget(hint, 0)
+                form.addRow(label, row)
+            else:
+                form.addRow(label, widget)
+            widgets[name] = widget
+            fields[name] = spec
+            self._answered_values.setdefault(node.key, {})[name] = value
         box.add(body)
         return box
 
@@ -666,11 +720,17 @@ class TemplateTree(QWidget):
         """What the user has typed, per node, as the schema shapes it."""
         out: dict[str, dict] = {}
         for key, widgets in self._widgets.items():
+            shown = self._answered_values.get(key, {})
             answers = {}
             for name, widget in widgets.items():
                 value = read_field_widget(widget, self._fields[key][name])
-                if value not in (None, "", [], {}):
-                    answers[name] = value
+                if value in (None, "", [], {}):
+                    continue
+                # Echoing what the conversion writes is not a statement. Storing
+                # it would freeze today's value onto every file of the kind.
+                if name in shown and shown[name] == value:
+                    continue
+                answers[name] = value
             if answers:
                 out[key] = answers
         return out

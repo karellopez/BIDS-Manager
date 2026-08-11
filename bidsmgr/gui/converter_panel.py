@@ -1156,7 +1156,9 @@ class ConverterPanel(QWidget):
         from ..recording_meta import scaffold_sidecar_path
         from .recording_meta_dialog import RecordingMetaDialog
 
-        from ..metadata.template_plan import example_paths_for, present_pairs
+        from ..metadata.template_plan import (
+            example_paths_for, pair_counts, present_pairs,
+        )
 
         # The (datatype, suffix) pairs the scan actually found, and one real
         # path per pair. Without them the dialog had to guess, and its guess was
@@ -1172,6 +1174,7 @@ class ConverterPanel(QWidget):
             scan_suggestions=self._scan_suggestions(),
             present_pairs=present_pairs(df),
             example_paths=example_paths_for(df),
+            pair_counts=pair_counts(df),
         )
         if dlg.exec() and self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.

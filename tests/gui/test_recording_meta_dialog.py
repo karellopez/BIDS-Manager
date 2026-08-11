@@ -130,9 +130,10 @@ def _dialog(tmp_path, **kw):
     return RecordingMetaDialog(scaffold, **kw), scaffold
 
 
-def test_the_template_offers_one_section_per_file(qtbot, tmp_path):
-    """A section exists for each file the scan says will be written, named in
-    full, and never for a modality the dataset does not contain."""
+def test_the_template_offers_one_section_per_kind_of_file(qtbot, tmp_path):
+    """One section per KIND of file the scan says will be written, never for a
+    modality the dataset does not contain, and titled as the class it speaks
+    for rather than as one file that happens to be of that class."""
     dlg, _ = _dialog(
         tmp_path,
         present_datatypes={"eeg", "meg"},
@@ -147,8 +148,11 @@ def test_the_template_offers_one_section_per_file(qtbot, tmp_path):
     assert keys == {"dataset_description", "eeg/eeg", "meg/meg"}
 
     labels = {n.key: n.label for n in dlg._all_nodes() if n.is_leaf}
-    assert labels["eeg/eeg"] == "sub-001_task-rest_eeg.json"
-    assert labels["meg/meg"] == "sub-002_task-rest_meg.json"
+    assert labels["eeg/eeg"] == "every *_eeg.json"
+    assert labels["meg/meg"] == "every *_meg.json"
+    # The real name still shows, as an example of what the section covers.
+    subtitles = {n.key: n.subtitle for n in dlg._all_nodes() if n.is_leaf}
+    assert "sub-001_task-rest_eeg.json" in subtitles["eeg/eeg"]
 
 
 def test_eeg_and_meg_do_not_share_a_section(qtbot, tmp_path):
@@ -308,12 +312,68 @@ def test_a_datatype_never_names_its_own_suffix(qtbot, tmp_path) -> None:
     assert "func/func" not in keys and "anat/anat" not in keys
 
 
-def test_a_file_section_names_a_file_bids_accepts(qtbot, tmp_path) -> None:
-    """A functional run needs a task entity, so the pattern has to show one."""
+def test_a_section_speaks_for_every_file_of_its_kind(qtbot, tmp_path) -> None:
+    """A section is a class of files, not one file.
+
+    It used to be titled with a real filename borrowed from one subject, which
+    reads as a list of individual files and hides the whole point: answer it
+    once and every file of that kind gets it.
+    """
     dlg = RecordingMetaDialog(
         tmp_path / "inv.tsv.recording_meta.json",
         present_datatypes={"func"}, present_pairs=[("func", "bold")],
+        pair_counts={("func", "bold"): 61},
     )
     qtbot.addWidget(dlg)
-    label = next(n.label for n in dlg._all_nodes() if n.key == "func/bold")
-    assert label == "sub-<label>_task-<label>_bold.json"
+    node = next(n for n in dlg._all_nodes() if n.key == "func/bold")
+    assert node.label == "every *_bold.json"
+    assert "61 files" in node.subtitle
+    assert "in func/" in node.subtitle
+
+
+# ---------------------------------------------------------------------------
+# What the conversion already answers
+#
+# The point of this form is what will still be MISSING after conversion. But a
+# field the converter fills has to stay reachable: the converter reads it from
+# the data, and when the data is wrong there is nowhere else to correct it.
+# ---------------------------------------------------------------------------
+
+
+def test_an_answered_field_is_shown_and_can_be_corrected(qtbot, tmp_path):
+    from bidsmgr.gui.widgets.template_form import write_field_widget
+    from bidsmgr.recording_meta import RecordingMetaSpec, dump_spec
+
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    spec = RecordingMetaSpec()
+    spec.converter_preview = {"meg/meg": {"PowerLineFrequency": 50.0}}
+    scaffold.write_text(dump_spec(spec))
+
+    dlg = RecordingMetaDialog(
+        scaffold, present_datatypes={"meg"}, present_pairs=[("meg", "meg")],
+    )
+    qtbot.addWidget(dlg)
+    widgets = dlg._template._widgets["meg/meg"]
+    assert "PowerLineFrequency" in widgets, (
+        "a field the converter fills must still be reachable, or a wrong value "
+        "in the data has nowhere to be corrected"
+    )
+
+    # Leaving it alone states nothing: storing it would freeze today's value.
+    assert "PowerLineFrequency" not in dlg._template.values_by_key().get("meg/meg", {})
+
+    write_field_widget(widgets["PowerLineFrequency"], 60)
+    assert dlg._template.values_by_key()["meg/meg"]["PowerLineFrequency"] == 60.0
+
+
+def test_the_fields_no_backend_can_answer_are_asked_not_hidden(qtbot, tmp_path):
+    """mne-bids writes these as "n/a" because BIDS demands the key."""
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    asked = set(dlg._template._widgets["eeg/eeg"])
+    answered = set(dlg._template._answered_values.get("eeg/eeg", {}))
+    for name in ("EEGReference", "EEGGround", "PowerLineFrequency"):
+        assert name in asked and name not in answered

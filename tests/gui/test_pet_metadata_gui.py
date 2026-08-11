@@ -194,7 +194,7 @@ def test_pet_is_one_section_named_after_its_file(qtbot, tmp_path):
     )
     qtbot.addWidget(dlg)
     leaves = {n.key: n.label for n in dlg._all_nodes() if n.is_leaf}
-    assert leaves["pet/pet"] == "sub-001_trc-FDG_pet.json"
+    assert leaves["pet/pet"] == "every *_pet.json"
 
 
 def test_pet_asks_only_what_the_scanner_cannot_answer(qtbot, tmp_path):
