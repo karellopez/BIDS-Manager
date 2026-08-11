@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from bidsmgr.fixups.sidecar_schema import apply_sequence_template, repair_sidecars
+from bidsmgr.fixups.sidecar_schema import apply_sequence_template, apply_stated_metadata
 from bidsmgr.recording_meta import (
+    AcquisitionSpec,
     VARIES,
     RecordingMetaSpec,
     is_varies,
@@ -128,7 +129,7 @@ def test_a_template_reaches_its_own_scope_and_nothing_else(tmp_path: Path) -> No
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("{}")
-    repair_sidecars(root, [], spec)
+    apply_stated_metadata(root, spec)
 
     rest = json.loads((root / "sub-001/func/sub-001_task-rest_bold.json").read_text())
     nback = json.loads((root / "sub-001/func/sub-001_task-nback_bold.json").read_text())
@@ -165,27 +166,12 @@ def test_varies_is_never_written_to_a_sidecar(tmp_path: Path) -> None:
     p = root / "sub-001/func/sub-001_task-rest_bold.json"
     p.parent.mkdir(parents=True)
     p.write_text("{}")
-    repair_sidecars(root, [], spec)
+    apply_stated_metadata(root, spec)
 
     data = json.loads(p.read_text())
     assert data == {"Instructions": "Lie still"}
     assert "VARIES" not in json.dumps(data)
 
-
-def test_varies_in_the_eeg_enrichment_is_not_written(tmp_path: Path) -> None:
-    from bidsmgr.fixups.eeg_sidecar import _apply_sidecar_fields
-
-    spec = RecordingMetaSpec()
-    spec.defaults.eeg_reference = VARIES
-    spec.defaults.manufacturer = "Brain Products"
-
-    p = tmp_path / "eeg.json"
-    p.write_text("{}")
-    _apply_sidecar_fields(p, spec, "eeg", suffix="eeg")
-
-    data = json.loads(p.read_text())
-    assert data.get("Manufacturer") == "Brain Products"
-    assert "EEGReference" not in data
 
 
 # ---------------------------------------------------------------------------
@@ -279,20 +265,56 @@ def test_every_layer_beats_the_one_above_it() -> None:
     assert cell.value == "from cell" and cell.origin == "cell"
 
 
-def test_a_row_cell_survives_the_chain(tmp_path: Path) -> None:
-    """The behaviour the enrichment always had, now expressed as a layer: a
-    reference typed into the inventory beats every template and default."""
-    import json as _json
 
-    from bidsmgr.fixups.eeg_sidecar import _apply_sidecar_fields
-    from bidsmgr.recording_meta import AcquisitionSpec
+
+
+# ---------------------------------------------------------------------------
+# The cells a user types in the table
+#
+# These used to be applied by the EEG fixup during conversion, which walked the
+# same chain as the template pass, so one field could be written twice and the
+# winner depended on the order. There is one pass now, in the metadata step.
+# ---------------------------------------------------------------------------
+
+
+def test_a_row_cell_beats_a_dataset_default(tmp_path: Path) -> None:
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+
+    root = tmp_path / "ds"
+    eeg = root / "sub-001" / "eeg"
+    eeg.mkdir(parents=True)
+    (eeg / "sub-001_task-rest_eeg.json").write_text(json.dumps({}))
 
     spec = RecordingMetaSpec()
-    spec.modality_defaults["eeg"] = AcquisitionSpec(eeg_reference="Cz")
-    p = tmp_path / "eeg.json"
-    p.write_text("{}")
-    _apply_sidecar_fields(
-        p, spec, "eeg", suffix="eeg",
-        row_values={"eeg_reference": "linked mastoids"},
+    spec.defaults = AcquisitionSpec(eeg_reference="Cz", power_line_freq=60.0)
+    inventory = pd.DataFrame([{
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "source_file": "/raw/one.edf",
+        "eeg_reference": "FCz",
+        "line_freq": "50",
+    }])
+
+    apply_stated_metadata(root, spec, inventory)
+    data = json.loads((eeg / "sub-001_task-rest_eeg.json").read_text())
+    assert data["EEGReference"] == "FCz", "the cell the user typed has to win"
+    assert data["PowerLineFrequency"] == "50"
+
+
+def test_varies_is_not_written_from_a_cell_either(tmp_path: Path) -> None:
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+
+    root = tmp_path / "ds"
+    eeg = root / "sub-001" / "eeg"
+    eeg.mkdir(parents=True)
+    (eeg / "sub-001_task-rest_eeg.json").write_text(json.dumps({}))
+
+    spec = RecordingMetaSpec()
+    spec.defaults = AcquisitionSpec(eeg_reference=VARIES)
+    apply_stated_metadata(root, spec, pd.DataFrame([{
+        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/one.edf",
+    }]))
+    assert "EEGReference" not in json.loads(
+        (eeg / "sub-001_task-rest_eeg.json").read_text()
     )
-    assert _json.loads(p.read_text())["EEGReference"] == "linked mastoids"

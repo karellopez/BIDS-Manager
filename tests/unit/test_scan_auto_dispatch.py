@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,6 +115,8 @@ class _StubProbe:
     subj_age: str = ""
     event_codes: tuple[str, ...] = ()
     montage_suggestion: str = ""
+    derived_fields: dict = dataclasses.field(default_factory=dict)
+
 
 
 def _patch_eeg_probe(monkeypatch, *, datatype: str = "eeg") -> None:

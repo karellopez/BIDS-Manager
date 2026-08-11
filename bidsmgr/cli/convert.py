@@ -64,12 +64,11 @@ from ..fixups import (
     enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
-    repair_sidecars,
+    repair_converter_output,
     update_scans_tsv,
 )
 from ..recording_meta import (
     RecordingMetaSpec,
-    dataset_description_as_bids,
     default_spec,
     load_spec,
     merge_pet,
@@ -320,19 +319,12 @@ def run_convert(
         bids_root = bids_parent / str(dataset_name)
         if not dry_run:
             bids_root.mkdir(parents=True, exist_ok=True)
-            ensure_dataset_description(
-                bids_root,
-                generated_by={
-                    "Name": "bidsmgr",
-                    "Version": bidsmgr.__version__,
-                    "Description": "dcm2niix-direct backend",
-                    "Container": {"Type": "binary", "Tag": dcm2niix_version},
-                },
-                # What the user stated in the metadata template's agnostic
-                # section. It belongs to the conversion, not to a later step:
-                # they filled it in before pressing convert.
-                fields=dataset_description_as_bids(spec.dataset_description),
-            )
+            ensure_dataset_description(bids_root, generated_by={
+                "Name": "bidsmgr",
+                "Version": bidsmgr.__version__,
+                "Description": "dcm2niix-direct backend",
+                "Container": {"Type": "binary", "Tag": dcm2niix_version},
+            })
             # Keep .bidsmgr/ + .tmp_bidsmgr/ out of the official bids-validator.
             ensure_bidsignore(bids_root)
             # Pre-convert collision summary: which incoming subjects already
@@ -462,13 +454,13 @@ def _convert_subject(
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
-        # Schema-driven repairs that are not specific to any modality: fix a
-        # key whose spelling differs from the standard's only in case (mne-bids
-        # writes MEG's MiscChannelCount into EEG sidecars, where BIDS spells it
-        # MISCChannelCount), wrap a scalar where the schema wants an array, and
-        # write the dataset-wide values every datatype declares. Runs last so
-        # it sees what the modality fixups produced.
-        n_enriched += repair_sidecars(staging, tasks, spec)
+        # Fix what the CONVERTER wrote: a key whose spelling differs from the
+        # standard's only in case, and a scalar where the schema declares an
+        # array. Runs last so it sees what the modality fixups produced.
+        #
+        # What the USER stated is NOT applied here. That is the metadata step's
+        # job, so this verb produces a faithful conversion and no opinions.
+        n_enriched += repair_converter_output(staging)
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we

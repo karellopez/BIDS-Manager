@@ -1,0 +1,212 @@
+# How metadata flows through BIDS Manager
+
+What the metadata template is, where an answer goes when you type it, and which
+step writes it into a file. Read this before changing anything under
+`metadata/`, `recording_meta/`, `fixups/` or the two metadata forms.
+
+---
+
+## 1. The one-page version
+
+```mermaid
+flowchart LR
+    RAW[Raw data] --> SCAN[bidsmgr-scan]
+    SCAN --> INV[(inventory.tsv)]
+    SCAN --> SCAF[(inventory.tsv.recording_meta.json<br/>the scaffold)]
+    SCAF -.->|what the conversion<br/>already answers| FORM
+    INV --> FORM[Metadata template<br/>dataset dialog + properties panel]
+    FORM -->|your answers| SCAF
+    INV --> CONV[bidsmgr-convert]
+    CONV --> BIDS[(BIDS tree)]
+    SCAF --> META[bidsmgr-metadata]
+    BIDS --> META
+    META --> BIDS
+    BIDS --> VAL[bidsmgr-validate]
+```
+
+Three files matter. The **inventory** is the table of what was found. The
+**scaffold** beside it holds everything you state that is not a column in that
+table. The **BIDS tree** is the output. The template reads the first two and
+`bidsmgr-metadata` writes the third.
+
+**Conversion never applies your answers.** `bidsmgr-convert` produces a faithful
+conversion and repairs only what the converter itself got wrong.
+`bidsmgr-metadata` applies what you stated. The GUI runs metadata immediately
+after convert, so from the Run button it is one step.
+
+---
+
+## 2. What the template asks, and why it is not everything
+
+```mermaid
+flowchart TD
+    S[The BIDS schema at your chosen version] -->|every field this file may carry| A
+    A[Fields declared for datatype/suffix] --> B{Does the conversion<br/>already answer it?}
+    B -->|yes, on YOUR data| SHOWN[Shown read-only:<br/>Filled in by the conversion]
+    B -->|no| C{Does the rule depend on<br/>a scenario this file<br/>may not be in?}
+    C -->|yes, speculative| DROP[Not asked]
+    C -->|no| ASK[Asked, at the schema's<br/>requirement level]
+```
+
+Nothing in that diagram is a list kept in code. The fields, their types, their
+vocabularies, their requirement levels and their descriptions all come from the
+schema, at the version chosen in **Settings, BIDS version**.
+
+### What counts as "the conversion answers it"
+
+Measured on your data, during the scan:
+
+* **DICOM**: a probe conversion runs dcm2niix once per series and reads the
+  sidecar it produced.
+* **EEG / MEG**: the scanner opens every recording anyway, and asks it the same
+  questions mne-bids will ask: channel counts by type, sampling frequency,
+  duration, recording type, and the line frequency and manufacturer where the
+  header states them.
+
+Two rules keep this honest:
+
+1. **A value of `n/a` is not an answer.** BIDS requires `EEGReference` in every
+   EEG sidecar, so mne-bids writes `"n/a"` when it does not know. Counting that
+   as answered is what once hid reference, ground and filters from the form.
+2. **A field only some files answer is still asked.** Half a dataset answered is
+   not answered, and the recordings that lack it need a way to get one.
+
+If a scan could not measure (no probe, no readable recording) a small built-in
+list is used as a fallback. It is a fallback, not the authority: it was measured
+once, on one tree, with one scanner.
+
+---
+
+## 3. Where an answer goes when you type it
+
+```mermaid
+flowchart TD
+    subgraph Forms
+      DLG[Dataset metadata dialog]
+      PANEL[Properties panel<br/>one selected row]
+    end
+    DLG -->|agnostic section| DD[spec.dataset_description]
+    DLG -->|a file's section| ST["spec.sequence_templates<br/>datatype/suffix"]
+    PANEL -->|a field the table<br/>also carries| CELL[(inventory column)]
+    PANEL -->|any other field| RT["spec.row_templates<br/>row id"]
+    DD & ST & RT --> SCAF[(the scaffold)]
+```
+
+Both forms are rendered by the same code from the same definition
+(`gui/widgets/template_form.py`), so a field means the same thing in both. The
+dialog states what is true of every `*_eeg.json`; the panel states what is true
+of one recording.
+
+A few fields are inventory COLUMNS as well as BIDS fields, because you need them
+in the table to sort and bulk-edit: `line_freq` is `PowerLineFrequency`,
+`eeg_reference` is `EEGReference`, `eeg_ground` is `EEGGround`. Answering them
+in a form writes the column, so the table and the form can never disagree.
+
+**One thing is not from the schema, and it is the only one: `montage`.** It
+names an MNE electrode layout to APPLY during conversion so that
+`electrodes.tsv` and `coordsystem.json` get written. It is an instruction to the
+converter, not a fact about the recording, which is why BIDS has no field for it.
+
+---
+
+## 4. Which answer wins
+
+Every layer is resolved by one function, `recording_meta/chain.py`, weakest
+first:
+
+```mermaid
+flowchart LR
+    D[dataset<br/>the site, shared by all] --> M[modality<br/>this instrument]
+    M --> T["template<br/>datatype/suffix"]
+    T --> TT["template@task"]
+    TT --> R[row<br/>this recording]
+    R --> C[cell<br/>this row in the table]
+```
+
+Later beats earlier. On top of all of it sits one more rule, applied when the
+answers are written:
+
+> What the converter read out of the file stands, unless THIS recording
+> contradicts it.
+
+A statement about a class of files does not overrule a file's own header.
+Correcting one specific file is exactly what the row and cell layers are for.
+
+`VARIES` is a fourth state, beside a value, blank, and not-applicable. It says
+"this differs per recording, the answer lives further down". It is never itself
+written to a sidecar.
+
+---
+
+## 5. Who writes what
+
+```mermaid
+flowchart TD
+    subgraph convert [bidsmgr-convert]
+      C1[dcm2niix / mne-bids / bidsphysio]
+      C2[fieldmap renames, IntendedFor, scans.tsv]
+      C3[channels.tsv retyping, event labels, task protocol]
+      C4[repair_converter_output:<br/>key casing, scalar-where-array]
+    end
+    subgraph metadata [bidsmgr-metadata]
+      M1[apply_stated_metadata:<br/>templates, row answers, table cells,<br/>the dataset-wide block]
+      M2[dataset_description.json, README, CHANGES]
+      M3[participants.tsv, phenotype tables]
+      M4[fill TODO placeholders, audit]
+    end
+    convert --> metadata
+```
+
+The line between them: **convert fixes what the converter wrote; metadata
+applies what you stated.** That is why `bidsmgr-convert` alone gives you a
+conversion with no opinions in it, and why running `bidsmgr-metadata` is what
+puts your template into the files.
+
+---
+
+## 6. The BIDS version
+
+One control, in **Settings, BIDS version**, and one flag, `--schema`, on every
+CLI verb. It governs:
+
+| | at 1.8.0 | at 1.11.1 |
+|---|---|---|
+| fields declared for `anat/T1w` | 64 | 76 |
+| questions the template asks for `anat/T1w` | 31 | 36 |
+| entities `func/bold` may carry | 10 | 11 |
+| datatypes that exist | 12 | 16 |
+| `BIDSVersion` stamped into `dataset_description.json` | 1.8.0 | 1.11.1 |
+| the version validation judges by | 1.8.0 | 1.11.1 |
+
+Set once, it holds for the whole session: forms, filenames, enrichment and
+validation. Several versions ship with BIDS Manager; the default is the newest.
+
+---
+
+## 7. Reading the form
+
+| mark | meaning |
+|---|---|
+| `*` red | the standard REQUIRES this field for this file |
+| `·` amber | the standard RECOMMENDS it |
+| unmarked | optional |
+| greyed value | inherited, from the layer named in the tooltip |
+| **Filled in by the conversion** | folded section: the converter answers these, with the value it will write |
+| `differs per recording` | the probed files disagreed; the answer is per recording |
+
+Colour can be turned off in Settings; the marks remain, so the information does
+not depend on being able to see colour.
+
+---
+
+## 8. Where the code is
+
+| you want | look in |
+|---|---|
+| which fields a file may carry | `bidsmgr/schema/` (a thin adapter over `bidsval.schema`) |
+| what to ask, arranged as a tree | `bidsmgr/metadata/template_plan.py` |
+| what the conversion answers by itself | `bidsmgr/metadata/converter_preview.py`, fallback in `derivable.py` |
+| a field becomes a widget | `bidsmgr/gui/widgets/template_form.py` |
+| which layer wins | `bidsmgr/recording_meta/chain.py` |
+| answers reach the files | `bidsmgr/fixups/sidecar_schema.py`, called by `bidsmgr/metadata/engine.py` |
+| which BIDS version is in force | `bidsmgr/schema/loader.py` |

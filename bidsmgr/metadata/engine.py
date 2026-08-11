@@ -220,6 +220,13 @@ def run_metadata(
         bids_root, meta, generator_label, report,
         extra_fields=_dataset_extras_from_scaffold(inventory_tsv),
     )
+    # Everything the user stated about these files: the per-sequence templates,
+    # the per-recording answers, the cells typed into the table, and the dataset
+    # block every datatype declares. One pass, one chain, and it lives here
+    # rather than in convert so that verb stays a conversion.
+    n_stated = _apply_stated_metadata(bids_root, inventory_tsv)
+    if n_stated:
+        log.info("applied stated metadata to %d sidecar(s)", n_stated)
     _write_participants(bids_root, inventory_tsv, report, participants_file=participants_file)
     write_phenotype(bids_root, phenotype_files, report)
     _write_readme(bids_root, meta.name, report)
@@ -413,6 +420,23 @@ def _dataset_meta_from_scaffold(
         and not (field == "name" and value == "Untitled BIDS Dataset")
     }
     return DatasetMetadata(**{**stated, **given})
+
+
+def _apply_stated_metadata(bids_root: Path, inventory_tsv: Optional[Path]) -> int:
+    """Write the metadata template's answers into the sidecars that take them."""
+    if inventory_tsv is None:
+        return 0
+    from ..fixups.sidecar_schema import apply_stated_metadata
+
+    try:
+        scaffold = scaffold_sidecar_path(inventory_tsv)
+        if not scaffold.exists():
+            return 0
+        spec = load_spec(scaffold)
+        inventory = pd.read_csv(inventory_tsv, sep="\t", dtype=str).fillna("")
+    except (OSError, ValueError):
+        return 0
+    return apply_stated_metadata(bids_root, spec, inventory)
 
 
 def _dataset_extras_from_scaffold(inventory_tsv: Optional[Path]) -> dict:

@@ -17,7 +17,8 @@ from bidsmgr.fixups.sidecar_schema import (
     fill_agnostic_fields,
     repair_array_types,
     repair_key_names,
-    repair_sidecars,
+    apply_stated_metadata,
+    repair_converter_output,
 )
 from bidsmgr.recording_meta import RecordingMetaSpec
 
@@ -150,8 +151,10 @@ def test_repair_sidecars_walks_the_tree(tmp_path: Path) -> None:
     spec = RecordingMetaSpec()
     spec.defaults.institution_name = "Uni Oldenburg"
 
-    changed = repair_sidecars(root, [], spec)
-    assert changed == 2
+    # Two passes, two owners. Conversion fixes what the converter wrote;
+    # the metadata step writes what the user stated.
+    assert repair_converter_output(root) == 1
+    assert _apply(root, spec) == 2
 
     eeg_data = json.loads((eeg / "sub-001_task-rest_eeg.json").read_text())
     assert eeg_data["MISCChannelCount"] == 0
@@ -174,8 +177,8 @@ def test_rerunning_changes_nothing(tmp_path: Path) -> None:
     (eeg / "sub-001_task-rest_eeg.json").write_text(
         json.dumps({"MiscChannelCount": 0})
     )
-    assert repair_sidecars(root, [], None) == 1
-    assert repair_sidecars(root, [], None) == 0
+    assert repair_converter_output(root) == 1
+    assert repair_converter_output(root) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +190,18 @@ def test_rerunning_changes_nothing(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _task(row_id: str, basename: str):
-    """The two attributes the pass reads off a conversion task."""
-    return SimpleNamespace(row_id=row_id, basename=basename)
+def _apply(root, spec, rows=()):
+    """Apply what the user stated, the way the metadata step does.
+
+    ``rows`` are ``(basename, row_id)`` pairs, the two inventory columns the
+    pass reads to learn which row produced which file.
+    """
+    import pandas as pd
+
+    inventory = pd.DataFrame(
+        [{"proposed_basename": b, "source_file": r} for b, r in rows]
+    ) if rows else None
+    return apply_stated_metadata(root, spec, inventory)
 
 
 def test_a_row_answer_reaches_only_that_rows_sidecar(tmp_path: Path) -> None:
@@ -202,11 +214,7 @@ def test_a_row_answer_reaches_only_that_rows_sidecar(tmp_path: Path) -> None:
     spec = RecordingMetaSpec()
     spec.row_templates["/raw/one"] = {"InstitutionName": "Only mine"}
 
-    repair_sidecars(
-        root,
-        [_task("/raw/one", "sub-001_T1w"), _task("/raw/two", "sub-002_T1w")],
-        spec,
-    )
+    _apply(root, spec, [("sub-001_T1w", "/raw/one"), ("sub-002_T1w", "/raw/two")])
     mine = json.loads((anat / "sub-001_T1w.json").read_text())
     theirs = json.loads((anat / "sub-002_T1w.json").read_text())
     assert mine["InstitutionName"] == "Only mine"
@@ -226,7 +234,7 @@ def test_a_row_answer_overrides_what_the_converter_wrote(tmp_path: Path) -> None
     spec = RecordingMetaSpec()
     spec.row_templates["/raw/one"] = {"InstitutionName": "the correct one"}
 
-    repair_sidecars(root, [_task("/raw/one", "sub-001_T1w")], spec)
+    _apply(root, spec, [("sub-001_T1w", "/raw/one")])
     data = json.loads((anat / "sub-001_T1w.json").read_text())
     assert data["InstitutionName"] == "the correct one"
 
@@ -242,7 +250,7 @@ def test_a_backend_suffix_still_matches_its_row(tmp_path: Path) -> None:
     spec = RecordingMetaSpec()
     spec.row_templates["/raw/one"] = {"InstitutionName": "matched anyway"}
 
-    repair_sidecars(root, [_task("/raw/one", "sub-001_task-rest_bold")], spec)
+    _apply(root, spec, [("sub-001_task-rest_bold", "/raw/one")])
     data = json.loads((func / "sub-001_task-rest_bold_e2.json").read_text())
     assert data["InstitutionName"] == "matched anyway"
 
@@ -259,6 +267,6 @@ def test_a_pet_block_reaches_the_sidecar_through_the_chain(tmp_path: Path) -> No
     spec = RecordingMetaSpec()
     spec.pet_defaults.mode_of_administration = "bolus"
 
-    repair_sidecars(root, [_task("/raw/one", "sub-001_pet")], spec)
+    _apply(root, spec, [("sub-001_pet", "/raw/one")])
     data = json.loads((pet / "sub-001_pet.json").read_text())
     assert data["ModeOfAdministration"] == "bolus"

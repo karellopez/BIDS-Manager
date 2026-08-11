@@ -161,6 +161,7 @@ def apply_sequence_template(
     task: Optional[str],
     spec: Optional[RecordingMetaSpec],
     row_id: str = "",
+    row_values: Optional[dict] = None,
 ) -> int:
     """Write what the chain resolved for this file. Returns how many landed.
 
@@ -176,10 +177,23 @@ def apply_sequence_template(
     template's opinion and a correction aimed at exactly this file.
     """
     resolved = resolve_sidecar_fields(
-        spec, datatype, suffix, row_id=row_id, task=task,
+        spec, datatype, suffix, row_id=row_id, task=task, row_values=row_values,
     )
+    # A MEG recording only carries an EEG reference if it carries EEG at all.
+    # The schema declares EEGReference for MEG because simultaneous EEG is
+    # common, not because every MEG run has it, and the converter has already
+    # counted the channels. Writing a dataset-wide reference into a MEG sidecar
+    # with no EEG channels states something untrue about the recording.
+    simultaneous_eeg = bool(data.get("EEGChannelCount") or 0)
+
     written = 0
     for name, field in resolved.items():
+        if (
+            name in ("EEGReference", "EEGGround")
+            and datatype == "meg"
+            and not simultaneous_eeg
+        ):
+            continue
         if name in data and not field.is_row_override:
             continue
         if data.get(name) == field.value:
@@ -189,28 +203,20 @@ def apply_sequence_template(
     return written
 
 
-def repair_sidecars(
-    staging: Path,
-    tasks,
-    spec: Optional[RecordingMetaSpec] = None,
-) -> int:
-    """Apply every schema-driven repair to the staged tree. Returns files changed.
+def _rewrite_each_sidecar(root: Path, apply) -> int:
+    """Walk every sidecar under ``root`` and let ``apply`` edit it in place.
 
-    Walks the staged sidecars rather than the task list, so a sidecar the
-    backend wrote for an output we did not enumerate (a fieldmap split, a
-    multi-echo series) is repaired too. The task list is still consulted, but
-    only to name which row produced which file, so a correction made against one
-    recording in the properties panel reaches that recording's sidecar and no
-    other. A file no task claims is repaired all the same, minus that layer.
+    Walks the tree rather than a task list, so a sidecar a backend wrote for an
+    output nobody enumerated, a fieldmap split or a multi-echo series, is
+    treated like any other. Returns how many files changed.
     """
     from ..editor.bidsmgr_checks import infer_datatype_suffix
 
-    row_by_basename = _row_ids_by_basename(tasks)
     changed = 0
-    for sidecar in sorted(staging.rglob("*.json")):
+    for sidecar in sorted(root.rglob("*.json")):
         if ".bidsmgr" in sidecar.parts:
             continue
-        datatype, suffix = infer_datatype_suffix(sidecar, staging)
+        datatype, suffix = infer_datatype_suffix(sidecar, root)
         if not (datatype and suffix):
             continue
         try:
@@ -221,14 +227,9 @@ def repair_sidecars(
             continue
 
         before = json.dumps(data, sort_keys=True)
-        n = repair_key_names(data, datatype, suffix)
-        n += repair_array_types(data, datatype, suffix)
-        n += apply_sequence_template(
-            data, datatype, suffix, _task_of(sidecar), spec,
-            row_id=_row_id_for(sidecar, row_by_basename),
-        )
-        n += fill_agnostic_fields(data, datatype, suffix, spec)
-        if not n or json.dumps(data, sort_keys=True) == before:
+        if not apply(sidecar, data, datatype, suffix):
+            continue
+        if json.dumps(data, sort_keys=True) == before:
             continue
         try:
             sidecar.write_text(
@@ -242,6 +243,126 @@ def repair_sidecars(
     return changed
 
 
+def repair_converter_output(staging: Path) -> int:
+    """Fix what the CONVERTER wrote. Returns files changed.
+
+    Two repairs, both about the backend's own output rather than about anything
+    a user said, which is why this belongs to conversion:
+
+    * a key whose spelling differs from the standard's only in case, the real
+      case being that mne-bids writes MEG's ``MiscChannelCount`` into EEG
+      sidecars where BIDS spells it ``MISCChannelCount``;
+    * a bare scalar where the schema declares an array, which dcm2niix writes
+      for a single-frame acquisition.
+
+    What the USER stated is applied by the metadata step instead: see
+    :func:`apply_stated_metadata`. Keeping the two apart means ``bidsmgr-convert``
+    produces a faithful conversion and no opinions, which is what the verb says.
+    """
+    return _rewrite_each_sidecar(
+        staging,
+        lambda _path, data, datatype, suffix: (
+            repair_key_names(data, datatype, suffix)
+            + repair_array_types(data, datatype, suffix)
+        ),
+    )
+
+
+def apply_stated_metadata(
+    bids_root: Path,
+    spec: Optional[RecordingMetaSpec],
+    inventory=None,
+) -> int:
+    """Write what the USER stated into every sidecar that takes it.
+
+    The single place user-stated metadata reaches the files. It used to happen
+    during conversion, in two passes that both walked the same chain, so which
+    one won depended on the order they ran in and a CLI user got opinions from a
+    verb that promises a conversion.
+
+    ``inventory`` is the scan table, used to recover which row produced which
+    file so a correction aimed at one recording lands on that recording and no
+    other, and to read the cells a user typed in the table.
+    """
+    if spec is None:
+        return 0
+
+    row_by_basename, cells_by_row = _rows_from_inventory(inventory)
+
+    def apply(sidecar: Path, data: dict, datatype: str, suffix: str) -> int:
+        row_id = _row_id_for(sidecar, row_by_basename)
+        return (
+            apply_sequence_template(
+                data, datatype, suffix, _task_of(sidecar), spec,
+                row_id=row_id, row_values=cells_by_row.get(row_id),
+            )
+            + fill_agnostic_fields(data, datatype, suffix, spec)
+            + _apply_extras(data, datatype, spec, row_id, _task_of(sidecar))
+        )
+
+    return _rewrite_each_sidecar(bids_root, apply)
+
+
+def _apply_extras(
+    data: dict, datatype: str, spec, row_id: str, task: Optional[str],
+) -> int:
+    """The supplemental acquisition conditions BIDS does not name.
+
+    Impedance, electrode type, conductive medium, Faraday cage. BIDS permits
+    extra keys and these are real facts about how a recording was made, so the
+    spec models them explicitly and they are written as given. Not for MEG,
+    which has none of them.
+    """
+    if spec is None or datatype == "meg":
+        return 0
+    from ..fixups.eeg_sidecar import _extras_to_keys
+    from ..recording_meta import resolve_effective
+
+    acq = resolve_effective(spec, row_id, task, datatype).acquisition
+    if acq is None or acq.extras is None:
+        return 0
+    written = 0
+    for key, value in _extras_to_keys(acq.extras).items():
+        if data.get(key) != value:
+            data[key] = value
+            written += 1
+    return written
+
+
+# Inventory columns that are also sidecar fields, in the chain's vocabulary.
+# The user types them in the table, so the table is where they live.
+_CELL_COLUMNS: dict[str, str] = {
+    "eeg_reference": "eeg_reference",
+    "eeg_ground": "eeg_ground",
+    "line_freq": "power_line_freq",
+}
+
+
+def _rows_from_inventory(inventory) -> tuple[dict[str, str], dict[str, dict]]:
+    """``(basename -> row_id, row_id -> the cells that are sidecar fields)``."""
+    if inventory is None or not len(inventory):
+        return {}, {}
+
+    by_basename: dict[str, str] = {}
+    cells: dict[str, dict] = {}
+    for _, row in inventory.iterrows():
+        basename = str(row.get("proposed_basename", "") or "").strip()
+        row_id = str(
+            row.get("source_file", "") or row.get("series_uid", "") or ""
+        ).strip()
+        if not basename or not row_id:
+            continue
+        by_basename[basename] = row_id
+        stated = {}
+        for column, attr in _CELL_COLUMNS.items():
+            value = str(row.get(column, "") or "").strip()
+            if value and value.lower() not in ("nan", "none"):
+                stated[attr] = value
+        if stated:
+            cells[row_id] = stated
+    return by_basename, cells
+
+
 _TASK_RE = re.compile(r"_task-([A-Za-z0-9]+)")
 
 
@@ -249,17 +370,6 @@ def _task_of(path: Path) -> Optional[str]:
     """The BIDS task label in a filename, if it carries one."""
     m = _TASK_RE.search(path.name)
     return m.group(1) if m else None
-
-
-def _row_ids_by_basename(tasks) -> dict[str, str]:
-    """Which inventory row produced each basename we converted."""
-    out: dict[str, str] = {}
-    for task in tasks or ():
-        basename = str(getattr(task, "basename", "") or "")
-        row_id = str(getattr(task, "row_id", "") or "")
-        if basename and row_id:
-            out[basename] = row_id
-    return out
 
 
 def _row_id_for(sidecar: Path, row_by_basename: dict[str, str]) -> str:
@@ -284,8 +394,9 @@ for _cached in (_declared_fields, _array_typed):
 
 __all__ = [
     "apply_sequence_template",
+    "apply_stated_metadata",
     "fill_agnostic_fields",
     "repair_array_types",
+    "repair_converter_output",
     "repair_key_names",
-    "repair_sidecars",
 ]

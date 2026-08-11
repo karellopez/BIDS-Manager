@@ -33,7 +33,6 @@ from typing import Iterable, Optional
 from ..recording_meta import (
     RecordingMetaSpec,
     resolve_effective,
-    resolve_sidecar_fields,
 )
 from ..recording_meta.resolve import EffectiveSpec
 
@@ -93,24 +92,14 @@ def enrich_recording_sidecars(
             datatype,
         )
 
-        # The row's own inventory cells. These are the strongest layer of the
-        # chain: the user typed them against this one recording, in the table,
-        # where they can see them.
-        row_values = {
-            "eeg_reference": getattr(task, "eeg_reference", None),
-            "eeg_ground": getattr(task, "eeg_ground", None),
-            "power_line_freq": getattr(task, "line_freq", None),
-        }
-
-        n_modified += _apply_sidecar_fields(
-            sidecar,
-            spec,
-            datatype,
-            suffix=str(getattr(task, "suffix", "") or datatype),
-            row_id=getattr(task, "row_id", "") or "",
-            task=(getattr(task, "entities", {}) or {}).get("task"),
-            row_values=row_values,
-        )
+        # The sidecar's own FIELDS are not written here any more. They are what
+        # the user stated, and stating them is the metadata step's job; this
+        # pass used to walk the same chain, so the same field could be written
+        # twice and the winner depended on the order the two ran in.
+        #
+        # What stays is the work that needs this context: retyping the channels
+        # the reader saw as generic, giving trigger codes their labels, and the
+        # task protocol. None of that is expressible as a sidecar field.
         n_modified += _retype_channels(sidecar, basename, eff)
         n_modified += _map_events(sidecar, basename, eff)
         n_modified += _apply_task_protocol(sidecar, eff)
@@ -148,65 +137,6 @@ def _read_json(path: Path) -> dict:
 
 def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=4) + "\n", encoding="utf-8")
-
-
-def _apply_sidecar_fields(
-    sidecar: Path,
-    spec: Optional[RecordingMetaSpec],
-    datatype: str,
-    suffix: str = "",
-    row_id: str = "",
-    task: Optional[str] = None,
-    row_values: Optional[dict] = None,
-) -> int:
-    """Write the resolved metadata into this recording's sidecar.
-
-    The values come from :func:`resolve_sidecar_fields`, the one chain that
-    knows every layer. This function used to read the acquisition block
-    directly, while sequence templates were applied by a separate pass in
-    another fixup, so the same field could be stated twice and which statement
-    won depended on the order the two passes happened to run in.
-    """
-    data = _read_json(sidecar)
-
-    # A MEG recording only carries an EEG reference if it carries EEG at all.
-    # The schema declares EEGReference for MEG because simultaneous EEG is
-    # common, not because every MEG run has it, and mne-bids has already
-    # counted the channels for us. Writing a dataset-wide reference into a MEG
-    # sidecar with no EEG channels states something untrue about the recording.
-    simultaneous_eeg = bool(data.get("EEGChannelCount") or 0)
-
-    resolved = resolve_sidecar_fields(
-        spec, datatype, suffix or datatype, row_id, task, row_values,
-    )
-    updates: dict = {}
-    for name, field in resolved.items():
-        if name in ("EEGReference", "EEGGround") and datatype == "meg" and not simultaneous_eeg:
-            continue
-        # What the converter read from the file stands, unless this recording
-        # says otherwise: correcting one specific file is what a row override
-        # is for, and a statement about a class of files is not that.
-        if name in data and not field.is_row_override:
-            continue
-        updates[name] = field.value
-
-    # Extras (non-required keys) for non-MEG datatypes. These are the
-    # arbitrary values a user supplies for keys the spec models explicitly, so
-    # they come from the merged acquisition rather than the BIDS-named chain.
-    acq = (
-        resolve_effective(spec, row_id, task, datatype).acquisition
-        if spec is not None else None
-    )
-    if acq is not None and acq.extras is not None and datatype != "meg":
-        updates.update(_extras_to_keys(acq.extras))
-
-    if not updates:
-        return 0
-
-    data.update(updates)
-    _write_json(sidecar, data)
-    log.info("enrich: %s sidecar +%d field(s)", sidecar.name, len(updates))
-    return 1
 
 
 def _extras_to_keys(extras) -> dict:

@@ -174,12 +174,23 @@ def sidecar_section(
     except (KeyError, ValueError, OSError):
         specs = []
 
-    skip = set() if include_derived else derived_fields(datatype) | CONVERTER_PRIVATE
-    if not include_derived:
-        skip |= {
-            name for name, value in (answered or {}).items()
+    # What the conversion answers, and so what this form must not ask for.
+    #
+    # When the scan measured it on THIS dataset, that measurement is the whole
+    # authority. The built-in list is only for a scan that could not measure,
+    # and it is wrong in both directions by nature: it was taken once, from one
+    # tree, with one scanner and one set of file formats. It claimed mne-bids
+    # answers EEGReference, which mne-bids writes as "n/a" because BIDS demands
+    # the key, and it missed five fields per MRI kind that dcm2niix does fill.
+    if include_derived:
+        skip: set = set()
+    elif answered:
+        skip = {
+            name for name, value in answered.items()
             if value not in (None, "", [], {})
-        }
+        } | CONVERTER_PRIVATE
+    else:
+        skip = derived_fields(datatype) | CONVERTER_PRIVATE
     fields = [
         _as_template_field(s)
         for s in specs
@@ -192,11 +203,34 @@ def sidecar_section(
         datatype=datatype,
         suffix=suffix,
         title=f"{datatype.upper()}  ·  {suffix}",
-        target=example_path or f"sub-<label>/{datatype}/sub-<label>_{suffix}.json",
+        target=example_path or _pattern_for(datatype, suffix),
         storage=STORAGE_SEQUENCE_TEMPLATE,
         storage_key=f"{datatype}/{suffix}",
         fields=_sorted_fields(fields),
     )
+
+
+def _pattern_for(datatype: str, suffix: str) -> str:
+    """The name this file takes, spelled out, when no scan row supplies one.
+
+    Built from the entities the schema REQUIRES for the pair, so a functional
+    run reads ``sub-<label>_task-<label>_bold.json`` rather than
+    ``sub-<label>_bold.json``, which is not a name BIDS accepts. Half a name is
+    worse than none: it looks like a real answer.
+    """
+    try:
+        entities = schema_mod.required_entities(datatype, suffix)
+    except (KeyError, ValueError, OSError):
+        entities = ["subject"]
+    tokens = []
+    for entity in entities:
+        try:
+            key = schema_mod.entity_info(entity).name
+        except (KeyError, ValueError, OSError):
+            key = entity
+        tokens.append(f"{key}-<label>")
+    stem = "_".join(tokens) or "sub-<label>"
+    return f"{tokens[0] if tokens else 'sub-<label>'}/{datatype}/{stem}_{suffix}.json"
 
 
 def build_template_plan(
@@ -316,6 +350,21 @@ class TemplateNode:
         return sum(len(n.section.required_fields) for n in self.walk() if n.section)
 
 
+def _is_real_pair(datatype: str, suffix: str) -> bool:
+    """Does BIDS declare this suffix for this datatype?
+
+    The last line of defence for the form. A caller that guesses, or a stale
+    inventory naming a suffix a newer schema dropped, would otherwise produce a
+    section for a file that cannot exist, filed under a key nothing reads.
+    """
+    if not datatype or not suffix:
+        return False
+    try:
+        return suffix in set(schema_mod.list_suffixes(datatype))
+    except (KeyError, ValueError, OSError):
+        return False
+
+
 def _file_label(section: TemplateSection) -> tuple[str, str]:
     """``(filename, directory)`` for a section, both stated in full.
 
@@ -342,6 +391,11 @@ def build_template_tree(
     renders the tree agrees about what comes first.
     """
     example_paths = example_paths or {}
+    present = [
+        (datatype, suffix)
+        for datatype, suffix in present
+        if _is_real_pair(datatype, suffix)
+    ]
 
     agnostic_section = dataset_description_section(bids_root)
     agnostic_name, agnostic_dir = _file_label(agnostic_section)

@@ -167,11 +167,12 @@ def test_eeg_and_meg_do_not_share_a_section(qtbot, tmp_path):
     # And each asks only what its own datatype takes.
     assert "AssociatedEmptyRoom" in meg and "AssociatedEmptyRoom" not in eeg
     assert "CapManufacturer" in eeg and "CapManufacturer" not in meg
-    # Manufacturer and DewarPosition are in neither: mne-bids reads both out of
-    # the recording, so asking would be noise. That is the derivable set doing
-    # its job, and it is why EEG asks 19 questions rather than 43.
-    for derived in ("Manufacturer", "DewarPosition"):
-        assert derived not in eeg and derived not in meg
+    # Both ARE asked about the amplifier. mne-bids writes Manufacturer only for
+    # the formats whose header carries it, so a form that never asks leaves the
+    # rest of a dataset with nothing. This used to be suppressed because the
+    # built-in "the converter fills this" list counted a key mne-bids writes as
+    # "n/a" as an answer.
+    assert "Manufacturer" in eeg and "Manufacturer" in meg
 
 
 def test_the_agnostic_section_asks_for_the_dataset_description(qtbot, tmp_path):
@@ -268,3 +269,51 @@ def test_a_dropdown_popup_is_wide_enough_to_read(qtbot, tmp_path):
             for i in range(combo.count())
         )
         assert combo.view().minimumWidth() >= widest
+
+
+def test_the_fields_mne_bids_cannot_answer_are_asked(qtbot, tmp_path) -> None:
+    """The regression that started this.
+
+    BIDS requires EEGReference and EEGGround in every EEG sidecar, so mne-bids
+    writes them as "n/a" when it does not know. The built-in list of what the
+    converter fills counted that as answered, so the form stopped asking for the
+    two fields a user most has to supply, and the dataset shipped with "n/a".
+    """
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    asked = set(dlg._template._widgets["eeg/eeg"])
+    for name in ("EEGReference", "EEGGround", "SoftwareFilters", "PowerLineFrequency"):
+        assert name in asked, f"{name} must be asked: no converter can answer it"
+
+
+def test_a_datatype_never_names_its_own_suffix(qtbot, tmp_path) -> None:
+    """func has suffixes bold and sbref; there is no _func.json.
+
+    The dialog used to invent ``(datatype, datatype)`` when nobody told it which
+    files the scan found. True for eeg and meg by coincidence, so it looked
+    fine, while func produced a section titled "sub-_func.json" whose answers
+    were filed under a key the writer never reads.
+    """
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"func", "anat"},
+        present_pairs=[("func", "func"), ("anat", "anat"), ("func", "bold")],
+    )
+    qtbot.addWidget(dlg)
+    keys = {n.key for n in dlg._all_nodes() if n.is_leaf}
+    assert "func/bold" in keys
+    assert "func/func" not in keys and "anat/anat" not in keys
+
+
+def test_a_file_section_names_a_file_bids_accepts(qtbot, tmp_path) -> None:
+    """A functional run needs a task entity, so the pattern has to show one."""
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"func"}, present_pairs=[("func", "bold")],
+    )
+    qtbot.addWidget(dlg)
+    label = next(n.label for n in dlg._all_nodes() if n.key == "func/bold")
+    assert label == "sub-<label>_task-<label>_bold.json"

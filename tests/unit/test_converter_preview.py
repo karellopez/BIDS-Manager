@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import json
+
 import pandas as pd
 
 from bidsmgr.metadata.converter_preview import (
@@ -22,20 +24,25 @@ from bidsmgr.metadata.template_plan import sidecar_section
 from bidsmgr.recording_meta import VARIES
 
 
-def _eeg_rows(**overrides) -> pd.DataFrame:
-    base = {
-        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-        "sfreq": "500", "duration_sec": "60", "n_channels": "64", "task": "rest",
-    }
-    return pd.DataFrame([base, {**base, **overrides}])
+def _eeg_rows(*derived: dict, task: str = "rest") -> pd.DataFrame:
+    """Rows shaped as the scanner writes them: one JSON blob per recording of
+    exactly what mne-bids will derive from it."""
+    return pd.DataFrame([
+        {
+            "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+            "task": task, "_derived_fields": json.dumps(d),
+        }
+        for d in derived
+    ])
 
 
 def test_the_scan_alone_previews_a_recording() -> None:
-    """No conversion has to run: the scanner read these out of the header."""
-    preview = preview_from_inventory(_eeg_rows())
+    """No conversion has to run: the scanner asked the recording the same
+    questions mne-bids will ask."""
+    derived = {"SamplingFrequency": 500.0, "EEGChannelCount": 64}
+    preview = preview_from_inventory(_eeg_rows(derived, derived))
     assert preview["eeg/eeg"] == {
         "EEGChannelCount": 64,
-        "RecordingDuration": 60.0,
         "SamplingFrequency": 500.0,
         "TaskName": "rest",
     }
@@ -44,24 +51,46 @@ def test_the_scan_alone_previews_a_recording() -> None:
 def test_disagreement_is_reported_as_varies_not_as_a_value() -> None:
     """One recording's value is not a statement about the kind. VARIES says the
     answer lives per recording, which is what that sentinel is for."""
-    preview = preview_from_inventory(_eeg_rows(n_channels="32"))
+    preview = preview_from_inventory(_eeg_rows(
+        {"SamplingFrequency": 500.0, "EEGChannelCount": 64},
+        {"SamplingFrequency": 500.0, "EEGChannelCount": 32},
+    ))
     assert preview["eeg/eeg"]["EEGChannelCount"] == VARIES
     assert preview["eeg/eeg"]["SamplingFrequency"] == 500.0
 
 
+def test_a_field_only_some_files_answer_is_not_reported() -> None:
+    """Half a dataset answered is not answered. The form must still ask, or the
+    recordings that lack it have no way to get one."""
+    preview = preview_from_inventory(_eeg_rows(
+        {"SamplingFrequency": 500.0, "Manufacturer": "BioSemi"},
+        {"SamplingFrequency": 500.0},
+    ))
+    assert "SamplingFrequency" in preview["eeg/eeg"]
+    assert "Manufacturer" not in preview["eeg/eeg"]
+
+
 def test_excluded_rows_do_not_contribute() -> None:
-    df = _eeg_rows(n_channels="32")
+    df = _eeg_rows(
+        {"EEGChannelCount": 64}, {"EEGChannelCount": 32},
+    )
     df.loc[1, "include"] = "0"
     assert preview_from_inventory(df)["eeg/eeg"]["EEGChannelCount"] == 64
 
 
-def test_meg_is_not_given_the_eeg_channel_count_name() -> None:
-    df = _eeg_rows()
-    df["proposed_datatype"] = "meg"
-    df["bids_guess_suffix"] = "meg"
-    preview = preview_from_inventory(df)["meg/meg"]
-    assert "MEGChannelCount" in preview
-    assert "EEGChannelCount" not in preview
+def test_a_placeholder_is_not_an_answer() -> None:
+    """BIDS demands the key; mne-bids writes n/a when it does not know. Counting
+    that as answered is what hid EEGReference and EEGGround from the form."""
+    df = pd.DataFrame([{
+        "include": "1", "series_uid": "1.2.3",
+        "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+    }])
+    stats = {"1.2.3": SimpleNamespace(sidecar_fields={
+        "EEGReference": "n/a", "SamplingFrequency": 500.0,
+    })}
+    preview = preview_from_probe(df, stats)["eeg/eeg"]
+    assert "SamplingFrequency" in preview
+    assert "EEGReference" not in preview
 
 
 def test_a_probe_previews_what_dcm2niix_wrote() -> None:

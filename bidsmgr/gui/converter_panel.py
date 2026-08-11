@@ -1156,11 +1156,22 @@ class ConverterPanel(QWidget):
         from ..recording_meta import scaffold_sidecar_path
         from .recording_meta_dialog import RecordingMetaDialog
 
+        from ..metadata.template_plan import example_paths_for, present_pairs
+
+        # The (datatype, suffix) pairs the scan actually found, and one real
+        # path per pair. Without them the dialog had to guess, and its guess was
+        # that a datatype names its own suffix: true for eeg and meg by
+        # coincidence, false for func, whose suffixes are bold and sbref. It
+        # showed "sub-_func.json", which is not a BIDS name, and filed the
+        # answers under "func/func", which nothing ever reads.
+        df = self._model.dataframe() if self._model is not None else None
         scaffold = scaffold_sidecar_path(self._output_tsv)
         dlg = RecordingMetaDialog(
             scaffold, self._present_datatypes(), self,
             montage_suggestions=self._montage_suggestions(),
             scan_suggestions=self._scan_suggestions(),
+            present_pairs=present_pairs(df),
+            example_paths=example_paths_for(df),
         )
         if dlg.exec() and self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.

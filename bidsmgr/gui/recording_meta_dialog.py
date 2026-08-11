@@ -47,6 +47,7 @@ from ..recording_meta import (
     RecordingMetaSpec,
     dataset_description_as_bids,
     dataset_description_from_bids,
+    resolve_sidecar_fields,
     dump_spec,
     load_spec,
 )
@@ -134,8 +135,14 @@ class RecordingMetaDialog(QDialog):
         # The (datatype, suffix) pairs the scan found. Without them the tree
         # falls back to one node per present datatype, which still works but
         # cannot name a real file.
-        self._present_pairs = list(present_pairs or []) or [
-            (dt, dt) for dt in sorted(self._present)
+        # No guessing. A datatype does not name its own suffix except by
+        # coincidence, and inventing one produced sections for files that cannot
+        # exist, filed under keys nothing reads. With no pairs the dialog shows
+        # the agnostic section, which is always true of any dataset.
+        self._present_pairs = [
+            (datatype, suffix)
+            for datatype, suffix in (present_pairs or [])
+            if datatype and suffix
         ]
         # Which sections the user folded last time, and whether levels are
         # coloured. Both are read from settings so the window opens the way it
@@ -313,8 +320,22 @@ class RecordingMetaDialog(QDialog):
         }
 
     def _stored_template_values(self) -> dict:
-        """What the scaffold already holds, keyed as the tree's nodes are."""
-        values = dict(self._spec.sequence_templates or {})
+        """What the scaffold already holds, keyed as the tree's nodes are.
+
+        A file's section starts from what the DATASET already states, so a site
+        stated once shows in every file that takes it rather than as an empty
+        box inviting the user to state it again. The chain decides which fields
+        a datatype accepts, so this cannot put an EEG reference on an MRI scan.
+        """
+        values: dict = {}
+        for datatype, suffix in self._present_pairs:
+            inherited = resolve_sidecar_fields(self._spec, datatype, suffix)
+            if inherited:
+                values[f"{datatype}/{suffix}"] = {
+                    name: field.value for name, field in inherited.items()
+                }
+        for key, stated in (self._spec.sequence_templates or {}).items():
+            values.setdefault(key, {}).update(stated)
         values["dataset_description"] = dataset_description_as_bids(
             self._spec.dataset_description
         )

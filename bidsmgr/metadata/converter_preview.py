@@ -24,6 +24,7 @@ Two rules make it honest rather than decorative:
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from .. import schema as schema_mod
@@ -33,6 +34,22 @@ from .derivable import CONVERTER_PRIVATE
 
 def _key(datatype: str, suffix: str) -> str:
     return f"{datatype}/{suffix}"
+
+
+def _is_answer(value: Any) -> bool:
+    """Is this a value, or a placeholder standing in for one?
+
+    BIDS requires some keys whatever the answer, so mne-bids writes ``"n/a"``
+    when it does not know. Counting that as answered is what hid EEGReference
+    and EEGGround from the form: the very fields a user has to supply.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip().lower() in ("n/a", "na", ""):
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
 
 
 def _agree(values: list[Any]) -> Any:
@@ -46,15 +63,24 @@ def _agree(values: list[Any]) -> Any:
 
 def _collapse(
     seen: dict[str, dict[str, list[Any]]],
+    counted: dict[str, int],
 ) -> dict[str, dict[str, Any]]:
-    """Per kind, one value per field, dropping what the standard does not declare."""
+    """Per kind, one value per field, for the fields EVERY file answered.
+
+    A field only some files answer is left out, so the form still asks for it.
+    Half a dataset answered is not answered: the user has to be able to supply
+    the rest, and that is the direction it is safe to be wrong in. Asking about
+    a field that turns out to be filled is noise; not asking loses data.
+    """
     out: dict[str, dict[str, Any]] = {}
     for key, fields in seen.items():
         datatype, _, suffix = key.partition("/")
+        n_files = counted.get(key, 0)
         answers = {
             name: _agree(values)
             for name, values in sorted(fields.items())
-            if name not in CONVERTER_PRIVATE
+            if len(values) >= n_files
+            and name not in CONVERTER_PRIVATE
             and schema_mod.field_applies(name, datatype, suffix)
         }
         if answers:
@@ -62,35 +88,20 @@ def _collapse(
     return out
 
 
-# Inventory column -> the BIDS field the conversion writes it as. These are read
-# from the recording by the scan itself, so an EEG or MEG dataset gets a preview
-# without any probe conversion at all.
-_RECORDING_COLUMNS: dict[str, str] = {
-    "sfreq": "SamplingFrequency",
-    "duration_sec": "RecordingDuration",
-    "n_channels": "EEGChannelCount",
-    "task": "TaskName",
-}
-
-# Which datatype takes which channel-count name. MEG counts its own channels
-# separately, so the EEG name would be wrong there.
-_CHANNEL_COUNT: dict[str, str] = {
-    "eeg": "EEGChannelCount",
-    "ieeg": "iEEGElectrodeCount",
-    "meg": "MEGChannelCount",
-}
-
-
 def preview_from_inventory(df) -> dict[str, dict[str, Any]]:
     """What the scan already knows the conversion will write, per kind.
 
-    Free: these are facts the scanner read out of each recording's header while
-    building the inventory, so no conversion has to run to know them.
+    Free: the scanner opened every recording to build the inventory and asked it
+    the same questions mne-bids will ask, so no conversion has to run.
+
+    The task label is added here rather than there because it is a curation
+    decision, not a fact in the file: mne-bids writes whatever the row says.
     """
-    if df is None or not len(df):
+    if df is None or not len(df) or "_derived_fields" not in df.columns:
         return {}
 
     seen: dict[str, dict[str, list[Any]]] = {}
+    counted: dict[str, int] = {}
     for _, row in df.iterrows():
         if str(row.get("include", "1")).strip() in ("0", "False", "false"):
             continue
@@ -98,31 +109,24 @@ def preview_from_inventory(df) -> dict[str, dict[str, Any]]:
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if not datatype or not suffix:
             continue
+        counted[_key(datatype, suffix)] = counted.get(_key(datatype, suffix), 0) + 1
+
+        raw = row.get("_derived_fields")
+        try:
+            derived = json.loads(raw) if isinstance(raw, str) and raw else {}
+        except (ValueError, TypeError):
+            derived = {}
+        if not isinstance(derived, dict) or not derived:
+            continue
+
+        task = str(row.get("task", "") or "").strip()
+        if task:
+            derived = {**derived, "TaskName": task}
 
         fields = seen.setdefault(_key(datatype, suffix), {})
-        for column, name in _RECORDING_COLUMNS.items():
-            if name == "EEGChannelCount":
-                name = _CHANNEL_COUNT.get(datatype, "")
-                if not name:
-                    continue
-            raw = row.get(column)
-            text = "" if raw is None else str(raw).strip()
-            if not text or text.lower() in ("nan", "none"):
-                continue
-            fields.setdefault(name, []).append(_as_number(text))
-    return _collapse(seen)
-
-
-def _as_number(text: str) -> Any:
-    """A count is an int and a rate is a float; anything else stays text."""
-    try:
-        return int(text)
-    except ValueError:
-        pass
-    try:
-        return float(text)
-    except ValueError:
-        return text
+        for name, value in derived.items():
+            fields.setdefault(name, []).append(value)
+    return _collapse(seen, counted)
 
 
 def preview_from_probe(df, probe_stats: Optional[dict] = None) -> dict[str, dict[str, Any]]:
@@ -146,15 +150,21 @@ def preview_from_probe(df, probe_stats: Optional[dict] = None) -> dict[str, dict
             kind_of[uid] = (datatype, suffix)
 
     seen: dict[str, dict[str, list[Any]]] = {}
+    counted: dict[str, int] = {}
     for uid, stats in probe_stats.items():
         kind = kind_of.get(str(uid))
-        fields = getattr(stats, "sidecar_fields", None)
-        if not kind or not fields:
+        if not kind:
             continue
-        bucket = seen.setdefault(_key(*kind), {})
+        key = _key(*kind)
+        counted[key] = counted.get(key, 0) + 1
+        fields = getattr(stats, "sidecar_fields", None)
+        if not fields:
+            continue
+        bucket = seen.setdefault(key, {})
         for name, value in fields.items():
-            bucket.setdefault(name, []).append(value)
-    return _collapse(seen)
+            if _is_answer(value):
+                bucket.setdefault(name, []).append(value)
+    return _collapse(seen, counted)
 
 
 def merge_previews(*previews: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

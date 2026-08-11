@@ -730,49 +730,37 @@ class PropertiesPanel(QWidget):
         ))
 
     def _append_recording_section(self, row: int, datatype: str) -> None:
-        """The conversion inputs an electrophysiology row needs from the user.
+        """The one instruction the conversion needs that BIDS has no field for.
 
-        Not sidecar fields, which the section below now asks for from the
-        schema. These three are decisions the CONVERSION depends on and that no
-        BIDS field expresses: which montage to apply, what the mains frequency
-        was where nothing recorded it, and where the reference and ground sat.
-        A montage in particular has no BIDS name at all: it names an electrode
-        layout to attach, not a value to write.
+        A montage names an MNE electrode layout to APPLY during conversion, so
+        that electrodes.tsv and coordsystem.json get written. It is not metadata
+        about the recording, it is an instruction to the converter, which is why
+        the standard has no field for it and why it is the single thing in this
+        panel that does not come from the schema.
 
-        They are inventory columns rather than scaffold entries because a user
-        needs to see them in the table, sort by them, and set fifty rows at
-        once. Editing them here writes the same cell.
+        Line frequency, reference and ground USED to be here as hand-built rows.
+        They are BIDS fields, so they are now asked for by the schema-driven
+        section below like everything else, and answering them there writes the
+        same inventory column this used to write.
         """
-        mod = _modality_label(datatype)
         show_montage = datatype in ("eeg", "ieeg")
-        show_ref_ground = datatype in ("eeg", "ieeg")
 
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "CONVERSION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
-        lf = self._eff(row, "line_freq")
-        lf = lf[:-2] if lf.endswith(".0") else lf
-        self._body_layout.addWidget(self._meta_combo_row(
-            "line_freq", "line_freq", ["(blank)", "50", "60"], lf, "(blank)",
-        ))
-        # Compute-PSD action, directly below the line-frequency field: the
-        # spectrum is how you find out which of 50 and 60 this recording is.
+            "CONVERSION", "electrodes.tsv + coordsystem.json",
+            agnostic=False, tag=_modality_label(datatype)))
+
+        # Reading the recording is how you find out which of 50 and 60 the
+        # mains was, so the action sits with the recording rather than with the
+        # field it informs.
         self._body_layout.addWidget(self._build_psd_row(row))
-        if show_ref_ground:
-            self._body_layout.addWidget(self._meta_edit_row(
-                "reference", "eeg_reference", self._eff(row, "eeg_reference"),
-            ))
-            self._body_layout.addWidget(self._meta_edit_row(
-                "ground", "eeg_ground", self._eff(row, "eeg_ground"),
-            ))
+
         if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
                 "montage", "montage",
                 ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
             ))
-            # The scan's best channel-name match, shown read-only so the user
-            # can pick with confidence. Never applied on its own.
             suggestion = self._cell(row, "montage_suggestion")
             if suggestion:
                 self._body_layout.addWidget(self._montage_hint(suggestion))
