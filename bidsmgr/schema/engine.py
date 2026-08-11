@@ -24,7 +24,7 @@ from typing import Mapping, Optional
 
 from bidsval import schema as bidsval_schema
 
-from .loader import get_schema
+from .loader import active_version, get_schema, register_cache
 from .types import Datatype, Entity, EntityFormat, EntityInfo, FieldInfo, Suffix
 
 
@@ -187,7 +187,9 @@ def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldIn
     ``EthicsApprovals`` and ``ReferencesAndLinks`` merely optional.
     """
     try:
-        specs = bidsval_schema.dataset_description_fields(dataset_root=bids_root)
+        specs = bidsval_schema.dataset_description_fields(
+            dataset_root=bids_root, schema=active_version(),
+        )
     except Exception:
         return []
     return [
@@ -216,7 +218,9 @@ def field_applies(field_name: str, datatype: Datatype, suffix: Suffix) -> bool:
     ``TracerName`` for a MEG recording (no).
     """
     try:
-        return bool(bidsval_schema.field_applies(field_name, datatype, suffix))
+        return bool(bidsval_schema.field_applies(
+            field_name, datatype, suffix, schema=active_version(),
+        ))
     except Exception:
         return False
 
@@ -386,7 +390,7 @@ def _sidecar_fields(
     """
     try:
         specs = bidsval_schema.sidecar_fields(
-            datatype, suffix, dataset_root=bids_root,
+            datatype, suffix, dataset_root=bids_root, schema=active_version(),
         )
     except Exception:
         # An unknown datatype/suffix is a question, not a crash: callers audit
@@ -442,3 +446,10 @@ __all__ = [
     "build_basename",
     "build_relative_path",
 ]
+
+
+# The memoised lookups above hold answers about one BIDS version. Switching
+# version has to drop them, and listing them at the bottom rather than at each
+# definition keeps that list in one readable place.
+for _cached in (_entity_index_lookup, _format_pattern, _datatype_groups):
+    register_cache(_cached)

@@ -606,25 +606,22 @@ class SettingsDialog(QDialog):
         w = QWidget()
         v = QVBoxLayout(w)
 
-        box = QGroupBox("Validation engine (bidsval)")
+        box = QGroupBox("BIDS version and validation")
         form = QFormLayout(box)
 
-        # BIDS schema version. bidsval bundles several; "" = its default.
+        # Which BIDS version the whole tool speaks. "" = the newest bundled.
         self._validate_schema = QComboBox()
         self._validate_schema.addItem("Bundled default (recommended)", userData="")
-        try:
-            import bidsval
-            for ver in bidsval.available_versions():
-                self._validate_schema.addItem(f"BIDS schema {ver}", userData=ver)
-        except Exception:
-            pass
+        for ver in schema.available_versions():
+            self._validate_schema.addItem(f"BIDS schema {ver}", userData=ver)
         self._validate_schema.setToolTip(
-            "Validate against this BIDS schema version. bidsval bundles "
-            "several versions; the bundled default tracks the BIDS release "
-            "BIDS Manager ships with. Picking an older version validates a "
-            "dataset against that version's rules."
+            "Which version of BIDS this session speaks. It decides which "
+            "fields the metadata forms ask for and which entities a filename "
+            "may carry, as well as what validation reports. Several versions "
+            "ship with BIDS Manager; the bundled default is the newest.\n\n"
+            "Pick an older one to work to a dataset that was made against it."
         )
-        form.addRow("BIDS schema version:", self._validate_schema)
+        form.addRow("BIDS version:", self._validate_schema)
 
         self._validate_max_rows = QSpinBox()
         self._validate_max_rows.setRange(1, 10_000_000)
@@ -811,6 +808,10 @@ class SettingsDialog(QDialog):
         s.validate_flag_todos = self._validate_flag_todos.isChecked()
 
         s.save()
+        # Adopt the chosen version now rather than at the next launch: every
+        # schema answer in the process is memoised, so this also drops the
+        # answers about the old one.
+        schema.set_active_version(s.validate_schema_version)
         self.accept()
 
 

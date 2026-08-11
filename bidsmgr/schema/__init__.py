@@ -44,7 +44,14 @@ from .engine import (
     required_sidecar_fields,
     sidecar_fields,
 )
-from .loader import bids_version, get_schema, schema_version
+from .loader import (
+    active_version,
+    available_versions,
+    bids_version,
+    get_schema,
+    schema_version,
+    set_active_version,
+)
 from .types import (
     Datatype,
     Entity,
@@ -59,6 +66,9 @@ from .types import (
 from .validation import validate_basename, validate_dataset, validate_entity_set
 
 __all__ = [
+    "active_version",
+    "available_versions",
+    "set_active_version",
     # listing
     "list_datatypes",
     "list_suffixes",

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import schema as schema_mod
+from ..schema.loader import register_cache
 from ..recording_meta import RecordingMetaSpec, is_varies, resolve_sidecar_fields
 
 log = logging.getLogger(__name__)
@@ -274,6 +275,11 @@ def _row_id_for(sidecar: Path, row_by_basename: dict[str, str]) -> str:
         return row_by_basename[stem]
     matches = [b for b in row_by_basename if stem.startswith(b)]
     return row_by_basename[max(matches, key=len)] if matches else ""
+
+
+# These hold answers about one BIDS version, so they are dropped when it changes.
+for _cached in (_declared_fields, _array_typed):
+    register_cache(_cached)
 
 
 __all__ = [

@@ -1844,7 +1844,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
 
+    parser.add_argument(
+        "--schema", default=None, metavar="VERSION",
+        help=(
+            "Which BIDS version to work to (for example 1.11.1). Decides which "
+            "fields are declared and which entities a filename may carry. "
+            "Default: the newest version shipped."
+        ),
+    )
+
     args = parser.parse_args(argv)
+    # One version for the whole run, adopted before any schema question is
+    # asked. Without this the flag would reach the validator alone and a
+    # dataset could be filled in against one version and checked against
+    # another.
+    from ..schema import set_active_version
+    set_active_version(args.schema)
+
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
