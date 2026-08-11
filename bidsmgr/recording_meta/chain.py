@@ -98,6 +98,59 @@ _ACQ_TO_BIDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+# The same translation for PET. It lived in the PET fixup, which meant the fixup
+# could write a field the chain knew nothing about, so a dose imported from a
+# lab spreadsheet reached the sidecar without ever appearing in the form that
+# claims to show what this recording will say. One map, one home.
+#
+# Split scalars from lists because they are read back differently, not because
+# they mean anything different.
+PET_SCALAR_TO_BIDS: dict[str, str] = {
+    "tracer_name": "TracerName",
+    "tracer_radionuclide": "TracerRadionuclide",
+    "tracer_molecular_weight": "TracerMolecularWeight",
+    "tracer_molecular_weight_units": "TracerMolecularWeightUnits",
+    "tracer_radlex": "TracerRadLex",
+    "tracer_snomed": "TracerSNOMED",
+    "injected_radioactivity": "InjectedRadioactivity",
+    "injected_radioactivity_units": "InjectedRadioactivityUnits",
+    "injected_mass": "InjectedMass",
+    "injected_mass_units": "InjectedMassUnits",
+    "specific_radioactivity": "SpecificRadioactivity",
+    "specific_radioactivity_units": "SpecificRadioactivityUnits",
+    "molar_activity": "MolarActivity",
+    "molar_activity_units": "MolarActivityUnits",
+    "injected_volume": "InjectedVolume",
+    "purity": "Purity",
+    "mode_of_administration": "ModeOfAdministration",
+    "injection_start": "InjectionStart",
+    "injection_end": "InjectionEnd",
+    "infusion_radioactivity": "InfusionRadioactivity",
+    "infusion_start": "InfusionStart",
+    "infusion_speed": "InfusionSpeed",
+    "infusion_speed_units": "InfusionSpeedUnits",
+    "time_zero": "TimeZero",
+    "scan_start": "ScanStart",
+    "acquisition_mode": "AcquisitionMode",
+    "image_decay_corrected": "ImageDecayCorrected",
+    "image_decay_correction_time": "ImageDecayCorrectionTime",
+    "attenuation_correction": "AttenuationCorrection",
+    "units": "Units",
+    "body_part": "BodyPart",
+    "recon_method_name": "ReconMethodName",
+    "recon_filter_type": "ReconFilterType",
+    "recon_filter_size": "ReconFilterSize",
+    "manufacturer": "Manufacturer",
+    "manufacturers_model_name": "ManufacturersModelName",
+}
+
+PET_LIST_TO_BIDS: dict[str, str] = {
+    "recon_method_parameter_labels": "ReconMethodParameterLabels",
+    "recon_method_parameter_units": "ReconMethodParameterUnits",
+    "recon_method_parameter_values": "ReconMethodParameterValues",
+}
+
+
 def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
     """Translate one acquisition block into the BIDS names this datatype uses.
 
@@ -127,6 +180,20 @@ def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
     put(("SoftwareVersions",), acq.software_versions or acq.software)
     put(("HardwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Hardware"})
     put(("SoftwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Software"})
+    return out
+
+
+def _pet_as_bids(pet, datatype: str, suffix: str, field_applies) -> dict[str, Any]:
+    """One PET block as BIDS fields, minus anything this file does not take."""
+    if pet is None or datatype != "pet":
+        return {}
+    out: dict[str, Any] = {}
+    for attr, name in {**PET_SCALAR_TO_BIDS, **PET_LIST_TO_BIDS}.items():
+        value = getattr(pet, attr, None)
+        if value in (None, "", [], {}) or is_varies(value):
+            continue
+        if field_applies(name, datatype, suffix):
+            out[name] = value
     return out
 
 
@@ -168,9 +235,15 @@ def resolve_sidecar_fields(
         ("dataset", _acquisition_as_bids(spec.defaults, datatype, field_applies)),
         (
             "modality",
-            _acquisition_as_bids(
-                spec.modality_defaults.get(datatype), datatype, field_applies,
-            ),
+            {
+                **_acquisition_as_bids(
+                    spec.modality_defaults.get(datatype), datatype, field_applies,
+                ),
+                # PET keeps its own block because an injected dose and an EEG cap
+                # have nothing to say to each other. It is still this datatype's
+                # instrument block, so it is the same layer.
+                **_pet_as_bids(spec.pet_defaults, datatype, suffix, field_applies),
+            },
         ),
         (
             "template",
@@ -189,11 +262,25 @@ def resolve_sidecar_fields(
             ),
         ))
     if row_id:
+        # One recording states things two ways: through the acquisition block
+        # the older surfaces write, and through the BIDS-named row template the
+        # properties panel writes. Both are this recording speaking, so they are
+        # one layer; the template goes second because it is the surface a user
+        # types into now, and because it can say things the block has no
+        # attribute for.
         contributions.append((
             "row",
-            _acquisition_as_bids(
-                spec.overrides.get(row_id), datatype, field_applies,
-            ),
+            {
+                **_acquisition_as_bids(
+                    spec.overrides.get(row_id), datatype, field_applies,
+                ),
+                **_pet_as_bids(
+                    spec.pet_overrides.get(row_id), datatype, suffix, field_applies,
+                ),
+                **_template_as_bids(
+                    spec.row_templates.get(row_id), datatype, suffix, field_applies,
+                ),
+            },
         ))
     if row_values:
         contributions.append((
@@ -261,14 +348,17 @@ def resolve_attribute(
     def from_block(block) -> Any:
         return getattr(block, attr, None) if block is not None else None
 
-    def from_template(key: str) -> Any:
-        values = spec.sequence_templates.get(key)
+    def from_values(values: Any) -> Any:
+        """This attribute's answer inside a BIDS-named mapping, if it has one."""
         if not isinstance(values, dict):
             return None
         for name in bids_names:
             if name in values and field_applies(name, datatype, suffix):
                 return values[name]
         return None
+
+    def from_template(key: str) -> Any:
+        return from_values(spec.sequence_templates.get(key))
 
     candidates: list[tuple[str, Any]] = [
         ("dataset", from_block(spec.defaults)),
@@ -278,7 +368,14 @@ def resolve_attribute(
     if task:
         candidates.append(("template@task", from_template(template_key(datatype, suffix, task))))
     if row_id:
-        candidates.append(("row", from_block(spec.overrides.get(row_id))))
+        # The row template is the surface a user types into now, so it answers
+        # first; the acquisition block still answers for anything it has no
+        # BIDS-named home for.
+        from_row = from_values(spec.row_templates.get(row_id))
+        candidates.append((
+            "row",
+            from_row if from_row is not None else from_block(spec.overrides.get(row_id)),
+        ))
     if row_values:
         candidates.append(("cell", row_values.get(attr)))
 

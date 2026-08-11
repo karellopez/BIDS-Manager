@@ -50,6 +50,7 @@ from ...recording_meta import (
     describe_origin,
     is_varies,
     resolve_attribute,
+    resolve_sidecar_fields,
     PetAcquisitionSpec,
     RecordingMetaSpec,
 )
@@ -748,6 +749,132 @@ class InventoryTableModel(QAbstractTableModel):
             overrides[rid] = updated
         self._global_spec = self._global_spec.model_copy(update={"overrides": overrides})
 
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
+
+    # ------------------------------------------------------------------
+    # Per-row sidecar fields, in the schema's own vocabulary
+    # ------------------------------------------------------------------
+    #
+    # The block above models a dozen acquisition attributes. This one carries
+    # any field the schema declares for the row's file, so the properties panel
+    # can offer exactly what the dataset dialog offers, one scope down. Both
+    # read the same chain, so a value set anywhere shows everywhere it applies.
+
+    # A few sidecar fields are also inventory columns, because the user needs
+    # them in the table to sort and bulk-edit by. Those keep the cell as their
+    # one home: a form that wrote a second copy elsewhere would show one value
+    # while the table showed another, and the converter would have to pick.
+    _CELL_BACKED_FIELDS: dict[str, tuple[str, str]] = {
+        "PowerLineFrequency": ("line_freq", "power_line_freq"),
+        "EEGReference": ("eeg_reference", "eeg_reference"),
+        "iEEGReference": ("eeg_reference", "eeg_reference"),
+        "EEGGround": ("eeg_ground", "eeg_ground"),
+        "iEEGGround": ("eeg_ground", "eeg_ground"),
+    }
+
+    def _row_context(self, row: int) -> tuple[str, str, Optional[str]]:
+        datatype, suffix = self.effective_datatype_suffix(row)
+        return datatype, suffix, (self._raw_cell(row, "task") or None)
+
+    def _row_cell_values(self, row: int) -> dict:
+        """This row's own cells, in the chain's vocabulary.
+
+        The same three the conversion passes, so the panel's picture of what
+        will be written is the one that gets written.
+        """
+        out: dict = {}
+        for column, attr in {
+            "eeg_reference": "eeg_reference",
+            "eeg_ground": "eeg_ground",
+            "line_freq": "power_line_freq",
+        }.items():
+            value = self._raw_cell(row, column)
+            if value:
+                out[attr] = value
+        return out
+
+    def resolved_sidecar(self, row: int, *, with_row: bool = True) -> dict:
+        """Every stated field for this row's sidecar, and which layer said it.
+
+        ``with_row=False`` stops above this recording, which is what the field
+        would say if the row had never been touched. That is the comparison that
+        decides whether an answer is worth storing.
+        """
+        if self._global_spec is None or not (0 <= row < len(self._df)):
+            return {}
+        datatype, suffix, task = self._row_context(row)
+        if not datatype:
+            return {}
+        return resolve_sidecar_fields(
+            self._global_spec, datatype, suffix or datatype,
+            row_id=self.row_id(row) if with_row else "", task=task,
+            row_values=self._row_cell_values(row) if with_row else None,
+        )
+
+    def row_template(self, row: int) -> dict:
+        """What this one recording states, by BIDS field name."""
+        if self._global_spec is None or not (0 <= row < len(self._df)):
+            return {}
+        return dict(self._global_spec.row_templates.get(self.row_id(row), {}))
+
+    def sidecar_origin(self, row: int, name: str) -> str:
+        """Where this field's current answer comes from, as a readable phrase."""
+        resolved = self.resolved_sidecar(row).get(name)
+        if resolved is None:
+            return ""
+        datatype, suffix, task = self._row_context(row)
+        return describe_origin(resolved.origin, datatype, suffix, task or "")
+
+    def set_row_template_field(self, row: int, name: str, value) -> bool:
+        """State a sidecar field for this recording alone, or stop stating it.
+
+        An answer equal to what the row already inherits is not stored: keeping
+        it would freeze today's inherited value into this row, so a later change
+        to the dataset default would silently skip this one recording.
+        """
+        if not (0 <= row < len(self._df)):
+            return False
+
+        backing = self._CELL_BACKED_FIELDS.get(name)
+        if backing is not None:
+            column = backing[0]
+            if column in self._df.columns:
+                return self.bulk_set(
+                    [row], column, "" if value in (None, "", [], {}) else str(value),
+                )
+
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        rid = self.row_id(row)
+        current = dict(self._global_spec.row_templates.get(rid, {}))
+        blank = value in (None, "", [], {})
+
+        if not blank:
+            inherited = self.resolved_sidecar(row, with_row=False).get(name)
+            if inherited is not None and inherited.value == value:
+                blank = True
+
+        if blank and name not in current:
+            return False
+        if not blank and current.get(name) == value:
+            return False
+
+        if blank:
+            current.pop(name, None)
+        else:
+            current[name] = value
+
+        templates = dict(self._global_spec.row_templates)
+        if current:
+            templates[rid] = current
+        else:
+            templates.pop(rid, None)
+        self._global_spec = self._global_spec.model_copy(
+            update={"row_templates": templates}
+        )
         self.recordingSpecChanged.emit()
         self.refresh_row(row)
         return True

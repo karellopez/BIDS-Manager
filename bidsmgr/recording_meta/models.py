@@ -394,6 +394,20 @@ class RecordingMetaSpec(_Model):
     # field its datatype does not accept: that check is what stops this from
     # becoming a second place to make the mistake the table used to make.
     sequence_templates: dict[str, dict[str, Any]] = {}
+    # The same thing one scope further down: what is true of ONE recording,
+    # keyed by its inventory ``row_id``.
+    #
+    # ``overrides`` above already holds per-recording facts, but only the twelve
+    # or so an ``AcquisitionSpec`` models, so the properties panel could offer
+    # only those twelve while the dataset dialog offered everything the schema
+    # declares. A user who found the right field in one surface could not state
+    # it for one recording in the other. This is BIDS-named like
+    # ``sequence_templates`` precisely so both surfaces speak one vocabulary and
+    # the same field means the same thing at every scope.
+    #
+    # ``overrides`` stays: every scaffold ever written has one, and the montage
+    # it carries has no BIDS name to move to.
+    row_templates: dict[str, dict[str, Any]] = {}
     # Dataset-level phenotype measure tables (TSV/CSV/XLSX/ODS paths keyed by
     # participant_id). Written to ``phenotype/<measure>.tsv`` + ``.json`` by the
     # metadata engine. Agnostic: applies to any modality.

@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 import pandas as pd
 
 from .. import schema as schema_mod
+from ..metadata.template_plan import sidecar_section
 from ..project import Project
 from ..recording_meta import (
     COMMON_CAP_MANUFACTURERS,
@@ -69,6 +70,15 @@ from .metadata_help import tooltip_for
 from .models import InventoryTableModel
 from .theme_manager import CUR, scaled_px
 from .widgets import BusySpinner, PaneHeader, ValMessage
+from .widgets.template_form import (
+    CollapsibleSection,
+    build_field_widget,
+    connect_field_widget,
+    field_label,
+    level_legend,
+    read_field_widget,
+    write_field_widget,
+)
 
 # Datatypes that carry recording-metadata (the per-row section appears only
 # for these). MEG has no scalp montage / reference / ground concept.
@@ -174,6 +184,12 @@ class PropertiesPanel(QWidget):
         # renders its busy state even across a re-render.
         self._psd_worker = None
         self._psd_row_id: Optional[str] = None
+        # Whether the schema-driven sidecar section is open. Folded by default:
+        # it offers everything the file may carry, which is the right answer to
+        # "what can I state about this recording" and the wrong thing to greet
+        # someone with in a narrow pane. Remembered for the session so a user
+        # working through a dataset opens it once, not once per row.
+        self._sidecar_expanded = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -376,98 +392,12 @@ class PropertiesPanel(QWidget):
         if datatype in _EEG_MEG_DATATYPES:
             self._append_region_label("Modality-specific", agnostic=False)
             self._append_recording_section(row, datatype)
-        elif datatype == "pet":
-            self._append_region_label("Modality-specific", agnostic=False)
-            self._append_pet_section(row)
+
+        # 6. Everything else the standard lets this file carry, asked exactly as
+        # the dataset dialog asks it, but answered for this recording alone.
+        self._append_sidecar_section(row, datatype, suffix)
 
         self._body_layout.addStretch(1)
-
-    def _append_pet_section(self, row: int) -> None:
-        """Per-recording PET fields -> sub-..._pet.json.
-
-        Two sub-sections. TRACER & DOSE holds what only the injection record
-        knows, and it is the block most likely to vary per scan even inside one
-        study, which is why it is here rather than only in the dataset dialog.
-        ACQUISITION holds the timing and units.
-
-        Every field shows the EFFECTIVE value: the per-row override when set,
-        otherwise the inherited dataset default. Writing the default back
-        clears the override, exactly as the EEG/MEG device fields behave.
-
-        Reconstruction is deliberately NOT exposed per row: it is a property of
-        the scanner protocol rather than the injection, so it belongs in the
-        dataset dialog where one edit covers the study.
-        """
-        self._body_layout.addSpacing(8)
-        self._body_layout.addWidget(self._divider())
-        self._body_layout.addWidget(self._section_header(
-            "TRACER & DOSE", "sub-..._pet.json", agnostic=False, tag="PET"))
-
-        self._body_layout.addWidget(self._meta_combo_row(
-            "tracer", "tracer_name", [""] + list(COMMON_TRACERS),
-            self._pet_eff(row, "tracer_name"), "",
-            setter=self._on_pet_field_changed, editable=True,
-        ))
-        self._body_layout.addWidget(self._meta_combo_row(
-            "radionuclide", "tracer_radionuclide", [""] + list(COMMON_RADIONUCLIDES),
-            self._pet_eff(row, "tracer_radionuclide"), "",
-            setter=self._on_pet_field_changed, editable=True,
-        ))
-        # What the scan read out of this row's own header, shown read-only
-        # beside the editable field. Not auto-applied: a vendor spelling can
-        # always parse wrongly, and a wrong tracer is worse than a blank one.
-        for column, field in (
-            ("tracer_suggestion", "tracer"),
-            ("radionuclide_suggestion", "radionuclide"),
-            ("injected_dose_suggestion", "dose"),
-        ):
-            value = self._cell(row, column)
-            if value:
-                self._body_layout.addWidget(
-                    self._scan_hint(field, "scan read", value))
-
-        self._body_layout.addWidget(self._meta_edit_row(
-            "dose", "injected_radioactivity",
-            self._pet_eff(row, "injected_radioactivity"),
-            setter=self._on_pet_field_changed,
-        ))
-        self._body_layout.addWidget(self._meta_combo_row(
-            "dose units", "injected_radioactivity_units",
-            [""] + list(RADIOACTIVITY_UNITS),
-            self._pet_eff(row, "injected_radioactivity_units"), "",
-            setter=self._on_pet_field_changed, editable=True,
-        ))
-        self._body_layout.addWidget(self._meta_combo_row(
-            "administration", "mode_of_administration",
-            [""] + list(MODES_OF_ADMINISTRATION),
-            self._pet_eff(row, "mode_of_administration"), "",
-            setter=self._on_pet_field_changed, editable=True,
-        ))
-
-        self._body_layout.addSpacing(8)
-        self._body_layout.addWidget(self._divider())
-        self._body_layout.addWidget(self._section_header(
-            "ACQUISITION", "sub-..._pet.json", agnostic=False, tag="PET"))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "time zero", "time_zero", self._pet_eff(row, "time_zero"),
-            setter=self._on_pet_field_changed,
-        ))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "scan start", "scan_start", self._pet_eff(row, "scan_start"),
-            setter=self._on_pet_field_changed,
-        ))
-        self._body_layout.addWidget(self._meta_combo_row(
-            "units", "units", [""] + list(PET_IMAGE_UNITS),
-            self._pet_eff(row, "units"), "",
-            setter=self._on_pet_field_changed, editable=True,
-        ))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "body part", "body_part", self._pet_eff(row, "body_part"),
-            setter=self._on_pet_field_changed,
-        ))
-        # PET can be 4-D; the PSD action is meaningless here, but a per-row
-        # metadata block still benefits from the same compute affordance the
-        # EEG/MEG rows have. Left out deliberately rather than stubbed.
 
     def _pet_eff(self, row: int, field: str) -> str:
         """Effective per-row PET value (scaffold override else dataset default)."""
@@ -808,117 +738,178 @@ class PropertiesPanel(QWidget):
         ))
 
     def _append_recording_section(self, row: int, datatype: str) -> None:
-        """EEG/MEG/iEEG/NIRS recording-sidecar fields -> sub-..._<datatype>.json.
+        """The conversion inputs an electrophysiology row needs from the user.
 
-        Up to three BIDS-aligned sub-sections: an Acquisition block (device +
-        line frequency - shared by all electrophysiology sidecars), a Reference
-        & montage block (EEG/iEEG only - MEG and NIRS have no scalp
-        reference/ground/montage), and a MEG-acquisition block (MEG only).
-        Institution is agnostic and lives in the Dataset-metadata dialog, NOT
-        here. Inheritance fields show the EFFECTIVE value (per-row override, else
-        the dataset default); writing the default clears the override.
+        Not sidecar fields, which the section below now asks for from the
+        schema. These three are decisions the CONVERSION depends on and that no
+        BIDS field expresses: which montage to apply, what the mains frequency
+        was where nothing recorded it, and where the reference and ground sat.
+        A montage in particular has no BIDS name at all: it names an electrode
+        layout to attach, not a value to write.
+
+        They are inventory columns rather than scaffold entries because a user
+        needs to see them in the table, sort by them, and set fifty rows at
+        once. Editing them here writes the same cell.
         """
         mod = _modality_label(datatype)
         show_montage = datatype in ("eeg", "ieeg")
         show_ref_ground = datatype in ("eeg", "ieeg")
-        show_cap = datatype == "eeg"
 
-        # --- Acquisition: device + line frequency (the recording's hardware).
-        # Institution is agnostic (set once for the dataset in Dataset metadata),
-        # NOT here. Device overrides live in the scaffold's overrides[row_id]
-        # (not a TSV column); each inherits the dataset default until set, and
-        # clearing it (or matching the default) restores inheritance.
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "ACQUISITION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
+            "CONVERSION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
         lf = self._eff(row, "line_freq")
         lf = lf[:-2] if lf.endswith(".0") else lf
         self._body_layout.addWidget(self._meta_combo_row(
             "line_freq", "line_freq", ["(blank)", "50", "60"], lf, "(blank)",
         ))
-        # Compute-PSD action, directly below the line-frequency field. Reads the
-        # recording on a background thread and shows the same interactive PSD
-        # dialog as the Editor's recording viewer.
+        # Compute-PSD action, directly below the line-frequency field: the
+        # spectrum is how you find out which of 50 and 60 this recording is.
         self._body_layout.addWidget(self._build_psd_row(row))
-        self._body_layout.addWidget(self._meta_combo_row(
-            "manufacturer", "manufacturer",
-            [""] + list(COMMON_MANUFACTURERS), self._acq_eff(row, "manufacturer"), "",
-            setter=self._on_acq_field_changed, editable=True,
-        ))
-        # Scan-detected/inferred manufacturer, shown like the montage match (a
-        # read-only suggestion; not auto-applied - mne-bids fills MEG itself).
-        manuf_sugg = self._cell(row, "manufacturer_suggestion")
-        if manuf_sugg:
-            self._body_layout.addWidget(
-                self._scan_hint("manufacturer", "scan detected", manuf_sugg))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "model", "amplifier_model", self._acq_eff(row, "amplifier_model"),
-            setter=self._on_acq_field_changed,
-        ))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "software", "software_versions", self._acq_eff(row, "software_versions"),
-            setter=self._on_acq_field_changed,
-        ))
-
-        # --- Reference & montage: EEG/iEEG scalp fields only.
-        if show_montage or show_ref_ground:
-            self._body_layout.addSpacing(8)
-            self._body_layout.addWidget(self._divider())
-            self._body_layout.addWidget(self._section_header(
-                "REFERENCE & MONTAGE",
-                f"sub-..._{datatype}.json + electrodes.tsv",
-                agnostic=False, tag=mod))
-            if show_ref_ground:
-                self._body_layout.addWidget(self._meta_edit_row(
-                    "reference", "eeg_reference", self._eff(row, "eeg_reference"),
-                ))
-                self._body_layout.addWidget(self._meta_edit_row(
-                    "ground", "eeg_ground", self._eff(row, "eeg_ground"),
-                ))
-            if show_montage:
-                self._body_layout.addWidget(self._meta_combo_row(
-                    "montage", "montage",
-                    ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
-                ))
-                # Surface the scan's best channel-name match as a read-only hint
-                # so the user can pick the montage with confidence (the scan does
-                # not auto-fill it).
-                suggestion = self._cell(row, "montage_suggestion")
-                if suggestion:
-                    self._body_layout.addWidget(self._montage_hint(suggestion))
-            if show_cap:
-                self._body_layout.addWidget(self._meta_combo_row(
-                    "cap", "cap_manufacturer",
-                    [""] + list(COMMON_CAP_MANUFACTURERS),
-                    self._acq_eff(row, "cap_manufacturer"), "",
-                    setter=self._on_acq_field_changed, editable=True,
-                ))
-
-        # --- MEG-specific acquisition (MEG only). Only fields mne-bids cannot
-        # derive from the recording: dewar position, the empty-room link, and
-        # the artefact note. Channel-derived MEG facts (head localization,
-        # digitized landmarks/head points, ...) are filled by mne-bids.
-        if datatype == "meg":
-            self._body_layout.addSpacing(8)
-            self._body_layout.addWidget(self._divider())
-            self._body_layout.addWidget(self._section_header(
-                "MEG ACQUISITION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
+        if show_ref_ground:
+            self._body_layout.addWidget(self._meta_edit_row(
+                "reference", "eeg_reference", self._eff(row, "eeg_reference"),
+            ))
+            self._body_layout.addWidget(self._meta_edit_row(
+                "ground", "eeg_ground", self._eff(row, "eeg_ground"),
+            ))
+        if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
-                "dewar", "dewar_position", ["", "upright", "supine"],
-                self._acq_eff(row, "dewar_position"), "",
-                setter=self._on_acq_field_changed, editable=True,
+                "montage", "montage",
+                ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
             ))
-            self._body_layout.addWidget(self._meta_edit_row(
-                "empty room", "associated_empty_room",
-                self._acq_eff(row, "associated_empty_room"),
-                setter=self._on_acq_field_changed,
-            ))
-            self._body_layout.addWidget(self._meta_edit_row(
-                "artefacts", "subject_artefact_description",
-                self._acq_eff(row, "subject_artefact_description"),
-                setter=self._on_acq_field_changed,
-            ))
+            # The scan's best channel-name match, shown read-only so the user
+            # can pick with confidence. Never applied on its own.
+            suggestion = self._cell(row, "montage_suggestion")
+            if suggestion:
+                self._body_layout.addWidget(self._montage_hint(suggestion))
+
+    # ------------------------------------------------------------------
+    # The schema-driven sidecar section, for this recording alone
+    # ------------------------------------------------------------------
+
+    def _append_sidecar_section(self, row: int, datatype: str, suffix: str) -> None:
+        """Everything the standard lets this file carry, answered per recording.
+
+        The same definition the dataset dialog renders, at a scope one step
+        down. Before this the panel wrote its own sections, so which fields a
+        user could state depended on which surface they happened to open, and
+        the two lists disagreed. Now there is one list, and the dialog says what
+        is true of every ``*_eeg.json`` while this says what is true of THIS one.
+
+        Unlike the dialog, it keeps the fields a converter usually fills. That
+        is not an oversight: correcting the one recording whose header lies is
+        exactly what a per-row answer is for, and refusing to show the field
+        would leave no way to do it.
+
+        Each control opens showing what the file will actually say, whichever
+        layer said it, with the layer named in the tooltip. Answering here
+        overrides that for this recording; clearing it hands the field back.
+        """
+        if self._model is None or not datatype:
+            return
+        section = sidecar_section(
+            datatype, suffix or datatype,
+            self._sidecar_example_path(row, datatype, suffix),
+            include_derived=True,
+        )
+        if not section.fields:
+            return
+
+        resolved = self._model.resolved_sidecar(row)
+        stated = self._model.row_template(row)
+        filename = section.target.rpartition("/")[2]
+
+        box = CollapsibleSection(
+            "Sidecar fields",
+            subtitle=filename,
+            badge=f"{len(section.fields)} fields",
+            expanded=self._sidecar_expanded,
+        )
+        box.toggled_by_user.connect(self._remember_sidecar_expanded)
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(box)
+        box.add(level_legend(colour=True))
+
+        for field in section.fields:
+            widget = build_field_widget(field, self._field_suggestions(row, field.name))
+            answer = resolved.get(field.name)
+            if answer is not None:
+                write_field_widget(widget, answer.value)
+
+            tip = field.description or ""
+            if answer is not None and field.name not in stated:
+                # Inherited: say where from, so a value that appears out of
+                # nowhere is accountable rather than mysterious.
+                origin = self._model.sidecar_origin(row, field.name)
+                tip = (tip + "\n\n" if tip else "") + f"Currently from {origin}."
+            if tip:
+                widget.setToolTip(tip)
+
+            connect_field_widget(
+                widget, lambda f=field, w=widget: self._on_sidecar_field_changed(f, w),
+            )
+            label = QLabel(field_label(field, colour=True))
+            label.setTextFormat(Qt.TextFormat.RichText)
+            if tip:
+                label.setToolTip(tip)
+            holder = QWidget()
+            holder.setObjectName("meta-row")
+            holder.setStyleSheet("#meta-row { background: transparent; }")
+            line = QHBoxLayout(holder)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            label.setMinimumWidth(140)
+            label.setMaximumWidth(140)
+            label.setWordWrap(True)
+            line.addWidget(label)
+            line.addWidget(widget, 1)
+            box.add(holder)
+
+    def _sidecar_example_path(self, row: int, datatype: str, suffix: str) -> str:
+        """The name of the file this row will produce, for the section heading."""
+        if self._model is None:
+            return ""
+        basename = self._cell(row, "proposed_basename")
+        return f"{datatype}/{basename}.json" if basename else ""
+
+    def _field_suggestions(self, row: int, name: str) -> tuple:
+        """Values BIDS Manager offers that the standard does not.
+
+        Two sources: the vocabularies we curate, and whatever the scan read out
+        of THIS recording's own header. Neither is applied on its own, because a
+        vendor string can always parse wrongly and a wrong answer is worse than
+        a blank one.
+        """
+        curated: tuple = {
+            "Manufacturer": tuple(COMMON_MANUFACTURERS),
+            "CapManufacturer": tuple(COMMON_CAP_MANUFACTURERS),
+            "TracerName": tuple(COMMON_TRACERS),
+            "TracerRadionuclide": tuple(COMMON_RADIONUCLIDES),
+            "ModeOfAdministration": tuple(MODES_OF_ADMINISTRATION),
+            "InjectedRadioactivityUnits": tuple(RADIOACTIVITY_UNITS),
+            "Units": tuple(PET_IMAGE_UNITS),
+        }.get(name, ())
+        scanned = {
+            "Manufacturer": "manufacturer_suggestion",
+            "TracerName": "tracer_suggestion",
+            "TracerRadionuclide": "radionuclide_suggestion",
+            "InjectedRadioactivity": "injected_dose_suggestion",
+        }.get(name, "")
+        hint = self._cell(row, scanned) if scanned else ""
+        return ((hint,) if hint and hint not in curated else ()) + curated
+
+    def _remember_sidecar_expanded(self, expanded: bool) -> None:
+        self._sidecar_expanded = expanded
+
+    def _on_sidecar_field_changed(self, field, widget) -> None:
+        """Commit one sidecar answer against this recording."""
+        if self._suppress_writeback or self._model is None or self._row is None:
+            return
+        self._model.set_row_template_field(
+            self._row, field.name, read_field_widget(widget, field),
+        )
 
     # ------------------------------------------------------------------
     # PSD compute (per-row, threaded, mirrors the Editor recording viewer)

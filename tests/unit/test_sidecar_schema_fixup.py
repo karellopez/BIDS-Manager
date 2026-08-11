@@ -8,6 +8,7 @@ being a hand-written list.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -175,3 +176,89 @@ def test_rerunning_changes_nothing(tmp_path: Path) -> None:
     )
     assert repair_sidecars(root, [], None) == 1
     assert repair_sidecars(root, [], None) == 0
+
+
+# ---------------------------------------------------------------------------
+# The row layer
+#
+# A correction aimed at ONE recording has to reach that recording's sidecar and
+# no other. The pass walks files, not rows, so it has to be told which row
+# produced which file; these lock that down.
+# ---------------------------------------------------------------------------
+
+
+def _task(row_id: str, basename: str):
+    """The two attributes the pass reads off a conversion task."""
+    return SimpleNamespace(row_id=row_id, basename=basename)
+
+
+def test_a_row_answer_reaches_only_that_rows_sidecar(tmp_path: Path) -> None:
+    root = tmp_path / "staging"
+    anat = root / "sub-001" / "anat"
+    anat.mkdir(parents=True)
+    for name in ("sub-001_T1w", "sub-002_T1w"):
+        (anat / f"{name}.json").write_text(json.dumps({"EchoTime": 0.03}))
+
+    spec = RecordingMetaSpec()
+    spec.row_templates["/raw/one"] = {"InstitutionName": "Only mine"}
+
+    repair_sidecars(
+        root,
+        [_task("/raw/one", "sub-001_T1w"), _task("/raw/two", "sub-002_T1w")],
+        spec,
+    )
+    mine = json.loads((anat / "sub-001_T1w.json").read_text())
+    theirs = json.loads((anat / "sub-002_T1w.json").read_text())
+    assert mine["InstitutionName"] == "Only mine"
+    assert "InstitutionName" not in theirs
+
+
+def test_a_row_answer_overrides_what_the_converter_wrote(tmp_path: Path) -> None:
+    """The file's own header normally stands. This recording contradicting it
+    is the exception, and the only reason a per-row answer exists."""
+    root = tmp_path / "staging"
+    anat = root / "sub-001" / "anat"
+    anat.mkdir(parents=True)
+    (anat / "sub-001_T1w.json").write_text(
+        json.dumps({"InstitutionName": "read from the DICOM"})
+    )
+
+    spec = RecordingMetaSpec()
+    spec.row_templates["/raw/one"] = {"InstitutionName": "the correct one"}
+
+    repair_sidecars(root, [_task("/raw/one", "sub-001_T1w")], spec)
+    data = json.loads((anat / "sub-001_T1w.json").read_text())
+    assert data["InstitutionName"] == "the correct one"
+
+
+def test_a_backend_suffix_still_matches_its_row(tmp_path: Path) -> None:
+    """dcm2niix appends its own tail for echoes and phase images. Those are
+    still that row's outputs."""
+    root = tmp_path / "staging"
+    func = root / "sub-001" / "func"
+    func.mkdir(parents=True)
+    (func / "sub-001_task-rest_bold_e2.json").write_text(json.dumps({}))
+
+    spec = RecordingMetaSpec()
+    spec.row_templates["/raw/one"] = {"InstitutionName": "matched anyway"}
+
+    repair_sidecars(root, [_task("/raw/one", "sub-001_task-rest_bold")], spec)
+    data = json.loads((func / "sub-001_task-rest_bold_e2.json").read_text())
+    assert data["InstitutionName"] == "matched anyway"
+
+
+def test_a_pet_block_reaches_the_sidecar_through_the_chain(tmp_path: Path) -> None:
+    """PET used to be resolved only by its own fixup, so a dose imported from a
+    lab spreadsheet never appeared in the form claiming to show what the file
+    would say. Both now read one chain."""
+    root = tmp_path / "staging"
+    pet = root / "sub-001" / "pet"
+    pet.mkdir(parents=True)
+    (pet / "sub-001_pet.json").write_text(json.dumps({}))
+
+    spec = RecordingMetaSpec()
+    spec.pet_defaults.mode_of_administration = "bolus"
+
+    repair_sidecars(root, [_task("/raw/one", "sub-001_pet")], spec)
+    data = json.loads((pet / "sub-001_pet.json").read_text())
+    assert data["ModeOfAdministration"] == "bolus"

@@ -28,7 +28,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
-from ..recording_meta import PetAcquisitionSpec, RecordingMetaSpec, resolve_pet
+from ..recording_meta import (
+    PET_LIST_TO_BIDS,
+    PET_SCALAR_TO_BIDS,
+    PetAcquisitionSpec,
+    RecordingMetaSpec,
+    resolve_pet,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,50 +91,7 @@ NON_BIDS_KEYS: frozenset[str] = frozenset({
 })
 
 # spec field -> BIDS sidecar key, for the values that map straight across.
-_SCALAR_FIELDS: dict[str, str] = {
-    "tracer_name": "TracerName",
-    "tracer_radionuclide": "TracerRadionuclide",
-    "tracer_molecular_weight": "TracerMolecularWeight",
-    "tracer_molecular_weight_units": "TracerMolecularWeightUnits",
-    "tracer_radlex": "TracerRadLex",
-    "tracer_snomed": "TracerSNOMED",
-    "injected_radioactivity": "InjectedRadioactivity",
-    "injected_radioactivity_units": "InjectedRadioactivityUnits",
-    "injected_mass": "InjectedMass",
-    "injected_mass_units": "InjectedMassUnits",
-    "specific_radioactivity": "SpecificRadioactivity",
-    "specific_radioactivity_units": "SpecificRadioactivityUnits",
-    "molar_activity": "MolarActivity",
-    "molar_activity_units": "MolarActivityUnits",
-    "injected_volume": "InjectedVolume",
-    "purity": "Purity",
-    "mode_of_administration": "ModeOfAdministration",
-    "injection_start": "InjectionStart",
-    "injection_end": "InjectionEnd",
-    "infusion_radioactivity": "InfusionRadioactivity",
-    "infusion_start": "InfusionStart",
-    "infusion_speed": "InfusionSpeed",
-    "infusion_speed_units": "InfusionSpeedUnits",
-    "time_zero": "TimeZero",
-    "scan_start": "ScanStart",
-    "acquisition_mode": "AcquisitionMode",
-    "image_decay_corrected": "ImageDecayCorrected",
-    "image_decay_correction_time": "ImageDecayCorrectionTime",
-    "attenuation_correction": "AttenuationCorrection",
-    "units": "Units",
-    "body_part": "BodyPart",
-    "recon_method_name": "ReconMethodName",
-    "recon_filter_type": "ReconFilterType",
-    "recon_filter_size": "ReconFilterSize",
-    "manufacturer": "Manufacturer",
-    "manufacturers_model_name": "ManufacturersModelName",
-}
 
-_LIST_FIELDS: dict[str, str] = {
-    "recon_method_parameter_labels": "ReconMethodParameterLabels",
-    "recon_method_parameter_units": "ReconMethodParameterUnits",
-    "recon_method_parameter_values": "ReconMethodParameterValues",
-}
 
 @lru_cache(maxsize=1)
 def _array_typed_keys() -> frozenset[str]:
@@ -260,11 +223,11 @@ def _apply_sidecar(
     # 2. fill from the spec. A user value always wins: it is a deliberate
     #    statement, where the converter's is an inference.
     if pet is not None:
-        for field, key in _SCALAR_FIELDS.items():
+        for field, key in PET_SCALAR_TO_BIDS.items():
             value = getattr(pet, field, None)
             if value is not None and value != "":
                 data[key] = value
-        for field, key in _LIST_FIELDS.items():
+        for field, key in PET_LIST_TO_BIDS.items():
             value = getattr(pet, field, None)
             if value:
                 data[key] = list(value)

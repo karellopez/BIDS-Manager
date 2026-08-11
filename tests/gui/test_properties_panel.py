@@ -367,20 +367,62 @@ def test_montage_match_rate_shown_for_eeg(qtbot) -> None:
     assert hints, "montage match-rate hint should be shown"
 
 
-def test_meg_row_has_meg_acquisition_section(qtbot) -> None:
-    """A MEG row shows a MEG ACQUISITION sub-section (and no scalp montage)."""
-    from PyQt6.QtWidgets import QLabel
+def test_meg_row_can_state_a_meg_only_field(qtbot) -> None:
+    """A MEG row is asked about the dewar; the answer is kept for that row.
+
+    The MEG ACQUISITION box that used to hold this is gone. The field is not:
+    it comes from the schema now, with the rest of what a *_meg.json may carry,
+    so nothing had to be listed in code for it to be here.
+    """
     row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg",
                    proposed_basename="sub-001_task-rest_meg", montage_suggestion="")
     panel, m = _build_panel_with_model(qtbot, row)
     from bidsmgr.recording_meta import default_spec
     m.set_global_spec(default_spec()); panel.set_selected_row(0)
-    texts = [w.text() for w in panel._body.findChildren(QLabel)]
-    assert any("MEG ACQUISITION" in t for t in texts)
-    assert not any("REFERENCE & MONTAGE" in t for t in texts)
-    # The MEG manual field (dewar position) writes through the override path.
-    panel._on_acq_field_changed("dewar_position", "supine")
-    assert m.global_spec().overrides["sub-001/rec.edf"].dewar_position == "supine"
+
+    m.set_row_template_field(0, "DewarPosition", "supine")
+    assert m.row_template(0) == {"DewarPosition": "supine"}
+    assert m.resolved_sidecar(0)["DewarPosition"].origin == "row"
+
+
+def test_a_row_says_where_an_inherited_value_came_from(qtbot) -> None:
+    """A value the row did not state is attributed, not left mysterious."""
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg",
+                   proposed_basename="sub-001_task-rest_meg")
+    panel, m = _build_panel_with_model(qtbot, row)
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
+    m.set_global_spec(spec)
+    panel.set_selected_row(0)
+
+    assert m.resolved_sidecar(0)["InstitutionName"].value == "Oldenburg"
+    assert m.sidecar_origin(0, "InstitutionName") == "the meg defaults"
+
+
+def test_echoing_an_inherited_value_stores_nothing(qtbot) -> None:
+    """Otherwise today's inherited answer freezes into the row, and a later
+    change to the dataset default would skip this one recording."""
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg")
+    panel, m = _build_panel_with_model(qtbot, row)
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
+    m.set_global_spec(spec)
+    panel.set_selected_row(0)
+
+    m.set_row_template_field(0, "InstitutionName", "Oldenburg")
+    assert m.row_template(0) == {}
+
+
+def test_a_field_the_table_carries_is_written_to_the_table(qtbot) -> None:
+    """One home per field. PowerLineFrequency is the line_freq column, so
+    answering it in the form must not make a second copy in the scaffold."""
+    row = _eeg_row()
+    panel, m = _build_panel_with_model(qtbot, row)
+    m.set_row_template_field(0, "PowerLineFrequency", "50")
+    assert str(m.dataframe().iloc[0]["line_freq"]) == "50"
+    assert "PowerLineFrequency" not in m.row_template(0)
 
 
 def test_minimal_metadata_title_present(qtbot) -> None:
@@ -390,15 +432,16 @@ def test_minimal_metadata_title_present(qtbot) -> None:
     assert any("MINIMAL METADATA" in t for t in texts)
 
 
-def test_manufacturer_suggestion_hint_shown(qtbot) -> None:
-    """The scan-detected/inferred manufacturer shows as a read-only hint
-    next to the manufacturer field (like the montage match)."""
-    from PyQt6.QtWidgets import QLabel
+def test_manufacturer_suggestion_is_offered_not_applied(qtbot) -> None:
+    """What the scan read out of this recording's header is offered as a choice.
+
+    It is not filled in: a vendor string can always parse wrongly, and a wrong
+    manufacturer is worse than a blank one.
+    """
     row = _eeg_row(manufacturer_suggestion="Brain Products")
-    panel, _m = _build_panel_with_model(qtbot, row)
-    hints = [w.text() for w in panel._body.findChildren(QLabel)
-             if "scan detected" in w.text() and "Brain Products" in w.text()]
-    assert hints
+    panel, m = _build_panel_with_model(qtbot, row)
+    assert "Brain Products" in panel._field_suggestions(0, "Manufacturer")
+    assert "Manufacturer" not in m.row_template(0)
 
 
 def test_per_row_has_no_institution_field(qtbot) -> None:
@@ -432,9 +475,10 @@ def test_nirs_row_has_no_reference_montage_section(qtbot) -> None:
     panel, _m = _build_panel_with_model(qtbot, row)
     texts = [w.text() for w in panel._body.findChildren(QLabel)]
     assert any("MODALITY-SPECIFIC" in t for t in texts)   # still modality-specific
-    assert any("ACQUISITION" in t for t in texts)         # device/institution block
-    assert not any("REFERENCE & MONTAGE" in t for t in texts)
+    assert any("CONVERSION" in t for t in texts)          # line frequency lives there
     assert not any("montage match" in t for t in texts)   # no montage hint
+    # Reference and ground are scalp-EEG concepts; NIRS is never asked.
+    assert not any(t.startswith("reference") or t.startswith("ground") for t in texts)
 
 
 # ---------------------------------------------------------------------------

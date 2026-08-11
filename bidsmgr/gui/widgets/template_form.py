@@ -63,6 +63,11 @@ class _RowList(QWidget):
     which it is holding.
     """
 
+    # Emitted whenever the list's contents settle: a row added, removed, or
+    # finished being typed into. The dialog saves on a button and ignores this;
+    # the properties panel commits as you go and needs it.
+    changed = pyqtSignal()
+
     def __init__(
         self,
         make_row: Callable[[], tuple[QWidget, Callable[[], Any], Callable[[Any], None]]],
@@ -111,8 +116,13 @@ class _RowList(QWidget):
             row.setParent(None)
             if not self._rows:
                 self.add_row()
+            self.changed.emit()
 
         remove.clicked.connect(drop)
+        for edit in widget.findChildren(QLineEdit) or (
+            [widget] if isinstance(widget, QLineEdit) else []
+        ):
+            edit.editingFinished.connect(self.changed)
 
     def value(self) -> list:
         out = []
@@ -239,6 +249,26 @@ def build_field_widget(field, suggestions: tuple = ()) -> QWidget:
     else:
         edit.setProperty("template_kind", "text")
     return edit
+
+
+def connect_field_widget(widget: QWidget, on_change) -> None:
+    """Call ``on_change`` whenever this control's value settles.
+
+    Which signal that is depends on the kind of control, so it is decided here
+    rather than by each caller: the dataset dialog saves on a button and needs
+    none of this, while the properties panel commits as you type, and neither
+    should have to know that a boolean is a combo and a list is not.
+    """
+    kind = widget.property("template_kind")
+    if kind in ("people", "list"):
+        widget.changed.connect(on_change)
+        return
+    if isinstance(widget, QComboBox):
+        widget.activated.connect(lambda _i: on_change())
+        if widget.isEditable():
+            widget.lineEdit().editingFinished.connect(on_change)
+        return
+    widget.editingFinished.connect(on_change)
 
 
 def read_field_widget(widget: QWidget, field) -> Any:
@@ -455,6 +485,7 @@ __all__ = [
     "TemplateTree",
     "PEOPLE_FIELDS",
     "build_field_widget",
+    "connect_field_widget",
     "fit_popup_to_contents",
     "field_label",
     "level_legend",

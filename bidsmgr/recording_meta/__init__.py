@@ -28,6 +28,8 @@ from .chain import (
     resolve_attribute,
     ResolvedField,
     resolve_sidecar_fields,
+    PET_LIST_TO_BIDS,
+    PET_SCALAR_TO_BIDS,
 )
 from .templates import (
     parse_template_key,
@@ -85,6 +87,8 @@ __all__ = [
     "resolve_attribute",
     "ResolvedField",
     "resolve_sidecar_fields",
+    "PET_LIST_TO_BIDS",
+    "PET_SCALAR_TO_BIDS",
     "VARIES",
     "is_varies",
     "parse_template_key",

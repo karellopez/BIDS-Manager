@@ -159,6 +159,7 @@ def apply_sequence_template(
     suffix: str,
     task: Optional[str],
     spec: Optional[RecordingMetaSpec],
+    row_id: str = "",
 ) -> int:
     """Write what the chain resolved for this file. Returns how many landed.
 
@@ -169,9 +170,13 @@ def apply_sequence_template(
 
     An existing value stands unless this recording itself contradicts it: the
     file's own header beats a statement about a class of files, and correcting
-    one specific file is what a row override is for.
+    one specific file is what a row override is for. That is why ``row_id``
+    matters here: without it this pass could not tell the difference between a
+    template's opinion and a correction aimed at exactly this file.
     """
-    resolved = resolve_sidecar_fields(spec, datatype, suffix, task=task)
+    resolved = resolve_sidecar_fields(
+        spec, datatype, suffix, row_id=row_id, task=task,
+    )
     written = 0
     for name, field in resolved.items():
         if name in data and not field.is_row_override:
@@ -192,10 +197,14 @@ def repair_sidecars(
 
     Walks the staged sidecars rather than the task list, so a sidecar the
     backend wrote for an output we did not enumerate (a fieldmap split, a
-    multi-echo series) is repaired too.
+    multi-echo series) is repaired too. The task list is still consulted, but
+    only to name which row produced which file, so a correction made against one
+    recording in the properties panel reaches that recording's sidecar and no
+    other. A file no task claims is repaired all the same, minus that layer.
     """
     from ..editor.bidsmgr_checks import infer_datatype_suffix
 
+    row_by_basename = _row_ids_by_basename(tasks)
     changed = 0
     for sidecar in sorted(staging.rglob("*.json")):
         if ".bidsmgr" in sidecar.parts:
@@ -215,6 +224,7 @@ def repair_sidecars(
         n += repair_array_types(data, datatype, suffix)
         n += apply_sequence_template(
             data, datatype, suffix, _task_of(sidecar), spec,
+            row_id=_row_id_for(sidecar, row_by_basename),
         )
         n += fill_agnostic_fields(data, datatype, suffix, spec)
         if not n or json.dumps(data, sort_keys=True) == before:
@@ -238,6 +248,32 @@ def _task_of(path: Path) -> Optional[str]:
     """The BIDS task label in a filename, if it carries one."""
     m = _TASK_RE.search(path.name)
     return m.group(1) if m else None
+
+
+def _row_ids_by_basename(tasks) -> dict[str, str]:
+    """Which inventory row produced each basename we converted."""
+    out: dict[str, str] = {}
+    for task in tasks or ():
+        basename = str(getattr(task, "basename", "") or "")
+        row_id = str(getattr(task, "row_id", "") or "")
+        if basename and row_id:
+            out[basename] = row_id
+    return out
+
+
+def _row_id_for(sidecar: Path, row_by_basename: dict[str, str]) -> str:
+    """The row that produced this sidecar, by its basename.
+
+    A backend may add its own tail to a name it was given: dcm2niix writes
+    ``..._bold_e2`` for a second echo and ``..._ph`` for a phase image. Those
+    are still that row's outputs, so the longest task basename the filename
+    starts with wins, and an unmatched file simply has no row layer.
+    """
+    stem = sidecar.name[: -len(".json")]
+    if stem in row_by_basename:
+        return row_by_basename[stem]
+    matches = [b for b in row_by_basename if stem.startswith(b)]
+    return row_by_basename[max(matches, key=len)] if matches else ""
 
 
 __all__ = [
