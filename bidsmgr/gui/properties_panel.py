@@ -125,7 +125,7 @@ class _EntityRow(QWidget):
 
         label_text = entity_name
         lbl = QLabel(label_text)
-        lbl.setMinimumWidth(76)
+        lbl.setMinimumWidth(0)
         lbl.setMaximumWidth(76)
         pal = CUR()
         css_color = pal["text"] if required else pal["dim"]
@@ -203,6 +203,10 @@ class PropertiesPanel(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._body)
+        # A scroll area otherwise reports its contents' minimum as its own, so
+        # the pane could not be squeezed past whatever the widest card wanted.
+        scroll.setMinimumWidth(0)
+        scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         outer.addWidget(scroll, 1)
 
         # Build the initial empty body (just a hint).
@@ -415,7 +419,7 @@ class PropertiesPanel(QWidget):
 
         pal = CUR()
         lbl = QLabel(label_text)
-        lbl.setMinimumWidth(76)
+        lbl.setMinimumWidth(0)
         lbl.setMaximumWidth(76)
         suffix = f' <span style="color:{pal["error"]}">*</span>' if required else ""
         lbl.setText(f'<span style="color:{pal["text"]}">{label_text}</span>{suffix}')
@@ -707,6 +711,11 @@ class PropertiesPanel(QWidget):
         )
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setStyleSheet(f"font-size: {scaled_px(10)}px; background: transparent;")
+        # Wrap rather than set a floor: these carry a title plus a destination
+        # path, and a plain QLabel reports all of it as its minimum width.
+        lbl.setWordWrap(True)
+        lbl.setMinimumWidth(0)
+        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         return lbl
 
     def _append_participant_section(self, row: int) -> None:
@@ -750,11 +759,6 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._section_header(
             "CONVERSION", "electrodes.tsv + coordsystem.json",
             agnostic=False, tag=_modality_label(datatype)))
-
-        # Reading the recording is how you find out which of 50 and 60 the
-        # mains was, so the action sits with the recording rather than with the
-        # field it informs.
-        self._body_layout.addWidget(self._build_psd_row(row))
 
         if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
@@ -840,12 +844,22 @@ class PropertiesPanel(QWidget):
             line = QHBoxLayout(holder)
             line.setContentsMargins(0, 0, 0, 0)
             line.setSpacing(8)
-            label.setMinimumWidth(140)
-            label.setMaximumWidth(140)
+            # No fixed column: a 33-character field name would set a floor for
+            # the whole pane. It wraps and asks for nothing instead.
             label.setWordWrap(True)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(160)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+            )
             line.addWidget(label)
             line.addWidget(widget, 1)
             box.add(holder)
+            # Reading the spectrum is how you find out which of 50 and 60 the
+            # mains was, so the action sits directly under the field it answers
+            # rather than in a block of its own.
+            if field.name == "PowerLineFrequency" and datatype in _EEG_MEG_DATATYPES:
+                box.add(self._build_psd_row(row))
 
     def _sidecar_example_path(self, row: int, datatype: str, suffix: str) -> str:
         """The name of the file this row will produce, for the section heading."""
@@ -1144,7 +1158,7 @@ class PropertiesPanel(QWidget):
         h.setSpacing(8)
         tip = tooltip_for(key)
         lbl = QLabel(label)
-        lbl.setMinimumWidth(76)
+        lbl.setMinimumWidth(0)
         lbl.setMaximumWidth(76)
         lbl.setStyleSheet(f"color: {CUR()['dim']};")
         if tip:
@@ -1192,7 +1206,7 @@ class PropertiesPanel(QWidget):
         h.setSpacing(8)
         tip = tooltip_for(key)
         lbl = QLabel(label)
-        lbl.setMinimumWidth(76)
+        lbl.setMinimumWidth(0)
         lbl.setMaximumWidth(76)
         lbl.setStyleSheet(f"color: {CUR()['dim']};")
         if tip:

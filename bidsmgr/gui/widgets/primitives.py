@@ -153,12 +153,44 @@ class VSep(QFrame):
 
 
 class PaneHeader(QLabel):
-    """28px uppercase header used at the top of every splitter pane."""
+    """28px uppercase header used at the top of every splitter pane.
+
+    It elides rather than setting a floor. A pane header carries a name and
+    often a path, and a plain QLabel reports all of it as its MINIMUM width, so
+    the header alone stopped the Properties pane narrowing past 191 px however
+    small its contents could go.
+    """
 
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text.upper(), parent)
         self.setObjectName("pane-h5")
         self.setFixedHeight(28)
+        self._full = text.upper()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._full = text
+        super().setText(text)
+        self.setToolTip(text)
+        self._elide()
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        room = max(0, self.width() - 12)
+        if not self._full or not room:
+            return
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, room,
+        )
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
 
 
 class ElidedLabel(QLabel):

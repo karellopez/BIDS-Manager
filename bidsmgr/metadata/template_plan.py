@@ -49,6 +49,12 @@ class TemplateField:
     unit: str = ""
     description: str = ""
     conditional: bool = False
+    # Why this field is being asked about, which is not the same question as
+    # what it means. Either no backend ever supplies it, or one usually does
+    # and this dataset's files do not carry it. The second case is worth saying
+    # out loud: it often means the answer exists at the scanner, or that an
+    # anonymiser stripped it, and the user can go and get it.
+    origin: str = "not in the data"
 
     @property
     def is_required(self) -> bool:
@@ -102,7 +108,12 @@ class TemplateSection:
         return tuple(f for f in self.fields if f.is_required)
 
 
-def _as_template_field(spec) -> TemplateField:
+# How a field's absence reads to a user.
+ORIGIN_ABSENT = "not in the data"
+ORIGIN_USUALLY_DERIVED = "usually read from the data, but missing here"
+
+
+def _as_template_field(spec, origin: str = ORIGIN_ABSENT) -> TemplateField:
     return TemplateField(
         name=spec.name,
         level=spec.level,
@@ -112,6 +123,7 @@ def _as_template_field(spec) -> TemplateField:
         unit=spec.unit,
         description=spec.description,
         conditional=spec.conditional,
+        origin=origin,
     )
 
 
@@ -196,8 +208,15 @@ def sidecar_section(
         } | CONVERTER_PRIVATE
     else:
         skip = derived_fields(datatype) | CONVERTER_PRIVATE
+    # A field a converter USUALLY supplies but this dataset's files do not
+    # carry. Worth saying so: it usually means the value exists at the scanner,
+    # or that an anonymiser removed it, either of which the user can act on.
+    usually = derived_fields(datatype)
     fields = [
-        _as_template_field(s)
+        _as_template_field(
+            s,
+            ORIGIN_USUALLY_DERIVED if s.name in usually else ORIGIN_ABSENT,
+        )
         for s in specs
         # A speculative requirement is one the schema imposes only in a
         # scenario this file may not be in; the form must not demand it.
@@ -508,6 +527,8 @@ __all__ = [
     "REGION_MODALITY",
     "STORAGE_DATASET_DESCRIPTION",
     "STORAGE_SEQUENCE_TEMPLATE",
+    "ORIGIN_ABSENT",
+    "ORIGIN_USUALLY_DERIVED",
     "TemplateField",
     "TemplateNode",
     "TemplateSection",

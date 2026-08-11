@@ -476,17 +476,95 @@ __all__ = [
 # Units and modes are here for a concrete reason: BIDS accepts free text, so a
 # lab typing "mbq" instead of "MBq" fails validation for nothing.
 CURATED_SUGGESTIONS: dict[str, tuple[str, ...]] = {
+    # --- who and what recorded it ------------------------------------
     "Manufacturer": tuple(COMMON_MANUFACTURERS),
+    "ManufacturersModelName": (
+        # EEG amplifiers
+        "BrainAmp", "BrainAmp DC", "BrainAmp MR plus", "actiCHamp",
+        "actiCHamp Plus", "LiveAmp", "ActiveTwo", "NetAmps 300", "NetAmps 400",
+        "eego mylab", "eego sports", "SynAmps RT", "Grael", "Quick-20",
+        "Cyton", "SAGA",
+        # MEG systems
+        "Neuromag-122", "Vectorview", "TRIUX", "CTF-275", "Magnes 3600 WH",
+        "PQ1160R-N2", "OPM",
+        # MR scanners
+        "Prisma", "Prisma_fit", "Skyra", "Trio", "TrioTim", "Vida", "Cima.X",
+        "Achieva", "Ingenia", "Ingenia Elition", "Elition X",
+        "DISCOVERY MR750", "SIGNA Premier", "SIGNA Architect",
+    ),
     "CapManufacturer": tuple(COMMON_CAP_MANUFACTURERS),
+    "CapManufacturersModelName": (
+        "actiCAP 64Ch", "actiCAP snap", "EasyCap M1", "EasyCap M10",
+        "EasyCap M34", "BioSemi 64", "BioSemi 128", "HydroCel GSN 128",
+        "HydroCel GSN 256", "waveguard original", "waveguard connect",
+    ),
+    "DewarPosition": ("upright", "supine"),
+
+    # --- how the electrodes sat --------------------------------------
+    #
+    # BIDS leaves these free text and they are the fields nobody can read from
+    # the data, so an editable list of what people actually write is the
+    # difference between an answer and a blank.
+    "EEGReference": (
+        "average", "Cz", "FCz", "CPz", "Pz", "nose", "left mastoid",
+        "right mastoid", "linked mastoids", "linked earlobes", "REST", "n/a",
+    ),
+    "iEEGReference": ("average", "bipolar", "a white matter electrode", "n/a"),
+    "EEGGround": (
+        "AFz", "Fpz", "FCz", "Fz", "left mastoid", "right mastoid", "n/a",
+    ),
+    "iEEGGround": ("a scalp electrode", "n/a"),
+    "EEGPlacementScheme": (
+        "10-20", "10-10", "10-5",
+        "based on the digitized electrode positions", "custom",
+    ),
+    "ElectrodeMaterial": ("Ag/AgCl", "silver", "gold", "tin", "platinum", "carbon"),
+    "ElectrodeManufacturer": tuple(COMMON_CAP_MANUFACTURERS),
+
+    # --- the recording environment -----------------------------------
+    "PowerLineFrequency": ("50", "60"),
+    "HardwareFilters": ("n/a",),
+    "SoftwareFilters": ("n/a",),
+    "RecordingType": ("continuous", "epoched", "discontinuous"),
+
+    # --- MRI acquisition, where the vendors share a vocabulary -------
+    "PulseSequenceType": (
+        "MPRAGE", "MP2RAGE", "FLASH", "GRE", "SPGR", "FSPGR", "TSE", "FSE",
+        "SPACE", "CUBE", "VISTA", "bSSFP", "TrueFISP", "FIESTA", "EPI",
+        "SE-EPI", "GE-EPI", "TFL", "IR-TSE", "FLAIR",
+    ),
+    "ParallelAcquisitionTechnique": (
+        "GRAPPA", "SENSE", "mSENSE", "ASSET", "ARC", "CAIPIRINHA", "SMS",
+        "HyperSense", "Compressed SENSE",
+    ),
+    "PartialFourierDirection": ("phase", "frequency", "slice", "combination"),
+    "WaterSuppressionTechnique": ("CHESS", "VAPOR", "MEGA", "WET", "none"),
+
+    # --- PET ---------------------------------------------------------
     "TracerName": tuple(COMMON_TRACERS),
     "TracerRadionuclide": tuple(COMMON_RADIONUCLIDES),
+    "TracerMolecularWeightUnits": ("g/mol",),
     "InjectedRadioactivityUnits": tuple(RADIOACTIVITY_UNITS),
     "InjectedMassUnits": tuple(MASS_UNITS),
+    "InjectedMassPerWeightUnits": ("ug/kg", "mg/kg", "nmol/kg", "umol/kg"),
     "SpecificRadioactivityUnits": tuple(SPECIFIC_RADIOACTIVITY_UNITS),
     "MolarActivityUnits": tuple(MOLAR_ACTIVITY_UNITS),
+    "InfusionSpeedUnits": ("mL/min", "mL/s", "uL/min"),
+    "PharmaceuticalDoseUnits": ("mg", "ug", "mg/kg", "ug/kg", "mL"),
     "ModeOfAdministration": tuple(MODES_OF_ADMINISTRATION),
     "AcquisitionMode": tuple(PET_ACQUISITION_MODES),
+    "ReconFilterType": (
+        "Gaussian", "Hann", "Hamming", "Shepp-Logan", "Ramp", "Butterworth",
+        "none",
+    ),
     "Units": tuple(PET_IMAGE_UNITS),
+
+    # --- the dataset itself ------------------------------------------
+    "License": (
+        "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "CC-BY-NC-4.0",
+        "CC-BY-NC-SA-4.0", "PDDL-1.0", "ODbL-1.0", "ODC-BY-1.0", "None",
+    ),
+    "HEDVersion": ("8.3.0", "8.2.0", "8.1.0", "8.0.0"),
 }
 
 # Inventory column holding what the scan read out of a recording's own header,

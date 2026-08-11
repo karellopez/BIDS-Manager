@@ -35,6 +35,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtWidgets import (
     QComboBox,
+    QSizePolicy,
     QHBoxLayout,
     QLabel,
     QFormLayout,
@@ -174,6 +175,20 @@ def _person_row() -> tuple[QWidget, Callable[[], Any], Callable[[Any], None]]:
     return row, read, write
 
 
+def _let_it_shrink(combo: QComboBox) -> None:
+    """Stop a combo from demanding the width of its widest option.
+
+    By default a QComboBox reports its longest item as its minimum, so one
+    45-character enum value sets a floor for the whole pane and the user cannot
+    narrow it. The popup is widened separately, so nothing becomes unreadable.
+    """
+    combo.setMinimumContentsLength(0)
+    combo.setSizeAdjustPolicy(
+        QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+    )
+    combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+
 def fit_popup_to_contents(combo: QComboBox) -> None:
     """Let the dropdown be as wide as its widest option.
 
@@ -215,17 +230,29 @@ def build_field_widget(field, suggestions: tuple = ()) -> QWidget:
         fit_popup_to_contents(combo)
         return combo
 
-    if suggestions and field.type in ("", "string"):
+    if suggestions and field.type in ("", "string", "number", "integer"):
+        # Sized to its layout, not to its widest option: fit_popup_to_contents
+        # widens the popup instead, so the list stays readable while the box
+        # itself can shrink with the pane.
+        # Numbers get the list too. The mains frequency is 50 or 60 everywhere
+        # on earth, and offering a bare numeric box for it helps nobody: BIDS
+        # types the field as a number, which is not a reason to withhold the two
+        # answers. The box stays typable, and stays numeric.
         combo = QComboBox()
         combo.setEditable(True)
         combo.addItem("")
         combo.addItems([str(v) for v in suggestions])
-        combo.setProperty("template_kind", "enum")
+        combo.setProperty(
+            "template_kind", "number" if field.type in ("number", "integer") else "enum"
+        )
+        if field.type in ("number", "integer"):
+            combo.setValidator(QDoubleValidator())
         combo.setToolTip(
             (field.description or "")
             + ("\n\n" if field.description else "")
             + "Suggestions, not a fixed list: anything may be typed."
         )
+        _let_it_shrink(combo)
         fit_popup_to_contents(combo)
         return combo
 
@@ -233,6 +260,7 @@ def build_field_widget(field, suggestions: tuple = ()) -> QWidget:
         combo = QComboBox()
         combo.addItems([_UNSET, "true", "false"])
         combo.setProperty("template_kind", "boolean")
+        _let_it_shrink(combo)
         fit_popup_to_contents(combo)
         return combo
 
@@ -271,6 +299,18 @@ def connect_field_widget(widget: QWidget, on_change) -> None:
     widget.editingFinished.connect(on_change)
 
 
+def _as_number(text: str) -> Any:
+    """The number the user typed, or the text if it is not one."""
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
 def read_field_widget(widget: QWidget, field) -> Any:
     """The widget's value, in the shape the schema declares. ``None`` if unset."""
     kind = widget.property("template_kind")
@@ -293,6 +333,12 @@ def read_field_widget(widget: QWidget, field) -> Any:
             return int(text) if field.type == "integer" else float(text)
         except ValueError:
             return text
+    if not field.type:
+        # A field the schema types with anyOf accepts more than one shape, so
+        # what the user typed decides which. "60" in PowerLineFrequency means
+        # the number 60; writing the string would fail validation for a field
+        # that was answered correctly.
+        return _as_number(text)
     if field.type == "array":
         # An array whose items are not strings: keep what was typed rather than
         # guessing a split that may be wrong.
@@ -369,6 +415,47 @@ def level_legend(*, colour: bool = True) -> QLabel:
 # section here should simply stop taking room, keeping its heading readable.
 
 
+class _ShrinkableButton(QPushButton):
+    """A section header that cannot stop its pane from narrowing.
+
+    A QPushButton reports the full width of its text as its MINIMUM, and these
+    headers carry a title, a filename and a count. One of them therefore set the
+    floor for the whole dialog: 367 px in a pane the user wanted at 150. It
+    elides instead, and keeps the full text as its tooltip.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._full = text
+        super().setText(text)
+        self._elide()
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        if not self._full:
+            return
+        room = max(0, self.width() - 20)
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, room,
+        ) if room else self._full
+        if shown != super().text():
+            QPushButton.setText(self, shown)
+        if self.toolTip() in ("", self._full):
+            self.setToolTip(self._full)
+
+
 class CollapsibleSection(QWidget):
     """A titled section that folds away, with a count of what is inside.
 
@@ -404,7 +491,7 @@ class CollapsibleSection(QWidget):
         }.get(level, (pal["text"], "transparent", "500", 0))
         colour, back, weight, rule = tint
 
-        self._header = QPushButton()
+        self._header = _ShrinkableButton()
         self._header.setObjectName("template-section-header")
         self._header.setCheckable(True)
         self._header.setChecked(expanded)
@@ -447,10 +534,9 @@ class CollapsibleSection(QWidget):
             parts.append(f'<span style="color:{pal["muted"]};">{self._subtitle}</span>')
         if self._badge:
             parts.append(f'<span style="color:{pal["muted"]};">{self._badge}</span>')
-        self._header.setText(f"{caret}  " + "   ".join(
-            _strip_markup(p) for p in parts
-        ))
-        self._header.setToolTip(self._subtitle or "")
+        full = f"{caret}  " + "   ".join(_strip_markup(p) for p in parts)
+        self._header.setToolTip(self._subtitle or full)
+        self._header.setText(full)
 
     def _on_toggled(self, checked: bool) -> None:
         self._expanded = checked
@@ -497,6 +583,34 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # The tree, rendered
 # ---------------------------------------------------------------------------
+
+
+def _field_label_widget(rich_text: str) -> QLabel:
+    """A field name that cannot stop the pane from narrowing.
+
+    A plain QLabel reports its full text width as its MINIMUM, and field names
+    run to 33 characters, so one row set a floor for the whole dialog. This one
+    wraps instead and asks for nothing.
+    """
+    label = QLabel(rich_text)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setWordWrap(True)
+    label.setMinimumWidth(0)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    return label
+
+
+def _origin_tooltip(origin: str) -> str:
+    """Why this field is being asked about."""
+    from ...metadata.template_plan import ORIGIN_USUALLY_DERIVED
+
+    if origin == ORIGIN_USUALLY_DERIVED:
+        return (
+            "dcm2niix or mne-bids usually reads this out of the data, and your "
+            "files do not carry it. It may still exist at the scanner, or an "
+            "anonymiser may have removed it."
+        )
+    return "No converter supplies this. If you do not state it, it stays absent."
 
 
 def _plain_field(name: str, value):
@@ -624,6 +738,9 @@ class TemplateTree(QWidget):
         form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
+        # Below a certain width the label moves above its field instead of
+        # squeezing both into nothing, so the form keeps shrinking usefully.
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         widgets: dict[str, QWidget] = {}
         fields: dict[str, object] = {}
@@ -636,11 +753,15 @@ class TemplateTree(QWidget):
             if field.name in stored:
                 write_field_widget(widget, stored[field.name])
 
-            label = QLabel(field_label(field, colour=self._colour))
-            label.setTextFormat(Qt.TextFormat.RichText)
-            if field.description:
-                label.setToolTip(field.description)
-            form.addRow(label, widget)
+            label = _field_label_widget(field_label(field, colour=self._colour))
+            tip = field.description or ""
+            origin = getattr(field, "origin", "")
+            if origin:
+                tip = (tip + "\n\n" if tip else "") + _origin_tooltip(origin)
+            if tip:
+                label.setToolTip(tip)
+                widget.setToolTip(tip)
+            form.addRow(label, self._with_origin(widget, origin))
             widgets[field.name] = widget
             fields[field.name] = field
 
@@ -675,6 +796,7 @@ class TemplateTree(QWidget):
         form.setVerticalSpacing(6)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         widgets = self._widgets.setdefault(node.key, {})
         fields = self._fields.setdefault(node.key, {})
@@ -693,8 +815,7 @@ class TemplateTree(QWidget):
                    "The conversion reads this from the data and will write the "
                    "value shown. Type here only to correct it.")
             )
-            label = QLabel(field_label(spec, colour=self._colour))
-            label.setTextFormat(Qt.TextFormat.RichText)
+            label = _field_label_widget(field_label(spec, colour=self._colour))
             label.setStyleSheet(f"color: {pal['muted']};")
             if varies:
                 hint = QLabel("differs per recording")
@@ -713,6 +834,30 @@ class TemplateTree(QWidget):
             self._answered_values.setdefault(node.key, {})[name] = value
         box.add(body)
         return box
+
+    def _with_origin(self, widget: QWidget, origin: str) -> QWidget:
+        """Put a short note beside a field the data usually answers.
+
+        Only for the surprising case. Almost everything the form asks about is
+        simply not in the data, and saying so on every row would be noise; a
+        field the converter USUALLY fills and did not is worth a look, because
+        the value often exists at the scanner or was stripped by an anonymiser.
+        """
+        from ...metadata.template_plan import ORIGIN_USUALLY_DERIVED
+
+        if origin != ORIGIN_USUALLY_DERIVED:
+            return widget
+        pal = CUR()
+        row = QWidget()
+        line = QHBoxLayout(row)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(6)
+        line.addWidget(widget, 1)
+        note = QLabel("not in your files")
+        note.setStyleSheet(f"color: {pal['warning']};")
+        note.setToolTip(_origin_tooltip(origin))
+        line.addWidget(note, 0)
+        return row
 
     # -- reading -------------------------------------------------------
 

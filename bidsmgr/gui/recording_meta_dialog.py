@@ -20,6 +20,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QSizePolicy,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -39,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..metadata.template_plan import build_template_tree
-from .widgets.template_form import TemplateTree
+from .widgets.template_form import TemplateTree, fit_popup_to_contents
 from ..recording_meta import (
     CURATED_SUGGESTIONS,
     AcquisitionSpec,
@@ -225,6 +226,17 @@ class RecordingMetaDialog(QDialog):
         # box by dragging is not a good use of anyone's time.
         self._section_picker = QComboBox()
         self._section_picker.setToolTip("Jump to a section")
+        # Its items are section titles, and a combo reports its widest item as
+        # its minimum width, so the picker alone set the dialog's floor. The
+        # popup is widened instead, where the width is what makes it readable.
+        fit_popup_to_contents(self._section_picker)
+        self._section_picker.setMinimumContentsLength(0)
+        self._section_picker.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._section_picker.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
         picker_row = QWidget()
         picker_layout = QHBoxLayout(picker_row)
         picker_layout.setContentsMargins(0, 0, 0, 0)
@@ -247,6 +259,7 @@ class RecordingMetaDialog(QDialog):
                 self._jump_targets.append((box.title(), box))
         for label, _widget in self._jump_targets:
             self._section_picker.addItem(label)
+        fit_popup_to_contents(self._section_picker)
 
         def jump(index: int) -> None:
             if not (0 <= index < len(self._jump_targets)):
@@ -409,7 +422,10 @@ class RecordingMetaDialog(QDialog):
         A montage is our own notion: which standard electrode layout mne-bids
         should apply during conversion, which the standard has no opinion about.
         """
-        box = QGroupBox("Montage  ·  EEG / iEEG  →  applied during conversion")
+        box = QGroupBox("Montage")
+        box.setToolTip(
+            "EEG and iEEG. Applied during conversion: it fills electrodes.tsv and coordsystem.json."
+        )
         form = QFormLayout(box)
         _tighten_form(form)
 
@@ -423,7 +439,10 @@ class RecordingMetaDialog(QDialog):
         return box
 
     def _build_event_group(self) -> QGroupBox:
-        box = QGroupBox("Events (trigger code -> label)  ·  modality-agnostic  →  events.tsv")
+        box = QGroupBox("Events")
+        box.setToolTip(
+            "Give each recorded trigger code a readable label. Any modality. Written to events.tsv."
+        )
         v = QVBoxLayout(box)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
@@ -454,7 +473,10 @@ class RecordingMetaDialog(QDialog):
             self._events.removeRow(r)
 
     def _build_participants_group(self) -> QGroupBox:
-        box = QGroupBox("Participants spreadsheet  ·  modality-agnostic  →  participants.tsv")
+        box = QGroupBox("Participants spreadsheet")
+        box.setToolTip(
+            "Any modality. Its columns are merged into participants.tsv."
+        )
         v = QVBoxLayout(box)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
@@ -490,7 +512,10 @@ class RecordingMetaDialog(QDialog):
             self._participants_file.setText(path)
 
     def _build_phenotype_group(self) -> QGroupBox:
-        box = QGroupBox("Phenotype tables  ·  modality-agnostic  →  phenotype/")
+        box = QGroupBox("Phenotype tables")
+        box.setToolTip(
+            "Any modality. Written to phenotype/ with a codebook beside each table."
+        )
         v = QVBoxLayout(box)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
