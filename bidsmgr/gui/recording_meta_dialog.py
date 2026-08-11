@@ -293,9 +293,10 @@ class RecordingMetaDialog(QDialog):
             f'letter-spacing:0.6px;">{text.upper()}</span>'
         )
         lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setObjectName("region-rule")
         lbl.setStyleSheet(
-            f"background: transparent; border-bottom: 1px solid {color}; "
-            "padding-bottom: 2px;"
+            f"#region-rule {{ background: transparent; "
+            f"border-bottom: 1px solid {color}; padding-bottom: 2px; }}"
         )
         return lbl
 

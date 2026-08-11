@@ -410,7 +410,8 @@ def level_legend(*, colour: bool = True) -> QLabel:
         text = "* required &nbsp; · recommended &nbsp; (unmarked) optional"
     label = QLabel(text)
     label.setTextFormat(Qt.TextFormat.RichText)
-    label.setStyleSheet("background: transparent;")
+    label.setObjectName("level-legend")
+    label.setStyleSheet("#level-legend { background: transparent; }")
     return label
 
 
@@ -519,12 +520,17 @@ class CollapsibleSection(QWidget):
         outer.addWidget(self._header)
 
         self._body = QWidget()
+        self._body.setObjectName("template-section-body")
         self._body_layout = QVBoxLayout(self._body)
         # An indent plus a hairline down the left says "this belongs to the
         # heading above" without drawing a box around every level, which at
         # three levels deep becomes nested boxes and unreadable.
+        # Scoped to this widget. A bare "QWidget{...}" rule is a TYPE selector:
+        # it applies to every descendant, so the hairline was drawn down the
+        # side of each control inside, and the rule reached the tooltips and
+        # popups they raise.
         self._body.setStyleSheet(
-            f"QWidget{{border-left:1px solid {pal['border']};}}"
+            f"#template-section-body{{border-left:1px solid {pal['border']};}}"
             if level else ""
         )
         self._body_layout.setContentsMargins(14, 4, 0, 8)
@@ -619,7 +625,13 @@ class FieldLabel(QLabel):
         super().__init__()
         self._full = text
         self.setToolTip(text)
-        self.setStyleSheet("color: %s; background: transparent;" % colour)
+        # Scoped to this label. An unscoped "background: transparent" cascades
+        # into the tooltip Qt raises for this widget, and the tooltip renders
+        # see-through over whatever is behind it.
+        self.setObjectName("field-label")
+        self.setStyleSheet(
+            "#field-label { color: %s; background: transparent; }" % colour
+        )
         self.setMinimumWidth(0)
         self.setMaximumWidth(width)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -724,6 +736,9 @@ class TemplateTree(QWidget):
         # What the conversion will write, per node, so an answer that merely
         # repeats it is not mistaken for a statement.
         self._answered_values: dict[str, dict] = {}
+        # The plan behind each node, so a caller can tell what is being ASKED
+        # from what is merely reachable.
+        self._sections_by_key: dict[str, object] = {}
         collapsed_keys = collapsed_keys or set()
 
         outer = QVBoxLayout(self)
@@ -775,8 +790,14 @@ class TemplateTree(QWidget):
         self._sections[node.key] = section
 
         if node.is_leaf:
+            self._sections_by_key[node.key] = node.section
             section.add(self._render_fields(node, values.get(node.key, {})))
-            already = self._answered.get(node.key) or {}
+            # Everything the conversion supplies: with the value where the scan
+            # measured one, and without where the built-in list is all we have.
+            # Both are shown, so no field the form considered simply vanishes.
+            measured = self._answered.get(node.key) or {}
+            already = {name: measured.get(name) for name in node.section.supplied}
+            already.update(measured)
             if already:
                 section.add(self._render_answered(node, already))
         for child in node.children:
@@ -858,19 +879,25 @@ class TemplateTree(QWidget):
             spec = declared.get(name) or _plain_field(name, value)
             widget = build_field_widget(spec, tuple(self._suggestions.get(name, ())))
             varies = str(value).strip().upper() == "VARIES"
-            if not varies:
+            unknown = value is None
+            if not varies and not unknown:
                 write_field_widget(widget, value)
             widget.setToolTip(
                 (spec.description + "\n\n" if spec.description else "")
-                + ("The recordings disagree, so the conversion writes each one's "
+                + ("The conversion normally supplies this from the data. Type "
+                   "here only if you know it will not, or to override it."
+                   if unknown else
+                   "The recordings disagree, so the conversion writes each one's "
                    "own value. Type here only to give them all the same one."
                    if varies else
                    "The conversion reads this from the data and will write the "
                    "value shown. Type here only to correct it.")
             )
             label = _field_label_widget(spec, colour=self._colour)
-            if varies:
-                hint = QLabel("differs per recording")
+            if varies or unknown:
+                hint = QLabel(
+                    "read from the data" if unknown else "differs per recording"
+                )
                 hint.setStyleSheet(f"color: {pal['dim']};")
                 row = QWidget()
                 line = QHBoxLayout(row)
@@ -883,7 +910,8 @@ class TemplateTree(QWidget):
                 form.addRow(label, widget)
             widgets[name] = widget
             fields[name] = spec
-            self._answered_values.setdefault(node.key, {})[name] = value
+            if not unknown:
+                self._answered_values.setdefault(node.key, {})[name] = value
         box.add(body)
         return box
 
@@ -931,6 +959,21 @@ class TemplateTree(QWidget):
             if answers:
                 out[key] = answers
         return out
+
+    def asked(self, key: str) -> set:
+        """The fields this node actually ASKS about.
+
+        ``_widgets`` holds those plus the ones folded away under "already
+        answered by the conversion", because both are editable. This is the
+        subset the form is putting to the user.
+        """
+        section = self._sections_by_key.get(key)
+        return {f.name for f in section.fields} if section is not None else set()
+
+    def supplied(self, key: str) -> set:
+        """The fields folded away because the conversion supplies them."""
+        section = self._sections_by_key.get(key)
+        return set(section.supplied) if section is not None else set()
 
     def section_widget(self, key: str):
         """The section for a node key, so a caller can scroll to or open it."""

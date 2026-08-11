@@ -202,14 +202,21 @@ def test_levels_come_from_the_schema(qtbot, tmp_path):
 
 
 def test_a_field_the_converter_fills_is_not_asked(qtbot, tmp_path):
-    """dcm2niix reads TracerName out of the DICOM, so asking is noise."""
+    """dcm2niix reads TracerName out of the DICOM, so asking is noise.
+
+    It is still REACHABLE, folded away under "already answered by the
+    conversion", because a field that simply vanished would leave a user who
+    knows the scanner got it wrong with nowhere to correct it.
+    """
     dlg, _ = _dialog(
         tmp_path, present_datatypes={"pet"}, present_pairs=[("pet", "pet")],
     )
     qtbot.addWidget(dlg)
-    asked = set(dlg._template._widgets["pet/pet"])
+    asked = dlg._template.asked("pet/pet")
     assert "TracerName" not in asked
     assert "ModeOfAdministration" in asked   # nothing in the data says this
+    assert "TracerName" in dlg._template.supplied("pet/pet")
+    assert "TracerName" in dlg._template._widgets["pet/pet"]
 
 
 def test_answers_round_trip_per_file(qtbot, tmp_path):

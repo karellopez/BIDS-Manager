@@ -134,25 +134,32 @@ class _EntityRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self.entity_name = entity_name
-        self.setStyleSheet("background: transparent;")
+        # Scoped by object name. A bare "background: transparent" on a container
+        # cascades into the tooltips and combo popups its children raise, and
+        # they render see-through.
+        self.setObjectName("entity-row")
+        self.setStyleSheet("#entity-row { background: transparent; }")
 
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
 
-        label_text = entity_name
-        lbl = QLabel(label_text)
-        lbl.setMinimumWidth(0)
-        lbl.setMaximumWidth(76)
+        # The same eliding, column-width label the metadata form uses, so the
+        # entities line up with everything below them and a long name like
+        # "reconstruction" ends in an ellipsis rather than being cut mid-word.
         pal = CUR()
-        css_color = pal["text"] if required else pal["dim"]
-        suffix = f' <span style="color:{pal["error"]}">*</span>' if required else ""
+        tone = pal["text"] if required else pal["dim"]
+        text = f"{entity_name} *" if required else entity_name
+        if required:
+            tone = pal["error"]
         if deprecated:
-            css_color = pal["muted"]
-            lbl.setText(f'<span style="color:{css_color};text-decoration:line-through;">{label_text}</span>')
-        else:
-            lbl.setText(f'<span style="color:{css_color}">{label_text}</span>{suffix}')
-        lbl.setTextFormat(Qt.TextFormat.RichText)
+            tone = pal["muted"]
+        lbl = FieldLabel(text, tone, _LABEL_COL)
+        if deprecated:
+            lbl.setStyleSheet(
+                "#field-label { color: %s; background: transparent; "
+                "text-decoration: line-through; }" % tone
+            )
         h.addWidget(lbl)
 
         self.edit = QLineEdit(value)
@@ -350,7 +357,8 @@ class PropertiesPanel(QWidget):
         head.addStretch(1)
         head_wrap = QWidget()
         head_wrap.setLayout(head)
-        head_wrap.setStyleSheet("background: transparent;")
+        head_wrap.setObjectName("entities-head")
+        head_wrap.setStyleSheet("#entities-head { background: transparent; }")
         self._body_layout.addWidget(head_wrap)
         self._body_layout.addSpacing(2)
 
@@ -544,10 +552,11 @@ class PropertiesPanel(QWidget):
         lbl = QLabel("".join(pieces))
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setWordWrap(True)
+        lbl.setObjectName("path-preview")
         lbl.setStyleSheet(
-            'font-family: "SF Mono","Menlo","Monaco",monospace; '
+            '#path-preview { font-family: "SF Mono","Menlo","Monaco",monospace; '
             f'font-size: {scaled_px(11)}px; color: {pal["text"]}; '
-            'background: transparent;'
+            'background: transparent; }'
         )
         lay.addWidget(lbl)
         return f
@@ -727,7 +736,10 @@ class PropertiesPanel(QWidget):
             f'<span style="color:{pal["dim"]};"> &middot; {tag} &rarr; {destination}</span>'
         )
         lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setStyleSheet(f"font-size: {scaled_px(10)}px; background: transparent;")
+        lbl.setObjectName("section-head")
+        lbl.setStyleSheet(
+            f"#section-head {{ font-size: {scaled_px(10)}px; background: transparent; }}"
+        )
         # Wrap rather than set a floor: these carry a title plus a destination
         # path, and a plain QLabel reports all of it as its minimum width.
         lbl.setWordWrap(True)

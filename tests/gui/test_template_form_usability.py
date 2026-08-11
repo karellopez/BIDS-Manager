@@ -244,3 +244,56 @@ def test_the_panel_lines_up_across_its_two_halves(qtbot):
     labels = [w for w in panel.findChildren(FieldLabel) if w.isVisible()]
     assert len(labels) > 5
     assert len({w.width() for w in labels}) == 1
+
+
+def test_nothing_the_panel_offers_is_missing_from_the_dialog(qtbot, tmp_path):
+    """The two surfaces render one definition, so neither may hide a field the
+    other shows. The dialog used to DROP what the converter supplies, while the
+    panel listed everything, so the mains frequency was in one and not the
+    other."""
+    from bidsmgr.metadata.template_plan import sidecar_section
+
+    for datatype, suffix in (("eeg", "eeg"), ("meg", "meg"), ("pet", "pet")):
+        panel_offers = {
+            f.name
+            for f in sidecar_section(datatype, suffix, include_derived=True).fields
+        }
+        dlg = RecordingMetaDialog(
+            tmp_path / f"{datatype}.recording_meta.json",
+            present_datatypes={datatype}, present_pairs=[(datatype, suffix)],
+        )
+        qtbot.addWidget(dlg)
+        reachable = set(dlg._template._widgets[f"{datatype}/{suffix}"])
+        assert not (panel_offers - reachable), (
+            f"{datatype}/{suffix}: only in the panel: "
+            f"{sorted(panel_offers - reachable)}"
+        )
+
+
+def test_the_mains_frequency_is_reachable_for_both_instruments(qtbot, tmp_path):
+    for datatype in ("eeg", "meg"):
+        dlg = RecordingMetaDialog(
+            tmp_path / f"{datatype}.recording_meta.json",
+            present_datatypes={datatype}, present_pairs=[(datatype, datatype)],
+        )
+        qtbot.addWidget(dlg)
+        assert "PowerLineFrequency" in dlg._template._widgets[f"{datatype}/{datatype}"]
+
+
+def test_a_transparent_background_never_reaches_a_tooltip(qtbot, tmp_path):
+    """An unscoped "background: transparent" on a widget cascades into the
+    tooltip Qt raises for it, and the tooltip renders see-through. Every such
+    rule has to name the widget it means."""
+    from PyQt6.QtWidgets import QWidget
+
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    offenders = []
+    for widget in dlg.findChildren(QWidget):
+        sheet = widget.styleSheet()
+        if "transparent" in sheet and "{" not in sheet:
+            offenders.append((type(widget).__name__, sheet[:60]))
+    assert not offenders, f"unscoped transparent rules: {offenders}"

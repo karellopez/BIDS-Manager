@@ -102,6 +102,11 @@ class TemplateSection:
     # about a CLASS of files, and saying how many it covers is the difference
     # between "here is a form for one file" and "answer this once for all 61".
     n_files: int = 0
+    # Fields NOT asked about because the conversion supplies them. Carried so
+    # the form can still show them, folded away and editable, rather than
+    # dropping them: a field that simply vanishes leaves a user who wants to
+    # correct it with nowhere to go, and no way to tell it was considered.
+    supplied: tuple[str, ...] = ()
 
     @property
     def required_fields(self) -> tuple[TemplateField, ...]:
@@ -222,6 +227,7 @@ def sidecar_section(
         # scenario this file may not be in; the form must not demand it.
         if s.name not in skip and not s.speculative and s.level != "prohibited"
     ]
+    declared = {spec.name for spec in specs}
     return TemplateSection(
         scope=datatype,
         datatype=datatype,
@@ -232,6 +238,7 @@ def sidecar_section(
         storage_key=f"{datatype}/{suffix}",
         fields=_sorted_fields(fields),
         n_files=n_files,
+        supplied=tuple(sorted((skip & declared) - CONVERTER_PRIVATE)),
     )
 
 

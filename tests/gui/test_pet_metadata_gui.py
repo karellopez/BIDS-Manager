@@ -205,9 +205,11 @@ def test_pet_asks_only_what_the_scanner_cannot_answer(qtbot, tmp_path):
         present_datatypes={"pet"}, present_pairs=[("pet", "pet")],
     )
     qtbot.addWidget(dlg)
-    asked = set(dlg._template._widgets["pet/pet"])
+    asked = dlg._template.asked("pet/pet")
     for from_the_scanner in ("TracerName", "FrameDuration", "FrameTimesStart"):
         assert from_the_scanner not in asked
+        # Not asked, but still reachable to correct.
+        assert from_the_scanner in dlg._template.supplied("pet/pet")
     for from_the_lab in ("InjectedMass", "ModeOfAdministration", "SpecificRadioactivity"):
         assert from_the_lab in asked
 
