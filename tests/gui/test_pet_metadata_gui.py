@@ -20,10 +20,14 @@ from bidsmgr.recording_meta import PetAcquisitionSpec, RecordingMetaSpec
 pytestmark = pytest.mark.gui
 
 
+# Keyed by BIDS field, as the scan collects them. Tracer and radionuclide stay
+# apart: they are read from one DICOM sequence but they answer two fields, and
+# "FDG / F18" is not a value either of them should be offered.
 PET_SUGGESTIONS = {
-    "tracer": ["FDG / F18"],
-    "dose": ["44.4 MBq"],
-    "recon": ["PSF+TOF (3i 21s)"],
+    "TracerName": ["FDG"],
+    "TracerRadionuclide": ["F18"],
+    "InjectedRadioactivity": ["44.4 MBq"],
+    "ReconMethodName": ["PSF+TOF (3i 21s)"],
 }
 
 
@@ -32,7 +36,7 @@ def _dialog(tmp_path, present):
         tmp_path / "inv.tsv.recording_meta.json",
         set(present),
         None,
-        pet_suggestions=PET_SUGGESTIONS,
+        scan_suggestions=PET_SUGGESTIONS,
     )
 
 

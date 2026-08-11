@@ -421,6 +421,8 @@ class RecordingMetaSpec(_Model):
 
 
 __all__ = [
+    "CURATED_SUGGESTIONS",
+    "SCAN_SUGGESTION_COLUMNS",
     "EventMap",
     "COMMON_MANUFACTURERS",
     "COMMON_CAP_MANUFACTURERS",
@@ -443,3 +445,39 @@ __all__ = [
     "PetAcquisitionSpec",
     "RecordingMetaSpec",
 ]
+
+
+# What BIDS Manager offers where BIDS leaves a field free text.
+#
+# Product opinion, not schema: the standard does not list these, and none of
+# them restricts what a user may type. They live beside the vocabularies they
+# are made of, and both metadata surfaces read this one table, because when the
+# dialog and the properties panel each kept their own the two offered different
+# answers for the same field.
+#
+# Units and modes are here for a concrete reason: BIDS accepts free text, so a
+# lab typing "mbq" instead of "MBq" fails validation for nothing.
+CURATED_SUGGESTIONS: dict[str, tuple[str, ...]] = {
+    "Manufacturer": tuple(COMMON_MANUFACTURERS),
+    "CapManufacturer": tuple(COMMON_CAP_MANUFACTURERS),
+    "TracerName": tuple(COMMON_TRACERS),
+    "TracerRadionuclide": tuple(COMMON_RADIONUCLIDES),
+    "InjectedRadioactivityUnits": tuple(RADIOACTIVITY_UNITS),
+    "InjectedMassUnits": tuple(MASS_UNITS),
+    "SpecificRadioactivityUnits": tuple(SPECIFIC_RADIOACTIVITY_UNITS),
+    "MolarActivityUnits": tuple(MOLAR_ACTIVITY_UNITS),
+    "ModeOfAdministration": tuple(MODES_OF_ADMINISTRATION),
+    "AcquisitionMode": tuple(PET_ACQUISITION_MODES),
+    "Units": tuple(PET_IMAGE_UNITS),
+}
+
+# Inventory column holding what the scan read out of a recording's own header,
+# per field. The better hint of the two, and the reason it is offered rather
+# than applied: a vendor string can always parse wrongly.
+SCAN_SUGGESTION_COLUMNS: dict[str, str] = {
+    "Manufacturer": "manufacturer_suggestion",
+    "TracerName": "tracer_suggestion",
+    "TracerRadionuclide": "radionuclide_suggestion",
+    "InjectedRadioactivity": "injected_dose_suggestion",
+    "ReconMethodName": "recon_method_suggestion",
+}

@@ -41,19 +41,12 @@ from PyQt6.QtWidgets import (
 from ..metadata.template_plan import build_template_tree
 from .widgets.template_form import TemplateTree
 from ..recording_meta import (
-    COMMON_CAP_MANUFACTURERS,
-    COMMON_MANUFACTURERS,
-    COMMON_RADIONUCLIDES,
-    COMMON_TRACERS,
-    MASS_UNITS,
-    MODES_OF_ADMINISTRATION,
-    PET_ACQUISITION_MODES,
-    PET_IMAGE_UNITS,
-    RADIOACTIVITY_UNITS,
-    SPECIFIC_RADIOACTIVITY_UNITS,
+    CURATED_SUGGESTIONS,
     AcquisitionSpec,
     PetAcquisitionSpec,
     RecordingMetaSpec,
+    dataset_description_as_bids,
+    dataset_description_from_bids,
     dump_spec,
     load_spec,
 )
@@ -108,8 +101,7 @@ class RecordingMetaDialog(QDialog):
         present_datatypes: Optional[set[str]] = None,
         parent: Optional[QWidget] = None,
         montage_suggestions: Optional[list[str]] = None,
-        manufacturer_suggestions: Optional[list[str]] = None,
-        pet_suggestions: Optional[dict[str, list[str]]] = None,
+        scan_suggestions: Optional[dict[str, list[str]]] = None,
         example_paths: Optional[dict] = None,
         present_pairs: Optional[list] = None,
     ) -> None:
@@ -117,8 +109,12 @@ class RecordingMetaDialog(QDialog):
         self.setWindowTitle("Dataset metadata")
         # Distinct per-recording suggestions the scan found, surfaced as read-only
         # hints beside the matching dataset defaults (not auto-applied).
+        # Montage is separate because it is the one hint with no BIDS field to
+        # attach to: it names an electrode layout to apply, not a value.
         self._montage_suggestions = list(montage_suggestions or [])
-        self._manufacturer_suggestions = list(manufacturer_suggestions or [])
+        self._scan_suggestions = {
+            name: list(values) for name, values in (scan_suggestions or {}).items()
+        }
         # A fixed, modest default size. The whole body lives in a scroll area,
         # so when the visible sections need more room the OUTER scroll bar moves
         # the entire window content as one - the user asked for a scrollable
@@ -147,13 +143,6 @@ class RecordingMetaDialog(QDialog):
         settings = AppSettings.load()
         self._colour_levels = settings.template_colour_levels
         self._collapsed_keys: set = set()
-        # Read-only scan hints, shown beside the fields they inform. Same
-        # contract as the montage and manufacturer hints: proposed, never
-        # applied, because a vendor string can always parse wrongly.
-        pet_suggestions = pet_suggestions or {}
-        self._pet_tracer_suggestions = list(pet_suggestions.get("tracer", []))
-        self._pet_dose_suggestions = list(pet_suggestions.get("dose", []))
-        self._pet_recon_suggestions = list(pet_suggestions.get("recon", []))
         self._spec = self._load()
 
         outer = QVBoxLayout(self)
@@ -308,41 +297,21 @@ class RecordingMetaDialog(QDialog):
         scan actually detected in THIS dataset, which is the better hint of the
         two and the reason it is offered rather than applied.
         """
+        # What this scan detected comes first: it is about the dataset in front
+        # of the user rather than about the world.
         return {
-            "Manufacturer": list(self._manufacturer_suggestions) + list(COMMON_MANUFACTURERS),
-            "CapManufacturer": list(COMMON_CAP_MANUFACTURERS),
-            "TracerName": list(self._pet_tracer_suggestions) + list(COMMON_TRACERS),
-            "TracerRadionuclide": list(COMMON_RADIONUCLIDES),
-            "ReconMethodName": list(self._pet_recon_suggestions),
-            "InjectedRadioactivity": list(self._pet_dose_suggestions),
-            # PET units and modes: BIDS leaves these free text, and a lab that
-            # types "mbq" instead of "MBq" fails validation for no good reason.
-            "InjectedRadioactivityUnits": list(RADIOACTIVITY_UNITS),
-            "InjectedMassUnits": list(MASS_UNITS),
-            "SpecificRadioactivityUnits": list(SPECIFIC_RADIOACTIVITY_UNITS),
-            "ModeOfAdministration": list(MODES_OF_ADMINISTRATION),
-            "AcquisitionMode": list(PET_ACQUISITION_MODES),
-            "Units": list(PET_IMAGE_UNITS),
+            name: list(self._scan_suggestions.get(name, ()))
+            + [v for v in CURATED_SUGGESTIONS.get(name, ())
+               if v not in self._scan_suggestions.get(name, ())]
+            for name in set(self._scan_suggestions) | set(CURATED_SUGGESTIONS)
         }
 
     def _stored_template_values(self) -> dict:
         """What the scaffold already holds, keyed as the tree's nodes are."""
         values = dict(self._spec.sequence_templates or {})
-        dd = self._spec.dataset_description
-        agnostic = {
-            "Name": dd.name,
-            "Authors": dd.authors,
-            "License": dd.license,
-            "Acknowledgements": dd.acknowledgements,
-            "HowToAcknowledge": dd.how_to_acknowledge,
-            "Funding": dd.funding,
-            "EthicsApprovals": dd.ethics_approvals,
-            "ReferencesAndLinks": dd.references_and_links,
-            "DatasetDOI": dd.dataset_doi,
-        }
-        values["dataset_description"] = {
-            k: v for k, v in agnostic.items() if v not in (None, "", [], {})
-        }
+        values["dataset_description"] = dataset_description_as_bids(
+            self._spec.dataset_description
+        )
         return values
 
     def _read_template(self, spec) -> None:
@@ -354,17 +323,9 @@ class RecordingMetaDialog(QDialog):
         """
         answers = self._template.values_by_key()
 
-        agnostic = answers.pop("dataset_description", {})
-        dd = spec.dataset_description
-        dd.name = agnostic.get("Name") or None
-        dd.authors = list(agnostic.get("Authors") or [])
-        dd.license = agnostic.get("License") or None
-        dd.acknowledgements = agnostic.get("Acknowledgements") or None
-        dd.how_to_acknowledge = agnostic.get("HowToAcknowledge") or None
-        dd.funding = list(agnostic.get("Funding") or [])
-        dd.ethics_approvals = list(agnostic.get("EthicsApprovals") or [])
-        dd.references_and_links = list(agnostic.get("ReferencesAndLinks") or [])
-        dd.dataset_doi = agnostic.get("DatasetDOI") or None
+        dataset_description_from_bids(
+            spec.dataset_description, answers.pop("dataset_description", {}),
+        )
 
         # Templates the tree did not show (another modality's, from a shared
         # scaffold) are kept: the dialog only speaks for what it displayed.

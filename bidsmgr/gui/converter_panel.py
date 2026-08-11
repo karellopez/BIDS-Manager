@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-from itertools import zip_longest
 from pathlib import Path
 from typing import Optional
 
@@ -1159,8 +1158,7 @@ class ConverterPanel(QWidget):
         dlg = RecordingMetaDialog(
             scaffold, self._present_datatypes(), self,
             montage_suggestions=self._montage_suggestions(),
-            manufacturer_suggestions=self._manufacturer_suggestions(),
-            pet_suggestions=self._pet_suggestions(),
+            scan_suggestions=self._scan_suggestions(),
         )
         if dlg.exec() and self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.
@@ -1223,27 +1221,22 @@ class ConverterPanel(QWidget):
             return []
         return self._distinct_column("montage_suggestion")
 
-    def _pet_suggestions(self) -> dict[str, list[str]]:
-        """Distinct per-row PET scan hints, grouped for the dialog's summaries.
+    def _scan_suggestions(self) -> dict[str, list[str]]:
+        """What the scan read out of the recordings, per BIDS field.
 
-        The tracer and radionuclide travel together because they are read from
-        the same DICOM sequence and mean little apart.
+        Which column carries which field is stated once, in recording_meta, so
+        the dataset dialog and the per-row panel offer the same hints. Two
+        collectors used to do this with the field names written out here, and
+        they had drifted: the dialog paired tracer with radionuclide into one
+        "FDG / F18" string, which reads well as a summary and is not a value
+        anyone should be offered for either field.
         """
-        tracers = self._distinct_column("tracer_suggestion")
-        nuclides = self._distinct_column("radionuclide_suggestion")
-        return {
-            "tracer": [
-                " / ".join(p for p in pair if p)
-                for pair in zip_longest(tracers, nuclides, fillvalue="")
-            ],
-            "dose": self._distinct_column("injected_dose_suggestion"),
-            "recon": self._distinct_column("recon_method_suggestion"),
-        }
+        from ..recording_meta import SCAN_SUGGESTION_COLUMNS
 
-    def _manufacturer_suggestions(self) -> list[str]:
-        """Distinct per-recording manufacturer suggestions found at scan (header
-        for EEG, file-format inference for MEG), for the dialog's summary hint."""
-        return self._distinct_column("manufacturer_suggestion")
+        return {
+            name: self._distinct_column(column)
+            for name, column in SCAN_SUGGESTION_COLUMNS.items()
+        }
 
     def _distinct_column(self, column: str) -> list[str]:
         """Order-preserving distinct non-blank values of a model column."""

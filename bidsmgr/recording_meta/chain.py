@@ -95,6 +95,10 @@ _ACQ_TO_BIDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("associated_empty_room", ("AssociatedEmptyRoom",)),
     ("subject_artefact_description", ("SubjectArtefactDescription",)),
     ("power_line_freq", ("PowerLineFrequency",)),
+    # Listed even though the loop's result is overwritten below, because this
+    # table is also read as "which BIDS field does this attribute mean", and
+    # leaving it out made that question unanswerable for this one attribute.
+    ("software_versions", ("SoftwareVersions",)),
 )
 
 
@@ -176,7 +180,9 @@ def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
     for attr, candidates in _ACQ_TO_BIDS:
         put(candidates, getattr(acq, attr, None))
 
-    # Two fields the spec models as one list and BIDS splits in two.
+    # The spec has two names for one BIDS field, so the more specific one wins
+    # and the older one is the fallback. This runs after the loop above, which
+    # already put software_versions, and says the same thing when it is set.
     put(("SoftwareVersions",), acq.software_versions or acq.software)
     put(("HardwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Hardware"})
     put(("SoftwareFilters",), {f.name: f.info for f in acq.filters if f.kind == "Software"})
@@ -388,10 +394,55 @@ def resolve_attribute(
 
 
 __all__ = [
+    "DATASET_DESCRIPTION_TO_BIDS",
     "LAYERS",
     "LAYER_LABELS",
     "ResolvedField",
+    "dataset_description_as_bids",
+    "dataset_description_from_bids",
     "describe_origin",
     "resolve_attribute",
     "resolve_sidecar_fields",
 ]
+
+
+# ``DatasetDescriptionSpec`` attribute -> its BIDS field. The third of these
+# tables, and the last: the dialog kept its own copy inline, spelled out twice
+# (once to show the stored answers, once to put them back), so adding a field
+# meant editing two lists in a GUI module and hoping they agreed.
+DATASET_DESCRIPTION_TO_BIDS: dict[str, str] = {
+    "name": "Name",
+    "authors": "Authors",
+    "license": "License",
+    "acknowledgements": "Acknowledgements",
+    "how_to_acknowledge": "HowToAcknowledge",
+    "funding": "Funding",
+    "ethics_approvals": "EthicsApprovals",
+    "references_and_links": "ReferencesAndLinks",
+    "dataset_doi": "DatasetDOI",
+}
+
+# Which of those hold a list, so reading one back knows what shape to keep.
+_DATASET_DESCRIPTION_LISTS = frozenset(
+    {"authors", "funding", "ethics_approvals", "references_and_links"}
+)
+
+
+def dataset_description_as_bids(dd) -> dict[str, Any]:
+    """One ``DatasetDescriptionSpec`` as the fields a form asks for."""
+    out: dict[str, Any] = {}
+    for attr, name in DATASET_DESCRIPTION_TO_BIDS.items():
+        value = getattr(dd, attr, None)
+        if value not in (None, "", [], {}):
+            out[name] = value
+    return out
+
+
+def dataset_description_from_bids(dd, answers: dict) -> None:
+    """Write a form's answers back onto a ``DatasetDescriptionSpec``, in place."""
+    for attr, name in DATASET_DESCRIPTION_TO_BIDS.items():
+        value = answers.get(name)
+        if attr in _DATASET_DESCRIPTION_LISTS:
+            setattr(dd, attr, list(value or []))
+        else:
+            setattr(dd, attr, value or None)

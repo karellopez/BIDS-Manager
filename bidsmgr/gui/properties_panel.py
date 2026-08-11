@@ -55,15 +55,7 @@ import pandas as pd
 from .. import schema as schema_mod
 from ..metadata.template_plan import sidecar_section
 from ..project import Project
-from ..recording_meta import (
-    COMMON_CAP_MANUFACTURERS,
-    COMMON_MANUFACTURERS,
-    COMMON_RADIONUCLIDES,
-    COMMON_TRACERS,
-    MODES_OF_ADMINISTRATION,
-    PET_IMAGE_UNITS,
-    RADIOACTIVITY_UNITS,
-)
+from ..recording_meta import CURATED_SUGGESTIONS, SCAN_SUGGESTION_COLUMNS
 from . import icons
 from .delegates import builtin_montages
 from .metadata_help import tooltip_for
@@ -882,22 +874,9 @@ class PropertiesPanel(QWidget):
         vendor string can always parse wrongly and a wrong answer is worse than
         a blank one.
         """
-        curated: tuple = {
-            "Manufacturer": tuple(COMMON_MANUFACTURERS),
-            "CapManufacturer": tuple(COMMON_CAP_MANUFACTURERS),
-            "TracerName": tuple(COMMON_TRACERS),
-            "TracerRadionuclide": tuple(COMMON_RADIONUCLIDES),
-            "ModeOfAdministration": tuple(MODES_OF_ADMINISTRATION),
-            "InjectedRadioactivityUnits": tuple(RADIOACTIVITY_UNITS),
-            "Units": tuple(PET_IMAGE_UNITS),
-        }.get(name, ())
-        scanned = {
-            "Manufacturer": "manufacturer_suggestion",
-            "TracerName": "tracer_suggestion",
-            "TracerRadionuclide": "radionuclide_suggestion",
-            "InjectedRadioactivity": "injected_dose_suggestion",
-        }.get(name, "")
-        hint = self._cell(row, scanned) if scanned else ""
+        curated = CURATED_SUGGESTIONS.get(name, ())
+        column = SCAN_SUGGESTION_COLUMNS.get(name, "")
+        hint = self._cell(row, column) if column else ""
         return ((hint,) if hint and hint not in curated else ()) + curated
 
     def _remember_sidecar_expanded(self, expanded: bool) -> None:
