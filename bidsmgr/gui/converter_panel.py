@@ -1719,6 +1719,29 @@ class ConverterPanel(QWidget):
     # Post-convert chain
     # ------------------------------------------------------------------
 
+    def _converted_datasets(self) -> Optional[list[str]]:
+        """The datasets THIS conversion wrote, by folder name.
+
+        The post-convert steps are given the parent directory, because that is
+        where convert puts each dataset. Projects are normally kept side by
+        side, so that parent is the home of all of them, and a metadata run
+        there wrote this project's name into every one of its neighbours.
+
+        In project mode there is exactly one; on a free path the inventory's
+        ``dataset`` column says which, and only those are touched.
+        """
+        if self._bids_root is not None:
+            return [self._bids_root.name]
+        if self._model is None or "dataset" not in self._model.dataframe().columns:
+            # Nothing to filter on. Say so with None rather than an empty list,
+            # which would mean "touch nothing" and silently skip the step.
+            return None
+        names = sorted({
+            name for name in (str(v).strip() for v in self._model.dataframe()["dataset"])
+            if name and name.lower() not in ("nan", "none")
+        })
+        return names or None
+
     def _maybe_run_post_convert(self, bids_parent: Path) -> bool:
         """Kick off the metadata + validate chain if settings say so.
 
@@ -1759,6 +1782,7 @@ class ConverterPanel(QWidget):
         s = self._app_settings
         worker = MetadataWorker(
             bids_parent,
+            datasets=self._converted_datasets(),
             inventory_tsv=self._output_tsv,
             # Metadata-engine name defaults to each BIDS root's folder
             # name (i.e. the dataset slug) when ``name`` is None.
@@ -1776,6 +1800,7 @@ class ConverterPanel(QWidget):
         s = self._app_settings
         worker = ValidateWorker(
             bids_parent,
+            datasets=self._converted_datasets(),
             strict=s.post_validate_strict,
             schema=s.validate_schema_version or None,
             max_rows=s.validate_max_rows,

@@ -181,7 +181,33 @@ written to a sidecar.
 
 ---
 
-## 6. Who writes what
+## 6. One project at a time
+
+Everything a project states lives inside that project. The scaffold sits beside
+the inventory, and in project mode the inventory is inside
+`<dataset>/.bidsmgr/project/scans/<version>/`, so two projects can never read
+each other's answers.
+
+One thing did leak, and it is worth knowing why. The steps that run after a
+conversion are handed the PARENT of the dataset, because that is where convert
+puts each one, and the metadata engine walks every BIDS root it finds under its
+target. Projects are normally kept side by side, so that parent is the home of
+all of them: a dataset name typed into one project's template was written into
+every neighbour.
+
+The post-convert steps now name the datasets they are allowed to touch, which in
+project mode is exactly the project. A deliberate `bidsmgr-metadata <folder>`
+over a folder of datasets still touches all of them, because that is what the
+command means when the caller does not say otherwise.
+
+What is deliberately shared between projects, because it is a preference rather
+than data: the theme, the BIDS version, the scan and convert defaults, the scan
+rules, and the validation settings. They live in the application's settings and
+apply to whatever you open next.
+
+---
+
+## 7. Who writes what
 
 ```mermaid
 flowchart TD
@@ -207,7 +233,7 @@ puts your template into the files.
 
 ---
 
-## 7. The BIDS version
+## 8. The BIDS version
 
 One control, in **Settings, BIDS version**, and one flag, `--schema`, on every
 CLI verb. It governs:
@@ -226,7 +252,7 @@ validation. Several versions ship with BIDS Manager; the default is the newest.
 
 ---
 
-## 8. Reading the form
+## 9. Reading the form
 
 | mark | meaning |
 |---|---|
@@ -243,7 +269,7 @@ not depend on being able to see colour.
 
 ---
 
-## 9. Looking at it
+## 10. Looking at it
 
 Layout bugs are invisible to a test suite. A pane can pass every assertion about
 its widths and still show a field with no box beside it, a column that does not
@@ -262,7 +288,7 @@ on the near-black surface can vanish on the light one.
 
 ---
 
-## 10. Where the code is
+## 11. Where the code is
 
 | you want | look in |
 |---|---|
