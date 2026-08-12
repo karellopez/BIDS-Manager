@@ -144,14 +144,16 @@ flowchart LR
     R --> C[cell<br/>this row in the table]
 ```
 
-Later beats earlier. On top of all of it sits one more rule, applied when the
-answers are written:
+Later beats earlier, and all of it beats what the converter wrote.
 
-> What the converter read out of the file stands, unless THIS recording
-> contradicts it.
+Nothing in that chain is a guess. Every layer of it is somebody having typed an
+answer into a form, and the form only offers a field when it is worth asking
+about. So a value you state replaces what the conversion put there, which is the
+whole reason the "already answered by the conversion" block is editable: opening
+it and correcting the manufacturer is you saying the header is wrong.
 
-A statement about a class of files does not overrule a file's own header.
-Correcting one specific file is exactly what the row and cell layers are for.
+Everything nobody stated is left exactly as the conversion wrote it, which is
+almost all of it.
 
 `VARIES` is a fourth state, beside a value, blank, and not-applicable. It says
 "this differs per recording, the answer lives further down". It is never itself

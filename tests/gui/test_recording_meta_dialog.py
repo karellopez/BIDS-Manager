@@ -162,8 +162,8 @@ def test_eeg_and_meg_do_not_share_a_section(qtbot, tmp_path):
         present_pairs=[("eeg", "eeg"), ("meg", "meg")],
     )
     qtbot.addWidget(dlg)
-    eeg = dlg._template._widgets["eeg/eeg"]
-    meg = dlg._template._widgets["meg/meg"]
+    eeg = dlg._template.widgets_for("eeg/eeg")
+    meg = dlg._template.widgets_for("meg/meg")
     # A field both instruments have is asked once per instrument, in separate
     # widgets, so an answer for one is never the other's.
     assert "DeviceSerialNumber" in eeg and "DeviceSerialNumber" in meg
@@ -183,7 +183,7 @@ def test_the_agnostic_section_asks_for_the_dataset_description(qtbot, tmp_path):
     """The fields whose absence produced NO_AUTHORS on every dataset."""
     dlg, _ = _dialog(tmp_path, present_datatypes={"eeg"})
     qtbot.addWidget(dlg)
-    fields = dlg._template._widgets["dataset_description"]
+    fields = dlg._template.widgets_for("dataset_description")
     assert {"Authors", "License", "Funding", "DatasetDOI"} <= set(fields)
 
 
@@ -216,7 +216,7 @@ def test_a_field_the_converter_fills_is_not_asked(qtbot, tmp_path):
     assert "TracerName" not in asked
     assert "ModeOfAdministration" in asked   # nothing in the data says this
     assert "TracerName" in dlg._template.supplied("pet/pet")
-    assert "TracerName" in dlg._template._widgets["pet/pet"]
+    assert "TracerName" in dlg._template.widgets_for("pet/pet")
 
 
 def test_answers_round_trip_per_file(qtbot, tmp_path):
@@ -230,9 +230,9 @@ def test_answers_round_trip_per_file(qtbot, tmp_path):
     )
     dlg, scaffold = _dialog(tmp_path, **kw)
     qtbot.addWidget(dlg)
-    write_field_widget(dlg._template._widgets["dataset_description"]["Authors"],
+    write_field_widget(dlg._template.widgets_for("dataset_description")["Authors"],
                        ["Lopez, Karel", "Doe, Jane"])
-    write_field_widget(dlg._template._widgets["eeg/eeg"]["CapManufacturer"], "EasyCap")
+    write_field_widget(dlg._template.widgets_for("eeg/eeg")["CapManufacturer"], "EasyCap")
     dlg._on_save()
 
     spec = load_spec(scaffold)
@@ -243,7 +243,7 @@ def test_answers_round_trip_per_file(qtbot, tmp_path):
     qtbot.addWidget(again)
     field = again._template._fields["dataset_description"]["Authors"]
     assert read_field_widget(
-        again._template._widgets["dataset_description"]["Authors"], field,
+        again._template.widgets_for("dataset_description")["Authors"], field,
     ) == ["Lopez, Karel", "Doe, Jane"]
 
 
@@ -254,7 +254,7 @@ def test_an_author_with_a_comma_stays_one_person(qtbot, tmp_path):
 
     dlg, _ = _dialog(tmp_path, present_datatypes={"eeg"})
     qtbot.addWidget(dlg)
-    widget = dlg._template._widgets["dataset_description"]["Authors"]
+    widget = dlg._template.widgets_for("dataset_description")["Authors"]
     write_field_widget(widget, ["Lopez, Karel"])
     field = dlg._template._fields["dataset_description"]["Authors"]
     assert read_field_widget(widget, field) == ["Lopez, Karel"]
@@ -270,7 +270,7 @@ def test_a_dropdown_popup_is_wide_enough_to_read(qtbot, tmp_path):
     )
     qtbot.addWidget(dlg)
     combos = [
-        w for w in dlg._template._widgets["pet/pet"].values()
+        w for w in dlg._template.widgets_for("pet/pet").values()
         if isinstance(w, QComboBox) and w.count() > 1
     ]
     assert combos, "expected at least one vocabulary dropdown"
@@ -295,7 +295,7 @@ def test_the_fields_mne_bids_cannot_answer_are_asked(qtbot, tmp_path) -> None:
         present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
     )
     qtbot.addWidget(dlg)
-    asked = set(dlg._template._widgets["eeg/eeg"])
+    asked = set(dlg._template.widgets_for("eeg/eeg"))
     for name in ("EEGReference", "EEGGround", "SoftwareFilters", "PowerLineFrequency"):
         assert name in asked, f"{name} must be asked: no converter can answer it"
 
@@ -360,7 +360,7 @@ def test_an_answered_field_is_shown_and_can_be_corrected(qtbot, tmp_path):
         scaffold, present_datatypes={"meg"}, present_pairs=[("meg", "meg")],
     )
     qtbot.addWidget(dlg)
-    widgets = dlg._template._widgets["meg/meg"]
+    widgets = dlg._template.widgets_for("meg/meg")
     assert "PowerLineFrequency" in widgets, (
         "a field the converter fills must still be reachable, or a wrong value "
         "in the data has nowhere to be corrected"
@@ -380,7 +380,7 @@ def test_the_fields_no_backend_can_answer_are_asked_not_hidden(qtbot, tmp_path):
         present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
     )
     qtbot.addWidget(dlg)
-    asked = set(dlg._template._widgets["eeg/eeg"])
+    asked = set(dlg._template.widgets_for("eeg/eeg"))
     answered = set(dlg._template._answered_values.get("eeg/eeg", {}))
     for name in ("EEGReference", "EEGGround", "PowerLineFrequency"):
         assert name in asked and name not in answered

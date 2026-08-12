@@ -486,10 +486,16 @@ class CollapsibleSection(QWidget):
         badge: str = "",
         level: int = 0,
         expanded: bool = True,
+        body_factory=None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._expanded = expanded
+        # Built on first opening rather than up front. A four-modality dataset
+        # is 559 controls, and Qt spends over a millisecond adding each one to a
+        # layout, so building them all to show a dozen cost two and a half
+        # seconds every time the window opened.
+        self._body_factory = body_factory
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(level * 10, 0, 0, 0)
@@ -543,6 +549,8 @@ class CollapsibleSection(QWidget):
 
         self._header.toggled.connect(self._on_toggled)
         self._refresh_header()
+        if expanded:
+            self._realise()
         self._body.setVisible(expanded)
 
     def _refresh_header(self) -> None:
@@ -557,8 +565,20 @@ class CollapsibleSection(QWidget):
         self._header.setToolTip(self._subtitle or full)
         self._header.setText(full)
 
+    def _realise(self) -> None:
+        """Build the body, once."""
+        factory, self._body_factory = self._body_factory, None
+        if factory is not None:
+            self._body_layout.addWidget(factory())
+
+    def is_realised(self) -> bool:
+        """Has this section's body been built yet?"""
+        return self._body_factory is None
+
     def _on_toggled(self, checked: bool) -> None:
         self._expanded = checked
+        if checked:
+            self._realise()
         self._body.setVisible(checked)
         self._refresh_header()
         self.toggled_by_user.emit(checked)
@@ -789,6 +809,9 @@ class TemplateTree(QWidget):
         # from what is merely reachable.
         self._sections_by_key: dict[str, object] = {}
         collapsed_keys = collapsed_keys or set()
+        # Kept so a section nobody opened still saves what it already held: its
+        # widgets do not exist to be read back.
+        self._stored = dict(values or {})
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -830,6 +853,7 @@ class TemplateTree(QWidget):
             subtitle=node.subtitle,
             badge=badge,
             level=level,
+            body_factory=(lambda n=node: self._build_leaf(n)) if node.is_leaf else None,
             # A file's own fields start folded: a dataset with four modalities
             # would otherwise open as a wall of boxes. The groupings above stay
             # open, so what exists is visible at a glance.
@@ -840,20 +864,39 @@ class TemplateTree(QWidget):
 
         if node.is_leaf:
             self._sections_by_key[node.key] = node.section
-            section.add(self._render_fields(node, values.get(node.key, {})))
-            # Everything the conversion supplies: with the value where the scan
-            # measured one, and without where the built-in list is all we have.
-            # Both are shown, so no field the form considered simply vanishes.
-            measured = self._answered.get(node.key) or {}
-            already = {name: measured.get(name) for name in node.section.supplied}
-            already.update(measured)
-            if already:
-                section.add(self._render_answered(node, already))
         for child in node.children:
             section.add(
                 self._render(child, values, collapsed, level + 1, open_files)
             )
         return section
+
+    def _build_leaf(self, node) -> QWidget:
+        """One file's questions, plus what the conversion answers, on demand."""
+        holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+        column.addWidget(self._render_fields(node, self._stored.get(node.key, {})))
+        # Everything the conversion supplies: with the value where the scan
+        # measured one, and without where the built-in list is all we have.
+        # Both are shown, so no field the form considered simply vanishes.
+        measured = self._answered.get(node.key) or {}
+        already = {name: measured.get(name) for name in node.section.supplied}
+        already.update(measured)
+        if already:
+            column.addWidget(self._render_answered(node, already))
+        return holder
+
+    def build(self, key: str) -> None:
+        """Build a section's body now, without waiting for the user to open it."""
+        section = self._sections.get(key)
+        if section is not None:
+            section._realise()
+
+    def widgets_for(self, key: str) -> dict:
+        """This node's controls, building the section if nobody has opened it."""
+        self.build(key)
+        return self._widgets.get(key, {})
 
     def _render_fields(self, node, stored: dict) -> QWidget:
         holder = QWidget()
@@ -992,7 +1035,14 @@ class TemplateTree(QWidget):
 
     def values_by_key(self) -> dict[str, dict]:
         """What the user has typed, per node, as the schema shapes it."""
-        out: dict[str, dict] = {}
+        # Sections nobody opened keep what they already held. Their widgets were
+        # never built, so there is nothing to read, and returning nothing would
+        # erase the answers on the next save.
+        out: dict[str, dict] = {
+            key: dict(values)
+            for key, values in self._stored.items()
+            if key not in self._widgets and values
+        }
         for key, widgets in self._widgets.items():
             shown = self._answered_values.get(key, {})
             answers = {}

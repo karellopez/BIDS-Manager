@@ -221,7 +221,7 @@ def test_pet_answers_round_trip(qtbot, tmp_path):
     kw = dict(present_datatypes={"pet"}, present_pairs=[("pet", "pet")])
     dlg = RecordingMetaDialog(scaffold, **kw)
     qtbot.addWidget(dlg)
-    write_field_widget(dlg._template._widgets["pet/pet"]["ModeOfAdministration"], "bolus")
+    write_field_widget(dlg._template.widgets_for("pet/pet")["ModeOfAdministration"], "bolus")
     dlg._on_save()
     assert load_spec(scaffold).sequence_templates["pet/pet"]["ModeOfAdministration"] == "bolus"
 

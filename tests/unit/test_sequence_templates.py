@@ -103,14 +103,24 @@ def test_an_inapplicable_field_is_refused_however_plainly_asked_for() -> None:
     assert data == {"PulseSequenceType": "MPRAGE"}
 
 
-def test_an_existing_value_is_never_replaced() -> None:
-    """The converter read its answer out of the file itself, which beats a
-    statement made about a class of files."""
-    spec = _spec(**{"anat/T1w": {"PulseSequenceType": "MPRAGE"}})
-    data = {"PulseSequenceType": "FromTheDicom"}
-    assert apply_sequence_template(data, "anat", "T1w", None, spec) == 0
-    assert data["PulseSequenceType"] == "FromTheDicom"
+def test_a_stated_answer_replaces_what_the_converter_wrote(tmp_path: Path) -> None:
+    """The user wins. This used to be the other way round.
 
+    The reasoning was that a file's own header beats a statement about a class
+    of files. That is wrong about who is talking: nothing in the chain is a
+    guess, every layer of it is somebody having typed an answer, and the form
+    only offers a field when it is worth asking about. A user who opens "already
+    answered by the conversion" and corrects the manufacturer has said the
+    header is wrong, and their correction used to vanish on the next run.
+    """
+    data = {"Manufacturer": "read from the header", "EchoTime": 0.03}
+    spec = RecordingMetaSpec()
+    spec.sequence_templates["anat/T1w"] = {"Manufacturer": "what the user says"}
+
+    apply_sequence_template(data, "anat", "T1w", None, spec)
+    assert data["Manufacturer"] == "what the user says"
+    # And what nobody stated is left exactly as the converter wrote it.
+    assert data["EchoTime"] == 0.03
 
 def test_a_template_reaches_its_own_scope_and_nothing_else(tmp_path: Path) -> None:
     """The gate for this feature: a bold template reaches every bold run, the

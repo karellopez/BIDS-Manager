@@ -94,6 +94,26 @@ def _tighten_form(form: QFormLayout) -> None:
 
 
 
+def _fill_then_show(combo: QComboBox, items):
+    """Populate a combo the first time it is opened, then show it as usual.
+
+    For a list that is expensive to compute and that most users never look at.
+    The current text survives, so a stored value shows before the list exists.
+    """
+    original = combo.showPopup
+
+    def show_popup() -> None:
+        if combo.property("filled") is not True:
+            combo.setProperty("filled", True)
+            current = combo.currentText()
+            combo.addItems([n for n in items() if combo.findText(n) < 0])
+            if current:
+                combo.setCurrentText(current)
+        original()
+
+    return show_popup
+
+
 class RecordingMetaDialog(QDialog):
     """Edit the dataset-level recording-metadata scaffold."""
 
@@ -428,9 +448,13 @@ class RecordingMetaDialog(QDialog):
         form = QFormLayout(box)
         _tighten_form(form)
 
+        # The list of built-in montages comes from MNE, and asking for it
+        # imports mne.channels, which takes about a second. Nobody should pay
+        # that to open a metadata window, so the list is filled the first time
+        # the box is actually opened.
         self._montage = QComboBox()
         self._montage.addItem(_NONE)
-        self._montage.addItems(builtin_montages())
+        self._montage.showPopup = _fill_then_show(self._montage, builtin_montages)
         self._form_row(form, "Montage:", self._montage, "montage")
         hint = self._suggestion_label(self._montage_suggestions)
         if hint is not None:

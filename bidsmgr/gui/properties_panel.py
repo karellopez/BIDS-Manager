@@ -783,7 +783,8 @@ class PropertiesPanel(QWidget):
         if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
                 "montage", "montage",
-                ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
+                ["(none)"], self._eff(row, "montage"), "(none)",
+                fill_on_open=builtin_montages,
             ))
             suggestion = self._cell(row, "montage_suggestion")
             if suggestion:
@@ -1157,7 +1158,8 @@ class PropertiesPanel(QWidget):
 
     def _meta_combo_row(self, label: str, key: str, options: list[str],
                         current: str, blank_label: str, *,
-                        setter=None, editable: bool = False) -> QWidget:
+                        setter=None, editable: bool = False,
+                        fill_on_open=None) -> QWidget:
         row_w = QWidget()
         # Scope the transparent background to THIS container only (objectName
         # selector) so it does not cascade into child combo popups / tooltips
@@ -1198,6 +1200,13 @@ class PropertiesPanel(QWidget):
                 lambda c=combo, k=key, bl=blank_label:
                 on_change(k, "" if c.currentText() == bl else c.currentText().strip())
             )
+        if fill_on_open is not None:
+            # An expensive list, filled the first time the user opens the box.
+            # Building it on every row selection made selecting a row slow for
+            # a list most people never look at.
+            from .recording_meta_dialog import _fill_then_show
+
+            combo.showPopup = _fill_then_show(combo, fill_on_open)
         h.addWidget(combo, 1)
         return row_w
 

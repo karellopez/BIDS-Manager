@@ -213,7 +213,7 @@ def test_the_fields_share_one_column(qtbot, tmp_path):
         # further right by design.
         asked = dlg._template.asked(key)
         widgets = [
-            w for name, w in dlg._template._widgets[key].items()
+            w for name, w in dlg._template.widgets_for(key).items()
             if name in asked and w.isVisible()
         ]
         assert len(widgets) > 5
@@ -290,7 +290,7 @@ def test_nothing_the_panel_offers_is_missing_from_the_dialog(qtbot, tmp_path):
             present_datatypes={datatype}, present_pairs=[(datatype, suffix)],
         )
         qtbot.addWidget(dlg)
-        reachable = set(dlg._template._widgets[f"{datatype}/{suffix}"])
+        reachable = set(dlg._template.widgets_for(f"{datatype}/{suffix}"))
         assert not (panel_offers - reachable), (
             f"{datatype}/{suffix}: only in the panel: "
             f"{sorted(panel_offers - reachable)}"
@@ -304,7 +304,7 @@ def test_the_mains_frequency_is_reachable_for_both_instruments(qtbot, tmp_path):
             present_datatypes={datatype}, present_pairs=[(datatype, datatype)],
         )
         qtbot.addWidget(dlg)
-        assert "PowerLineFrequency" in dlg._template._widgets[f"{datatype}/{datatype}"]
+        assert "PowerLineFrequency" in dlg._template.widgets_for(f"{datatype}/{datatype}")
 
 
 def test_a_transparent_background_never_reaches_a_tooltip(qtbot, tmp_path):
@@ -324,3 +324,67 @@ def test_a_transparent_background_never_reaches_a_tooltip(qtbot, tmp_path):
         if "transparent" in sheet and "{" not in sheet:
             offenders.append((type(widget).__name__, sheet[:60]))
     assert not offenders, f"unscoped transparent rules: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Building on demand
+#
+# A four-modality dataset is 559 controls, and Qt spends over a millisecond
+# adding each one to a layout, so building them all to show a dozen cost two and
+# a half seconds every time the window opened, and again on every theme swap.
+# ---------------------------------------------------------------------------
+
+
+def test_a_section_builds_nothing_until_it_is_opened(qtbot, tmp_path):
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg", "meg"},
+        present_pairs=[("eeg", "eeg"), ("meg", "meg")],
+    )
+    qtbot.addWidget(dlg)
+    assert dlg._template._widgets.get("eeg/eeg") in (None, {})
+
+    opened = dlg._template.widgets_for("eeg/eeg")
+    assert len(opened) > 10
+    # And the other one is still untouched.
+    assert dlg._template._widgets.get("meg/meg") in (None, {})
+
+
+def test_a_section_nobody_opened_keeps_its_answers(qtbot, tmp_path):
+    """Its controls were never built, so there is nothing to read back. Saving
+    what the widgets hold would erase the answers of every section the user did
+    not happen to look at."""
+    from bidsmgr.recording_meta import RecordingMetaSpec, dump_spec, load_spec
+
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    spec = RecordingMetaSpec()
+    spec.sequence_templates["meg/meg"] = {"InstitutionName": "stated earlier"}
+    scaffold.write_text(dump_spec(spec))
+
+    dlg = RecordingMetaDialog(
+        scaffold, present_datatypes={"eeg", "meg"},
+        present_pairs=[("eeg", "eeg"), ("meg", "meg")],
+    )
+    qtbot.addWidget(dlg)
+    dlg._on_save()
+
+    saved = load_spec(scaffold).sequence_templates
+    assert saved["meg/meg"]["InstitutionName"] == "stated earlier"
+
+
+def test_opening_the_dialog_does_not_import_mne(qtbot, tmp_path):
+    """The montage list comes from MNE, and asking for it imports mne.channels,
+    which takes about a second. Nobody should pay that to open a metadata
+    window; the list fills the first time the box is opened."""
+    import sys
+
+    for name in [m for m in sys.modules if m.startswith("mne")]:
+        del sys.modules[name]
+
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    assert "mne.channels" not in sys.modules
+    assert dlg._montage.count() == 1   # just the "(none)" entry, so far

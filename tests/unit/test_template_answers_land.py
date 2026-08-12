@@ -123,3 +123,35 @@ def test_every_file_node_stores_under_the_key_the_writer_reads() -> None:
             assert node.key == template_key(
                 node.section.datatype, node.section.suffix
             )
+
+
+def test_a_correction_to_what_the_converter_wrote_survives(tmp_path: Path) -> None:
+    """The whole reason "already answered by the conversion" is editable.
+
+    A user who corrects the manufacturer there has said the header is wrong.
+    Their answer used to be skipped, on the rule that a file's own header beats
+    a statement about a class of files, so the correction vanished with no
+    explanation on the next run.
+    """
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    root = tmp_path / "ds"
+    eeg = root / "sub-001" / "eeg"
+    eeg.mkdir(parents=True)
+    (eeg / "sub-001_task-rest_eeg.json").write_text(json.dumps({
+        "Manufacturer": "read from the header",
+        "SamplingFrequency": 500.0,
+    }))
+
+    spec = RecordingMetaSpec()
+    spec.sequence_templates["eeg/eeg"] = {"Manufacturer": "what the user says"}
+    apply_stated_metadata(root, spec, pd.DataFrame([{
+        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+    }]))
+
+    got = json.loads((eeg / "sub-001_task-rest_eeg.json").read_text())
+    assert got["Manufacturer"] == "what the user says"
+    # What nobody stated is left exactly as the converter wrote it.
+    assert got["SamplingFrequency"] == 500.0

@@ -170,11 +170,20 @@ def apply_sequence_template(
     acquisition blocks were applied in the EEG/MEG fixup, so the same field
     could be written by either pass and the winner depended on their order.
 
-    An existing value stands unless this recording itself contradicts it: the
-    file's own header beats a statement about a class of files, and correcting
-    one specific file is what a row override is for. That is why ``row_id``
-    matters here: without it this pass could not tell the difference between a
-    template's opinion and a correction aimed at exactly this file.
+    What the user stated WINS over what the converter wrote.
+
+    It used to be the other way round: an existing value stood unless the row
+    itself contradicted it, on the reasoning that a file's own header beats a
+    statement about a class of files. That reasoning is wrong about who is
+    talking. Nothing in this chain is a guess; every layer of it is somebody
+    having typed an answer into a form, and the form only offers a field at all
+    when it is worth asking about. A user who opens "already answered by the
+    conversion" and corrects the manufacturer has said the header is wrong,
+    which is the entire reason that block is editable. Skipping their answer
+    made the correction vanish on the next run with no explanation.
+
+    The converter still supplies everything nobody stated, which is almost all
+    of it.
     """
     resolved = resolve_sidecar_fields(
         spec, datatype, suffix, row_id=row_id, task=task, row_values=row_values,
@@ -193,8 +202,6 @@ def apply_sequence_template(
             and datatype == "meg"
             and not simultaneous_eeg
         ):
-            continue
-        if name in data and not field.is_row_override:
             continue
         if data.get(name) == field.value:
             continue
