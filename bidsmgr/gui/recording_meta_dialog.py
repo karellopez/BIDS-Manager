@@ -15,6 +15,7 @@ map the scan seeded.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -127,6 +128,7 @@ class RecordingMetaDialog(QDialog):
         example_paths: Optional[dict] = None,
         pair_counts: Optional[dict] = None,
         present_pairs: Optional[list] = None,
+        bids_root: Optional[Path] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Dataset metadata")
@@ -145,6 +147,9 @@ class RecordingMetaDialog(QDialog):
         # tables stretch. Still freely resizable (enlarge to see more at once).
         self.resize(560, 640)
         self._scaffold_path = Path(scaffold_path)
+        # The dataset this template belongs to, so the form can start from the
+        # name it was created with and can say what a rename would affect.
+        self._bids_root = Path(bids_root) if bids_root is not None else None
         # Datatypes the scanned dataset actually contains. Drives which sections
         # / fields make sense: the recording-acquisition section is hidden for a
         # dataset with no EEG/MEG, and within it the scalp-EEG fields
@@ -581,12 +586,32 @@ class RecordingMetaDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _load(self) -> RecordingMetaSpec:
+        spec = RecordingMetaSpec()
         if self._scaffold_path.exists():
             try:
-                return load_spec(self._scaffold_path)
+                spec = load_spec(self._scaffold_path)
             except Exception:
                 pass
-        return RecordingMetaSpec()
+        if not spec.dataset_description.name:
+            # The name the dataset was created with. It is already in
+            # dataset_description.json, and the form is where a user expects to
+            # see it, so it starts there rather than as an empty box that then
+            # writes a blank over a name they chose.
+            spec.dataset_description.name = self._dataset_name_on_disk()
+        return spec
+
+    def _dataset_name_on_disk(self) -> str:
+        """The Name the dataset currently carries, if there is one."""
+        root = self._bids_root
+        if root is None:
+            return ""
+        try:
+            data = json.loads(
+                (root / "dataset_description.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return ""
+        return str(data.get("Name", "") or "").strip() if isinstance(data, dict) else ""
 
     def _populate(self) -> None:
         """Fill the parts BIDS has no field for. The rest is the tree's.
@@ -729,12 +754,51 @@ class RecordingMetaDialog(QDialog):
             "participants_file": self._participants_file.text().strip(),
         })
 
+    #: Set when saving a name means renaming the project folder. The caller
+    #: does the move: this dialog knows what was asked, not how to close and
+    #: reopen a project.
+    rename_project_to: Optional[str] = None
+
     def _on_save(self) -> None:
         spec = self.build_spec()
         self._read_template(spec)
+
+        if not self._settle_the_name(spec):
+            return
+
         self._scaffold_path.parent.mkdir(parents=True, exist_ok=True)
         self._scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
         self.accept()
+
+    def _settle_the_name(self, spec) -> bool:
+        """Ask what a changed dataset name means. False if the user backed out.
+
+        Two intentions wear the same edit. A folder named in a hurry gets its
+        real name later, which is a rename; or the folder name is the one
+        everybody uses and what is being typed is the dataset's title. Guessing
+        was the old behaviour and it guessed wrong in a way nothing announced.
+        """
+        from .rename_dataset_dialog import (
+            RENAME_ALL, ask_what_the_name_means, can_rename_to,
+        )
+
+        self.rename_project_to = None
+        stated = (spec.dataset_description.name or "").strip()
+        root = self._bids_root
+        if root is None or not stated or stated == root.name:
+            return True
+        if stated == self._dataset_name_on_disk():
+            # Unchanged since it was last settled; do not ask again.
+            return True
+
+        answer = ask_what_the_name_means(
+            root.name, stated, self, can_rename=can_rename_to(root, stated),
+        )
+        if answer is None:
+            return False
+        if answer == RENAME_ALL:
+            self.rename_project_to = stated
+        return True
 
 
 __all__ = ["RecordingMetaDialog"]

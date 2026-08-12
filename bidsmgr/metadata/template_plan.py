@@ -107,6 +107,13 @@ class TemplateSection:
     # dropping them: a field that simply vanishes leaves a user who wants to
     # correct it with nowhere to go, and no way to tell it was considered.
     supplied: tuple[str, ...] = ()
+    # EVERY field this file may carry, asked or not, with its level.
+    #
+    # The folded block used to look its fields up in ``fields``, which holds
+    # only the ones being ASKED, so it never found them and fell back to a
+    # stand-in with no level at all. A user could not see that the conversion
+    # had answered something BIDS requires.
+    declared: tuple[TemplateField, ...] = field(default_factory=tuple)
 
     @property
     def required_fields(self) -> tuple[TemplateField, ...]:
@@ -227,7 +234,7 @@ def sidecar_section(
         # scenario this file may not be in; the form must not demand it.
         if s.name not in skip and not s.speculative and s.level != "prohibited"
     ]
-    declared = {spec.name for spec in specs}
+    declared_names = {spec.name for spec in specs}
     return TemplateSection(
         scope=datatype,
         datatype=datatype,
@@ -238,7 +245,12 @@ def sidecar_section(
         storage_key=f"{datatype}/{suffix}",
         fields=_sorted_fields(fields),
         n_files=n_files,
-        supplied=tuple(sorted((skip & declared) - CONVERTER_PRIVATE)),
+        supplied=tuple(sorted((skip & declared_names) - CONVERTER_PRIVATE)),
+        declared=tuple(
+            _as_template_field(spec)
+            for spec in specs
+            if spec.level != "prohibited"
+        ),
     )
 
 

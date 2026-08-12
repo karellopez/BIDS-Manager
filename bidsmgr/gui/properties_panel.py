@@ -910,7 +910,9 @@ class PropertiesPanel(QWidget):
         place to say so.
         """
         pal = CUR()
-        declared = {f.name: f for f in section.fields}
+        # Every field the file may carry, not just the ones being asked, or
+        # a required field the recording answered shows with no level.
+        declared = {f.name: f for f in section.declared}
         box = CollapsibleSection(
             "Already answered by the conversion",
             subtitle="edit only to correct what the data says",

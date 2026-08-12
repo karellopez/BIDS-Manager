@@ -974,7 +974,10 @@ class TemplateTree(QWidget):
 
         widgets = self._widgets.setdefault(node.key, {})
         fields = self._fields.setdefault(node.key, {})
-        declared = {f.name: f for f in node.section.fields}
+        # Every field the file may carry, so a required one the conversion
+        # answered still shows as required. section.fields holds only the
+        # ones being asked, which is why the levels used to be missing here.
+        declared = {f.name: f for f in node.section.declared}
         for name, value in sorted(already.items()):
             spec = declared.get(name) or _plain_field(name, value)
             widget = build_field_widget(spec, tuple(self._suggestions.get(name, ())))

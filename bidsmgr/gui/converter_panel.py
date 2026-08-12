@@ -123,6 +123,10 @@ class ConverterPanel(QWidget):
     log_message = pyqtSignal(str)
     scan_finished = pyqtSignal(object, object)
     convert_finished = pyqtSignal(int, object)
+    # (current root, the new folder name) when the user asks for the dataset
+    # name change to rename the project itself. The window does the move: this
+    # panel knows what was asked, not how to close and reopen a project.
+    project_rename_requested = pyqtSignal(object, str)
 
     def __init__(self, project: Optional[Project] = None, parent=None) -> None:
         super().__init__(parent)
@@ -1175,10 +1179,17 @@ class ConverterPanel(QWidget):
             present_pairs=present_pairs(df),
             example_paths=example_paths_for(df),
             pair_counts=pair_counts(df),
+            bids_root=self._bids_root,
         )
-        if dlg.exec() and self._model is not None:
+        if not dlg.exec():
+            return
+        if self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.
             self._model.set_global_spec(self._load_global_spec())
+        if dlg.rename_project_to:
+            self.project_rename_requested.emit(
+                self._bids_root, dlg.rename_project_to,
+            )
 
     def _load_global_spec(self):
         """Load the recording-metadata scaffold for the current inventory.
