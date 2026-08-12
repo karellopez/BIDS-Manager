@@ -70,6 +70,16 @@ dependencies = [
     "pydicom>=2.4,<=3.0.2",
     "nibabel>=5.0,<=5.4.2",
 
+    # PET. pet2bids is the reference implementation from the OpenNeuroPET group,
+    # and the work it does that we would otherwise duplicate is real: reading
+    # PMOD blood curves, and parsing the ECAT7 headers our own reader skims.
+    #
+    # It does NOT bring its own dcm2niix. It looks for one on PATH and only
+    # unzips its bundled copy when it finds none, so the binary pinned above is
+    # the one both of us use. BIDS Manager sets DCM2NIIX_PATH explicitly so
+    # there is never a question about which.
+    "pypet2bids>=1.5.1,<2",
+
     # EEG / MEG / iEEG conversion stack.
     "mne>=1.6,<=1.12.1",
     "mne-bids>=0.15,<=0.17.0",
