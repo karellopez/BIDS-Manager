@@ -388,3 +388,87 @@ def test_opening_the_dialog_does_not_import_mne(qtbot, tmp_path):
     qtbot.addWidget(dlg)
     assert "mne.channels" not in sys.modules
     assert dlg._montage.count() == 1   # just the "(none)" entry, so far
+
+
+# ---------------------------------------------------------------------------
+# What is already settled, shown first
+# ---------------------------------------------------------------------------
+
+
+def test_the_settled_block_comes_first_and_reads_as_settled(qtbot, tmp_path):
+    """Green, and above the questions. Ending a long section on it meant nobody
+    saw what they already had before working through what they did not."""
+    from bidsmgr.gui.theme_manager import CUR
+    from bidsmgr.gui.widgets.template_form import CollapsibleSection
+
+    dlg = RecordingMetaDialog(
+        tmp_path / "inv.tsv.recording_meta.json",
+        present_datatypes={"eeg"}, present_pairs=[("eeg", "eeg")],
+    )
+    qtbot.addWidget(dlg)
+    dlg.resize(700, 900)
+    dlg.show()
+    dlg._template.build("eeg/eeg")
+    _expand_all(dlg)
+
+    leaf = dlg._template.section_widget("eeg/eeg")
+    inner = leaf.findChildren(CollapsibleSection)
+    settled = [b for b in inner if b._title_text.startswith("Already answered")]
+    assert settled, "the fields the conversion answers should have their own block"
+    assert CUR()["success"] in settled[0]._header.styleSheet()
+
+    # Above the questions: its header sits higher than the first field's label.
+    asked = dlg._template.asked("eeg/eeg")
+    first = next(w for n, w in dlg._template.widgets_for("eeg/eeg").items() if n in asked)
+    assert settled[0].mapTo(dlg, settled[0].rect().topLeft()).y() < \
+        first.mapTo(dlg, first.rect().topLeft()).y()
+
+
+def test_the_panel_has_the_settled_block_too(qtbot):
+    """A recording answers things by itself, and the per-file form has to say
+    which, or the same field looks unanswered here and answered next door."""
+    import json as _json
+
+    from bidsmgr.gui.widgets.template_form import CollapsibleSection
+
+    df = pd.DataFrame([{
+        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "BIDS_name": "sub-001", "task": "rest", "line_freq": "", "montage": "",
+        "eeg_reference": "", "eeg_ground": "",
+        "_derived_fields": _json.dumps({
+            "SamplingFrequency": 500.0, "EEGChannelCount": 64,
+        }),
+    }])
+    panel = PropertiesPanel()
+    qtbot.addWidget(panel)
+    panel.bind_model(InventoryTableModel(df))
+    panel.set_selected_row(0)
+
+    settled = [
+        b for b in panel.findChildren(CollapsibleSection)
+        if b._title_text.startswith("Already answered")
+    ]
+    assert settled, "the per-file form needs the settled block as well"
+
+
+def test_an_entity_the_row_already_carries_counts_as_answered(qtbot):
+    """A task label on the row settles TaskName: the converter writes whatever
+    the row says, so asking for it again is asking twice."""
+    df = pd.DataFrame([{
+        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "BIDS_name": "sub-001", "task": "rest", "line_freq": "", "montage": "",
+        "eeg_reference": "", "eeg_ground": "",
+    }])
+    model = InventoryTableModel(df)
+    assert model.row_answered(0).get("TaskName") == "rest"
+
+    panel = PropertiesPanel()
+    qtbot.addWidget(panel)
+    panel.bind_model(model)
+    panel.set_selected_row(0)
+    from bidsmgr.metadata.template_plan import sidecar_section
+
+    asked = {f.name for f in sidecar_section("eeg", "eeg", answered=model.row_answered(0)).fields}
+    assert "TaskName" not in asked

@@ -50,6 +50,12 @@ ROW = {
     "Handedness": "R",
     "manufacturer_suggestion": "Brain Products",
     "montage_suggestion": "standard_1005 (60/64)",
+    # What the scan read out of this recording, which is what the converter
+    # will write for it. Internal column: it never reaches the TSV.
+    "_derived_fields": (
+        '{"SamplingFrequency": 500.0, "EEGChannelCount": 64, '
+        '"RecordingType": "continuous", "MISCChannelCount": 0}'
+    ),
 }
 
 

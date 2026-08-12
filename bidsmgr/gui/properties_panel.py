@@ -89,6 +89,24 @@ _MODALITY_NAMES = {
 }
 
 
+def _answered_field(name: str, value):
+    """A stand-in for a field the schema does not declare for this file.
+
+    A converter can write keys BIDS never mentions. They are still shown, so
+    nothing appears from nowhere, but there is no level or vocabulary to show.
+    """
+    from ..metadata.template_plan import TemplateField
+
+    kind = (
+        "boolean" if isinstance(value, bool)
+        else "number" if isinstance(value, (int, float))
+        else "array" if isinstance(value, list)
+        else "object" if isinstance(value, dict)
+        else "string"
+    )
+    return TemplateField(name=name, level="optional", type=kind)
+
+
 def _modality_label(datatype: str) -> str:
     """Display name for a single datatype (``eeg`` -> ``EEG``)."""
     return _MODALITY_NAMES.get(datatype, datatype.upper())
@@ -803,10 +821,11 @@ class PropertiesPanel(QWidget):
         the two lists disagreed. Now there is one list, and the dialog says what
         is true of every ``*_eeg.json`` while this says what is true of THIS one.
 
-        Unlike the dialog, it keeps the fields a converter usually fills. That
-        is not an oversight: correcting the one recording whose header lies is
-        exactly what a per-row answer is for, and refusing to show the field
-        would leave no way to do it.
+        Split the same way the dialog splits it. What THIS recording already
+        answers, from its own header and its own entities, is settled and comes
+        first, in green; what it does not is asked below. Everything stays
+        editable, since correcting the one recording whose header lies is
+        exactly what a per-row answer is for.
 
         Each control opens showing what the file will actually say, whichever
         layer said it, with the layer named in the tooltip. Answering here
@@ -814,12 +833,13 @@ class PropertiesPanel(QWidget):
         """
         if self._model is None or not datatype:
             return
+        answered = self._model.row_answered(row)
         section = sidecar_section(
             datatype, suffix or datatype,
             self._sidecar_example_path(row, datatype, suffix),
-            include_derived=True,
+            answered=answered,
         )
-        if not section.fields:
+        if not section.fields and not answered:
             return
 
         resolved = self._model.resolved_sidecar(row)
@@ -829,12 +849,21 @@ class PropertiesPanel(QWidget):
         box = CollapsibleSection(
             "Sidecar fields",
             subtitle=filename,
-            badge=f"{len(section.fields)} fields",
+            badge=f"{len(section.fields)} to answer",
             expanded=self._sidecar_expanded,
         )
         box.toggled_by_user.connect(self._remember_sidecar_expanded)
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(box)
+
+        # Settled first, in green: this recording's header and entities answer
+        # these, and the user needs to see what they need NOT fill in.
+        settled = {
+            name: answered.get(name)
+            for name in sorted(set(section.supplied) | set(answered))
+        }
+        if settled:
+            box.add(self._build_answered_block(row, section, settled))
         box.add(level_legend(colour=True))
 
         for field in section.fields:
@@ -872,6 +901,49 @@ class PropertiesPanel(QWidget):
             # rather than in a block of its own.
             if field.name == "PowerLineFrequency" and datatype in _EEG_MEG_DATATYPES:
                 box.add(self._build_psd_row(row))
+
+    def _build_answered_block(self, row: int, section, settled: dict) -> QWidget:
+        """The fields this recording already answers, folded away and editable.
+
+        Green because nothing in it is outstanding. Editable because the value
+        was read out of the data, and when the data is wrong this is the only
+        place to say so.
+        """
+        pal = CUR()
+        declared = {f.name: f for f in section.fields}
+        box = CollapsibleSection(
+            "Already answered by the conversion",
+            subtitle="edit only to correct what the data says",
+            badge=f"{len(settled)} fields",
+            level=1,
+            expanded=False,
+            tone=pal["success"],
+        )
+        for name, value in settled.items():
+            field = declared.get(name) or _answered_field(name, value)
+            widget = build_field_widget(field, self._field_suggestions(row, name))
+            if value is not None:
+                write_field_widget(widget, value)
+            widget.setToolTip(
+                (field.description + "\n\n" if field.description else "")
+                + ("The conversion reads this from the data and will write the "
+                   "value shown. Type here only to correct it."
+                   if value is not None else
+                   "The conversion normally supplies this from the data.")
+            )
+            connect_field_widget(
+                widget, lambda f=field, w=widget: self._on_sidecar_field_changed(f, w),
+            )
+            holder = QWidget()
+            holder.setObjectName("meta-row")
+            holder.setStyleSheet("#meta-row { background: transparent; }")
+            line = QHBoxLayout(holder)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            line.addWidget(field_label_widget(field, width=_LABEL_COL, fixed=True))
+            line.addWidget(widget, 1)
+            box.add(holder)
+        return box
 
     def _sidecar_example_path(self, row: int, datatype: str, suffix: str) -> str:
         """The name of the file this row will produce, for the section heading."""

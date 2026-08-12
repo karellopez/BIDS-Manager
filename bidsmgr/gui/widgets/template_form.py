@@ -486,6 +486,7 @@ class CollapsibleSection(QWidget):
         badge: str = "",
         level: int = 0,
         expanded: bool = True,
+        tone: str = "",
         body_factory=None,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -510,6 +511,9 @@ class CollapsibleSection(QWidget):
             1: (pal["text"], pal["surface2"], "600", 0),
         }.get(level, (pal["text"], "transparent", "500", 0))
         colour, back, weight, rule = tint
+        # A section can say what KIND of thing it holds. The settled block is
+        # green because nothing in it is outstanding.
+        colour = tone or colour
 
         self._header = _ShrinkableButton()
         self._header.setObjectName("template-section-header")
@@ -876,15 +880,15 @@ class TemplateTree(QWidget):
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
-        column.addWidget(self._render_fields(node, self._stored.get(node.key, {})))
-        # Everything the conversion supplies: with the value where the scan
-        # measured one, and without where the built-in list is all we have.
-        # Both are shown, so no field the form considered simply vanishes.
+        # What is settled comes first, in green, so the eye starts with "here
+        # is what you already have" and then reaches the questions. Putting it
+        # last made a long section end on a note nobody read.
         measured = self._answered.get(node.key) or {}
         already = {name: measured.get(name) for name in node.section.supplied}
         already.update(measured)
         if already:
             column.addWidget(self._render_answered(node, already))
+        column.addWidget(self._render_fields(node, self._stored.get(node.key, {})))
         return holder
 
     def build(self, key: str) -> None:
@@ -932,8 +936,11 @@ class TemplateTree(QWidget):
             widgets[field.name] = widget
             fields[field.name] = field
 
-        self._widgets[node.key] = widgets
-        self._fields[node.key] = fields
+        # Merge, do not replace. The answered block builds first now and puts
+        # its controls in the same maps; assigning here wiped every one of them,
+        # so a field the conversion fills became unreachable again.
+        self._widgets.setdefault(node.key, {}).update(widgets)
+        self._fields.setdefault(node.key, {}).update(fields)
         return holder
 
     def _render_answered(self, node, already: dict) -> QWidget:
@@ -955,6 +962,7 @@ class TemplateTree(QWidget):
             badge=f"{len(already)} fields",
             level=2,
             expanded=False,
+            tone=pal["success"],
         )
         body = QWidget()
         form = QFormLayout(body)

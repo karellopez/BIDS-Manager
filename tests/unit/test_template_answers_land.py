@@ -155,3 +155,74 @@ def test_a_correction_to_what_the_converter_wrote_survives(tmp_path: Path) -> No
     assert got["Manufacturer"] == "what the user says"
     # What nobody stated is left exactly as the converter wrote it.
     assert got["SamplingFrequency"] == 500.0
+
+
+# ---------------------------------------------------------------------------
+# Types
+#
+# Everything arrives as text somewhere: the inventory is a TSV and a combo box
+# hands back whatever was typed. BIDS declares PowerLineFrequency a number, and
+# the string "60" fails validation for a field answered correctly.
+# ---------------------------------------------------------------------------
+
+
+def test_a_value_takes_the_shape_the_standard_declares() -> None:
+    from bidsmgr import schema as schema_mod
+
+    cases = [
+        ("PowerLineFrequency", "60", "eeg", "eeg", 60),
+        ("HeadCircumference", "58.5", "eeg", "eeg", 58.5),
+        ("EEGChannelCount", "64", "eeg", "eeg", 64),
+        ("InjectedMass", "10", "pet", "pet", 10),
+        ("ImageDecayCorrected", "true", "pet", "pet", True),
+    ]
+    for name, typed, datatype, suffix, want in cases:
+        got = schema_mod.coerce(name, typed, datatype, suffix)
+        assert got == want and type(got) is type(want), f"{name}: {got!r}"
+
+
+def test_a_word_the_field_accepts_is_left_alone() -> None:
+    """Several of these fields take a number OR "n/a"."""
+    from bidsmgr import schema as schema_mod
+
+    assert schema_mod.coerce("PowerLineFrequency", "n/a", "eeg", "eeg") == "n/a"
+    assert schema_mod.coerce("EEGReference", "average", "eeg", "eeg") == "average"
+
+
+def test_a_string_field_that_looks_numeric_stays_a_string() -> None:
+    """A run label of "01" is not the number 1."""
+    from bidsmgr import schema as schema_mod
+
+    assert schema_mod.coerce("TaskName", "01", "eeg", "eeg") == "01"
+
+
+def test_a_cell_typed_in_the_table_reaches_the_sidecar_as_a_number(tmp_path) -> None:
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    root = tmp_path / "ds"
+    eeg = root / "sub-001" / "eeg"
+    eeg.mkdir(parents=True)
+    (eeg / "sub-001_task-rest_eeg.json").write_text(json.dumps({}))
+
+    apply_stated_metadata(root, RecordingMetaSpec(), pd.DataFrame([{
+        "proposed_basename": "sub-001_task-rest_eeg",
+        "source_file": "/raw/a.edf",
+        "line_freq": "50",
+    }]))
+    written = json.loads((eeg / "sub-001_task-rest_eeg.json").read_text())
+    assert written["PowerLineFrequency"] == 50
+    assert not isinstance(written["PowerLineFrequency"], str)
+
+
+def test_a_row_resolves_its_own_cells_with_no_dataset_metadata_at_all() -> None:
+    """A user who typed a line frequency into the table and never opened the
+    dataset dialog used to get nothing: the chain bailed out on a missing spec
+    before it ever looked at the row."""
+    from bidsmgr.recording_meta import resolve_sidecar_fields
+
+    resolved = resolve_sidecar_fields(
+        None, "eeg", "eeg", row_values={"power_line_freq": "50"},
+    )
+    assert resolved["PowerLineFrequency"].value == 50

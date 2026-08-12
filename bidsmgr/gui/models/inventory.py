@@ -813,6 +813,32 @@ class InventoryTableModel(QAbstractTableModel):
             row_values=self._row_cell_values(row) if with_row else None,
         )
 
+    def row_answered(self, row: int) -> dict:
+        """What the conversion will fill in for THIS recording, by BIDS name.
+
+        Two sources, both about this one file. The scan asked the recording the
+        same questions the converter will ask and stashed the answers; and the
+        row's own entities settle a field or two by themselves, a task label
+        being the obvious one, since the converter writes whatever the row says.
+        """
+        if not (0 <= row < len(self._df)):
+            return {}
+
+        answered: dict = {}
+        raw = self._raw_cell(row, "_derived_fields")
+        if raw:
+            try:
+                measured = json.loads(raw)
+            except (ValueError, TypeError):
+                measured = {}
+            if isinstance(measured, dict):
+                answered.update(measured)
+
+        task = (self.entities(row) or {}).get("task") or self._raw_cell(row, "task")
+        if task:
+            answered["TaskName"] = task
+        return answered
+
     def row_template(self, row: int) -> dict:
         """What this one recording states, by BIDS field name."""
         if self._global_spec is None or not (0 <= row < len(self._df)):

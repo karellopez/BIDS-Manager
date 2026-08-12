@@ -23,6 +23,7 @@ Public API:
 from __future__ import annotations
 
 from .engine import (
+    coerce,
     allowed_entities,
     build_basename,
     build_relative_path,
@@ -66,6 +67,7 @@ from .types import (
 from .validation import validate_basename, validate_dataset, validate_entity_set
 
 __all__ = [
+    "coerce",
     "active_version",
     "available_versions",
     "set_active_version",

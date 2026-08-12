@@ -308,7 +308,9 @@ def test_a_row_cell_beats_a_dataset_default(tmp_path: Path) -> None:
     apply_stated_metadata(root, spec, inventory)
     data = json.loads((eeg / "sub-001_task-rest_eeg.json").read_text())
     assert data["EEGReference"] == "FCz", "the cell the user typed has to win"
-    assert data["PowerLineFrequency"] == "50"
+    # The table is text, and BIDS declares this field a number. Writing "50"
+    # would fail validation for a field answered correctly.
+    assert data["PowerLineFrequency"] == 50
 
 
 def test_varies_is_not_written_from_a_cell_either(tmp_path: Path) -> None:

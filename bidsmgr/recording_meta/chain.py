@@ -155,6 +155,21 @@ PET_LIST_TO_BIDS: dict[str, str] = {
 }
 
 
+def _coerce(name: str, value: Any, datatype: str, suffix: str) -> Any:
+    """Put a value into the shape the standard declares, if it is not already.
+
+    Everything arrives as text somewhere: the inventory is a TSV, and a combo
+    box hands back whatever was typed. BIDS declares PowerLineFrequency a
+    number, and the string "60" fails validation for a field answered right.
+    """
+    from .. import schema as schema_mod
+
+    try:
+        return schema_mod.coerce(name, value, datatype, suffix)
+    except Exception:  # noqa: BLE001 - a shape we cannot check is left alone
+        return value
+
+
 def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
     """Translate one acquisition block into the BIDS names this datatype uses.
 
@@ -174,7 +189,7 @@ def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
             return
         for name in candidates:
             if field_applies(name, datatype, datatype):
-                out[name] = value
+                out[name] = _coerce(name, value, datatype, datatype)
                 return
 
     for attr, candidates in _ACQ_TO_BIDS:
@@ -199,7 +214,7 @@ def _pet_as_bids(pet, datatype: str, suffix: str, field_applies) -> dict[str, An
         if value in (None, "", [], {}) or is_varies(value):
             continue
         if field_applies(name, datatype, suffix):
-            out[name] = value
+            out[name] = _coerce(name, value, datatype, suffix)
     return out
 
 
@@ -208,7 +223,7 @@ def _template_as_bids(values: Any, datatype: str, suffix: str, field_applies) ->
     if not isinstance(values, dict):
         return {}
     return {
-        name: value
+        name: _coerce(name, value, datatype, suffix)
         for name, value in values.items()
         if value not in (None, "", [], {})
         and not is_varies(value)
@@ -230,8 +245,10 @@ def resolve_sidecar_fields(
     ``field_applies`` is injected so this stays a pure-data module; the default
     resolves it lazily from the schema layer.
     """
-    if spec is None:
-        return {}
+    # An empty spec is not the same as nothing to resolve: the row's own cells
+    # are a layer too, and a user who typed a line frequency into the table
+    # without ever opening the dataset dialog got nothing at all.
+    spec = spec if spec is not None else RecordingMetaSpec()
     if field_applies is None:
         from .. import schema as schema_mod
 

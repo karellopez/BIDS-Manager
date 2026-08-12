@@ -225,6 +225,67 @@ def field_applies(field_name: str, datatype: Datatype, suffix: Suffix) -> bool:
         return False
 
 
+@lru_cache(maxsize=256)
+def _declared_type(field_name: str, datatype: str, suffix: str) -> str:
+    """What shape the standard declares for this field, in this kind of file.
+
+    Read through :func:`sidecar_fields`, which is bidsval's interpretation and
+    the one the forms use. The local ``objects.metadata`` reader disagrees about
+    a field the schema types with ``anyOf``: it reports PowerLineFrequency as a
+    string, when the standard accepts a number or the word "n/a" and rejects
+    the string "60".
+    """
+    if datatype:
+        for spec in sidecar_fields(datatype, suffix or datatype):
+            if spec.name == field_name:
+                return spec.type
+    try:
+        return field_metadata(field_name).type
+    except (KeyError, ValueError, OSError):
+        return ""
+
+
+def coerce(field_name: str, value, datatype: str = "", suffix: str = ""):
+    """Put ``value`` into the shape BIDS declares for ``field_name``.
+
+    Everything arrives as text somewhere. The inventory is a TSV, so a mains
+    frequency typed into the table is the string "60"; a combo box hands back
+    whatever was typed. BIDS declares PowerLineFrequency a number, and writing
+    "60" into a sidecar fails validation for a field that was answered right.
+
+    Only a value that genuinely converts is converted. "n/a" stays "n/a", which
+    several of these fields accept, and a field the schema types as a string is
+    left alone even when it looks like a number: a run label of "01" is not 1.
+    """
+    if value is None or isinstance(value, (bool, int, float, list, dict)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return value
+    declared = _declared_type(field_name, datatype, suffix)
+
+    if declared == "boolean":
+        low = text.lower()
+        return True if low == "true" else False if low == "false" else value
+    if declared == "integer":
+        try:
+            return int(text)
+        except ValueError:
+            return value
+    if declared in ("number", ""):
+        # An empty type means anyOf: the field takes more than one shape, and
+        # what the user typed decides which.
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            return value
+    return value
+
+
 def field_metadata(field_name: str) -> FieldInfo:
     schema = get_schema()
     raw = schema.objects.metadata.get(field_name) if hasattr(schema.objects.metadata, "get") else None
@@ -451,5 +512,5 @@ __all__ = [
 # The memoised lookups above hold answers about one BIDS version. Switching
 # version has to drop them, and listing them at the bottom rather than at each
 # definition keeps that list in one readable place.
-for _cached in (_entity_index_lookup, _format_pattern, _datatype_groups):
+for _cached in (_entity_index_lookup, _format_pattern, _datatype_groups, _declared_type):
     register_cache(_cached)

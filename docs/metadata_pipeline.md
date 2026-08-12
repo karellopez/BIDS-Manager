@@ -66,8 +66,8 @@ Nothing in that diagram is a list kept in code. The fields, their types, their
 vocabularies, their requirement levels and their descriptions all come from the
 schema, at the version chosen in **Settings, BIDS version**.
 
-A field the conversion answers is not hidden. It moves into a folded
-**Already answered by the conversion** block at the end of the section, showing
+A field the conversion answers is not hidden. It moves into a folded, green
+**Already answered by the conversion** block at the TOP of the section, showing
 the value that will be written, and it stays editable: the converter reads these
 out of the data, and when the data is wrong or a legacy file carries nothing,
 that block is the only place to correct it. Typing nothing there stores nothing,
@@ -83,6 +83,13 @@ Measured on your data, during the scan:
   questions mne-bids will ask: channel counts by type, sampling frequency,
   duration, recording type, and the line frequency and manufacturer where the
   header states them.
+* **The row itself**: an entity already on the row settles a field. A task label
+  answers `TaskName`, because the converter writes whatever the row says.
+
+Values arrive as text from all three, and from every box a user types into. Each
+one is put into the shape the schema declares before it is written, so the mains
+frequency reaches the sidecar as the number 50 and not as the string "50", which
+BIDS rejects.
 
 Two rules keep this honest:
 
@@ -214,7 +221,7 @@ validation. Several versions ship with BIDS Manager; the default is the newest.
 | `·` amber | the standard RECOMMENDS it |
 | unmarked | optional |
 | greyed value | inherited, from the layer named in the tooltip |
-| **Already answered by the conversion** | folded block: the converter fills these from the data, showing the value; editable, to correct what the data says |
+| **Already answered by the conversion** | folded green block at the TOP of a section: what is settled, with the value that will be written; editable, to correct what the data says |
 | `N to answer, M required by BIDS` | the section heading: what is still missing, which is the point of the form |
 | `differs per recording` | the probed files disagreed; the answer is per recording |
 
