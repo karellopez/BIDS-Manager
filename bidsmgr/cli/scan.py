@@ -809,6 +809,22 @@ def _placeholder_for_entity(entity: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_real_answer(value) -> bool:
+    """Is this a value, or a placeholder standing in for one?
+
+    A converter writes some keys whatever the answer, so "n/a" means it did not
+    know. Counting that as answered is what once hid the fields a user most has
+    to supply.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip().lower() in ("n/a", "na", ""):
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
 def _augment_dataframe(
     df: pd.DataFrame,
     rows: list[InventoryRow],
@@ -841,6 +857,10 @@ def _augment_dataframe(
         for col in PROBE_COLUMNS:
             if col not in df.columns:
                 _init_object_column(df, col)
+        # Internal (leading underscore -> dropped from the TSV): what the probe
+        # conversion actually produced for each series.
+        if "_derived_fields" not in df.columns:
+            _init_object_column(df, "_derived_fields")
 
     for df_idx, group_rows in rows_by_df_idx.items():
         # Pick best classification for this DataFrame row.
@@ -958,17 +978,29 @@ def _augment_dataframe(
             n_nifti_total = 0
             n_volumes_max = 0
             ext_set: set[str] = set()
+            derived: dict = {}
             seen = False
             for u in uids:
                 ps = probe_stats.get(u)
                 if ps is None:
                     continue
                 seen = True
+                # What dcm2niix actually wrote for this series. Only the EEG/MEG
+                # scanner used to record this, so an MRI row could say nothing
+                # about what the conversion answers, and its per-file form asked
+                # for the repetition time the converter reads from the header.
+                for key, value in (getattr(ps, "sidecar_fields", None) or {}).items():
+                    if _is_real_answer(value):
+                        derived.setdefault(key, value)
                 n_files_total += ps.n_files
                 n_nifti_total += ps.n_nifti
                 if ps.n_volumes_max > n_volumes_max:
                     n_volumes_max = ps.n_volumes_max
                 ext_set.update(ps.extensions)
+            if seen and derived:
+                df.at[df_idx, "_derived_fields"] = json.dumps(
+                    derived, sort_keys=True, default=str,
+                )
             if seen:
                 df.at[df_idx, "probe_n_files"] = n_files_total
                 df.at[df_idx, "probe_n_nifti"] = n_nifti_total
@@ -1377,19 +1409,21 @@ def _write_converter_preview(
     conversion, the sidecars dcm2niix actually produced.
     """
     from ..metadata.converter_preview import (
-        merge_previews, preview_from_inventory, preview_from_probe,
+        merge_previews, preview_by_row, preview_from_inventory, preview_from_probe,
     )
 
     preview = merge_previews(
         preview_from_inventory(merged),
         preview_from_probe(merged, probe_stats),
     )
-    if not preview:
+    by_row = preview_by_row(merged)
+    if not preview and not by_row:
         return
 
     scaffold_path = scaffold_sidecar_path(output_tsv)
     spec = load_spec(scaffold_path) if scaffold_path.exists() else RecordingMetaSpec()
     spec.converter_preview = preview
+    spec.row_preview = by_row
     scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
 
 

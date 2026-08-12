@@ -52,8 +52,15 @@ def _is_answer(value: Any) -> bool:
     return True
 
 
-def _agree(values: list[Any]) -> Any:
-    """One answer for a group of files, or VARIES when they disagree."""
+def _agree(values: list[Any], complete: bool = True) -> Any:
+    """One answer for a group of files, or VARIES.
+
+    VARIES covers both ways a kind can fail to have one answer: the files
+    disagree, or some of them did not answer at all. Either way the answer lives
+    per recording, which is what the sentinel says.
+    """
+    if not complete:
+        return VARIES
     first = values[0]
     for other in values[1:]:
         if other != first:
@@ -65,22 +72,32 @@ def _collapse(
     seen: dict[str, dict[str, list[Any]]],
     counted: dict[str, int],
 ) -> dict[str, dict[str, Any]]:
-    """Per kind, one value per field, for the fields EVERY file answered.
+    """Per kind, one value per field the conversion answers for any of them.
 
-    A field only some files answer is left out, so the form still asks for it.
-    Half a dataset answered is not answered: the user has to be able to supply
-    the rest, and that is the direction it is safe to be wrong in. Asking about
-    a field that turns out to be filled is noise; not asking loses data.
+    Three states, and the difference between them matters:
+
+    * every file gave the same value: that value, and the form says so;
+    * the files disagree, or only some of them answered: VARIES, meaning the
+      answer is per recording rather than one thing about the kind.
+
+    Requiring EVERY file to answer before saying the conversion does was the
+    first attempt and it was too strict for real data. Seventy-five functional
+    runs from several studies agree on fourteen fields and no more, so the form
+    asked for the repetition time, the echo time and thirty others that
+    dcm2niix reads out of the header for almost all of them. Being asked for
+    what the converter fills is the noise the template exists to remove.
+
+    Nothing is lost by relaxing it: the block is editable, so a value stated
+    there covers the recordings whose header lacked one.
     """
     out: dict[str, dict[str, Any]] = {}
     for key, fields in seen.items():
         datatype, _, suffix = key.partition("/")
         n_files = counted.get(key, 0)
         answers = {
-            name: _agree(values)
+            name: _agree(values, complete=len(values) >= n_files)
             for name, values in sorted(fields.items())
-            if len(values) >= n_files
-            and name not in CONVERTER_PRIVATE
+            if name not in CONVERTER_PRIVATE
             and schema_mod.field_applies(name, datatype, suffix)
         }
         if answers:
@@ -109,8 +126,6 @@ def preview_from_inventory(df) -> dict[str, dict[str, Any]]:
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if not datatype or not suffix:
             continue
-        counted[_key(datatype, suffix)] = counted.get(_key(datatype, suffix), 0) + 1
-
         raw = row.get("_derived_fields")
         try:
             derived = json.loads(raw) if isinstance(raw, str) and raw else {}
@@ -118,6 +133,10 @@ def preview_from_inventory(df) -> dict[str, dict[str, Any]]:
             derived = {}
         if not isinstance(derived, dict) or not derived:
             continue
+        # Counted only now: a row that measured nothing is not a row that
+        # failed to answer.
+        key = _key(datatype, suffix)
+        counted[key] = counted.get(key, 0) + 1
 
         task = str(row.get("task", "") or "").strip()
         if task:
@@ -155,11 +174,11 @@ def preview_from_probe(df, probe_stats: Optional[dict] = None) -> dict[str, dict
         kind = kind_of.get(str(uid))
         if not kind:
             continue
-        key = _key(*kind)
-        counted[key] = counted.get(key, 0) + 1
         fields = getattr(stats, "sidecar_fields", None)
         if not fields:
             continue
+        key = _key(*kind)
+        counted[key] = counted.get(key, 0) + 1
         bucket = seen.setdefault(key, {})
         for name, value in fields.items():
             if _is_answer(value):
@@ -178,6 +197,50 @@ def merge_previews(*previews: dict[str, dict[str, Any]]) -> dict[str, dict[str, 
 
 __all__ = [
     "merge_previews",
+    "preview_by_row",
     "preview_from_inventory",
     "preview_from_probe",
 ]
+
+
+def preview_by_row(df) -> dict[str, dict[str, Any]]:
+    """What the conversion answers for each individual recording.
+
+    Keyed by the same row id the converter uses: the source path for a
+    recording, the series UID for a DICOM series. The per-file form reads it to
+    say what THIS file already answers, which is not the same question as what
+    every file of its kind answers.
+    """
+    if df is None or not len(df) or "_derived_fields" not in df.columns:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        row_id = str(
+            row.get("source_file", "") or row.get("series_uid", "") or ""
+        ).strip()
+        raw = row.get("_derived_fields")
+        if not row_id or not isinstance(raw, str) or not raw:
+            continue
+        try:
+            derived = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(derived, dict):
+            continue
+
+        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        suffix = str(row.get("bids_guess_suffix", "") or "").strip()
+        kept = {
+            name: value
+            for name, value in derived.items()
+            if _is_answer(value)
+            and name not in CONVERTER_PRIVATE
+            and (
+                not datatype
+                or schema_mod.field_applies(name, datatype, suffix or datatype)
+            )
+        }
+        if kept:
+            out[row_id] = kept
+    return out

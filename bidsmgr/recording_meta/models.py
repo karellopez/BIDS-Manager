@@ -426,6 +426,11 @@ class RecordingMetaSpec(_Model):
     # like a dataset missing its metadata. Filled by the scan; VARIES where the
     # probed files of one kind disagreed.
     converter_preview: dict[str, dict[str, Any]] = {}
+    # The same thing per recording, keyed by inventory row id. The inventory
+    # drops it: it is derived, not curated, and it would add a column of JSON to
+    # a table people read. It belongs here, where the per-file form can find it
+    # after the table has been written and read back.
+    row_preview: dict[str, dict[str, Any]] = {}
     # Dataset-level phenotype measure tables (TSV/CSV/XLSX/ODS paths keyed by
     # participant_id). Written to ``phenotype/<measure>.tsv`` + ``.json`` by the
     # metadata engine. Agnostic: applies to any modality.

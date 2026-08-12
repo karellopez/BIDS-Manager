@@ -825,6 +825,13 @@ class InventoryTableModel(QAbstractTableModel):
             return {}
 
         answered: dict = {}
+        # Written by the scan into the scaffold, because the inventory drops it:
+        # it is derived rather than curated, and a column of JSON in a table
+        # people read helps nobody.
+        if self._global_spec is not None:
+            stored = self._global_spec.row_preview.get(self.row_id(row))
+            if isinstance(stored, dict):
+                answered.update(stored)
         raw = self._raw_cell(row, "_derived_fields")
         if raw:
             try:

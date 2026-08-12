@@ -59,15 +59,24 @@ def test_disagreement_is_reported_as_varies_not_as_a_value() -> None:
     assert preview["eeg/eeg"]["SamplingFrequency"] == 500.0
 
 
-def test_a_field_only_some_files_answer_is_not_reported() -> None:
-    """Half a dataset answered is not answered. The form must still ask, or the
-    recordings that lack it have no way to get one."""
+def test_a_field_only_some_files_answer_reads_as_varying() -> None:
+    """Not asked, and not claimed as one answer either.
+
+    Requiring every file to answer before saying the conversion does was the
+    first attempt, and it was too strict for real data: seventy-five functional
+    runs from several studies agree on fourteen fields and no more, so the form
+    asked for the repetition time and thirty others that dcm2niix reads out of
+    the header for almost all of them.
+
+    VARIES is the honest answer, and the block is editable, so a value stated
+    there covers the recordings whose header lacked one.
+    """
     preview = preview_from_inventory(_eeg_rows(
         {"SamplingFrequency": 500.0, "Manufacturer": "BioSemi"},
         {"SamplingFrequency": 500.0},
     ))
-    assert "SamplingFrequency" in preview["eeg/eeg"]
-    assert "Manufacturer" not in preview["eeg/eeg"]
+    assert preview["eeg/eeg"]["SamplingFrequency"] == 500.0
+    assert preview["eeg/eeg"]["Manufacturer"] == VARIES
 
 
 def test_excluded_rows_do_not_contribute() -> None:
@@ -150,3 +159,39 @@ def test_later_sources_win_when_merged() -> None:
         {"eeg/eeg": {"SamplingFrequency": 1000.0}},
     )
     assert merged["eeg/eeg"] == {"SamplingFrequency": 1000.0, "TaskName": "rest"}
+
+
+def test_each_recording_gets_its_own_measurement() -> None:
+    """What EVERY file of a kind answers is not the same question as what THIS
+    file answers, and the per-file form asks the second one.
+
+    Only the EEG scanner used to record it, so an MRI row could say nothing
+    about what its conversion answers and its form asked for the repetition
+    time dcm2niix reads straight out of the header.
+    """
+    from bidsmgr.metadata.converter_preview import preview_by_row
+
+    df = pd.DataFrame([
+        {"include": "1", "proposed_datatype": "func", "bids_guess_suffix": "bold",
+         "series_uid": "1.2.3",
+         "_derived_fields": json.dumps({"RepetitionTime": 2.5, "EchoTime": 0.03})},
+        {"include": "1", "proposed_datatype": "func", "bids_guess_suffix": "bold",
+         "series_uid": "1.2.4",
+         "_derived_fields": json.dumps({"RepetitionTime": 3.0})},
+    ])
+    by_row = preview_by_row(df)
+    assert by_row["1.2.3"] == {"RepetitionTime": 2.5, "EchoTime": 0.03}
+    assert by_row["1.2.4"] == {"RepetitionTime": 3.0}
+
+
+def test_a_per_row_measurement_drops_what_the_file_cannot_carry() -> None:
+    from bidsmgr.metadata.converter_preview import preview_by_row
+
+    df = pd.DataFrame([{
+        "include": "1", "proposed_datatype": "anat", "bids_guess_suffix": "T1w",
+        "series_uid": "1.2.3",
+        "_derived_fields": json.dumps({
+            "EchoTime": 0.03, "TracerName": "FDG", "ConversionSoftware": "dcm2niix",
+        }),
+    }])
+    assert preview_by_row(df)["1.2.3"] == {"EchoTime": 0.03}

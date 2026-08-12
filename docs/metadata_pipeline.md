@@ -86,6 +86,19 @@ Measured on your data, during the scan:
 * **The row itself**: an entity already on the row settles a field. A task label
   answers `TaskName`, because the converter writes whatever the row says.
 
+Each recording gets its own measurement as well as its kind's, because "what
+every `*_bold.json` answers" and "what THIS run answers" are different
+questions. The per-file form asks the second one, so a functional run opens
+showing its actual repetition time, echo time and slice timing rather than
+asking for them.
+
+A field only some files of a kind answer reads as `VARIES` rather than being
+asked. Requiring every file to answer was the first rule and it was too strict:
+seventy-five functional runs from several studies agree on fourteen fields and
+no more, so the form asked for thirty others that dcm2niix reads out of the
+header for almost all of them. Nothing is lost, because the block is editable
+and a value stated there covers the recordings whose header lacked one.
+
 Values arrive as text from all three, and from every box a user types into. Each
 one is put into the shape the schema declares before it is written, so the mains
 frequency reaches the sidecar as the number 50 and not as the string "50", which
