@@ -415,6 +415,14 @@ class InventoryTableModel(QAbstractTableModel):
         for i in range(len(self._df)):
             self._revalidate_row(i)
 
+        # Which rows currently want a name another row also wants. Derived
+        # live rather than read from a cell: a clash is a property of the whole
+        # table as it stands right now, so anything stored at scan time is
+        # stale the moment the user edits an entity, and a red name that stays
+        # red after you have fixed it is worse than no warning at all.
+        self._colliding: set[int] = set()
+        self._recompute_collisions()
+
         # Cache per-row state so delegates don't re-derive on every paint.
         # Invalidated for one row by :meth:`refresh_row`.
         self._row_states: list[str] = [
@@ -1048,6 +1056,12 @@ class InventoryTableModel(QAbstractTableModel):
                     where = self.inherited_from(row, spec_col)
                     if where:
                         return f"Inherited from {where}.\nType here to override it."
+            if row in self._colliding:
+                # Derived, not stored, so it disappears the moment the clash is
+                # resolved rather than lingering on a row that is now fine.
+                from ...inventory.name_collisions import DUPLICATE_ISSUE
+
+                return DUPLICATE_ISSUE
             if "proposed_issues" in self._df.columns:
                 issues = str(self._df.at[row, "proposed_issues"] or "").strip()
                 if issues:
@@ -1457,6 +1471,27 @@ class InventoryTableModel(QAbstractTableModel):
             self.refresh_row(row)
         return changed
 
+    def _recompute_collisions(self) -> bool:
+        """Refresh which rows clash. True if the answer changed.
+
+        Cheap enough to run on every edit: it is one pass building a dict of
+        names.
+        """
+        from ...inventory.name_collisions import find_collisions
+
+        try:
+            found = find_collisions(self._df)
+        except Exception:  # noqa: BLE001 - a paint hint must never raise
+            found = {}
+        colliding = {idx for rows in found.values() for idx in rows}
+        changed = colliding != self._colliding
+        self._colliding = colliding
+        return changed
+
+    def colliding_rows(self) -> set:
+        """Rows whose BIDS name another included row also wants."""
+        return set(self._colliding)
+
     def refresh_row(self, row: int) -> None:
         """Re-derive cached state for ``row`` and notify the view.
 
@@ -1469,6 +1504,20 @@ class InventoryTableModel(QAbstractTableModel):
         if not (0 <= row < len(self._df)):
             return
         self._revalidate_row(row)
+
+        # Renaming ONE row can clear the clash on ANOTHER: two rows wanted the
+        # same name and now they do not. Refreshing only the edited row left
+        # its partner painted red with nothing wrong with it, which reads as
+        # the warning being stuck.
+        if self._recompute_collisions():
+            for i in range(len(self._df)):
+                self._row_states[i] = self._derive_row_state(i)
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, self.columnCount() - 1),
+            )
+            return
+
         self._row_states[row] = self._derive_row_state(row)
         left = self.index(row, 0)
         right = self.index(row, self.columnCount() - 1)
@@ -1490,6 +1539,8 @@ class InventoryTableModel(QAbstractTableModel):
             return
         for i in range(len(self._df)):
             self._revalidate_row(i)
+        self._recompute_collisions()
+        for i in range(len(self._df)):
             self._row_states[i] = self._derive_row_state(i)
         self.dataChanged.emit(
             self.index(0, 0),
@@ -1746,6 +1797,13 @@ class InventoryTableModel(QAbstractTableModel):
             issues_l = str(self._df.at[row, "proposed_issues"] or "").lower()
             if "non-image series" in issues_l:
                 return "noimg"
+
+        # Two included recordings wanting one BIDS name means one overwrites
+        # the other, and conversion refuses until it is resolved. An error
+        # rather than a warning, and checked before the include and skip states
+        # because the danger comes precisely from the row being included.
+        if row in self._colliding:
+            return "err"
 
         if not self._read_include(row):
             return "skip"

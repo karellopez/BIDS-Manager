@@ -126,9 +126,37 @@ CONVERTER_PRIVATE: frozenset[str] = frozenset({
 })
 
 
+# Fields BIDS Manager itself settles while converting, so asking would invite an
+# answer that contradicts the file beside it.
+#
+# The blood availability flags are the case in point. Whether plasma is
+# available is not an opinion: it is whether a plasma curve was attached to the
+# run. We write them from the table we produced, so a template answer saying
+# otherwise would be overwritten at best and believed at worst.
+#
+# Keyed by (datatype, suffix), because this is a property of one kind of file
+# rather than of a whole modality.
+DETERMINED_BY_CONVERSION: dict[tuple[str, str], frozenset[str]] = {
+    ("pet", "blood"): frozenset({
+        "WholeBloodAvail", "PlasmaAvail", "MetaboliteAvail",
+    }),
+}
+
+
+def determined_fields(datatype: str, suffix: str) -> frozenset[str]:
+    """Fields the conversion settles for this kind of file, and never asks."""
+    return DETERMINED_BY_CONVERSION.get((datatype, suffix), frozenset())
+
+
 def derived_fields(datatype: str) -> frozenset[str]:
     """Fields a conversion of this datatype usually supplies by itself."""
     return DERIVED_BY_CONVERTER.get(datatype, frozenset())
 
 
-__all__ = ["CONVERTER_PRIVATE", "DERIVED_BY_CONVERTER", "derived_fields"]
+__all__ = [
+    "CONVERTER_PRIVATE",
+    "DERIVED_BY_CONVERTER",
+    "DETERMINED_BY_CONVERSION",
+    "derived_fields",
+    "determined_fields",
+]

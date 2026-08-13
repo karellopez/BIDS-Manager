@@ -61,6 +61,7 @@ from ..converter import (
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    convert_blood_files,
     enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
@@ -263,6 +264,23 @@ def run_convert(
     if dataset:
         df = df[df["dataset"] == dataset].copy()
 
+    # Nothing is written until every row is known to want a different name.
+    # The scan resolves what BIDS has an answer for and flags the rest, but a
+    # TSV can be edited by hand between the two steps, and the cost of being
+    # wrong here is a recording silently overwritten by the next one.
+    #
+    # This is about two rows in THIS run colliding with each other. Whether a
+    # destination already exists from an earlier conversion is a different
+    # question, and ``--on-existing`` answers it.
+    from ..inventory.name_collisions import (
+        NameCollisionError,
+        describe_collisions,
+    )
+
+    collision_report = describe_collisions(df)
+    if collision_report:
+        raise NameCollisionError(collision_report)
+
     # The files_by_uid sidecar is only required when the inventory
     # contains MRI rows. EEG/MEG-only inventories store the recording
     # path in each row's ``source_file`` column.
@@ -454,6 +472,10 @@ def _convert_subject(
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
+        # A PET run's blood curves, which ARE converted: PMOD exports become the
+        # BIDS blood tables, named for the run they belong to. Source data the
+        # user pointed at, so it belongs to the conversion.
+        n_enriched += convert_blood_files(staging, tasks)
         # Fix what the CONVERTER wrote: a key whose spelling differs from the
         # standard's only in case, and a scalar where the schema declares an
         # array. Runs last so it sees what the modality fixups produced.
@@ -1070,6 +1092,19 @@ def _row_to_task_file_based(
             if c.exists():
                 src_path = c
                 break
+        else:
+            # Say so here, where the reason is known. Left unresolved, the row
+            # falls past the backend that reads its format (which checks the
+            # file's signature and so needs it to exist) into the DICOM one,
+            # and fails with "no source DICOMs were accessible": true, and no
+            # help at all in working out that a path could not be resolved.
+            log.warning(
+                "could not find the source for %s: %r is relative and does "
+                "not exist under any of %s. Pass --raw-root <the folder that "
+                "was scanned> so relative paths can be resolved.",
+                basename, source_file,
+                [str(r) for r in source_search_roots] or ["the working directory"],
+            )
 
     # The row's ``entities`` column is the source of truth (the in-memory
     # rebuild ran above so it's already reconciled with display cells).
@@ -1321,6 +1356,17 @@ def _print_tasks(tasks: Iterable[ConvertTask]) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Entry point. Reports a name collision as a refusal, not a crash."""
+    from ..inventory.name_collisions import NameCollisionError
+
+    try:
+        return _main(argv)
+    except NameCollisionError as exc:
+        log.error("%s", exc)
+        return 1
+
+
+def _main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bidsmgr-convert",
         description=(

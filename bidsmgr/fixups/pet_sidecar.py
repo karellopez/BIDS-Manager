@@ -168,11 +168,19 @@ def enrich_pet_sidecars(
         if sidecar is None:
             continue
 
+        # Read the DICOM header for the BIDS fields dcm2niix leaves out, before
+        # anything the user stated is applied: this is reading, not stating, so
+        # a template answer must still win over it. The rename, type-repair and
+        # prune passes below then treat what it added like everything else.
+        changed = _enrich_from_dicom(sidecar, task)
+
         pet = None
         if spec is not None:
             pet = resolve_pet(spec, str(getattr(task, "row_id", "")))
 
         if _apply_sidecar(sidecar, pet, prune_identifiers=prune_identifiers):
+            changed = True
+        if changed:
             n_modified += 1
 
     return n_modified
@@ -181,6 +189,33 @@ def enrich_pet_sidecars(
 # ----------------------------------------------------------------------
 # internals
 # ----------------------------------------------------------------------
+
+
+def _enrich_from_dicom(sidecar: Path, task) -> bool:
+    """Fill this sidecar from its own DICOM header. True if anything was added.
+
+    ECAT tasks are skipped: that format is enriched as it is converted, by the
+    backend that reads it, and its source files are not DICOM.
+
+    Best-effort throughout. pet2bids crashes outright on at least one published
+    phantom, so a failure here is logged and the conversion keeps every field it
+    already had.
+    """
+    from ..inventory.pet_dicom_meta import enrich_pet_sidecar
+    from ..inventory.pet_ecat import is_ecat_file
+
+    for source in getattr(task, "source_files", ()) or ():
+        candidate = Path(source)
+        if not candidate.is_file() or is_ecat_file(candidate):
+            continue
+        added = enrich_pet_sidecar(sidecar, candidate)
+        if added:
+            log.info(
+                "pet: %s gained %s from the DICOM header",
+                sidecar.name, ", ".join(added),
+            )
+        return bool(added)
+    return False
 
 
 def _find_sidecar(staging: Path, basename: str) -> Optional[Path]:

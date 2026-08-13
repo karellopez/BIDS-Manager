@@ -825,6 +825,52 @@ def _is_real_answer(value) -> bool:
     return True
 
 
+def _finish_unified_frame(merged, exclusions) -> None:
+    """The last passes over the finished inventory, whatever it holds.
+
+    Extracted because there are two write paths, one for a tree with MRI in it
+    and one for a tree without, and they had drifted. A check added to the MRI
+    path silently did nothing for an EEG-only dataset: a workshop tree where
+    every subject exports a rest and a video recording produced two rows with
+    one name per subject, and nothing said so.
+
+    Order matters. Exclusions first, because an excluded row is never written
+    and so cannot collide. Names next. The mixed-study heads-up last, so it only
+    ever appends to ``proposed_issues`` and never downgrades a more severe row
+    state.
+    """
+    _apply_user_exclusions(merged, exclusions)
+
+    # Two recordings resolving to one name means one silently overwrites the
+    # other. Where BIDS has an answer (a run) it is applied; where it does not,
+    # or where a run is already stated, the rows are left alone and reported.
+    #
+    # Nothing is written into the issue column: a note stored there would still
+    # be showing after the user had fixed the thing it describes. The GUI
+    # derives the red live from the current names, and conversion checks again.
+    from ..inventory.name_collisions import assign_runs, count_collisions
+
+    numbered = assign_runs(merged)
+    if numbered:
+        # Printed, not logged: this CHANGED the filenames the user will get.
+        print(
+            f"Named {numbered} recordings as runs so their BIDS names stay "
+            "unique (they had resolved to the same name)."
+        )
+
+    flagged = count_collisions(merged)
+    if flagged:
+        print(
+            f"WARNING: {flagged} recordings share a BIDS name with another "
+            "and would overwrite each other. A run could not be assigned "
+            "automatically, so give them different entities (a task or "
+            "session label), or exclude one. They are shown in red in the "
+            "table, and conversion will refuse until they are unique."
+        )
+
+    _flag_mixed_study_descriptions(merged)
+
+
 def _augment_dataframe(
     df: pd.DataFrame,
     rows: list[InventoryRow],
@@ -1703,7 +1749,7 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
-        _apply_user_exclusions(merged, exclusions)
+        _finish_unified_frame(merged, exclusions)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
         scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
@@ -1781,16 +1827,10 @@ def run_scan(
         merged = df
     merged = _finalize_unified_dataframe(merged)
 
-    # User exclusions run last, on the unified frame, so they cover MRI +
-    # EEG/MEG rows and stamp the same proposed_issues cell after non-image
-    # flagging (mutates in place; reversible).
-    _apply_user_exclusions(merged, exclusions)
-
-    # Heads-up (warnings chip + Issues dialog + log) if the scan pooled
-    # multiple DICOM studies. Runs after non-image flagging + user exclusions
-    # so it only appends to proposed_issues and never downgrades a more severe
-    # row state.
-    _flag_mixed_study_descriptions(merged)
+    # Exclusions, name collisions and the mixed-study heads-up, on the unified
+    # frame so they cover MRI and EEG/MEG alike. Shared with the EEG-only path
+    # above, which is what stopped them drifting apart again.
+    _finish_unified_frame(merged, exclusions)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,

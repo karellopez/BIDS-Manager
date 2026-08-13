@@ -23,11 +23,13 @@ be tested without a screen.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .. import schema as schema_mod
-from .derivable import CONVERTER_PRIVATE, derived_fields
+from .derivable import CONVERTER_PRIVATE, derived_fields, determined_fields
 
 # Where a section's answers are kept. The scaffold already has these blocks;
 # the template is a view onto them rather than a new file.
@@ -186,6 +188,7 @@ def sidecar_section(
     include_derived: bool = False,
     answered: Optional[dict] = None,
     n_files: int = 0,
+    also_ask: Sequence[str] = (),
 ) -> TemplateSection:
     """The questions for one kind of sidecar, e.g. every ``*_eeg.json``.
 
@@ -211,15 +214,19 @@ def sidecar_section(
     # tree, with one scanner and one set of file formats. It claimed mne-bids
     # answers EEGReference, which mne-bids writes as "n/a" because BIDS demands
     # the key, and it missed five fields per MRI kind that dcm2niix does fill.
+    # Never asked, whatever else is true: we write these from what was actually
+    # attached, so a stated answer could only contradict the file beside it.
+    determined = determined_fields(datatype, suffix)
+
     if include_derived:
-        skip: set = set()
+        skip: set = set(determined)
     elif answered:
         skip = {
             name for name, value in answered.items()
             if value not in (None, "", [], {})
-        } | CONVERTER_PRIVATE
+        } | CONVERTER_PRIVATE | determined
     else:
-        skip = derived_fields(datatype) | CONVERTER_PRIVATE
+        skip = derived_fields(datatype) | CONVERTER_PRIVATE | determined
     # A field a converter USUALLY supplies but this dataset's files do not
     # carry. Worth saying so: it usually means the value exists at the scanner,
     # or that an anonymiser removed it, either of which the user can act on.
@@ -232,7 +239,9 @@ def sidecar_section(
         for s in specs
         # A speculative requirement is one the schema imposes only in a
         # scenario this file may not be in; the form must not demand it.
-        if s.name not in skip and not s.speculative and s.level != "prohibited"
+        if s.name not in skip
+        and (not s.speculative or s.name in also_ask)
+        and s.level != "prohibited"
     ]
     declared_names = {spec.name for spec in specs}
     return TemplateSection(
@@ -282,6 +291,7 @@ def build_template_plan(
     example_paths: Optional[dict[tuple[str, str], str]] = None,
     bids_root=None,
     include_derived: bool = False,
+    also_ask: Optional[dict[tuple[str, str], Sequence[str]]] = None,
 ) -> list[TemplateSection]:
     """The whole template for a dataset: the agnostic file, then one per kind.
 
@@ -289,6 +299,11 @@ def build_template_plan(
     describes the dataset in front of the user rather than BIDS in general.
     Sections are ordered agnostic first, then by datatype, so the questions that
     apply to everything come before the ones that apply to one instrument.
+
+    ``also_ask`` names, per kind, fields the caller knows apply after all. A
+    conditional requirement is normally left out, because demanding it of every
+    file sends the user hunting for something they must not add; when the
+    caller can see the condition holds, the question is a real one.
     """
     example_paths = example_paths or {}
     sections = [dataset_description_section(bids_root)]
@@ -302,11 +317,75 @@ def build_template_plan(
             datatype, suffix,
             example_paths.get((datatype, suffix), ""),
             bids_root, include_derived,
+            also_ask=(also_ask or {}).get((datatype, suffix), ()),
         )
         # A file with nothing left to ask is not worth a section.
         if section.fields:
             sections.append(section)
     return sections
+
+
+def _blood_rows(df) -> int:
+    """How many included runs carry blood curves.
+
+    A blood file is not a scanned row, so nothing in the inventory's own
+    datatype and suffix columns announces it. It exists because the user
+    attached curves to a PET run, and it needs its own questions asked: BIDS
+    REQUIRES DispersionCorrected in a blood sidecar, and without this the form
+    would never ask for it.
+    """
+    if df is None or not len(df) or "companion_files" not in df.columns:
+        return 0
+    from ..fixups.blood import is_blood_role
+
+    found = 0
+    for _, row in df.iterrows():
+        if str(row.get("include", "1")).strip() in ("0", "False", "false"):
+            continue
+        raw = str(row.get("companion_files", "") or "").strip()
+        if not raw:
+            continue
+        try:
+            items = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(items, list) and any(
+            isinstance(it, dict) and is_blood_role(str(it.get("suffix", "")))
+            for it in items
+        ):
+            found += 1
+    return found
+
+
+def blood_conditions(df) -> tuple[str, ...]:
+    """Fields a blood attachment makes applicable, that are otherwise skipped.
+
+    The schema marks MetaboliteMethod required only when metabolite data is
+    available, so the form leaves it out by default: a requirement that depends
+    on a scenario a file may not be in must not be demanded of everybody.
+    Attaching a parent-fraction curve IS that scenario, and then the question is
+    a real one rather than a guess.
+    """
+    if df is None or not len(df) or "companion_files" not in df.columns:
+        return ()
+    from ..fixups.blood import parse_blood_role
+
+    for _, row in df.iterrows():
+        if str(row.get("include", "1")).strip() in ("0", "False", "false"):
+            continue
+        try:
+            items = json.loads(str(row.get("companion_files", "") or "") or "[]")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            parsed = parse_blood_role(str(it.get("suffix", "")))
+            if parsed is not None and parsed[0] == "parentfraction":
+                return ("MetaboliteMethod", "MetaboliteRecoveryCorrectionApplied")
+    return ()
 
 
 def present_pairs(df) -> list[tuple[str, str]]:
@@ -323,6 +402,8 @@ def present_pairs(df) -> list[tuple[str, str]]:
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if datatype and suffix:
             out.add((datatype, suffix))
+    if _blood_rows(df):
+        out.add(("pet", "blood"))
     return sorted(out)
 
 
@@ -342,6 +423,9 @@ def pair_counts(df) -> dict[tuple[str, str], int]:
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if datatype and suffix:
             out[(datatype, suffix)] = out.get((datatype, suffix), 0) + 1
+    n_blood = _blood_rows(df)
+    if n_blood:
+        out[("pet", "blood")] = n_blood
     return out
 
 
@@ -459,6 +543,7 @@ def build_template_tree(
     include_derived: bool = False,
     answered: Optional[dict] = None,
     counts: Optional[dict[tuple[str, str], int]] = None,
+    also_ask: Optional[dict[tuple[str, str], Sequence[str]]] = None,
 ) -> list[TemplateNode]:
     """The whole template as a tree, agnostic region first.
 
@@ -500,6 +585,7 @@ def build_template_tree(
             bids_root, include_derived,
             answered=(answered or {}).get(f"{datatype}/{suffix}"),
             n_files=(counts or {}).get((datatype, suffix), 0),
+            also_ask=(also_ask or {}).get((datatype, suffix), ()),
         )
         if not section.fields:
             # Nothing left to ask about this file: the converter answers it all.

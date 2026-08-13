@@ -168,14 +168,29 @@ class EcatDirect:
     def _sidecar_from_header(source: Path, probe) -> dict:
         """The sidecar fields the ECAT header states outright.
 
-        Deliberately narrow. Anything the header does not record (injected
-        mass, administration mode, reconstruction parameters) is left for the
-        metadata step rather than guessed here, so a missing field stays
-        visibly missing in validation.
+        Two readers, in order of authority.
+
+        Ours first, from :func:`probe_ecat`: frame timing, radionuclide, tracer
+        and institution, the fields the inventory already showed the user, so
+        the sidecar and the table can never disagree.
+
+        Then pet2bids fills what it reads and we do not. An ECAT7 header carries
+        roughly sixty fields, of which we parsed five, so an ECAT user used to
+        get a far thinner sidecar than a DICOM user for no better reason than
+        that nobody had written the parser. They had, and it is the reference
+        implementation. It adds the scanner model, the reconstruction method
+        with its iterations and subsets, per-frame decay and scale factors, the
+        dose calibration factor and ``TimeZero``, which BIDS REQUIRES and no
+        other part of our ECAT path could supply.
+
+        Still deliberately narrow about invention. Nothing here guesses: every
+        value is something a reader found in the file. What no scanner records
+        (injected mass, administration mode) stays absent, so it stays visibly
+        missing in validation and the form still asks for it.
         """
         out: dict = {"Modality": "PT", "ConversionSoftware": "nibabel"}
         if probe is None:
-            return out
+            return _fill_absent(out, source)
 
         if probe.frame_durations:
             out["FrameDuration"] = [round(v, 6) for v in probe.frame_durations]
@@ -189,7 +204,22 @@ class EcatDirect:
             out["TracerName"] = probe.tracer
         if probe.facility:
             out["InstitutionName"] = probe.facility
-        return out
+        return _fill_absent(out, source)
+
+
+def _fill_absent(out: dict, source: Path) -> dict:
+    """Add what pet2bids reads, without touching anything already stated.
+
+    Ours wins on every field it sets: those came from the same probe the
+    inventory displayed, and a sidecar that disagrees with the table it was
+    built from is worse than a thin one. The user's template still overrides
+    all of it at the metadata step, which is where stated answers belong.
+    """
+    from ...inventory.pet_ecat import ecat_sidecar_fields
+
+    for name, value in ecat_sidecar_fields(source).items():
+        out.setdefault(name, value)
+    return out
 
 
 __all__ = ["EcatDirect"]

@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 import pandas as pd
 
 from .. import schema as schema_mod
+from ..fixups.blood import is_blood_role
 from ..metadata.template_plan import sidecar_section
 from ..project import Project
 from ..recording_meta import CURATED_SUGGESTIONS, SCAN_SUGGESTION_COLUMNS
@@ -418,6 +419,9 @@ class PropertiesPanel(QWidget):
         self._append_region_label("Modality-agnostic", agnostic=True)
         self._append_participant_section(row)
         self._append_companion_section(row)
+        if datatype == "pet":
+            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_blood_section(row)
         if datatype in _EEG_MEG_DATATYPES:
             self._append_region_label("Modality-specific", agnostic=False)
             self._append_recording_section(row, datatype)
@@ -1164,7 +1168,14 @@ class PropertiesPanel(QWidget):
 
         self._companion_list = QListWidget()
         self._companion_list.setMaximumHeight(72)
-        for suffix, path in self._companions(row):
+        # Blood curves are companions too, but they have their own section and
+        # are converted rather than copied, so they are not offered here.
+        self._plain_companions = [
+            (suffix, path)
+            for suffix, path in self._companions(row)
+            if not is_blood_role(suffix)
+        ]
+        for suffix, path in self._plain_companions:
             self._companion_list.addItem(f"{suffix}: {path}")
         self._body_layout.addWidget(self._companion_list)
 
@@ -1188,6 +1199,165 @@ class PropertiesPanel(QWidget):
         h.addWidget(rem)
         h.addStretch(1)
         self._body_layout.addWidget(ctl)
+
+    def _append_blood_section(self, row: int) -> None:
+        """Attach this PET run's blood curves.
+
+        Quantitative PET rests on the arterial input function: what the tracer
+        was doing in the blood while the scanner counted it in tissue. BIDS has
+        a place for it and a lab usually has it in PMOD exports.
+
+        Three series, each drawn one of two ways. How it was drawn is not a
+        detail: a hand-drawn series and an autosampled one have different time
+        resolution, so BIDS puts them in separate files under the ``recording``
+        entity, and pet2bids asks on the console when it cannot tell. In a
+        window that is a freeze with no visible cause, which is why the method
+        is chosen here rather than guessed later.
+
+        Storage is the ordinary companion list, tagged ``blood:<series>:<method>``,
+        because a blood curve belongs to exactly one PET run in the same way an
+        events file belongs to one functional run. The copier skips these tags;
+        conversion happens in `fixups/blood.py`.
+        """
+        from ..fixups.blood import BLOOD_SERIES, parse_blood_role
+
+        labels = {
+            "wholeblood": "Whole blood",
+            "plasma": "Plasma",
+            "parentfraction": "Parent fraction",
+        }
+
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "BLOOD SAMPLING", "PMOD .bld curves, converted to _blood.tsv",
+            agnostic=False, tag="pet"))
+
+        linked: dict[str, tuple[str, str]] = {}
+        for tag, path in self._companions(row):
+            parsed = parse_blood_role(tag)
+            if parsed is not None:
+                linked[parsed[0]] = (parsed[1], path)
+
+        self._blood_methods: dict[str, QComboBox] = {}
+        for series in BLOOD_SERIES:
+            method, path = linked.get(series, ("manual", ""))
+
+            line = QWidget()
+            line.setObjectName("blood-row")
+            line.setStyleSheet("#blood-row { background: transparent; }")
+            h = QHBoxLayout(line)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            # The panel's shared eliding label, so these line up with the
+            # entities above and every schema-driven field below, and so a long
+            # name narrows with the pane instead of setting a floor for it.
+            h.addWidget(FieldLabel(
+                labels[series], CUR()["text"], _LABEL_COL, fixed=True,
+            ))
+
+            how = QComboBox()
+            how.setObjectName("ent-input")  # opaque popup styling
+            how.addItems(["manual", "automatic"])
+            how.setCurrentText(method)
+            how.setToolTip(
+                "How the samples were drawn. Hand-drawn and autosampled series "
+                "have different time resolution, so BIDS writes them to "
+                "separate files under the recording entity."
+            )
+            how.currentTextChanged.connect(
+                lambda text, r=row, s=series: self._set_blood_method(r, s, text)
+            )
+            h.addWidget(how)
+            self._blood_methods[series] = how
+
+            pick = QPushButton("Change" if path else "Link")
+            pick.setToolTip("Choose the PMOD .bld export for this series")
+            pick.clicked.connect(
+                lambda _=False, r=row, s=series: self._link_blood(r, s)
+            )
+            h.addWidget(pick)
+
+            if path:
+                # A cross rather than the word: at the width this panel is
+                # meant to reach, a second labelled button would not fit.
+                clear = QPushButton("\u2715")
+                clear.setToolTip("Unlink this curve")
+                clear.setFixedWidth(scaled_px(24))
+                clear.clicked.connect(
+                    lambda _=False, r=row, s=series: self._clear_blood(r, s)
+                )
+                h.addWidget(clear)
+            h.addStretch(1)
+            self._body_layout.addWidget(line)
+
+            if path:
+                shown = QLabel(Path(path).name)
+                shown.setToolTip(path)
+                shown.setStyleSheet(
+                    f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; "
+                    f"background: transparent; margin-left: {scaled_px(_LABEL_COL + 8)}px;"
+                )
+                self._body_layout.addWidget(shown)
+
+        note = QLabel(
+            "Whether the plasma was dispersion-corrected, how metabolites were "
+            "measured and the withdrawal rate are sidecar fields, asked below "
+            "with everything else the standard declares."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; "
+            "background: transparent;"
+        )
+        self._body_layout.addWidget(note)
+
+    def _set_blood(self, row: int, series: str, method: str, path: str) -> None:
+        """Put one blood series into the companion list, replacing any there."""
+        from ..fixups.blood import blood_role, parse_blood_role
+
+        items = [
+            (tag, existing)
+            for tag, existing in self._companions(row)
+            if (parse_blood_role(tag) or ("", ""))[0] != series
+        ]
+        if path:
+            items.append((blood_role(series, method), path))
+        self._write_companions(row, items)
+
+    def _blood_method(self, series: str) -> str:
+        combo = getattr(self, "_blood_methods", {}).get(series)
+        return combo.currentText() if combo is not None else "manual"
+
+    def _blood_path(self, row: int, series: str) -> str:
+        from ..fixups.blood import parse_blood_role
+
+        for tag, path in self._companions(row):
+            parsed = parse_blood_role(tag)
+            if parsed is not None and parsed[0] == series:
+                return path
+        return ""
+
+    def _link_blood(self, row: int, series: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Link a blood curve", "",
+            "PMOD blood files (*.bld);;All files (*)",
+        )
+        if not path:
+            return
+        self._set_blood(row, series, self._blood_method(series), path)
+
+    def _set_blood_method(self, row: int, series: str, method: str) -> None:
+        """Re-tag an already-linked curve. Nothing linked, nothing to record."""
+        if self._suppress_writeback:
+            return
+        path = self._blood_path(row, series)
+        if path:
+            self._set_blood(row, series, method, path)
+
+    def _clear_blood(self, row: int, series: str) -> None:
+        self._set_blood(row, series, "manual", "")
 
     def _companions(self, row: int) -> list[tuple[str, str]]:
         raw = self._cell(row, "companion_files")
@@ -1224,10 +1394,19 @@ class PropertiesPanel(QWidget):
         self._write_companions(row, items)
 
     def _remove_companion(self, row: int) -> None:
+        """Remove the selected companion.
+
+        Matched by value, not by index: the list on screen hides blood curves,
+        so a position in it is not a position in the stored list.
+        """
         sel = self._companion_list.currentRow()
+        shown = getattr(self, "_plain_companions", [])
+        if not (0 <= sel < len(shown)):
+            return
+        target = shown[sel]
         items = self._companions(row)
-        if 0 <= sel < len(items):
-            items.pop(sel)
+        if target in items:
+            items.remove(target)
             self._write_companions(row, items)
 
     def _meta_combo_row(self, label: str, key: str, options: list[str],

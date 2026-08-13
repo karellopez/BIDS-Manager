@@ -1026,3 +1026,104 @@ def test_the_properties_panel_resolves_per_modality() -> None:
     # A template value reaches the panel too.
     assert model.acq_effective(0, "amplifier_model") == "actiCHamp"
     assert "template" in model.acq_inherited_from(0, "amplifier_model")
+
+
+# ---------------------------------------------------------------------------
+# Colliding BIDS names
+# ---------------------------------------------------------------------------
+
+
+def _colliding_rows() -> pd.DataFrame:
+    """Two EEG recordings that resolve to one name.
+
+    The real shape of it: a workshop tree exports a rest and a video recording
+    per subject, both named after the participant code, so the task label is
+    identical and only the folder distinguishes them.
+    """
+    return pd.DataFrame([
+        {
+            "BIDS_name": "sub-001", "include": 1, "modality": "eeg",
+            "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+            "proposed_basename": "sub-001_task-CLV002_eeg",
+            "Proposed BIDS name": "sub-001_task-CLV002_eeg",
+            "entities": json.dumps({"subject": "001", "task": "CLV002"}),
+            "proposed_issues": "", "dataset": "study",
+            "source_file": f"sub-001/{where}/CLV002.set",
+            "bids_guess_skip": False, "bids_guess_confidence": "0.9",
+            "task": "CLV002", "run": "", "session": "", "series_uid": "",
+        }
+        for where in ("rest", "video")
+    ])
+
+
+def test_a_colliding_row_reads_as_an_error(qtbot) -> None:
+    """Which is what paints the basename red.
+
+    ``CellTextDelegate`` with the ``basename`` role tints to the palette's
+    error colour whenever the row state is ``err``.
+    """
+    m = InventoryTableModel(_colliding_rows())
+    assert [m._row_states[i] for i in range(2)] == ["err", "err"]
+    assert m.colliding_rows() == {0, 1}
+
+
+def test_the_reason_is_on_the_row(qtbot) -> None:
+    """Hovering any cell of the row says why."""
+    m = InventoryTableModel(_colliding_rows())
+    tip = m.data(m.index(0, 0), Qt.ItemDataRole.ToolTipRole)
+    assert tip and "same BIDS name" in tip
+
+
+def test_fixing_the_name_clears_the_red_on_BOTH_rows(qtbot) -> None:
+    """The reported confusion: it stayed red after being fixed.
+
+    The state used to come from a note stamped into the row at scan time, which
+    nothing rewrote, and an edit refreshed only the row that was edited. So the
+    row you corrected stayed red, and so did its partner, which was now fine.
+    """
+    m = InventoryTableModel(_colliding_rows())
+    assert m.colliding_rows() == {0, 1}
+
+    m.set_entity(1, "task", "video")
+
+    assert m.colliding_rows() == set()
+    assert m._row_states[0] != "err"
+    assert m._row_states[1] != "err"
+    assert m.data(m.index(0, 0), Qt.ItemDataRole.ToolTipRole) is None
+
+
+def test_excluding_one_side_clears_it_too(qtbot) -> None:
+    """An excluded row is never written, so it cannot overwrite anything."""
+    m = InventoryTableModel(_colliding_rows())
+    checkbox = next(
+        i for i, spec in enumerate(m.COLUMNS) if spec.role == "checkbox"
+    )
+    m.setData(m.index(1, checkbox), False, Qt.ItemDataRole.EditRole)
+
+    assert m.colliding_rows() == set()
+    assert m._row_states[0] != "err"
+
+
+def test_a_new_clash_appears_without_a_rescan(qtbot) -> None:
+    """Derived live, so it works in both directions."""
+    df = _colliding_rows()
+    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    df.at[1, "entities"] = json.dumps({"subject": "001", "task": "video"})
+    m = InventoryTableModel(df)
+    assert m.colliding_rows() == set()
+
+    m.set_entity(1, "task", "CLV002")
+
+    assert m.colliding_rows() == {0, 1}
+    assert m._row_states[0] == "err"
+
+
+def test_unique_names_are_not_flagged(qtbot) -> None:
+    df = _colliding_rows()
+    # The entities are the source of truth; the model rebuilds the basename
+    # from them, so changing the display cell alone would be undone.
+    df.at[1, "entities"] = json.dumps({"subject": "001", "task": "video"})
+    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    m = InventoryTableModel(df)
+    assert m.colliding_rows() == set()
+    assert m._row_states[0] != "err"

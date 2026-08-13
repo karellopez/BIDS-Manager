@@ -1161,7 +1161,7 @@ class ConverterPanel(QWidget):
         from .recording_meta_dialog import RecordingMetaDialog
 
         from ..metadata.template_plan import (
-            example_paths_for, pair_counts, present_pairs,
+            blood_conditions, example_paths_for, pair_counts, present_pairs,
         )
 
         # The (datatype, suffix) pairs the scan actually found, and one real
@@ -1179,6 +1179,10 @@ class ConverterPanel(QWidget):
             present_pairs=present_pairs(df),
             example_paths=example_paths_for(df),
             pair_counts=pair_counts(df),
+            # A conditional requirement whose condition we can see holds: a
+            # parent-fraction curve attached to a run makes the metabolite
+            # fields real questions rather than ones nobody can answer.
+            also_ask={("pet", "blood"): blood_conditions(df)},
             bids_root=self._bids_root,
         )
         if not dlg.exec():

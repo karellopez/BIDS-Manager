@@ -128,6 +128,7 @@ class RecordingMetaDialog(QDialog):
         example_paths: Optional[dict] = None,
         pair_counts: Optional[dict] = None,
         present_pairs: Optional[list] = None,
+        also_ask: Optional[dict] = None,
         bids_root: Optional[Path] = None,
     ) -> None:
         super().__init__(parent)
@@ -168,6 +169,7 @@ class RecordingMetaDialog(QDialog):
         # coincidence, and inventing one produced sections for files that cannot
         # exist, filed under keys nothing reads. With no pairs the dialog shows
         # the agnostic section, which is always true of any dataset.
+        self._also_ask = dict(also_ask or {})
         self._present_pairs = [
             (datatype, suffix)
             for datatype, suffix in (present_pairs or [])
@@ -213,6 +215,7 @@ class RecordingMetaDialog(QDialog):
         self._tree_nodes = build_template_tree(
             self._present_pairs, self._example_paths,
             counts=self._pair_counts,
+            also_ask=self._also_ask,
             # Do not ask for what the scan saw the conversion answer on THIS
             # dataset. The measured default list came from one tree with one
             # scanner; this came from theirs.

@@ -180,6 +180,18 @@ def parse_recon_filter(raw: str) -> tuple[str, Optional[float]]:
             continue
         if not ftype and not part.endswith(":") and not re.fullmatch(r"[\d.]+", part):
             ftype = part
+
+    # Some vendors run the two together with no separator and no unit, as in
+    # Siemens' "XYZGAUSSIAN3.00". Split only when a size was not found any
+    # other way, so a string that merely ends in a digit is left alone.
+    if size is None and ftype:
+        packed = re.fullmatch(r"([A-Za-z][A-Za-z\-\s]*?)\s*([\d.]+)", ftype)
+        if packed:
+            try:
+                size = float(packed.group(2))
+                ftype = packed.group(1).strip()
+            except ValueError:
+                pass
     return ftype or (parts[0] if parts else ""), size
 
 

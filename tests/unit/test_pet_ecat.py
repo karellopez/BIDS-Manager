@@ -26,9 +26,13 @@ from bidsmgr.inventory.pet_ecat import (
 )
 
 REAL_DATA = os.environ.get("BIDS_MANAGER_REAL_PET_DATA") == "1"
+# The three ECAT phantoms, in the raw data where they persist. This used to
+# point at a scratch directory under bids_manager_outputs, which is conversion
+# OUTPUT and gets cleared, so these tests silently found nothing the moment the
+# folder was tidied away.
 PHANTOMS = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/bids_manager_outputs"
-    "/testing_pet/scratch_raw"
+    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS"
+    "/PN000001/OpenNeuroPET-Phantoms/sourcedata"
 )
 
 
