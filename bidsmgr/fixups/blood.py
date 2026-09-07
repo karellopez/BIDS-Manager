@@ -190,18 +190,33 @@ def _convert_one(curves: dict, sidecar: Path, prefix: str) -> int:
         # So the dictionary is rebuilt from the table that was actually written.
         _rewrite_dictionaries(staged)
 
+        produced_files = sorted(staged.rglob("*_blood.*"))
+        # BIDS makes ``recording`` a required entity on blood files, tables and
+        # sidecars alike. pet2bids 1.5.1 puts it on the table and leaves it off
+        # the sidecar, which pairs a valid table with an invalid sidecar. The
+        # entity belongs to the sampling, so it is taken from the tables, and a
+        # sidecar that arrived without one is written once per sampling it
+        # describes.
+        recordings = sorted({
+            _recording_entity(p.name) for p in produced_files
+            if p.name.endswith(".tsv") and _recording_entity(p.name)
+        })
+
         written = 0
-        for produced in sorted(staged.rglob("*_blood.*")):
-            recording = _recording_entity(produced.name)
-            parts = [prefix] + ([recording] if recording else []) + ["blood"]
-            dest = sidecar.with_name("_".join(parts) + _extension(produced.name))
-            try:
-                shutil.copyfile(produced, dest)
-            except OSError as exc:  # noqa: BLE001
-                log.warning("blood: could not write %s: %s", dest.name, exc)
-                continue
-            written += 1
-            log.info("blood: %s -> %s", produced.name, dest.name)
+        for produced in produced_files:
+            own = _recording_entity(produced.name)
+            targets = [own] if own else (recordings or [""])
+            for recording in targets:
+                parts = [prefix] + ([recording] if recording else []) + ["blood"]
+                dest = sidecar.with_name(
+                    "_".join(parts) + _extension(produced.name))
+                try:
+                    shutil.copyfile(produced, dest)
+                except OSError as exc:  # noqa: BLE001
+                    log.warning("blood: could not write %s: %s", dest.name, exc)
+                    continue
+                written += 1
+                log.info("blood: %s -> %s", produced.name, dest.name)
         return written
 
 

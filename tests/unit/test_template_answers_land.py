@@ -226,3 +226,77 @@ def test_a_row_resolves_its_own_cells_with_no_dataset_metadata_at_all() -> None:
         None, "eeg", "eeg", row_values={"power_line_freq": "50"},
     )
     assert resolved["PowerLineFrequency"].value == 50
+
+
+def test_a_numeric_array_stored_as_text_is_repaired_when_it_is_applied(
+    tmp_path: Path,
+) -> None:
+    """Answers are PERSISTED, so a bad one keeps arriving until it is repaired.
+
+    A template saved before the form could read numeric arrays holds ``["0"]``
+    on disk, and that file is applied again on every later run. Five PET fields
+    reached a validated dataset as arrays of decimal STRINGS this way, three of
+    them values the conversion had written correctly and the form only echoed
+    back. Repairing on apply means the stored answer does not have to be typed
+    in again to become valid, and it covers a hand-edited template too.
+    """
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    root = tmp_path / "ds"
+    pet = root / "sub-001" / "pet"
+    pet.mkdir(parents=True)
+    (pet / "sub-001_pet.json").write_text(json.dumps({"Units": "Bq/mL"}))
+
+    spec = RecordingMetaSpec()
+    spec.sequence_templates["pet/pet"] = {
+        "FrameTimesStart": ["0"],
+        "FrameDuration": ["14400"],
+        "ScatterFraction": ["1.90358e-08"],
+        "ReconMethodParameterValues": ["0"],
+        # An array of strings is a different thing and must survive untouched.
+        "ReconMethodParameterLabels": ["none"],
+    }
+    apply_stated_metadata(root, spec, pd.DataFrame([{
+        "proposed_basename": "sub-001_pet", "source_file": "/raw/a.dcm",
+    }]))
+
+    got = json.loads((pet / "sub-001_pet.json").read_text())
+    assert got["FrameTimesStart"] == [0]
+    assert got["FrameDuration"] == [14400]
+    assert got["ScatterFraction"] == [1.90358e-08]
+    assert got["ReconMethodParameterValues"] == [0]
+    assert got["ReconMethodParameterLabels"] == ["none"]
+    assert all(isinstance(x, (int, float)) for x in got["FrameTimesStart"])
+
+
+def test_a_word_in_a_numeric_array_is_left_alone(tmp_path: Path) -> None:
+    """Coercion is only for items that spell a number. Anything else is an
+    answer the user meant, and mangling it would be worse than leaving it."""
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    root = tmp_path / "ds"
+    pet = root / "sub-001" / "pet"
+    pet.mkdir(parents=True)
+    (pet / "sub-001_pet.json").write_text(json.dumps({"Units": "Bq/mL"}))
+
+    spec = RecordingMetaSpec()
+    spec.sequence_templates["pet/pet"] = {"FrameTimesStart": ["n/a"]}
+    apply_stated_metadata(root, spec, pd.DataFrame([{
+        "proposed_basename": "sub-001_pet", "source_file": "/raw/a.dcm",
+    }]))
+
+    assert json.loads((pet / "sub-001_pet.json").read_text())["FrameTimesStart"] == ["n/a"]
+
+
+def test_the_schema_says_what_an_array_holds() -> None:
+    """``field_metadata`` reported only "array", which cannot tell a list of
+    frame times from a list of parameter names, so nothing downstream could
+    repair one without guessing."""
+    assert schema_mod.field_metadata("FrameTimesStart").item_type == "number"
+    assert schema_mod.field_metadata("ReconMethodParameterValues").item_type == "number"
+    assert schema_mod.field_metadata("ReconMethodParameterLabels").item_type == "string"
+    assert schema_mod.field_metadata("TaskName").item_type == ""

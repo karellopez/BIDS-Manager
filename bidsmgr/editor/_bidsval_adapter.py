@@ -71,6 +71,10 @@ def to_bm_issue(bv_issue) -> Issue:
     fix's target field) becomes ``field`` so the Editor's fix button can jump to
     that row in the sidecar form. The button is only offered when there is a
     field to jump to.
+
+    ``rule`` is carried across as ``schema_rule``: the path in the BIDS schema
+    the finding came from. bidsval sets it on every issue it raises, and showing
+    it lets a user check the standard rather than trust the message.
     """
     fix = bv_issue.fix
     field = (fix.field if (fix and fix.field) else bv_issue.sub_code) or None
@@ -79,6 +83,7 @@ def to_bm_issue(bv_issue) -> Issue:
     return Issue(
         severity=to_bm_severity(bv_issue.severity),
         rule_id=bv_issue.code,
+        schema_rule=getattr(bv_issue, "rule", None) or None,
         message=_compose_message(bv_issue),
         field=field,
         line=getattr(bv_issue, "line", None),

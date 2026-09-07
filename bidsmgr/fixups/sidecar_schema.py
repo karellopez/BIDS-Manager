@@ -13,6 +13,10 @@ This one knows only what the SCHEMA says, and so applies everywhere:
   types the field as an array of one entry per frame or per run. Generalised
   from the PET fixup, which had it first because dcm2niix does this on
   single-frame PET.
+* :func:`repair_datetimes` zero-pads an acquisition time whose seconds field
+  dcm2niix wrote unpadded. ``11:22:1.995`` is not a date-time to any validator,
+  and it is copied on into ``scans.tsv``, so one converter slip is reported
+  twice.
 * :func:`fill_agnostic_fields` writes the values that belong to the DATASET
   rather than to a modality, chiefly where the study was done, into every
   sidecar whose datatype declares them. They used to reach electrophysiology
@@ -128,6 +132,44 @@ def repair_array_types(data: dict, datatype: str, suffix: str) -> int:
     return fixed
 
 
+# Fields the standard types as a date-time, written by a converter rather than
+# by a user. Scoped rather than applied to every string that looks like a date,
+# so a free-text field that happens to contain one is never rewritten.
+_DATETIME_KEYS: tuple[str, ...] = ("AcquisitionDateTime", "AcquisitionTime")
+
+_DATETIME_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}T)?"
+    r"(?P<h>\d{1,2}):(?P<m>\d{1,2}):(?P<s>\d{1,2})(?P<frac>\.\d+)?$"
+)
+
+
+def repair_datetimes(data: dict, datatype: str, suffix: str) -> int:
+    """Zero-pad an unpadded time field. Returns the count.
+
+    dcm2niix writes the seconds without a leading zero when the DICOM had one,
+    producing ``2025-05-26T11:22:1.995000``. BIDS wants a real date-time, so
+    that value is rejected, and it is rejected twice: once in the sidecar and
+    again in ``scans.tsv``, which is generated from it. Nothing about the
+    instant is wrong, only how it was spelled.
+    """
+    fixed = 0
+    for name in _DATETIME_KEYS:
+        value = data.get(name)
+        if not isinstance(value, str) or not value:
+            continue
+        m = _DATETIME_RE.match(value)
+        if m is None:
+            continue
+        padded = "%s%02d:%02d:%02d%s" % (
+            m.group("date") or "", int(m.group("h")), int(m.group("m")),
+            int(m.group("s")), m.group("frac") or "",
+        )
+        if padded != value:
+            data[name] = padded
+            fixed += 1
+    return fixed
+
+
 def fill_agnostic_fields(
     data: dict, datatype: str, suffix: str, spec: Optional[RecordingMetaSpec],
 ) -> int:
@@ -203,11 +245,52 @@ def apply_sequence_template(
             and not simultaneous_eeg
         ):
             continue
-        if data.get(name) == field.value:
+        value = _as_schema_types_it(name, field.value)
+        if data.get(name) == value:
             continue
-        data[name] = field.value
+        data[name] = value
         written += 1
     return written
+
+
+def _as_schema_types_it(name: str, value):
+    """``value`` in the shape the schema declares, where that is unambiguous.
+
+    Only numeric arrays are touched, and only when an item spells a number.
+    A number written as its own decimal string is the same number, and storing
+    it as text fails validation for an answer that is otherwise right.
+
+    This exists because the answers are PERSISTED. A metadata template saved
+    before the form learned to read numeric arrays holds ``["0"]`` on disk, and
+    that file keeps being applied on every later run. Repairing it as it is
+    applied means a stored answer does not have to be re-entered to become
+    valid, and it also covers a hand-edited template.
+    """
+    if not isinstance(value, list) or not any(isinstance(x, str) for x in value):
+        return value
+    from .. import schema as schema_mod
+
+    try:
+        info = schema_mod.field_metadata(name)
+    except (KeyError, ValueError):
+        return value
+    if info.type != "array" or info.item_type not in ("number", "integer"):
+        return value
+    return [_number_or_text(item) for item in value]
+
+
+def _number_or_text(value):
+    """``value`` as the number it spells, or unchanged if it spells none."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
 
 
 def _rewrite_each_sidecar(root: Path, apply) -> int:
@@ -253,14 +336,16 @@ def _rewrite_each_sidecar(root: Path, apply) -> int:
 def repair_converter_output(staging: Path) -> int:
     """Fix what the CONVERTER wrote. Returns files changed.
 
-    Two repairs, both about the backend's own output rather than about anything
-    a user said, which is why this belongs to conversion:
+    Three repairs, all about the backend's own output rather than about
+    anything a user said, which is why this belongs to conversion:
 
     * a key whose spelling differs from the standard's only in case, the real
       case being that mne-bids writes MEG's ``MiscChannelCount`` into EEG
       sidecars where BIDS spells it ``MISCChannelCount``;
     * a bare scalar where the schema declares an array, which dcm2niix writes
-      for a single-frame acquisition.
+      for a single-frame acquisition;
+    * an acquisition time whose seconds field is not zero-padded, which
+      dcm2niix also writes and which no validator will accept as a date-time.
 
     What the USER stated is applied by the metadata step instead: see
     :func:`apply_stated_metadata`. Keeping the two apart means ``bidsmgr-convert``
@@ -271,6 +356,7 @@ def repair_converter_output(staging: Path) -> int:
         lambda _path, data, datatype, suffix: (
             repair_key_names(data, datatype, suffix)
             + repair_array_types(data, datatype, suffix)
+            + repair_datetimes(data, datatype, suffix)
         ),
     )
 
@@ -404,6 +490,7 @@ __all__ = [
     "apply_stated_metadata",
     "fill_agnostic_fields",
     "repair_array_types",
+    "repair_datetimes",
     "repair_converter_output",
     "repair_key_names",
 ]

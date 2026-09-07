@@ -270,3 +270,46 @@ def test_a_pet_block_reaches_the_sidecar_through_the_chain(tmp_path: Path) -> No
     _apply(root, spec, [("sub-001_pet", "/raw/one")])
     data = json.loads((pet / "sub-001_pet.json").read_text())
     assert data["ModeOfAdministration"] == "bolus"
+
+
+# ---------------------------------------------------------------------------
+# Acquisition times
+# ---------------------------------------------------------------------------
+
+
+def test_an_unpadded_seconds_field_is_padded() -> None:
+    """dcm2niix drops the leading zero on the seconds when the DICOM had one.
+
+    ``2025-05-26T11:22:1.995000`` is not a date-time to any validator, and the
+    metadata step copies it on into ``scans.tsv``, so one slip by the converter
+    is reported as two errors. The instant is right; only the spelling is not.
+    """
+    from bidsmgr.fixups.sidecar_schema import repair_datetimes
+
+    data = {"AcquisitionDateTime": "2025-05-26T11:22:1.995000"}
+    assert repair_datetimes(data, "func", "bold") == 1
+    assert data["AcquisitionDateTime"] == "2025-05-26T11:22:01.995000"
+
+
+def test_a_time_that_is_already_padded_is_left_alone() -> None:
+    from bidsmgr.fixups.sidecar_schema import repair_datetimes
+
+    data = {"AcquisitionDateTime": "2025-05-26T11:22:01.995000"}
+    assert repair_datetimes(data, "func", "bold") == 0
+
+
+def test_every_part_of_the_time_is_padded() -> None:
+    from bidsmgr.fixups.sidecar_schema import repair_datetimes
+
+    data = {"AcquisitionTime": "9:5:3"}
+    assert repair_datetimes(data, "func", "bold") == 1
+    assert data["AcquisitionTime"] == "09:05:03"
+
+
+def test_something_that_is_not_a_time_is_not_touched() -> None:
+    """Only the two date-time keys are looked at, and only when they parse."""
+    from bidsmgr.fixups.sidecar_schema import repair_datetimes
+
+    data = {"AcquisitionDateTime": "unknown", "TaskName": "1:2:3"}
+    assert repair_datetimes(data, "func", "bold") == 0
+    assert data == {"AcquisitionDateTime": "unknown", "TaskName": "1:2:3"}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.2.5.2"
+version = "1.2.6"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -56,8 +56,10 @@ dependencies = [
     # declares from ``bidsval.schema`` rather than deriving them again here (see
     # CLAUDE.md guard 8). It pulls only deps BIDS Manager already ships
     # (bidsschematools, pydantic, nibabel, pandas, mne), so the footprint barely
-    # changes. 0.1.0 is the first release carrying that namespace.
-    "bidsval>=0.1.0,<0.2.0",
+    # changes. 0.1.0 is the first release carrying that namespace; 0.1.1 adds
+    # the INVALID_LOCATION check for a well-named file in a folder that is not
+    # a datatype, which the Editor needs to stop painting such files green.
+    "bidsval>=0.1.1,<0.2.0",
 
     # GUI.
     "pyqt6>=6.5,<=6.11.0",

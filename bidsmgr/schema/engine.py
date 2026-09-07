@@ -291,11 +291,16 @@ def field_metadata(field_name: str) -> FieldInfo:
     raw = schema.objects.metadata.get(field_name) if hasattr(schema.objects.metadata, "get") else None
     if raw is None:
         raise KeyError(f"Unknown metadata field: {field_name!r}")
+    items = raw.get("items")
     return FieldInfo(
         name=str(raw.get("name", field_name)),
         display_name=str(raw.get("display_name", field_name)),
         description=str(raw.get("description", "")),
         type=str(raw.get("type", "string")),
+        # An array says what its items are, and a caller repairing types needs
+        # that: "array" alone cannot tell a list of frame times from a list of
+        # parameter names.
+        item_type=str(items.get("type", "")) if items is not None else "",
     )
 
 

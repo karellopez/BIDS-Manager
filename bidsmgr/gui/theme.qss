@@ -1077,6 +1077,16 @@ QLabel#val-rule {
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
+/* Provenance: the schema path a finding came from, shown under the body so a
+   user can check the standard. Quieter than the rule code above it, and not
+   uppercased, because it is a path to be read literally. */
+QLabel#val-provenance {
+    font-family: "SF Mono","Menlo","Monaco",monospace;
+    font-size: 9px;
+    color: $muted;
+    background: transparent;
+}
+
 /* Optional small chip on the header row, naming the JSON field a
    finding refers to (e.g. "License" for a TODO-placeholder issue). */
 QLabel#val-field {

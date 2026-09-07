@@ -34,6 +34,12 @@ def _field(datatype: str, suffix: str, name: str):
     return {f.name: f for f in sidecar_section(datatype, suffix).fields}[name]
 
 
+def _any_field(datatype: str, suffix: str, name: str):
+    """Including the fields the conversion supplies, which the form still shows."""
+    section = sidecar_section(datatype, suffix, include_derived=True)
+    return {f.name: f for f in section.fields}[name]
+
+
 # ---------------------------------------------------------------------------
 # Common answers, offered
 # ---------------------------------------------------------------------------
@@ -472,3 +478,63 @@ def test_an_entity_the_row_already_carries_counts_as_answered(qtbot):
 
     asked = {f.name for f in sidecar_section("eeg", "eeg", answered=model.row_answered(0)).fields}
     assert "TaskName" not in asked
+
+
+# ---------------------------------------------------------------------------
+# Numeric arrays survive the round trip
+# ---------------------------------------------------------------------------
+
+
+def test_a_numeric_array_comes_back_as_numbers(qtbot):
+    """Typing 0 into ReconMethodParameterValues must reach the sidecar as 0.
+
+    It came back as ``["0"]`` before, which the schema rejects with "items must
+    be number": a field the user answered correctly turned into an error.
+    """
+    field = _field("pet", "pet", "ReconMethodParameterValues")
+    widget = build_field_widget(field, ())
+    qtbot.addWidget(widget)
+    widget.setText("0")
+    assert read_field_widget(widget, field) == [0]
+
+
+def test_a_numeric_array_the_form_only_displayed_is_read_back_unchanged(qtbot):
+    """The worse half of the same defect.
+
+    ``FrameTimesStart`` and friends are written by the conversion and only
+    SHOWN by the form. Reading them back as strings made them differ from what
+    the conversion wrote, so the form restated them in the wrong shape and a
+    template meant to add answers took valid ones away. Five fields failed this
+    way on a PET scan whose sidecar had been correct.
+    """
+    for name, value in (
+        ("FrameTimesStart", [0]),
+        ("FrameDuration", [14400]),
+        ("DecayCorrectionFactor", [1.99952]),
+        ("ScatterFraction", [1.90358e-08]),
+    ):
+        field = _any_field("pet", "pet", name)
+        widget = build_field_widget(field, ())
+        qtbot.addWidget(widget)
+        write_field_widget(widget, value)
+        assert read_field_widget(widget, field) == value, name
+
+
+def test_a_multi_frame_array_keeps_every_element(qtbot):
+    """A dynamic scan has many frames. The form joins them with ", " to show
+    them, so it has to split on the same comma to read them."""
+    field = _any_field("pet", "pet", "FrameTimesStart")
+    widget = build_field_widget(field, ())
+    qtbot.addWidget(widget)
+    write_field_widget(widget, [0, 10, 20, 300])
+    assert read_field_widget(widget, field) == [0, 10, 20, 300]
+
+
+def test_an_array_of_strings_is_still_left_alone(qtbot):
+    """Only numeric arrays are split. A string list has its own row widget, and
+    a value with a comma in it must not be torn in two."""
+    field = _field("pet", "pet", "ReconMethodParameterLabels")
+    widget = build_field_widget(field, ())
+    qtbot.addWidget(widget)
+    write_field_widget(widget, ["subsets, iterations"])
+    assert read_field_widget(widget, field) == ["subsets, iterations"]

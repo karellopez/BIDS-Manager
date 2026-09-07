@@ -147,18 +147,20 @@ def test_resources_card_lists_links(qtbot, isolated_settings) -> None:
     links = [
         l for l in panel.findChildren(QLabel) if l.objectName() == "welcome-link"
     ]
-    # 3 resource links + 4 sample datasets + 1 update-notes link = 8 clickable
-    # links, all external.
-    assert len(links) == 8
+    # 3 resource links + 6 sample datasets + 1 link to the section that
+    # compares them + 1 update-notes link = 11 clickable links, all external.
+    assert len(links) == 11
     assert all(l.openExternalLinks() for l in links)
     hrefs = " ".join(l.text() for l in links)
     assert "bids_manager_documentation" in hrefs       # docs site
     assert "github.com/ANCPLabOldenburg" in hrefs       # source
-    assert "cloud.uol.de" in hrefs                       # sample data
+    assert "cloud.uol.de" in hrefs                       # sample data, direct
+    assert "tutorial.html#datasets" in hrefs             # sample data, compared
     assert "updates.html" in hrefs                       # update notes
-    # Raw URLs never show as the visible text — friendly labels only.
+    # Raw URLs never show as the visible text: friendly labels only.
     assert ">Documentation website<" in hrefs
     assert ">MEG Elekta sample dataset<" in hrefs
+    assert ">Compare them, and see what each one demonstrates<" in hrefs
 
 
 def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> None:

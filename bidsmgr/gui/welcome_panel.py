@@ -66,12 +66,27 @@ _RESOURCE_LINKS: tuple[tuple[str, str], ...] = (
     ("Tutorial walkthrough", "https://ancplaboldenburg.github.io/bids_manager_documentation/tutorial.html"),
     ("Source code on GitHub", "https://github.com/ANCPLabOldenburg/BIDS-Manager"),
 )
-# Sample datasets (hosted on the UOL cloud) the docs offer for trying the tool.
+# Sample datasets, offered two ways: straight to the download for somebody who
+# knows which one they want, and to the documentation section for somebody who
+# does not. The section says what each dataset demonstrates and what a full run
+# of it produces, which a bare link cannot.
+#
+# These are hosted on the UOL cloud and must be kept in step with the "Pick a
+# dataset" section of the tutorial page. They have drifted before: the list here
+# had four while the documentation offered six, and one share link was reissued
+# when its dataset changed, so the application handed out a stale file. If you
+# add or replace a dataset, change both.
 _SAMPLE_DATASETS: tuple[tuple[str, str], ...] = (
     ("MRI walkthrough dataset", "https://cloud.uol.de/s/g9gMPpwL7Xg49y9/download"),
+    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/ZxaZCtHJPLjtDbR/download"),
+    ("PET, DICOM and ECAT with blood", "https://cloud.uol.de/s/CGcjfTpxzFWnrdz/download"),
     ("EEG motor-imagery dataset", "https://cloud.uol.de/s/T66zc5mN4eeZPGK/download"),
     ("MEG Elekta sample dataset", "https://cloud.uol.de/s/btGeke5NNkDcs6G/download"),
-    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/ZxaZCtHJPLjtDbR/download"),
+    ("Multimodal: MRI, PET, EEG and MEG", "https://cloud.uol.de/s/o6XCk6zH9DYpoes/download"),
+)
+_SAMPLE_DATASETS_URL = (
+    "https://ancplaboldenburg.github.io/bids_manager_documentation/"
+    "tutorial.html#datasets"
 )
 
 
@@ -404,6 +419,12 @@ class WelcomePanel(QWidget):
         lay.addWidget(sample)
         for text, url in _SAMPLE_DATASETS:
             lay.addWidget(self._link_label(text, url))
+        # One line rather than a paragraph: the card already runs past the fold
+        # on a first run, and the label says plainly enough what the link is for.
+        lay.addWidget(self._link_label(
+            "Compare them, and see what each one demonstrates",
+            _SAMPLE_DATASETS_URL,
+        ))
         return card
 
     def _build_updates_card(self) -> QFrame:

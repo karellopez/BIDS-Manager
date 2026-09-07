@@ -344,7 +344,20 @@ def read_field_widget(widget: QWidget, field) -> Any:
         # that was answered correctly.
         return _as_number(text)
     if field.type == "array":
-        # An array whose items are not strings: keep what was typed rather than
+        if field.item_type in ("number", "integer"):
+            # ``write_field_widget`` shows a list as ", "-joined text, so this
+            # split is the inverse of the way the value was displayed, not a
+            # guess. Coercing the items matters twice over. A numeric array
+            # captured as strings fails validation for a field the user
+            # answered correctly (``ReconMethodParameterValues`` typed as 0
+            # reaching the sidecar as "0"). Worse, an uncoerced read stops
+            # comparing equal to what the conversion already wrote, so fields
+            # nobody touched, ``FrameTimesStart`` and ``FrameDuration`` among
+            # them, get restated in the wrong shape and a template that was
+            # meant to add answers takes valid ones away.
+            parts = [part.strip() for part in text.split(",")]
+            return [_as_number(part) for part in parts if part] or None
+        # An array whose items are not numbers: keep what was typed rather than
         # guessing a split that may be wrong.
         return [text]
     return text

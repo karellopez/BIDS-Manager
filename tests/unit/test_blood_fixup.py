@@ -195,7 +195,11 @@ def test_names_come_from_the_runs_own_basename(
     assert convert_blood_files(staging, [task]) == 2
     written = {p.name for p in (staging / "pet").iterdir()}
     assert "sub-001_ses-baseline_trc-PIB_run-2_recording-manual_blood.tsv" in written
-    assert "sub-001_ses-baseline_trc-PIB_run-2_blood.json" in written
+    # ``recording`` is required on blood files, sidecar included. pet2bids
+    # 1.5.1 omits it from the sidecar, so the entity is taken from the table
+    # rather than copied through, which would pair a valid table with an
+    # invalid sidecar.
+    assert "sub-001_ses-baseline_trc-PIB_run-2_recording-manual_blood.json" in written
 
 
 # --------------------------------------------------------------------------
@@ -246,7 +250,8 @@ def test_the_dictionary_describes_the_table_beside_it(
     convert_blood_files(staging, [task])
 
     written = json.loads(
-        (staging / "pet" / "sub-001_blood.json").read_text(encoding="utf-8")
+        (staging / "pet" / "sub-001_recording-manual_blood.json")
+        .read_text(encoding="utf-8")
     )
     described = {k for k, v in written.items() if isinstance(v, dict)}
     assert described == {"time", "plasma_radioactivity", "whole_blood_radioactivity"}
@@ -290,7 +295,7 @@ def test_whole_blood_and_plasma_convert(tmp_path: Path) -> None:
 
     pet = staging / "pet"
     table = pet / "sub-001_trc-FDG_run-1_recording-manual_blood.tsv"
-    sidecar = pet / "sub-001_trc-FDG_run-1_blood.json"
+    sidecar = pet / "sub-001_trc-FDG_run-1_recording-manual_blood.json"
     assert table.is_file() and sidecar.is_file()
 
     with table.open(encoding="utf-8") as handle:
@@ -314,8 +319,10 @@ def test_mixed_sampling_splits_into_two_recordings(tmp_path: Path) -> None:
     """Hand-drawn and autosampled series have different time resolution.
 
     BIDS separates them with the ``recording`` entity, and pet2bids works out
-    which is which. Both tables share one sidecar, which must then describe the
-    columns of both.
+    which is which. It writes one sidecar for both, with no recording entity on
+    it, which no table can inherit by name. Each table therefore gets its own
+    copy, and each copy describes the columns of both, since that is what the
+    one sidecar they wrote described.
     """
     src = BLOOD_DATA / "Ex_bld_manual_and_autosampled_mixed"
     basename = "sub-002_ses-baseline_trc-PIB_pet"
@@ -334,21 +341,25 @@ def test_mixed_sampling_splits_into_two_recordings(tmp_path: Path) -> None:
             ),
         ],
     )
-    assert convert_blood_files(staging, [task]) == 3
+    # Two tables and a sidecar apiece.
+    assert convert_blood_files(staging, [task]) == 4
 
     pet = staging / "pet"
     stem = "sub-002_ses-baseline_trc-PIB"
     assert (pet / f"{stem}_recording-manual_blood.tsv").is_file()
     assert (pet / f"{stem}_recording-automatic_blood.tsv").is_file()
+    assert not (pet / f"{stem}_blood.json").exists()
 
     columns: set[str] = set()
     for table in pet.glob("*_blood.tsv"):
         with table.open(encoding="utf-8") as handle:
             columns.update(next(csv.reader(handle, delimiter="\t"), []))
 
-    written = json.loads((pet / f"{stem}_blood.json").read_text(encoding="utf-8"))
-    assert {k for k, v in written.items() if isinstance(v, dict)} == columns
-    assert written["MetaboliteAvail"] is True
+    for recording in ("manual", "automatic"):
+        sidecar = pet / f"{stem}_recording-{recording}_blood.json"
+        written = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert {k for k, v in written.items() if isinstance(v, dict)} == columns
+        assert written["MetaboliteAvail"] is True
 
 
 # --------------------------------------------------------------------------

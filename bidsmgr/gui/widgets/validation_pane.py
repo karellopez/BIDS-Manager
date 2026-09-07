@@ -397,6 +397,7 @@ class ValidationPane(QWidget):
                     body_html=issue.message,
                     fix_label=issue.fix_label,
                     field=issue.field,
+                    schema_rule=issue.schema_rule,
                 )
                 # Re-emit fix clicks with the file context so the host
                 # panel can jump to the right place.
