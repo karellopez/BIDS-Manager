@@ -134,9 +134,11 @@ class TestFindDcm2niix:
             p.name
             for p in dcm2niix_bidsguess._binary_candidates(Path("pkg/dcm2niix"))
         ]
-        # .EXE is added even when PATHEXT forgets it: it is the one the wheel
-        # ships, and an odd PATHEXT should not cost the user the probe.
-        assert names == ["dcm2niix", "dcm2niix.EXE", "dcm2niix.COM", "dcm2niix.BAT"]
+        # The wheel's suffix is added even when PATHEXT forgets it, and an odd
+        # PATHEXT should not cost the user the probe. It is tried in the case
+        # the wheel ships, lowercase, so that on a case-insensitive filesystem
+        # the path returned names the file that is actually on disk.
+        assert names == ["dcm2niix", "dcm2niix.exe", "dcm2niix.COM", "dcm2niix.BAT"]
 
     def test_candidates_are_just_the_path_off_windows(
         self, monkeypatch: pytest.MonkeyPatch,

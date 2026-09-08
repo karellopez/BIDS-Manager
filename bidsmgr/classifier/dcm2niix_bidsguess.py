@@ -136,6 +136,12 @@ def _binary_candidates(bin_path: Path) -> list[Path]:
     ]
     if ".EXE" not in {s.upper() for s in suffixes}:
         suffixes.insert(0, ".EXE")
+    # The wheel ships a lowercase ``dcm2niix.exe`` and PATHEXT is conventionally
+    # uppercase. Windows and macOS both match case-insensitively, so ``.EXE``
+    # would resolve and we would return a path naming a file that exists under
+    # no such spelling: right binary, wrong name in every log and error after
+    # it. Try the spelling the wheel actually ships first.
+    suffixes = [".exe"] + [s for s in suffixes if s.lower() != ".exe"]
     return [bin_path] + [bin_path.with_name(bin_path.name + s) for s in suffixes]
 
 
