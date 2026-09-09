@@ -37,6 +37,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QSizePolicy,
     QFrame,
     QHBoxLayout,
@@ -55,6 +56,7 @@ from ...editor.types import (
     SidecarField,
     ValidationReport,
 )
+from ...editor.grouping import FindingGroup, group_report, summarise
 from .primitives import Chip, PaneHeader
 from .val_message import ValMessage
 
@@ -101,6 +103,22 @@ def _find_verdict(
     return None
 
 
+class _ClipRow(QFrame):
+    """A row that renders at its natural size but claims no minimum width.
+
+    A horizontal row of buttons otherwise reports its full width as the
+    minimum of everything above it, and the Editor's splitter must be able to
+    squeeze this pane down to nothing. Overriding the minimum rather than
+    giving the buttons an Ignored size policy keeps them from being crushed
+    into each other when there IS room.
+    """
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+
 def _folder_key_for(root: Optional[Path], path: Optional[Path]) -> Optional[str]:
     """Compute the relative-folder key the validator uses in
     :pyattr:`ValidationReport.folder_issues`.
@@ -132,6 +150,9 @@ class ValidationPane(QWidget):
     """
 
     fix_requested = pyqtSignal(object, str)  # (Path | None, field_name)
+    # A grouped finding's fix-in-all-files button. Carries the
+    # FindingGroup so the host can open the candidate picker.
+    fix_group_requested = pyqtSignal(object)
     # Emitted by the File section's "Highlight in editor" button: highlight
     # every shown error/warning field (JSON) or column (TSV) for this file.
     highlight_all_requested = pyqtSignal(object)  # (Path | None)
@@ -157,6 +178,48 @@ class ValidationPane(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(PaneHeader("Validation"))
+
+        # Which findings the pane lists. Per-file is the original behaviour.
+        # Grouped answers a different question: a rule that fires on 200 files
+        # is one problem, and reading it 200 times teaches nothing the first
+        # reading did not.
+        self._grouped: bool = False
+        mode = _ClipRow()
+        mode.setObjectName("val-mode-row")
+        ml = QHBoxLayout(mode)
+        ml.setContentsMargins(14, 8, 14, 0)
+        ml.setSpacing(8)
+        self._file_mode_btn = QPushButton("This file")
+        self._file_mode_btn.setObjectName("view-pill")
+        self._file_mode_btn.setCheckable(True)
+        self._file_mode_btn.setChecked(True)
+        self._group_mode_btn = QPushButton("Whole dataset")
+        self._group_mode_btn.setObjectName("view-pill")
+        self._group_mode_btn.setCheckable(True)
+        self._group_mode_btn.setToolTip(
+            "Every finding in the dataset, collapsed to one row per kind "
+            "with the number of files it fired on."
+        )
+        grp = QButtonGroup(mode)
+        grp.setExclusive(True)
+        grp.addButton(self._file_mode_btn, 0)
+        grp.addButton(self._group_mode_btn, 1)
+        grp.idClicked.connect(self._on_mode_clicked)
+        self._mode_group = grp
+        ml.addWidget(self._file_mode_btn)
+        ml.addWidget(self._group_mode_btn)
+        ml.addStretch(1)
+        self._mode_summary = QLabel("")
+        self._mode_summary.setObjectName("pane-hint")
+        ml.addWidget(self._mode_summary)
+        # Only the summary label gives way; the two pills keep their natural
+        # size or they draw on top of each other. The row itself claims no
+        # minimum (see :class:`_ClipRow`), so the splitter can still squeeze
+        # this pane to nothing and the buttons simply clip.
+        self._mode_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        v.addWidget(mode)
 
         # Scrollable body. ``val-panel`` carries the QSS background.
         self._body = QWidget()
@@ -267,6 +330,11 @@ class ValidationPane(QWidget):
             self._insert_section_widget(hint)
             return
 
+        if self._grouped:
+            self._render_grouped()
+            return
+
+        self._mode_summary.setText('')
         # Section 1: dataset issues.
         # Fix buttons on dataset issues land on the currently-selected
         # file if any (matches what the user expects when they're
@@ -408,6 +476,96 @@ class ValidationPane(QWidget):
                 sl.addWidget(msg)
 
         self._insert_section_widget(section)
+
+    # ------------------------------------------------------------------
+    # Grouped (whole-dataset) mode
+    # ------------------------------------------------------------------
+
+    def _on_mode_clicked(self, idx: int) -> None:
+        grouped = idx == 1
+        if grouped == self._grouped:
+            return
+        self._grouped = grouped
+        self._render()
+
+    def _render_grouped(self) -> None:
+        """One row per kind of finding, with the file count beside it."""
+        groups = group_report(self._report, allowed=self._allowed)
+        self._mode_summary.setText(summarise(groups))
+        if not groups:
+            hint = QLabel("No findings at the current severity filter.")
+            hint.setObjectName("pane-hint")
+            hint.setWordWrap(True)
+            self._insert_section_widget(hint)
+            return
+        for grp in groups:
+            self._insert_section_widget(self._build_group_row(grp))
+
+    def _build_group_row(self, grp: FindingGroup) -> QWidget:
+        """A finding, its count, the files under it, and a fix-all action."""
+        sev = (
+            grp.severity.value
+            if isinstance(grp.severity, Severity) else str(grp.severity)
+        )
+        card = QFrame()
+        card.setObjectName("val-section")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.setContentsMargins(0, 0, 0, 0)
+        title = QLabel(grp.title())
+        title.setObjectName("val-section-title")
+        title.setToolTip(grp.message)
+        # A rule id plus a field name is long, and the count and the fix
+        # button are the parts that must survive a narrow pane. Ignored
+        # horizontal policy lets the label give way rather than push them out.
+        title.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        head.addWidget(title, 1)
+        if grp.field:
+            fix = QPushButton("Fix in all files")
+            fix.setObjectName("val-highlight-all")
+            fix.setToolTip(
+                "Review the {n} files this fired on and write a value into "
+                "the ones you tick.".format(n=grp.count)
+            )
+            fix.clicked.connect(
+                lambda _=False, g=grp: self.fix_group_requested.emit(g)
+            )
+            head.addWidget(fix)
+        head.addWidget(Chip(
+            "{n} file{s}".format(n=grp.count, s="" if grp.count == 1 else "s"),
+            "err" if sev == "error" else "warn",
+        ))
+        cl.addLayout(head)
+
+        msg = ValMessage(
+            severity=sev,
+            rule=grp.rule_id,
+            body_html=grp.message,
+            fix_label=None,
+            field=grp.field,
+            schema_rule=grp.schema_rule,
+        )
+        cl.addWidget(msg)
+
+        # The files, listed rather than summarised: the point of grouping is
+        # to stop repeating the message, not to hide where it landed.
+        shown = [str(x) for x in grp.files[:8]]
+        extra = len(grp.files) - len(shown)
+        text = "\n".join(shown)
+        if extra > 0:
+            text += "\nand {n} more".format(n=extra)
+        listing = QLabel(text)
+        listing.setObjectName("pane-hint")
+        listing.setWordWrap(True)
+        listing.setToolTip("\n".join(str(x) for x in grp.files))
+        cl.addWidget(listing)
+        return card
 
     def _insert_section_widget(self, widget: QWidget) -> None:
         """Insert ``widget`` before the trailing stretch and remember it."""

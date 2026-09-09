@@ -382,6 +382,16 @@ class _TopHeader(QFrame):
         icons.apply_button(self._theme_btn, "sun" if new == "dark" else "moon")
         AppSettings.remember_theme(new)
 
+    @staticmethod
+    def _largest_app_icon(assets: Path) -> Path:
+        """The biggest ``AppIcon<N>.png`` that exists, 128 as a floor."""
+        macos = assets / "macos"
+        for size in (1024, 512, 256, 128):
+            candidate = macos / f"AppIcon{size}.png"
+            if candidate.exists():
+                return candidate
+        return macos / "AppIcon128.png"
+
     def _apply_logo_pixmap(self, pal: dict) -> None:
         """Load the brand artwork chosen by ``AppSettings.header_logo``.
 
@@ -403,7 +413,14 @@ class _TopHeader(QFrame):
         choice = AppSettings.load().header_logo
         assets = Path(__file__).parent / "assets"
         if choice == "app_icon":
-            png = assets / "macos" / "AppIcon128.png"
+            # The LARGEST icon that ships, not the one nearest the target.
+            # The header draws it at 44 logical px, which is 88 device px on a
+            # retina screen and more again with the font scale up; a 128 px
+            # source is then barely above 1:1 and looks soft, and
+            # ``_trim_transparent_bbox`` crops the inset away before it is
+            # scaled, costing more. Downscaling from 1024 is free at load time
+            # and always at least as sharp.
+            png = self._largest_app_icon(assets)
             invert_on_dark = False
         else:
             png = assets / "logo.png"

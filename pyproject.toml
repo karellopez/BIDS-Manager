@@ -82,6 +82,11 @@ dependencies = [
     # there is never a question about which.
     "pypet2bids>=1.5.1,<2",
 
+    # CITATION.cff. Reached through bidsval today, but BIDS Manager now reads
+    # and writes the file itself (the Editor renders it as a form), so the
+    # dependency is declared rather than inherited.
+    "pyyaml>=5.4,<=6.0.3",
+
     # EEG / MEG / iEEG conversion stack.
     "mne>=1.6,<=1.12.1",
     "mne-bids>=0.15,<=0.17.0",
@@ -134,6 +139,7 @@ Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 [project.scripts]
 bidsmgr           = "bidsmgr.main:main"
 bidsmgr-create    = "bidsmgr.cli.create:main"
+bidsmgr-adopt     = "bidsmgr.cli.adopt:main"
 bidsmgr-project   = "bidsmgr.cli.project:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"

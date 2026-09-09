@@ -1267,3 +1267,34 @@ QWidget#nifti-3d-controls {
     background: $surface2;
     border: none;
 }
+
+/* ---------- Editor automation: fix-ups, bulk edit, citation, ignore ----------
+   Same QSS-only pattern as the sidecar rows above: every colour is a palette
+   token, so a dark/light swap is the app-wide re-apply and no widget needs a
+   repaint listener. Anything that cannot be reached this way (an item view's
+   per-row foreground) is set in code and re-rendered by the pane's
+   ``repaint_for_palette``. */
+
+/* A scroll surface and its content widget need their own background rule:
+   a plain QWidget does not inherit the parent's QSS background, and on a
+   theme swap it keeps the brush it was first polished with. Same treatment
+   as #issue-dialog-scroll / #issue-dialog-body above. */
+QScrollArea#cff-scroll, QWidget#cff-body { background: $surface; border: none; }
+QPlainTextEdit#ent-input {
+    background: $bg; color: $text;
+    border: 1px solid $input_border; border-radius: 4px; padding: 3px 6px;
+}
+QPlainTextEdit#ent-input:focus { border: 1px solid $accent; }
+
+/* Section heading inside a dialog (Fix ups). */
+QLabel#dlg-section-title { color: $text; font-weight: 600; }
+
+/* A row the action does not apply to, in the bulk-edit candidate list. */
+QCheckBox#candidate-off { color: $muted; }
+
+/* CITATION.cff form: the field name, coloured by what the format asks of it,
+   and the note saying which BIDS field it was derived from. */
+QLabel#cff-key-required    { color: $error;   font-weight: 600; }
+QLabel#cff-key-recommended { color: $warning; font-weight: 600; }
+QLabel#cff-key-optional    { color: $muted;   font-weight: 600; }
+QLabel#cff-source          { color: $muted; }

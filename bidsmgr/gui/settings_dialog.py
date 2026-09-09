@@ -156,6 +156,35 @@ class SettingsDialog(QDialog):
             self._header_logo_combo.addItem(label)
         form.addRow("Header logo:", self._header_logo_combo)
 
+        # Editor tree: dotfiles and the machinery folders. Off by default,
+        # because a dataset carries .bidsmgr/, .git/ and .bidsignore and none
+        # of them are the data. On, they are shown dimmed.
+        self._editor_show_hidden = QCheckBox(
+            "Show hidden files and folders in the Editor tree"
+        )
+        self._editor_show_hidden.setToolTip(
+            "Dotfiles and dot-folders (.bidsignore, .bidsmgr, .git) are "
+            "hidden by default. Shown, they are dimmed so they do not "
+            "compete with the dataset. Needed to open .bidsignore."
+        )
+        form.addRow("Editor tree:", self._editor_show_hidden)
+
+        # Save as you go. Safe because every editor write goes through the
+        # operation log, so an edit made without being asked for can still be
+        # undone after the pane has moved on.
+        self._editor_autosave = QCheckBox(
+            "Save a sidecar edit as soon as the field is committed"
+        )
+        self._editor_autosave.setToolTip(
+            "Off by default: edits wait for the Save button, and the toolbar "
+            "says there are unsaved changes from the first keystroke either "
+            "way.\n\nOn, a field commits when it loses focus or you press "
+            "Enter and is written after a short pause, so a burst of typing "
+            "is one write. Every write is reversible, so this cannot lose "
+            "what was there before."
+        )
+        form.addRow("Editor saving:", self._editor_autosave)
+
         hint = QLabel(
             "Theme can also be toggled live via the sun / moon button "
             "in the top header. Font scale and header logo apply on Save."
@@ -580,6 +609,36 @@ class SettingsDialog(QDialog):
         )
         pv.addWidget(_indented(self._post_metadata_fill_todos))
 
+        # Dataset repairs. They run between metadata and validation, and they
+        # are the same code the Editor's Fix ups button runs, so a dataset
+        # gets the same result whichever moment the user chooses. Both are off
+        # by default: one adds files and the other moves fields between them.
+        self._post_fixup_companions = QCheckBox(
+            "Generate missing companion files (events.tsv, channels.tsv, "
+            "JSON sidecars)"
+        )
+        self._post_fixup_companions.setToolTip(
+            "What can be read from a recording is read from it, so a "
+            "channels table is real content. The rest is a stub carrying "
+            "TODO rows.\n\nA generated events table is deliberately INVALID "
+            "until you fill it in: TODO is not a valid onset, so validation "
+            "reports an error for each one. That is the point. An empty but "
+            "valid events table would be indistinguishable from a recording "
+            "that genuinely had no events, and would pass quietly forever."
+        )
+        pv.addWidget(_indented(self._post_fixup_companions))
+        self._post_fixup_citation = QCheckBox(
+            "Write CITATION.cff from the dataset description"
+        )
+        self._post_fixup_citation.setToolTip(
+            "BIDS treats the citation file as the single source for Authors, "
+            "License, HowToAcknowledge and ReferencesAndLinks, so those move "
+            "out of dataset_description.json rather than being duplicated. "
+            "Leaving them in both is an error, not a duplicate. An existing "
+            "CITATION.cff is never overwritten."
+        )
+        pv.addWidget(_indented(self._post_fixup_citation))
+
         self._post_run_validate = QCheckBox(
             "Validate dataset (bidsval schema-driven validation)"
         )
@@ -598,7 +657,12 @@ class SettingsDialog(QDialog):
         pv.addWidget(_indented(self._post_validate_strict))
         pv.addWidget(_indented(self._post_validate_html))
 
-        _bind_children(self._post_run_metadata, self._post_metadata_fill_todos)
+        _bind_children(
+            self._post_run_metadata,
+            self._post_metadata_fill_todos,
+            self._post_fixup_companions,
+            self._post_fixup_citation,
+        )
         _bind_children(
             self._post_run_validate,
             self._post_validate_strict,
@@ -772,6 +836,8 @@ class SettingsDialog(QDialog):
         cap = self._sys.logical_threads
 
         self._theme_combo.setCurrentText(s.theme)
+        self._editor_show_hidden.setChecked(s.editor_show_hidden)
+        self._editor_autosave.setChecked(s.editor_autosave)
         self._font_scale_combo.setCurrentIndex(
             self._closest_font_scale_index(s.font_scale)
         )
@@ -792,6 +858,8 @@ class SettingsDialog(QDialog):
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
         self._post_metadata_fill_todos.setChecked(s.post_metadata_fill_todos)
+        self._post_fixup_companions.setChecked(s.post_fixup_companions)
+        self._post_fixup_citation.setChecked(s.post_fixup_citation)
         self._post_run_validate.setChecked(s.post_run_validate)
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
@@ -845,6 +913,8 @@ class SettingsDialog(QDialog):
         s.user_hints = hints
         s.scan_exclusions = exclusions
         s.theme = self._theme_combo.currentText()
+        s.editor_show_hidden = self._editor_show_hidden.isChecked()
+        s.editor_autosave = self._editor_autosave.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()
         ][1]
@@ -866,6 +936,8 @@ class SettingsDialog(QDialog):
 
         s.post_run_metadata = self._post_run_metadata.isChecked()
         s.post_metadata_fill_todos = self._post_metadata_fill_todos.isChecked()
+        s.post_fixup_companions = self._post_fixup_companions.isChecked()
+        s.post_fixup_citation = self._post_fixup_citation.isChecked()
         s.post_run_validate = self._post_run_validate.isChecked()
         s.post_validate_strict = self._post_validate_strict.isChecked()
         s.post_validate_html = self._post_validate_html.isChecked()

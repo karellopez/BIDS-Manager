@@ -61,6 +61,13 @@ LEVEL_ROLE = Qt.ItemDataRole.UserRole + 5
 # item's background brush, so we paint it ourselves, like the level bar).
 HIGHLIGHT_ROLE = Qt.ItemDataRole.UserRole + 6
 
+# True on a row the standard declares for this file but the file does not
+# carry. The row is shown so the two views hold the same fields, is drawn
+# dimmed, and is omitted from :meth:`JsonTreeView.to_dict` until the user
+# types a value into it. Without this the Tree view showed 90 fields where
+# the BIDS form showed 130, and nothing said why.
+PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
+
 # Semi-transparent row tints; low alpha so the text stays readable over them.
 _HL_TINT: dict[str, "QColor"] = {
     "err":   QColor(207, 34, 46, 78),
@@ -229,6 +236,7 @@ class JsonTreeView(QTreeWidget):
         data: OrderedDict[str, Any] | None,
         *,
         levels: Optional[dict[str, str]] = None,
+        placeholders: Optional[list[str]] = None,
     ) -> None:
         """Render an :class:`OrderedDict` as the tree.
 
@@ -249,17 +257,37 @@ class JsonTreeView(QTreeWidget):
             if data is None:
                 return
             levels = levels or {}
+            # Declared-but-absent fields carry no value, so they sort with
+            # the rest by level and are told apart by the role, not by a
+            # separate list at the bottom.
+            absent = [k for k in (placeholders or []) if k not in data]
             # Stable sort: keys keep their relative order within a
             # level bucket, but the buckets themselves are reordered.
             sorted_keys = sorted(
-                data.keys(),
+                list(data.keys()) + absent,
                 key=lambda k: _LEVEL_DISPLAY_ORDER.get(
                     levels.get(k, ""), _NO_LEVEL_RANK,
                 ),
             )
+            absent_set = set(absent)
             for key in sorted_keys:
-                val = data[key]
-                item = self._make_item(key, val)
+                if key in absent_set:
+                    item = self._make_item(key, "")
+                    item.setData(0, PLACEHOLDER_ROLE, True)
+                    # Dimmed, so an absent field cannot be mistaken for one
+                    # the file states as empty. Set here rather than in
+                    # ``drawRow`` because the row is rebuilt on every
+                    # palette change anyway.
+                    dim = QColor(CUR()["muted"])
+                    item.setForeground(0, dim)
+                    item.setForeground(1, dim)
+                    item.setToolTip(
+                        0,
+                        f"{key} is declared for this kind of file and is not "
+                        "in it. Type a value to add it.",
+                    )
+                else:
+                    item = self._make_item(key, data[key])
                 self.addTopLevelItem(item)
                 if key in levels:
                     item.setData(0, LEVEL_ROLE, levels[key])
@@ -407,6 +435,11 @@ class JsonTreeView(QTreeWidget):
             key = child.text(0).strip()
             if not key:
                 continue
+            # A field the standard declares and the file does not carry is
+            # shown but not written. Typing into it clears the flag in
+            # ``_on_item_changed``, and only then does it reach the file.
+            if child.data(0, PLACEHOLDER_ROLE):
+                continue
             out[key] = self._value_from_item(child)
         return out
 
@@ -432,8 +465,28 @@ class JsonTreeView(QTreeWidget):
     def _on_item_changed(self, item: QTreeWidgetItem, col: int) -> None:
         if self._suppress:
             return
-        del item, col
+        # Typing into a declared-but-absent row is how the user states the
+        # field, so the row stops being a placeholder and starts being data.
+        # Clearing an edited row back to empty does NOT restore the flag: at
+        # that point the user has stated an empty value, which is a statement.
+        if item.data(0, PLACEHOLDER_ROLE):
+            item.setData(0, PLACEHOLDER_ROLE, None)
+        del col
         self.model_changed.emit()
 
+    def placeholder_keys(self) -> set[str]:
+        """Top-level rows shown but not written (declared, absent from file)."""
+        return {
+            self.topLevelItem(i).text(0).strip()
+            for i in range(self.topLevelItemCount())
+            if self.topLevelItem(i).data(0, PLACEHOLDER_ROLE)
+        }
 
-__all__ = ["JsonTreeView", "LEVEL_ROLE", "value_to_text", "text_to_value"]
+
+__all__ = [
+    "JsonTreeView",
+    "LEVEL_ROLE",
+    "PLACEHOLDER_ROLE",
+    "value_to_text",
+    "text_to_value",
+]

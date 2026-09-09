@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QWidget,
 )
 
@@ -137,6 +138,13 @@ class SidecarRow(QFrame):
     # Emitted when the user commits an edit (Enter / focus-out / combo
     # change). Args: (key, parsed_value, value_kind).
     value_committed = pyqtSignal(str, object, str)
+    # Right-click: state this field in more than one file at once.
+    # Carries the key so the host can open the candidate picker.
+    apply_to_others_requested = pyqtSignal(str)
+    # The first keystroke in a field. ``value_committed`` only fires on
+    # focus-out or Enter, so without this the pane could not say a file
+    # had unsaved changes until the user clicked somewhere else.
+    editing_started = pyqtSignal(str)
 
     def __init__(
         self,
@@ -156,6 +164,15 @@ class SidecarRow(QFrame):
         self._value_kind = value_kind
         self._editable = editable
         self._editor: Optional[QWidget] = None
+
+        # An answer is rarely true of one file only. Right-clicking a row
+        # offers to state it across the files the standard declares it for,
+        # which is the same picker the grouped-findings fix uses.
+        if editable:
+            self.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            self.customContextMenuRequested.connect(self._on_context_menu)
 
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 4, 0, 4)
@@ -196,6 +213,16 @@ class SidecarRow(QFrame):
         "warn":  "rgba(191, 135, 0, 0.26)",
         "focus": "rgba(79, 195, 247, 0.22)",
     }
+
+    def _on_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        act = menu.addAction("Apply this field to other files")
+        act.setToolTip(
+            "Pick which other files should carry this field and value."
+        )
+        chosen = menu.exec(self.mapToGlobal(pos))
+        if chosen is act:
+            self.apply_to_others_requested.emit(self._key)
 
     @property
     def key(self) -> str:
@@ -284,6 +311,12 @@ class SidecarRow(QFrame):
             validator.setNotation(QDoubleValidator.Notation.ScientificNotation)
             edit.setValidator(validator)
         edit.editingFinished.connect(self._on_line_committed)
+        # ``textEdited`` fires on user input only, never on the
+        # programmatic ``setText`` above, so seeding a row does not mark
+        # the file dirty.
+        edit.textEdited.connect(
+            lambda _t: self.editing_started.emit(self._key)
+        )
         return edit
 
     def _seed_text(

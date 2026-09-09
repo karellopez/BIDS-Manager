@@ -23,8 +23,10 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QFrame,
+    QMessageBox,
     QHBoxLayout,
     QPushButton,
     QSplitter,
@@ -36,6 +38,8 @@ from PyQt6.QtWidgets import (
 from ..editor.types import FileVerdict, Severity, ValidationReport
 from ..workers import FileReportWorker, FolderReportWorker, ReportWorker
 from . import icons
+from .widgets.bidsignore_pane import BidsIgnorePane
+from .widgets.citation_pane import CitationPane
 from .widgets import (
     BidsTreePane,
     BusySpinner,
@@ -106,10 +110,17 @@ class EditorPanel(QWidget):
         self._nifti_viewer = NiftiViewerPane()
         self._recording_viewer = RecordingViewerPane()
         self._center_stack = QStackedWidget()
+        self._sidecar_form.apply_to_others_requested.connect(
+            self._on_apply_field_to_others
+        )
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
         self._center_stack.addWidget(self._recording_viewer)
+        self._bidsignore_pane = BidsIgnorePane()
+        self._center_stack.addWidget(self._bidsignore_pane)
+        self._citation_pane = CitationPane()
+        self._center_stack.addWidget(self._citation_pane)
         # Threaded panes drive the toolbar busy spinner + status bar.
         self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
         self._recording_viewer.loading_changed.connect(self._on_pane_loading)
@@ -120,6 +131,9 @@ class EditorPanel(QWidget):
         self._center_stack.currentChanged.connect(self._sync_undo_redo)
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
+        self._validation_pane.fix_group_requested.connect(
+            self._on_fix_group_requested
+        )
         self._validation_pane.highlight_all_requested.connect(
             self._on_highlight_all_requested
         )
@@ -320,6 +334,33 @@ class EditorPanel(QWidget):
         self._validate_dataset_btn.clicked.connect(self.start_dataset_validation)
         lay.addWidget(self._validate_dataset_btn)
 
+        # Repairs that act on the whole dataset rather than one finding:
+        # companion files a recording is missing, and the citation file.
+        self._fixups_btn = QPushButton("  Fix ups")
+        self._fixups_btn.setObjectName("tb-btn")
+        self._fixups_btn.setToolTip(
+            "Generate the companion files recordings are missing, and write "
+            "CITATION.cff from the dataset description. Nothing is written "
+            "until you choose it, and everything can be undone."
+        )
+        self._fixups_btn.setEnabled(False)
+        self._fixups_btn.clicked.connect(self._on_fixups)
+        lay.addWidget(self._fixups_btn)
+
+        # Only meaningful for a dataset this tool did not convert, so it
+        # hides itself once the dataset carries a project bundle.
+        self._adopt_btn = QPushButton("  Track changes")
+        self._adopt_btn.setObjectName("tb-btn")
+        self._adopt_btn.setToolTip(
+            "This dataset was not converted here, so there is no record "
+            "of what it looked like before you started editing. Tracking "
+            "writes that baseline into .bidsmgr/ and changes nothing "
+            "else, so edits become reversible."
+        )
+        self._adopt_btn.setVisible(False)
+        self._adopt_btn.clicked.connect(self._on_adopt)
+        lay.addWidget(self._adopt_btn)
+
         # Deep-checks toggle — when on, "Validate dataset" reads NIfTI
         # headers and file contents (slower, more thorough); when off it
         # runs the fast structural pass used for live revalidation. Maps
@@ -450,6 +491,8 @@ class EditorPanel(QWidget):
         self._hide_chips()
         # Enable dataset-level validation now that we have a root.
         self._validate_dataset_btn.setEnabled(True)
+        self._fixups_btn.setEnabled(True)
+        self._refresh_adopt_button()
         if persist:
             from .app_settings import AppSettings
             AppSettings.remember_editor_bids_root(path)
@@ -709,6 +752,22 @@ class EditorPanel(QWidget):
             return
         name = path.name.lower()
         root = self.current_root()
+        if name == "citation.cff":
+            # YAML rather than JSON, so the sidecar form cannot render it.
+            # It was the one dataset-level file that sent the user to a text
+            # editor.
+            self._citation_pane.set_file(path, root)
+            self._center_stack.setCurrentWidget(self._citation_pane)
+            self._validation_pane.set_current_file(path, root)
+            return
+        if name == ".bidsignore":
+            # Not a text file as far as a user is concerned: what matters is
+            # which files each pattern is hiding, which a text editor cannot
+            # say.
+            self._bidsignore_pane.set_root(root)
+            self._center_stack.setCurrentWidget(self._bidsignore_pane)
+            self._validation_pane.set_current_file(path, root)
+            return
         if name.endswith(".tsv") or name.endswith(".tsv.gz"):
             self._tsv_viewer.set_file(path, root)
             # Other panes get cleared so a future toggle back doesn't
@@ -805,6 +864,163 @@ class EditorPanel(QWidget):
         # between validation and the click), fall back to loading
         # the sidecar / TSV viewer directly so the click still works.
         self._on_file_selected(path)
+
+    def _refresh_adopt_button(self) -> None:
+        """Offer tracking only while the open dataset lacks a project bundle."""
+        from ..project.adopt import is_managed
+
+        root = self.current_root()
+        self._adopt_btn.setVisible(
+            root is not None and not is_managed(root)
+        )
+
+    def _on_adopt(self) -> None:
+        """Write the baseline that makes editing this dataset reversible."""
+        from ..project.adopt import NotABidsDataset, adopt
+
+        root = self.current_root()
+        if root is None:
+            return
+        answer = QMessageBox.question(
+            self, "Track changes to this dataset",
+            f"This will create a .bidsmgr folder inside\n{root}\n\n"
+            "and record what every file looks like right now, so edits made "
+            "from here can be undone. Nothing else in the dataset is touched, "
+            "and every BIDS tool ignores dot-folders, so validation is "
+            "unaffected.\n\nOn a large dataset this reads every file once.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Ok,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        try:
+            result = adopt(root)
+        except NotABidsDataset as exc:
+            QMessageBox.warning(self, "Not a BIDS dataset", str(exc))
+            return
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Could not write",
+                f"{root} could not be written to, so the baseline was not "
+                f"recorded:\n\n{exc}",
+            )
+            return
+        self.log_message.emit(
+            f"tracking {result.files} file(s) in {result.root}"
+        )
+        self._refresh_adopt_button()
+        self._tree_pane.set_root(root)
+
+    def _on_fixups(self) -> None:
+        """Open the dataset-wide repairs, then revalidate what changed."""
+        from .fixups_dialog import FixupsDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = FixupsDialog(root, parent=self)
+        dlg.exec()
+        # Generating a file or moving citation fields changes what the
+        # validator would say, so the board must not keep showing the old
+        # answer.
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_apply_field_to_others(self, field: str) -> None:
+        """State the field the user is editing across other files too."""
+        from ..editor import bulk_edit as be
+        from .bulk_field_dialog import BulkFieldDialog
+
+        root = self.current_root()
+        current = self._sidecar_form.current_file()
+        if root is None or current is None:
+            return
+        # Offer the value the user has in front of them as the starting point.
+        cache = getattr(self._sidecar_form, "_json_cache", None) or {}
+        dlg = BulkFieldDialog(
+            root, field,
+            anchor=current,
+            initial_value=cache.get(field),
+            title=f"Apply {field} to other files",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dlg.selected()
+        if not chosen:
+            return
+        result = be.apply_value(
+            root, chosen, field, dlg.value(),
+            label=f"Set {field} in {len(chosen)} file(s)",
+        )
+        self._report_bulk_result(result)
+
+    def _on_fix_group_requested(self, group) -> None:
+        """Fix one finding in every file it fired on.
+
+        The grouped view knows exactly which files produced the finding, so
+        they are passed straight through as the candidate list rather than
+        re-derived from a scope: the question is not "where else could this
+        apply" but "which of these do you want changed".
+        """
+        from ..editor import bulk_edit as be
+        from .bulk_field_dialog import BulkFieldDialog
+
+        root = self.current_root()
+        if root is None or not group.field:
+            return
+        # A finding is recorded against the data file; the field is edited in
+        # its sidecar. ``candidates`` follows that hop for us.
+        cands = be.candidates(
+            root, group.field,
+            paths=[root / p for p in group.files],
+        )
+        if not cands:
+            QMessageBox.information(
+                self, "Nothing to fix",
+                "No editable sidecar was found for those files.",
+            )
+            return
+        dlg = BulkFieldDialog(
+            root, group.field,
+            candidates=cands,
+            title=f"Fix {group.field} in {len(cands)} file(s)",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dlg.selected()
+        if not chosen:
+            return
+        result = be.apply_value(
+            root, chosen, group.field, dlg.value(),
+            label=f"Fix {group.field} in {len(chosen)} file(s)",
+        )
+        self._report_bulk_result(result)
+
+    def _report_bulk_result(self, result) -> None:
+        """Tell the user what was written, and revalidate so it shows."""
+        parts = [f"{len(result.written)} file(s) written"]
+        if result.skipped:
+            parts.append(f"{len(result.skipped)} already correct")
+        if result.failed:
+            parts.append(f"{len(result.failed)} failed")
+        msg = ", ".join(parts) + "."
+        if result.failed:
+            msg += "\n\n" + "\n".join(
+                f"{p}: {why}" for p, why in result.failed[:5]
+            )
+            QMessageBox.warning(self, "Some files were not written", msg)
+        else:
+            self.log_message.emit(msg)
+        if result.written:
+            # The sidecar on screen may be one of the files just changed.
+            current = self._sidecar_form.current_file()
+            if current is not None and current in result.written:
+                self._sidecar_form.set_file(
+                    current, self.current_root(), self._report,
+                )
+            self.start_dataset_validation()
 
     def _on_fix_requested(self, path: Path, field: str) -> None:
         """A user clicked a ValMessage's fix button.
@@ -980,6 +1196,8 @@ class EditorPanel(QWidget):
         self._sidecar_form.repaint_for_palette(pal)
         self._tsv_viewer.repaint_for_palette(pal)
         self._nifti_viewer.repaint_for_palette(pal)
+        self._bidsignore_pane.repaint_for_palette(pal)
+        self._citation_pane.repaint_for_palette(pal)
         self._recording_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
         for frame in getattr(self, "_panel_frames", []):

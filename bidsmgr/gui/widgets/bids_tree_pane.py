@@ -122,12 +122,23 @@ def _norm_path(p) -> str:
         return str(Path(p))
 
 
+def is_hidden_name(name: str) -> bool:
+    """Would this entry be hidden with "Show hidden files" off?
+
+    One source of truth for the filter and for the dimming, so a name can
+    never be shown at full weight by one rule and hidden by the other.
+    Dotfiles plus the machinery directories in :data:`_SKIP_DIRS`.
+    """
+    return name.startswith(".") or name in _SKIP_DIRS
+
+
 def _walk(
     folder: Path,
     parent_item: QTreeWidgetItem,
     *,
     depth: int,
     dirs: Optional[list[str]] = None,
+    show_hidden: bool = False,
 ) -> None:
     """Populate ``parent_item`` with the contents of ``folder``.
 
@@ -149,23 +160,32 @@ def _walk(
 
     pal = CUR()
     for entry in entries:
-        if entry.name.startswith("."):
-            continue
-        if entry.name in _SKIP_DIRS:
+        hidden = is_hidden_name(entry.name)
+        if hidden and not show_hidden:
             continue
         is_dir = entry.is_dir()
         item = QTreeWidgetItem([entry.name])
         token = _color_token_for(entry.name, is_dir)
         item.setData(0, PATH_ROLE, entry.path)
         item.setData(0, COLOR_TOKEN_ROLE, token)
-        item.setForeground(0, QColor(pal[token]))
+        if hidden:
+            # Shown but dimmed. A dataset carries .bidsmgr/, .git/ and
+            # .bidsignore, and none of them are the data: they should be
+            # reachable without competing with the tree proper.
+            item.setData(0, COLOR_TOKEN_ROLE, "muted")
+            item.setForeground(0, QColor(pal["muted"]))
+        else:
+            item.setForeground(0, QColor(pal[token]))
         item.setIcon(0, icons.icon_for_path(entry.name, is_dir=is_dir))
         parent_item.addChild(item)
         # Recurse only into real directories that are not folder-recordings.
         if is_dir and not _is_folder_recording(entry.name):
             if dirs is not None:
                 dirs.append(entry.path)
-            _walk(Path(entry.path), item, depth=depth + 1, dirs=dirs)
+            _walk(
+                Path(entry.path), item, depth=depth + 1, dirs=dirs,
+                show_hidden=show_hidden,
+            )
 
 
 class BidsTreePane(QWidget):
@@ -323,7 +343,13 @@ class BidsTreePane(QWidget):
         top.setIcon(0, icons.icon_for_path(path.name or str(path), is_dir=True))
         self._tree.addTopLevelItem(top)
         dirs: list[str] = [str(path)]
-        _walk(path, top, depth=0, dirs=dirs)
+        # Read the preference at build time rather than caching it, so a
+        # change in Settings shows on the next refresh without extra wiring.
+        from ..app_settings import AppSettings
+        _walk(
+            path, top, depth=0, dirs=dirs,
+            show_hidden=AppSettings.load().editor_show_hidden,
+        )
         self._stack.setCurrentIndex(1)
         return dirs
 

@@ -32,6 +32,9 @@ KEYS = {
     "active_view":        "ui/active_view",          # "converter" | "editor"
     "editor_bids_root":   "editor/bids_root",        # last BIDS root opened in the Editor view
     "editor_sidecar_view": "editor/sidecar_view",    # "bids" | "tree"
+    "editor_field_scope": "editor/field_scope",      # "all"|"present"|"absent"
+    "editor_show_hidden": "editor/show_hidden",      # dotfiles in the tree
+    "editor_autosave": "editor/autosave",            # save as you go
     "editor_strict_validate": "editor/strict_validate",  # "deep checks": bidsval read_headers on/off
     # Validation engine (bidsval) knobs, controllable from Settings.
     "template_colour_levels": "ui/template_colour_levels",  # colour the level marks
@@ -62,6 +65,8 @@ KEYS = {
     "post_metadata_fill_todos": "post_convert/metadata_fill_todos",
     "post_validate_strict": "post_convert/validate_strict",
     "post_validate_html": "post_convert/validate_html",
+    "post_fixup_companions": "post_convert/fixup_companions",
+    "post_fixup_citation": "post_convert/fixup_citation",
     # Self-update
     "skipped_update_version": "update/skipped_version",
     # UI font scale (1.0 = default size baseline; values <1 shrink,
@@ -95,6 +100,18 @@ class AppSettings:
     editor_bids_root: Optional[str] = None
     # Which sidecar pane layout is active for JSON files.
     editor_sidecar_view: str = "bids"  # "bids" | "tree"
+    # Which fields BOTH sidecar views show. "all" keeps the schema-declared
+    # fields the file does not carry; "present" makes the two views identical.
+    editor_field_scope: str = "all"   # "all" | "present" | "absent"
+    # Dotfiles and dot-folders in the BIDS tree. Off by default: a dataset
+    # has .bidsmgr/, .git/ and .bidsignore in it and none of them are the
+    # data. On, they are shown dimmed rather than mixed in.
+    editor_show_hidden: bool = False
+    # Write a sidecar edit as soon as the field commits, debounced. OFF by
+    # default: saving without being asked is a surprise, and the thing that
+    # was actually wanted was for the toolbar to SAY there are unsaved
+    # changes from the first keystroke, which it now does regardless of this.
+    editor_autosave: bool = False
     # "Deep checks" toggle for the Editor's "Validate dataset". When True the
     # validator (bidsval) reads NIfTI headers and file contents (slower, more
     # thorough); when False it runs the fast structural pass used for live
@@ -162,6 +179,12 @@ class AppSettings:
     post_metadata_fill_todos: bool = True
     post_validate_strict: bool = True
     post_validate_html: bool = True
+    # Dataset repairs, run after metadata and before validation. Both default
+    # OFF: one adds files to the dataset and the other moves fields between
+    # files, and a tool that does either without being asked is a tool whose
+    # output cannot be trusted.
+    post_fixup_companions: bool = False
+    post_fixup_citation: bool = False
 
     # PyPI version string the user picked "Skip this version" on, so the
     # startup update check doesn't nag them about the same release on
@@ -250,6 +273,17 @@ class AppSettings:
         )
         if out.editor_sidecar_view not in ("bids", "tree"):
             out.editor_sidecar_view = "bids"
+        out.editor_field_scope = _as_str(
+            s.value(KEYS["editor_field_scope"]), out.editor_field_scope,
+        )
+        if out.editor_field_scope not in ("all", "present", "absent"):
+            out.editor_field_scope = "all"
+        out.editor_show_hidden = _as_bool(
+            s.value(KEYS["editor_show_hidden"]), out.editor_show_hidden,
+        )
+        out.editor_autosave = _as_bool(
+            s.value(KEYS["editor_autosave"]), out.editor_autosave,
+        )
         out.editor_strict_validate = _as_bool(
             s.value(KEYS["editor_strict_validate"]),
             out.editor_strict_validate,
@@ -332,6 +366,12 @@ class AppSettings:
                                             out.post_validate_strict)
         out.post_validate_html = _as_bool(s.value(KEYS["post_validate_html"]),
                                           out.post_validate_html)
+        out.post_fixup_companions = _as_bool(
+            s.value(KEYS["post_fixup_companions"]), out.post_fixup_companions,
+        )
+        out.post_fixup_citation = _as_bool(
+            s.value(KEYS["post_fixup_citation"]), out.post_fixup_citation,
+        )
         out.skipped_update_version = _as_str(
             s.value(KEYS["skipped_update_version"]),
             out.skipped_update_version,
@@ -357,6 +397,7 @@ class AppSettings:
         # Strings.
         s.setValue(KEYS["theme"], self.theme)
         s.setValue(KEYS["scan_tsv_filename"], self.scan_tsv_filename)
+        s.setValue(KEYS["editor_field_scope"], self.editor_field_scope)
         if self.raw_root is not None:
             s.setValue(KEYS["raw_root"], self.raw_root)
         if self.bids_parent is not None:
@@ -378,8 +419,12 @@ class AppSettings:
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
             ("post_validate_strict",     self.post_validate_strict),
             ("post_validate_html",       self.post_validate_html),
+            ("post_fixup_companions",    self.post_fixup_companions),
+            ("post_fixup_citation",      self.post_fixup_citation),
             ("editor_strict_validate",   self.editor_strict_validate),
             ("validate_flag_todos",      self.validate_flag_todos),
+            ("editor_show_hidden",       self.editor_show_hidden),
+            ("editor_autosave",          self.editor_autosave),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
@@ -454,6 +499,14 @@ class AppSettings:
     @classmethod
     def remember_editor_sidecar_view(cls, view: str) -> None:
         cls._settings().setValue(KEYS["editor_sidecar_view"], view)
+
+    @classmethod
+    def remember_editor_field_scope(cls, scope: str) -> None:
+        cls._settings().setValue(KEYS["editor_field_scope"], scope)
+
+    @classmethod
+    def remember_editor_show_hidden(cls, show: bool) -> None:
+        cls._settings().setValue(KEYS["editor_show_hidden"], bool(show))
 
     @classmethod
     def remember_editor_strict_validate(cls, enabled: bool) -> None:

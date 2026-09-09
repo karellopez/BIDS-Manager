@@ -314,10 +314,11 @@ def test_dirty_count_chip_reflects_changes(
     assert not pane._dirty_chip.isVisibleTo(pane)
 
 
-def test_switching_files_discards_unsaved_changes(
+def test_switching_files_discards_unsaved_changes_when_autosave_is_off(
     qapp, bids_root: Path, tmp_path: Path,
 ) -> None:
     pane = SidecarFormPane()
+    pane.set_autosave(False)
     a = bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     pane.set_file(a, bids_root, None)
     rt_row = next(r for r in pane._rows if r.key == "RepetitionTime")
@@ -325,14 +326,37 @@ def test_switching_files_discards_unsaved_changes(
     rt_row.editor().editingFinished.emit()
     assert pane.is_dirty()
 
-    # Switch to dataset_description.json — the previous dirty cache
-    # is discarded; disk for the first file stays at the original.
+    # Switch to dataset_description.json: the previous dirty cache is
+    # discarded, and disk for the first file stays at the original.
     b = bids_root / "dataset_description.json"
     pane.set_file(b, bids_root, None)
     assert not pane.is_dirty()
 
     disk_a = json.loads(a.read_text())
     assert disk_a["RepetitionTime"] == 2.0
+
+
+def test_switching_files_keeps_the_edit_when_autosave_is_on(
+    qapp, bids_root: Path, tmp_path: Path,
+) -> None:
+    """The reported defect, and the reason autosave exists.
+
+    A field committed on one file and then abandoned by clicking another was
+    silently lost. With autosave on, the pending write is flushed against the
+    file it belongs to before the pane rebinds.
+    """
+    pane = SidecarFormPane()
+    pane.set_autosave(True)
+    a = bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
+    pane.set_file(a, bids_root, None)
+    rt_row = next(r for r in pane._rows if r.key == "RepetitionTime")
+    rt_row.editor().setText("99.0")
+    rt_row.editor().editingFinished.emit()
+    assert pane.is_dirty()
+
+    pane.set_file(bids_root / "dataset_description.json", bids_root, None)
+    assert not pane.is_dirty()
+    assert json.loads(a.read_text())["RepetitionTime"] == 99.0
 
 
 def test_editing_appends_a_new_field_when_missing(

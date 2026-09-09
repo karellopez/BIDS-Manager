@@ -46,6 +46,8 @@ class MetadataWorker(QThread):
         inventory_tsv: Optional[Path] = None,
         name: Optional[str] = None,
         fill_todos: bool = False,
+        generate_companions: bool = False,
+        write_citation_file: bool = False,
         datasets=None,
         parent=None,
     ) -> None:
@@ -58,6 +60,8 @@ class MetadataWorker(QThread):
         self._inventory_tsv = Path(inventory_tsv) if inventory_tsv else None
         self._name = name
         self._fill_todos = fill_todos
+        self._generate_companions = generate_companions
+        self._write_citation_file = write_citation_file
 
     def run(self) -> None:
         from ..cli.metadata import run_metadata_cli
@@ -76,6 +80,8 @@ class MetadataWorker(QThread):
                 inventory_tsv=self._inventory_tsv,
                 name=self._name,
                 fill_todos=self._fill_todos,
+                generate_companions=self._generate_companions,
+                write_citation_file=self._write_citation_file,
                 datasets=self._datasets,
             )
             verdict = "completed" if rc == 0 else f"completed with rc={rc}"
