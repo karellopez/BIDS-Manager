@@ -282,3 +282,131 @@ def test_a_finding_on_a_data_file_edits_its_sidecar(dataset: Path) -> None:
     assert len(cands) == 1
     assert cands[0].path.name == "sub-01_task-rest_bold.json"
     assert cands[0].current == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Repairing a value's shape: the rule is that a repair may change a TYPE,
+# never invent a FACT.
+# ---------------------------------------------------------------------------
+
+
+def test_a_number_written_as_text_is_repaired(dataset: Path) -> None:
+    target = dataset / "sub-01" / "func" / "sub-01_task-rest_bold.json"
+    target.write_text(json.dumps({"RepetitionTime": "2.0", "TaskName": "rest"}))
+    plan = be.plan_coercions(dataset, "RepetitionTime")
+    assert [c.path for c in plan] == [target]
+    assert "number" in plan[0].reason
+    be.apply_coercions(dataset, plan, "RepetitionTime")
+    assert json.loads(target.read_text())["RepetitionTime"] == 2.0
+
+
+def test_an_array_of_numbers_written_as_strings_is_repaired(
+    dataset: Path,
+) -> None:
+    """The defect that made the metadata dialog add errors, as a fix action."""
+    target = dataset / "sub-01" / "func" / "sub-01_task-rest_bold.json"
+    target.write_text(json.dumps({"SliceTiming": ["0", "0.5"]}))
+    plan = be.plan_coercions(dataset, "SliceTiming")
+    be.apply_coercions(dataset, plan, "SliceTiming")
+    assert json.loads(target.read_text())["SliceTiming"] == [0.0, 0.5]
+
+
+def test_a_value_that_cannot_be_converted_is_left_alone(
+    dataset: Path,
+) -> None:
+    """Losing a value to make a validator quiet is the worst outcome here."""
+    target = dataset / "sub-01" / "func" / "sub-01_task-rest_bold.json"
+    target.write_text(json.dumps({"RepetitionTime": "about two"}))
+    assert be.plan_coercions(dataset, "RepetitionTime") == []
+    assert json.loads(target.read_text())["RepetitionTime"] == "about two"
+
+
+def test_a_value_already_the_right_type_is_not_offered(dataset: Path) -> None:
+    plan = be.plan_coercions(dataset, "RepetitionTime")
+    assert plan == []
+
+
+# ---------------------------------------------------------------------------
+# Tabular repairs
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def events(dataset: Path) -> Path:
+    p = dataset / "sub-01" / "func" / "sub-01_task-rest_events.tsv"
+    p.write_text("trial_type\tonset\tduration\ngo\t1.5\t0.2\nstop\tbad\t0.2\n")
+    return p
+
+
+def test_a_missing_column_can_be_added(dataset: Path, events: Path) -> None:
+    from bidsmgr.editor import tsv_edit as te
+
+    plan = te.plan_add_column(dataset, [events], "response_time")
+    assert plan[0].applicable and plan[0].n_cells == 2
+    te.apply_add_column(dataset, plan, "response_time")
+    table = te.read_table(events)
+    assert "response_time" in table.header
+    assert table.column("response_time") == ["n/a", "n/a"]
+
+
+def test_a_column_that_is_already_there_is_refused(
+    dataset: Path, events: Path,
+) -> None:
+    from bidsmgr.editor import tsv_edit as te
+
+    plan = te.plan_add_column(dataset, [events], "onset")
+    assert not plan[0].applicable
+    assert "already has" in plan[0].reason
+
+
+def test_only_the_cells_that_fail_their_type_are_touched(
+    dataset: Path, events: Path,
+) -> None:
+    from bidsmgr.editor import tsv_edit as te
+
+    events.write_text("onset\tduration\n1.50\t0.2\nbad\t0.2\n")
+    plan = te.plan_coerce_column(dataset, [events], "onset")
+    assert plan[0].applicable
+    assert "cannot be converted" in plan[0].detail
+    te.apply_coerce_column(dataset, plan, "onset")
+    # 1.50 normalised, "bad" left exactly as it was.
+    assert te.read_table(events).column("onset") == ["1.5", "bad"]
+
+
+def test_reordering_moves_no_data(dataset: Path, events: Path) -> None:
+    from bidsmgr.editor import tsv_edit as te
+
+    before = {
+        row[0]: row for row in te.read_table(events).rows
+    }
+    plan = te.plan_reorder(dataset, [events])
+    assert plan[0].applicable
+    te.apply_reorder(dataset, plan)
+    table = te.read_table(events)
+    assert table.header[:3] == ["onset", "duration", "trial_type"]
+    # Every row's values travelled with their column.
+    for row in table.rows:
+        original = before[row[2]]
+        assert row == [original[1], original[2], original[0]]
+
+
+def test_a_table_already_in_order_is_not_rewritten(
+    dataset: Path, events: Path,
+) -> None:
+    from bidsmgr.editor import tsv_edit as te
+
+    events.write_text("onset\tduration\ttrial_type\n1.0\t0.2\tgo\n")
+    plan = te.plan_reorder(dataset, [events])
+    assert not plan[0].applicable
+    assert plan[0].reason == "already in order"
+
+
+def test_a_tabular_repair_is_one_undo(dataset: Path, events: Path) -> None:
+    from bidsmgr.editor import tsv_edit as te
+
+    before = events.read_text()
+    plan = te.plan_add_column(dataset, [events], "response_time")
+    te.apply_add_column(dataset, plan, "response_time")
+    assert len(read_log(dataset)) == 1
+    undo_last(dataset)
+    assert events.read_text() == before

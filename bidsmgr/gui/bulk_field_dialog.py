@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..editor import bulk_edit as be
+from .dialog_chrome import build_footer_with, build_header
 from .theme_manager import CUR
 
 _COL_FILE = 0
@@ -74,17 +75,22 @@ class BulkFieldDialog(QDialog):
         self.setModal(True)
         self.resize(760, 520)
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
-
-        lede = QLabel(
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(build_header(
+            title or f"Apply {field} to other files",
             f"Write <b>{field}</b> into the files you tick. Nothing is "
-            "written until you press Apply, and the whole batch can be "
-            "undone as one step."
-        )
-        lede.setWordWrap(True)
-        v.addWidget(lede)
+            "written until you press Apply, and the whole batch is "
+            "<b>one step</b> in the Editor's history.",
+        ))
+
+        body = QWidget()
+        body.setObjectName("issue-dialog-body")
+        body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        v = QVBoxLayout(body)
+        v.setContentsMargins(18, 14, 18, 12)
+        v.setSpacing(10)
 
         # Value.
         row = QHBoxLayout()
@@ -149,19 +155,21 @@ class BulkFieldDialog(QDialog):
             btn.clicked.connect(slot)
             tools.addWidget(btn)
         tools.addStretch(1)
-        self._summary = QLabel("")
-        tools.addWidget(self._summary)
         v.addLayout(tools)
+        outer.addWidget(body, 1)
 
+        self._summary = QLabel("")
+        self._summary.setObjectName("dlg-hint")
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel
             | QDialogButtonBox.StandardButton.Apply
         )
         self._apply_btn = buttons.button(QDialogButtonBox.StandardButton.Apply)
+        self._apply_btn.setObjectName("tb-btn-primary")
         self._apply_btn.setDefault(True)
         self._apply_btn.clicked.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        v.addWidget(buttons)
+        outer.addWidget(build_footer_with(self._summary, buttons))
 
         self._reload()
 

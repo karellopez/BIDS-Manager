@@ -45,6 +45,10 @@ class ValMessage(QFrame):
     # row in the sidecar form; empty string when the issue has no
     # specific field.
     fix_requested = pyqtSignal(str)
+    # Right-click on a WARNING: record that somebody looked at it and
+    # decided to keep it. Never offered on an error: a tool that lets you
+    # dismiss wrongness produces broken datasets quietly.
+    accept_requested = pyqtSignal(str, str)   # (rule_id, field)
 
     def __init__(
         self,
@@ -97,8 +101,14 @@ class ValMessage(QFrame):
         # Findings BIDS Manager raises itself have none, and show none rather
         # than an invented provenance.
         self._schema_rule = schema_rule or ""
-
+        self._rule_id = rule or ""
         self._field_name = field or ""
+        if str(severity).lower().startswith("warn"):
+            self.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            self.customContextMenuRequested.connect(self._on_context_menu)
+
         if fix_label:
             btn = QPushButton(fix_label)
             btn.setObjectName("val-fix")
@@ -108,6 +118,21 @@ class ValMessage(QFrame):
             body_widget.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
 
         right.addLayout(body_widget)
+
+        # What the rule is FOR, when we have prose for it. The rule id lets a
+        # user CHECK the claim; this says why the claim matters, which the
+        # codes never do: TSV_ADDITIONAL_COLUMNS_UNDEFINED is precise and
+        # tells a first-time reader nothing.
+        from ...editor.rule_help import explain as _explain_rule
+
+        help_text = _explain_rule(rule)
+        if help_text:
+            meaning, action = help_text
+            note = QLabel(meaning + "  " + action)
+            note.setObjectName("val-explanation")
+            note.setWordWrap(True)
+            note.setToolTip(meaning + "\n\n" + action)
+            right.addWidget(note)
 
         # Provenance last, quiet, and only when there is one: the schema path
         # the finding came from, so the standard can be checked rather than the
@@ -126,6 +151,23 @@ class ValMessage(QFrame):
             right.addWidget(prov)
 
         h.addLayout(right, 1)
+
+
+    def _on_context_menu(self, pos) -> None:
+        from PyQt6.QtWidgets import QMenu
+
+        from ..combo_popup import round_menu
+
+        menu = QMenu(self)
+        round_menu(menu)
+        act = menu.addAction("Accept this warning...")
+        act.setToolTip(
+            "Record that you looked at this and decided it is fine, with a "
+            "note saying why. Stored in the dataset, so the next reviewer "
+            "sees it too."
+        )
+        if menu.exec(self.mapToGlobal(pos)) is act:
+            self.accept_requested.emit(self._rule_id, self._field_name)
 
 
 __all__ = ["ValMessage"]

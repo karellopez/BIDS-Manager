@@ -56,12 +56,17 @@ class OperationError(RuntimeError):
 class ChildStep:
     """One file-level change inside an operation."""
 
-    kind: str            # "write" | "create" | "delete"
+    kind: str            # "write" | "create" | "delete" | "rename"
     path: str            # relative to the dataset root
     existed: bool        # was there a file here before?
+    # Only for "rename": where it came from, so undo can move it back.
+    origin: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "path": self.path, "existed": self.existed}
+        out = {"kind": self.kind, "path": self.path, "existed": self.existed}
+        if self.origin:
+            out["origin"] = self.origin
+        return out
 
 
 @dataclass
@@ -138,10 +143,36 @@ class Operation:
             return
         rel = self._rel(path)
         dest = self.originals_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dest)
+        # Only if nothing in this operation has saved it yet. An operation that
+        # edits a file and then deletes it (fusing two subjects rewrites the
+        # source's scans table before merging it away) must restore what was
+        # there when the operation STARTED, not the intermediate state it
+        # wrote a moment ago.
+        if not any(step.path == rel for step in self.children):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest)
         self.children.append(ChildStep(kind="delete", path=rel, existed=True))
         path.unlink()
+
+    def rename(self, src: Path, dst: Path) -> None:
+        """Move ``src`` to ``dst``, recording where it came from.
+
+        A rename is not a write: copying the bytes aside would double the disk
+        cost of renaming a subject, and there is nothing to restore from
+        because the content never changes. Undo moves it back instead, which
+        is why the origin is recorded rather than the contents.
+        """
+        src, dst = Path(src), Path(dst)
+        if not src.exists():
+            return
+        if dst.exists():
+            raise OperationError(f"{dst} already exists")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+        self.children.append(ChildStep(
+            kind="rename", path=self._rel(dst), existed=False,
+            origin=self._rel(src),
+        ))
 
     # -- finishing -----------------------------------------------------
 
@@ -243,6 +274,13 @@ def _restore(root: Path, op_id: str, children: list[ChildStep]) -> int:
     n = 0
     for step in children:
         target = Path(root) / step.path
+        if step.kind == "rename":
+            origin = Path(root) / step.origin
+            if target.exists() and not origin.exists():
+                origin.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, origin)
+                n += 1
+            continue
         if not step.existed:
             # We created it; undo means it should not be there.
             target.unlink(missing_ok=True)
@@ -270,7 +308,10 @@ def undo_last(root: Path) -> Optional[dict[str, Any]]:
         return None
     last = records[-1]
     children = [
-        ChildStep(kind=c["kind"], path=c["path"], existed=c["existed"])
+        ChildStep(
+            kind=c["kind"], path=c["path"], existed=c["existed"],
+            origin=c.get("origin", ""),
+        )
         for c in last.get("children", [])
     ]
     _restore(root, last["op_id"], list(reversed(children)))

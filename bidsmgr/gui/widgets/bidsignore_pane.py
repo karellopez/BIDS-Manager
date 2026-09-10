@@ -46,6 +46,7 @@ class BidsIgnorePane(QWidget):
         self.setObjectName("pane")
         self._root: Optional[Path] = None
         self._paths: list[str] = []
+        self._report = None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -58,7 +59,7 @@ class BidsIgnorePane(QWidget):
         bl.setContentsMargins(14, 6, 14, 6)
         bl.setSpacing(8)
         self._summary = QLabel("")
-        self._summary.setObjectName("pane-hint")
+        self._summary.setObjectName("dlg-hint")
         bl.addWidget(self._summary)
         bl.addStretch(1)
         self._remove_btn = QPushButton("Remove pattern")
@@ -97,7 +98,7 @@ class BidsIgnorePane(QWidget):
         add_row.addWidget(add_btn)
         ll.addLayout(add_row)
         self._preview = QLabel("")
-        self._preview.setObjectName("pane-hint")
+        self._preview.setObjectName("dlg-hint")
         self._preview.setWordWrap(True)
         ll.addWidget(self._preview)
         split.addWidget(left)
@@ -140,6 +141,15 @@ class BidsIgnorePane(QWidget):
         """Point the pane at a dataset and read its ignore file."""
         self._root = Path(root) if root is not None else None
         self.reload()
+
+    def set_report(self, report) -> None:
+        """Give the pane the last validation, so it can say what is silenced.
+
+        The point of a pattern is to stop something being reported, and a
+        count of matched files does not say whether any of them had findings.
+        """
+        self._report = report
+        self._refresh_files()
 
     def reload(self) -> None:
         if self._root is None:
@@ -219,10 +229,13 @@ class BidsIgnorePane(QWidget):
                 item.setToolTip("Currently ignored")
             self._files.addItem(item)
             shown += 1
-        self._summary.setText(
-            f"{len(ignored)} of {len(self._paths)} files ignored"
-            + (f"  ·  showing {shown}" if needle else "")
-        )
+        text = f"{len(ignored)} of {len(self._paths)} files ignored"
+        hidden = bi.findings_hidden_by(self._root, self._report)
+        if hidden:
+            text += f"  ·  hiding {hidden} finding(s) from validation"
+        if needle:
+            text += f"  ·  showing {shown}"
+        self._summary.setText(text)
 
     # -- editing -------------------------------------------------------
 

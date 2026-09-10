@@ -179,3 +179,638 @@ def test_the_tree_can_show_and_hide_dotfiles(qtbot, dataset: Path) -> None:
         assert ".bidsmgr" in shown
     finally:
         AppSettings.remember_editor_show_hidden(previous)
+
+
+# ---------------------------------------------------------------------------
+# The save-defect reproductions the plan asked for before the save path was
+# touched. Each is a way an edit could go missing.
+# ---------------------------------------------------------------------------
+
+
+def _edit(pane: SidecarFormPane, key: str, text: str) -> None:
+    row = next(r for r in pane._rows if r.key == key)
+    row.editor().setText(text)
+    row.editor().editingFinished.emit()
+
+
+def test_switching_view_keeps_the_edit(qtbot, dataset: Path) -> None:
+    """BIDS form to Tree view and back. Both read one cache, so an edit made
+    in either must survive the trip."""
+    fp = dataset / "sub-01" / "anat" / "sub-01_T1w.json"
+    pane = SidecarFormPane()
+    qtbot.addWidget(pane)
+    pane.set_autosave(False)
+    pane.set_file(fp, dataset, None)
+    _edit(pane, "EchoTime", "0.09")
+
+    pane._apply_view_mode("tree", persist=False)
+    assert pane._tree_view.to_dict()["EchoTime"] == 0.09
+    pane._apply_view_mode("bids", persist=False)
+    assert pane._json_cache["EchoTime"] == 0.09
+    assert pane.is_dirty()
+
+
+def test_editing_back_to_the_original_is_not_dirty(
+    qtbot, dataset: Path,
+) -> None:
+    """A dirty flag that stays on after the value is back where it started
+    would make the count meaningless."""
+    fp = dataset / "sub-01" / "anat" / "sub-01_T1w.json"
+    pane = SidecarFormPane()
+    qtbot.addWidget(pane)
+    pane.set_autosave(False)
+    pane.set_file(fp, dataset, None)
+    _edit(pane, "EchoTime", "0.09")
+    assert pane.is_dirty()
+    _edit(pane, "EchoTime", "0.03")
+    assert not pane.is_dirty()
+
+
+def test_a_nested_object_survives_a_save(qtbot, dataset: Path) -> None:
+    """Round trip through the tree editor must not flatten a container or
+    retype its values."""
+    fp = dataset / "sub-01" / "anat" / "sub-01_T1w.json"
+    original = {
+        "EchoTime": 0.03,
+        "GeneratedBy": [{"Name": "bidsmgr", "Version": "1.2.6"}],
+        "Nested": {"a": 1, "b": [1, 2, 3]},
+    }
+    fp.write_text(json.dumps(original))
+    pane = SidecarFormPane()
+    qtbot.addWidget(pane)
+    pane.set_autosave(False)
+    pane.set_file(fp, dataset, None)
+    _edit(pane, "EchoTime", "0.05")
+    assert pane.save()
+
+    on_disk = json.loads(fp.read_text())
+    assert on_disk["EchoTime"] == 0.05
+    assert on_disk["GeneratedBy"] == original["GeneratedBy"]
+    assert on_disk["Nested"] == original["Nested"]
+    assert list(on_disk) == list(original), "key order must be preserved"
+
+
+def test_two_panes_on_one_file_do_not_clobber_each_other(
+    qtbot, dataset: Path,
+) -> None:
+    """A detached panel means two panes can hold the same file. The second to
+    save must not silently drop the first one's field."""
+    fp = dataset / "sub-01" / "anat" / "sub-01_T1w.json"
+    first, second = SidecarFormPane(), SidecarFormPane()
+    for pane in (first, second):
+        qtbot.addWidget(pane)
+        pane.set_autosave(False)
+        pane.set_file(fp, dataset, None)
+
+    _edit(first, "EchoTime", "0.07")
+    assert first.save()
+
+    # The second pane still holds the pre-save state. Re-binding is what the
+    # Editor does when a file it is showing changes on disk.
+    second.set_file(fp, dataset, None)
+    assert second._json_cache["EchoTime"] == 0.07
+
+
+# ---------------------------------------------------------------------------
+# A tree you scan rather than excavate
+# ---------------------------------------------------------------------------
+
+
+def _find(pane: BidsTreePane, name: str):
+    from PyQt6.QtCore import Qt as _Qt
+
+    it = pane._tree.findItems(
+        name, _Qt.MatchFlag.MatchRecursive | _Qt.MatchFlag.MatchExactly, 0,
+    )
+    return it[0] if it else None
+
+
+def test_a_folder_says_what_is_inside_it(qtbot, dataset: Path) -> None:
+    from bidsmgr.gui.widgets.bids_tree_pane import COUNT_ROLE
+
+    ses = dataset / "sub-02" / "ses-pre" / "anat"
+    ses.mkdir(parents=True)
+    (ses / "sub-02_ses-pre_T1w.json").write_text("{}")
+    (ses / "sub-02_ses-pre_T2w.json").write_text("{}")
+
+    pane = BidsTreePane()
+    qtbot.addWidget(pane)
+    pane.set_root(dataset)
+    pane._tree.expandAll()
+
+    subject = _find(pane, "sub-02")
+    assert subject is not None
+    badge = subject.data(0, COUNT_ROLE)
+    assert "1 ses" in badge and "2 files" in badge
+
+
+def test_the_count_is_a_role_not_the_name(qtbot, dataset: Path) -> None:
+    """Several things look items up by their text. The badge is painted by the
+    delegate so the name stays the name."""
+    pane = BidsTreePane()
+    qtbot.addWidget(pane)
+    pane.set_root(dataset)
+    pane._tree.expandAll()
+    assert _find(pane, "sub-01") is not None
+    assert _find(pane, "anat") is not None
+
+
+def test_the_tree_reports_every_selected_file(qtbot, dataset: Path) -> None:
+    """Bulk actions need more than one file, so the tree must hand over more
+    than one."""
+    from PyQt6.QtCore import QItemSelectionModel
+
+    second = dataset / "sub-01" / "anat" / "sub-01_T2w.json"
+    second.write_text("{}")
+
+    pane = BidsTreePane()
+    qtbot.addWidget(pane)
+    pane.set_root(dataset)
+    pane._tree.expandAll()
+
+    seen: list[list[Path]] = []
+    pane.selection_changed.connect(seen.append)
+    for name in ("sub-01_T1w.json", "sub-01_T2w.json"):
+        item = _find(pane, name)
+        assert item is not None
+        item.setSelected(True)
+    pane._tree.setCurrentItem(
+        _find(pane, "sub-01_T2w.json"),
+        0,
+        QItemSelectionModel.SelectionFlag.NoUpdate,
+    )
+
+    picked = {p.name for p in pane.selected_paths()}
+    assert picked == {"sub-01_T1w.json", "sub-01_T2w.json"}
+    assert seen, "selecting must announce itself"
+
+
+# ---------------------------------------------------------------------------
+# Accepting a warning
+# ---------------------------------------------------------------------------
+
+
+def _warn_report(root: Path) -> ValidationReport:
+    from bidsmgr.editor.types import Issue
+
+    return ValidationReport(
+        bids_root=root,
+        files=[FileVerdict(
+            path=Path("sub-01/anat/sub-01_T1w.json"),
+            severity=Severity.WARN,
+            issues=[
+                Issue(
+                    severity=Severity.WARN,
+                    rule_id="SIDECAR_KEY_RECOMMENDED",
+                    message="InstitutionName is recommended",
+                    field="InstitutionName",
+                ),
+                Issue(
+                    severity=Severity.ERR, rule_id="SIDECAR_KEY_REQUIRED",
+                    message="MagneticFieldStrength is required",
+                    field="MagneticFieldStrength",
+                ),
+            ],
+        )],
+    )
+
+
+def _messages(pane):
+    from bidsmgr.gui.widgets.val_message import ValMessage
+
+    return pane.findChildren(ValMessage)
+
+
+def test_only_warnings_offer_acceptance(qtbot, dataset: Path) -> None:
+    """A tool that lets you dismiss an error produces broken datasets."""
+    from PyQt6.QtCore import Qt as _Qt
+    from bidsmgr.gui.widgets.validation_pane import ValidationPane
+
+    pane = ValidationPane()
+    qtbot.addWidget(pane)
+    pane.set_report(_warn_report(dataset))
+    pane.set_current_file(
+        dataset / "sub-01" / "anat" / "sub-01_T1w.json", dataset,
+    )
+
+    policies = {
+        m.objectName(): m.contextMenuPolicy() for m in _messages(pane)
+    }
+    assert policies.get("val-msg-warn") == _Qt.ContextMenuPolicy.CustomContextMenu
+    assert policies.get("val-msg-err") == _Qt.ContextMenuPolicy.DefaultContextMenu
+
+
+def test_an_accepted_warning_is_dimmed_not_hidden(qtbot, dataset: Path) -> None:
+    """The decision is part of the record. Hiding it would make the next
+    reviewer rediscover the same finding."""
+    from bidsmgr.editor import review
+    from bidsmgr.gui.widgets.validation_pane import ValidationPane
+
+    pane = ValidationPane()
+    qtbot.addWidget(pane)
+    pane.set_report(_warn_report(dataset))
+    pane.set_current_file(
+        dataset / "sub-01" / "anat" / "sub-01_T1w.json", dataset,
+    )
+    warn = next(m for m in _messages(pane) if m.objectName() == "val-msg-warn")
+    assert warn.isEnabled()
+
+    review.accept(
+        dataset, file="sub-01/anat/sub-01_T1w.json",
+        rule_id="SIDECAR_KEY_RECOMMENDED", field="InstitutionName",
+        note="Resting state, deliberate.",
+    )
+    pane.reload_acceptances()
+
+    warn = next(m for m in _messages(pane) if m.objectName() == "val-msg-warn")
+    assert not warn.isEnabled()
+    assert "Resting state" in warn.toolTip()
+    # The error beside it is untouched.
+    err = next(m for m in _messages(pane) if m.objectName() == "val-msg-err")
+    assert err.isEnabled()
+
+
+def test_the_pane_forwards_the_file_with_the_acceptance(
+    qtbot, dataset: Path,
+) -> None:
+    from bidsmgr.gui.widgets.validation_pane import ValidationPane
+
+    pane = ValidationPane()
+    qtbot.addWidget(pane)
+    pane.set_report(_warn_report(dataset))
+    pane.set_current_file(
+        dataset / "sub-01" / "anat" / "sub-01_T1w.json", dataset,
+    )
+    seen: list[tuple] = []
+    pane.accept_requested.connect(lambda *a: seen.append(a))
+    warn = next(m for m in _messages(pane) if m.objectName() == "val-msg-warn")
+    warn.accept_requested.emit("SIDECAR_KEY_RECOMMENDED", "InstitutionName")
+
+    assert seen == [(
+        dataset / "sub-01" / "anat" / "sub-01_T1w.json",
+        "SIDECAR_KEY_RECOMMENDED", "InstitutionName",
+    )]
+
+
+def test_a_finding_explains_what_its_rule_is_for(qtbot, dataset: Path) -> None:
+    """The code lets a user check the claim; the prose says why it matters."""
+    from PyQt6.QtWidgets import QLabel
+    from bidsmgr.gui.widgets.validation_pane import ValidationPane
+
+    pane = ValidationPane()
+    qtbot.addWidget(pane)
+    pane.set_report(_warn_report(dataset))
+    pane.set_current_file(
+        dataset / "sub-01" / "anat" / "sub-01_T1w.json", dataset,
+    )
+    warn = next(m for m in _messages(pane) if m.objectName() == "val-msg-warn")
+    notes = [
+        w for w in warn.findChildren(QLabel)
+        if w.objectName() == "val-explanation"
+    ]
+    assert notes and "recommends" in notes[0].text()
+
+
+# ---------------------------------------------------------------------------
+# Renaming from where you noticed the problem
+#
+# You spot a wrong subject label while looking at the subject. Making the user
+# go to a toolbar and re-pick it from a dropdown is the difference between an
+# action that gets used and one that does not.
+# ---------------------------------------------------------------------------
+
+
+def test_the_tree_offers_the_entities_the_clicked_row_carries() -> None:
+    from bidsmgr.gui.widgets.bids_tree_pane import _renameable_entities
+
+    keys = [e for e, _v, _l in _renameable_entities(Path("sub-01"))]
+    assert keys == ["sub"]
+
+    got = {
+        e: v for e, v, _l in _renameable_entities(
+            Path("sub-01_ses-pre_task-rest_run-02_bold.nii.gz")
+        )
+    }
+    assert got == {
+        "sub": "01", "ses": "pre", "task": "rest", "run": "02",
+    }
+
+
+def test_a_plain_file_offers_nothing_to_rename() -> None:
+    from bidsmgr.gui.widgets.bids_tree_pane import _renameable_entities
+
+    assert _renameable_entities(Path("README")) == []
+    assert _renameable_entities(Path("CHANGES")) == []
+
+
+def test_entities_are_labelled_in_words() -> None:
+    """`sub-` tells a first-time user nothing."""
+    from bidsmgr.gui.widgets.bids_tree_pane import _renameable_entities
+
+    labels = {e: lb for e, _v, lb in _renameable_entities(
+        Path("sub-01_ses-pre_acq-highres_T1w.json")
+    )}
+    assert labels["sub"] == "subject"
+    assert labels["ses"] == "session"
+    assert labels["acq"] == "acquisition"
+
+
+def test_the_tree_announces_a_rename_rather_than_doing_one(
+    qtbot, dataset: Path,
+) -> None:
+    """The tree knows what was clicked; the panel knows the root and what to
+    refresh. Keeping the dialog out of the tree is what makes both testable."""
+    pane = BidsTreePane()
+    qtbot.addWidget(pane)
+    pane.set_root(dataset)
+    seen: list[tuple] = []
+    pane.rename_requested.connect(lambda *a: seen.append(a))
+    pane.rename_requested.emit("sub", "01")
+    assert seen == [("sub", "01")]
+
+
+# ---------------------------------------------------------------------------
+# The rename dialog, including the merge it offers instead of a refusal
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def two_subjects(tmp_path: Path) -> Path:
+    root = tmp_path / "ds"
+    for sub, ses in (("sub-01", "ses-pre"), ("sub-02", "ses-post")):
+        anat = root / sub / ses / "anat"
+        anat.mkdir(parents=True)
+        (anat / f"{sub}_{ses}_T1w.nii.gz").write_text("i")
+        (anat / f"{sub}_{ses}_T1w.json").write_text(json.dumps({"EchoTime": 0.03}))
+    (root / "participants.tsv").write_text(
+        "participant_id\tage\nsub-01\t31\nsub-02\tn/a\n"
+    )
+    (root / "dataset_description.json").write_text(
+        json.dumps({"Name": "ds", "BIDSVersion": "1.10.0"})
+    )
+    return root
+
+
+def _preview_text(dlg) -> str:
+    """Every row of the dry-run tree, flattened, for asserting on."""
+    lines: list[str] = []
+    tree = dlg._preview
+    for i in range(tree.topLevelItemCount()):
+        top = tree.topLevelItem(i)
+        lines.append(f"{top.text(0)}  {top.text(1)}")
+        for j in range(top.childCount()):
+            child = top.child(j)
+            lines.append(f"{child.text(0)}  {child.text(1)}")
+    return "\n".join(lines)
+
+
+def _dialog(qtbot, root: Path, entity: str = "", value: str = ""):
+    from bidsmgr.gui.rename_entity_dialog import RenameEntityDialog
+
+    dlg = RenameEntityDialog(root, entity=entity, value=value)
+    qtbot.addWidget(dlg)
+    return dlg
+
+
+def test_the_dialog_opens_on_what_the_user_clicked(
+    qtbot, two_subjects: Path,
+) -> None:
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    assert dlg._entity.currentData() == "sub"
+    assert dlg._old.currentText() == "02"
+
+
+def test_a_free_name_is_an_ordinary_rename(qtbot, two_subjects: Path) -> None:
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    dlg._new.setText("99")
+    # isHidden, not isVisible: an unshown dialog's children are all invisible,
+    # so isVisible would pass whatever the code did.
+    assert dlg._fuse.isHidden()
+    assert dlg._ok.text() == "Rename"
+    assert dlg._ok.isEnabled()
+    assert not dlg._plan.fusion
+
+
+def test_a_taken_name_offers_the_merge_instead_of_only_refusing(
+    qtbot, two_subjects: Path,
+) -> None:
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    dlg._new.setText("01")
+    assert not dlg._fuse.isHidden(), "the option must be offered where it bites"
+    assert not dlg._ok.isEnabled(), "not until the user says merge"
+    assert "Merge them into one subject" in dlg._summary.text()
+
+    dlg._fuse.setChecked(True)
+    assert dlg._ok.isEnabled()
+    assert dlg._ok.text() == "Merge", "the button must not still say Rename"
+    assert dlg._plan.fusion
+    assert "cannot be undone by renaming back" in dlg._summary.text()
+
+
+def test_the_merge_option_disappears_when_the_name_frees_up(
+    qtbot, two_subjects: Path,
+) -> None:
+    """A ticked checkbox that no longer applies would silently change the
+    meaning of the next Rename."""
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    dlg._new.setText("01")
+    dlg._fuse.setChecked(True)
+    dlg._new.setText("99")
+    assert dlg._fuse.isHidden()
+    assert not dlg._fuse.isChecked()
+    assert dlg._ok.text() == "Rename"
+
+
+def test_the_preview_names_the_tables_a_merge_would_touch(
+    qtbot, two_subjects: Path,
+) -> None:
+    """A merge does things a rename does not, so the dry run has to show them."""
+    (two_subjects / "sub-02" / "sub-02_scans.tsv").write_text(
+        "filename\nses-post/anat/sub-02_ses-post_T1w.nii.gz\n"
+    )
+    (two_subjects / "sub-01" / "sub-01_scans.tsv").write_text(
+        "filename\nses-pre/anat/sub-01_ses-pre_T1w.nii.gz\n"
+    )
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    dlg._new.setText("01")
+    dlg._fuse.setChecked(True)
+    text = _preview_text(dlg)
+    assert "merged into the existing sub-01" in text
+    assert "appended to sub-01_scans.tsv" in text
+    assert "two participant_id rows folded into one" in text
+
+
+# ---------------------------------------------------------------------------
+# Dialog chrome
+# ---------------------------------------------------------------------------
+
+
+def test_a_wrapped_label_takes_the_height_its_text_needs(qtbot) -> None:
+    """#pane-hint carries 24px of padding for the empty-pane case it was
+    written for. A dialog of them drifts apart; that is what #dlg-hint is."""
+    from PyQt6.QtWidgets import QVBoxLayout, QWidget
+
+    from bidsmgr.gui.dialog_chrome import hint
+
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    label = hint("One short line.")
+    layout.addWidget(label)
+    layout.addStretch(1)
+    host.resize(700, 400)
+    host.show()
+    qtbot.waitExposed(host)
+
+    assert label.objectName() == "dlg-hint"
+    one_line = label.fontMetrics().height()
+    assert label.height() <= one_line * 2
+
+
+def test_the_new_dialogs_wear_the_app_chrome(qtbot, two_subjects: Path) -> None:
+    """A dialog that does not set these object names is painted by Qt's
+    defaults and looks like it came from a different program."""
+    from PyQt6.QtWidgets import QFrame
+
+    from bidsmgr.gui.fixups_dialog import FixupsDialog
+
+    for dlg in (_dialog(qtbot, two_subjects), FixupsDialog(two_subjects)):
+        qtbot.addWidget(dlg)
+        names = {
+            f.objectName() for f in dlg.findChildren(QFrame)
+        }
+        assert "issue-dialog-header" in names, type(dlg).__name__
+        assert "issue-dialog-footer" in names, type(dlg).__name__
+
+
+# ---------------------------------------------------------------------------
+# Choosing which files to rename
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def three_runs(tmp_path: Path) -> Path:
+    root = tmp_path / "ds"
+    func = root / "sub-01" / "func"
+    func.mkdir(parents=True)
+    for run in ("1", "2", "3"):
+        (func / f"sub-01_task-rest_run-{run}_bold.nii.gz").write_bytes(b"")
+        (func / f"sub-01_task-rest_run-{run}_bold.json").write_text(
+            json.dumps({"TaskName": "rest"})
+        )
+    (root / "dataset_description.json").write_text(
+        json.dumps({"Name": "ds", "BIDSVersion": "1.10.0"})
+    )
+    return root
+
+
+def _file_rows(dlg):
+    tree = dlg._preview
+    out = []
+    for i in range(tree.topLevelItemCount()):
+        top = tree.topLevelItem(i)
+        for j in range(top.childCount()):
+            child = top.child(j)
+            if child.data(0, _key_role()):
+                out.append(child)
+    return out
+
+
+def _key_role():
+    from bidsmgr.gui.rename_entity_dialog import _KEY_ROLE
+
+    return _KEY_ROLE
+
+
+def test_every_file_starts_selected(qtbot, three_runs: Path) -> None:
+    """The common case is renaming all of them, so that is the default."""
+    from PyQt6.QtCore import Qt as _Qt
+
+    dlg = _dialog(qtbot, three_runs, "task", "rest")
+    dlg._new.setText("resting")
+    rows = _file_rows(dlg)
+    assert len(rows) == 6
+    assert all(r.checkState(0) == _Qt.CheckState.Checked for r in rows)
+    assert len(dlg.selected_keys()) == 6
+
+
+def test_unticking_a_file_takes_it_out_of_the_rename(
+    qtbot, three_runs: Path,
+) -> None:
+    from PyQt6.QtCore import Qt as _Qt
+
+    dlg = _dialog(qtbot, three_runs, "task", "rest")
+    dlg._new.setText("resting")
+    for row in _file_rows(dlg):
+        if "run-3" in row.text(0):
+            row.setCheckState(0, _Qt.CheckState.Unchecked)
+
+    chosen = dlg.selected_keys()
+    assert len(chosen) == 4
+    assert not any("run-3" in k for k in chosen)
+
+
+def test_the_button_says_what_a_partial_rename_is(
+    qtbot, three_runs: Path,
+) -> None:
+    """Calling it Rename when it renames four of six files is a lie the user
+    only discovers afterwards."""
+    from PyQt6.QtCore import Qt as _Qt
+
+    dlg = _dialog(qtbot, three_runs, "task", "rest")
+    dlg._new.setText("resting")
+    assert dlg._ok.text() == "Rename"
+
+    _file_rows(dlg)[0].setCheckState(0, _Qt.CheckState.Unchecked)
+    assert dlg._ok.text() == "Rename selected"
+    assert "5 of 6 file(s) selected" in dlg._status.text()
+
+
+def test_selecting_none_disables_the_button(qtbot, three_runs: Path) -> None:
+    from PyQt6.QtCore import Qt as _Qt
+
+    dlg = _dialog(qtbot, three_runs, "task", "rest")
+    dlg._new.setText("resting")
+    dlg._set_all(_Qt.CheckState.Unchecked)
+    assert not dlg.selected_keys()
+    assert not dlg._ok.isEnabled()
+
+    dlg._set_all(_Qt.CheckState.Checked)
+    assert len(dlg.selected_keys()) == 6
+    assert dlg._ok.isEnabled()
+
+
+def test_what_cannot_be_chosen_separately_is_not_offered_as_a_choice(
+    qtbot, two_subjects: Path,
+) -> None:
+    """A cross-reference follows the file it names. Letting a user tick it
+    independently would produce a pointer to a name nothing has."""
+    from PyQt6.QtCore import Qt as _Qt
+
+    (two_subjects / "sub-02" / "sub-02_scans.tsv").write_text(
+        "filename\nses-post/anat/sub-02_ses-post_T1w.nii.gz\n"
+    )
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    dlg._new.setText("99")
+
+    tree = dlg._preview
+    follows = [
+        tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+        if tree.topLevelItem(i).text(0) == "Follows automatically"
+    ]
+    assert follows, "the plan must still show them"
+    for j in range(follows[0].childCount()):
+        child = follows[0].child(j)
+        assert not (child.flags() & _Qt.ItemFlag.ItemIsUserCheckable)
+
+
+def test_the_rows_are_grouped_by_folder(qtbot, two_subjects: Path) -> None:
+    """"These three runs" and "that whole session" are how a user thinks."""
+    dlg = _dialog(qtbot, two_subjects, "sub", "02")
+    dlg._new.setText("99")
+    tree = dlg._preview
+    groups = {
+        tree.topLevelItem(i).text(0)
+        for i in range(tree.topLevelItemCount())
+    }
+    assert "sub-02/ses-post/anat" in groups

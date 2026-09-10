@@ -434,10 +434,22 @@ QLabel#pane-h5 {
 }
 
 /* Placeholder / hint labels used in empty panes and stub tabs. They
- * follow the dim palette token so dark↔light toggle refreshes them. */
+ * follow the dim palette token so dark↔light toggle refreshes them.
+ *
+ * The generous padding is deliberate and belongs to the EMPTY-PANE case:
+ * a "nothing selected" message centred in a large blank area. It is wrong
+ * for a status line inside a dialog, where 24px top and bottom pushes the
+ * sections apart; that is what #dlg-hint below is for. */
 QLabel#pane-hint {
     color: $dim;
     padding: 24px;
+    font-size: 11px;
+}
+
+/* The same quiet voice, sized for a line of running text: an explanation
+ * under a section heading, or a status line in a dialog footer. */
+QLabel#dlg-hint {
+    color: $dim;
     font-size: 11px;
 }
 
@@ -1286,6 +1298,10 @@ QPlainTextEdit#ent-input {
 }
 QPlainTextEdit#ent-input:focus { border: 1px solid $accent; }
 
+/* The plain-language note under a finding: quieter than the message it
+   explains, louder than the schema path below it. */
+QLabel#val-explanation { color: $muted; font-size: 11px; }
+
 /* Section heading inside a dialog (Fix ups). */
 QLabel#dlg-section-title { color: $text; font-weight: 600; }
 
@@ -1298,3 +1314,32 @@ QLabel#cff-key-required    { color: $error;   font-weight: 600; }
 QLabel#cff-key-recommended { color: $warning; font-weight: 600; }
 QLabel#cff-key-optional    { color: $muted;   font-weight: 600; }
 QLabel#cff-source          { color: $muted; }
+
+/* The rename dry run: every file the rename would move, tickable, grouped by
+   the folder it lives in. Monospace because a plan is a list of names, and
+   lining "sub-02_ses-post_T2w" up under "sub-01_ses-post_T2w" is what makes
+   the difference visible at a glance. The checkbox styling matches the filter
+   tree's so the two read as the same control. */
+QTreeWidget#rename-preview {
+    background: $bg;
+    color: $text;
+    border: 1px solid $input_border;
+    border-radius: 6px;
+    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+    font-size: 11px;
+}
+QTreeWidget#rename-preview::item { padding: 2px 0; }
+QTreeWidget#rename-preview::indicator {
+    width: 13px; height: 13px;
+    border: 1px solid $border;
+    background: $bg;
+    border-radius: 3px;
+}
+QTreeWidget#rename-preview::indicator:checked {
+    background: $accent;
+    border: 1px solid $accent;
+}
+QTreeWidget#rename-preview::indicator:indeterminate {
+    background: $accent_bg;
+    border: 1px solid $accent;
+}

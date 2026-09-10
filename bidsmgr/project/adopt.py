@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,6 +125,16 @@ def adopt(root: Path, *, name: Optional[str] = None) -> AdoptResult:
             "it does not look like a BIDS dataset."
         )
 
+    # The bundle lives INSIDE the dataset, which is the whole point and also
+    # the one thing that can make adoption impossible. Say so before reading
+    # the tree rather than after.
+    if not os.access(root, os.W_OK):
+        raise NotABidsDataset(
+            f"{root} is not writable, so the tracking folder cannot be "
+            "created there. A read-only or cloud-mounted dataset has to be "
+            "copied somewhere writable first."
+        )
+
     already = is_managed(root)
     manifest = build_manifest(root)
 
@@ -148,6 +159,10 @@ def adopt(root: Path, *, name: Optional[str] = None) -> AdoptResult:
             ),
         )
 
+    # A dataset under git gains an untracked folder. Offering to ignore it is
+    # not this function's job, but noticing is: the caller shows it.
+    _ensure_git_ignored(root)
+
     target = root / MANIFEST
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
@@ -160,6 +175,35 @@ def adopt(root: Path, *, name: Optional[str] = None) -> AdoptResult:
         already_managed=already,
         manifest_path=target,
     )
+
+
+def _ensure_git_ignored(root: Path) -> bool:
+    """Add ``.bidsmgr/`` to a git working tree's ignore list, once.
+
+    Adopting a dataset that is under version control otherwise leaves it dirty
+    with a folder the user did not create, which reads as the tool having
+    changed their data. Only touched when a ``.git`` directory is actually
+    there, and never duplicated.
+    """
+    if not (root / ".git").exists():
+        return False
+    ignore = root / ".gitignore"
+    line = ".bidsmgr/"
+    try:
+        existing = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+        if any(row.strip() == line for row in existing.splitlines()):
+            return False
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        ignore.write_text(
+            existing + prefix
+            + "# BIDS Manager keeps its curation history here.\n"
+            + line + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.debug("could not update %s: %s", ignore, exc)
+        return False
+    return True
 
 
 def read_manifest(root: Path) -> Optional[dict]:

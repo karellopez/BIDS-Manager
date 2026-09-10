@@ -153,6 +153,8 @@ class ValidationPane(QWidget):
     # A grouped finding's fix-in-all-files button. Carries the
     # FindingGroup so the host can open the candidate picker.
     fix_group_requested = pyqtSignal(object)
+    # (file, rule_id, field) for a warning somebody wants to accept.
+    accept_requested = pyqtSignal(object, str, str)
     # Emitted by the File section's "Highlight in editor" button: highlight
     # every shown error/warning field (JSON) or column (TSV) for this file.
     highlight_all_requested = pyqtSignal(object)  # (Path | None)
@@ -170,6 +172,9 @@ class ValidationPane(QWidget):
         self._report: Optional[ValidationReport] = None
         self._current_file: Optional[Path] = None
         self._current_root: Optional[Path] = None
+        # Read lazily and cached per render pass, so accepting one
+        # finding does not re-read the file for every other row.
+        self._accepted = None
 
         # Per-section state: lazily replaced on every render.
         self._section_widgets: list[QWidget] = []
@@ -473,6 +478,23 @@ class ValidationPane(QWidget):
                     lambda field, p=target_file:
                         self.fix_requested.emit(p, field)
                 )
+                msg.accept_requested.connect(
+                    lambda rule, field, p=target_file:
+                        self.accept_requested.emit(p, rule, field)
+                )
+                decision = self._is_accepted(target_file, issue)
+                if decision is not None:
+                    # Shown, not hidden: a decision somebody made is part of
+                    # the record, and hiding it would make the next reviewer
+                    # rediscover the same finding.
+                    msg.setEnabled(False)
+                    msg.setToolTip(
+                        "Accepted by {who} on {at}.\n\n{note}".format(
+                            who=decision.who or "somebody",
+                            at=decision.at.replace("T", " "),
+                            note=decision.note or "No reason was given.",
+                        )
+                    )
                 sl.addWidget(msg)
 
         self._insert_section_widget(section)
@@ -566,6 +588,34 @@ class ValidationPane(QWidget):
         listing.setToolTip("\n".join(str(x) for x in grp.files))
         cl.addWidget(listing)
         return card
+
+    def _is_accepted(self, target_file, issue):
+        """The decision covering this finding, or ``None``."""
+        if target_file is None or self._current_root is None:
+            return None
+        if issue.severity is not Severity.WARN:
+            return None
+        from ...editor.review import is_accepted, load
+
+        if self._accepted is None:
+            self._accepted = load(self._current_root)
+        try:
+            rel = str(
+                Path(target_file).resolve().relative_to(
+                    Path(self._current_root).resolve()
+                )
+            )
+        except (ValueError, OSError):
+            return None
+        return is_accepted(
+            self._accepted, file=rel, rule_id=issue.rule_id,
+            field=issue.field or "",
+        )
+
+    def reload_acceptances(self) -> None:
+        """Forget the cached decisions; the next render re-reads them."""
+        self._accepted = None
+        self._render()
 
     def _insert_section_widget(self, widget: QWidget) -> None:
         """Insert ``widget`` before the trailing stretch and remember it."""

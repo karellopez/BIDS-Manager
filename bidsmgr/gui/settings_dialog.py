@@ -568,6 +568,24 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Existing subjects:", self._convert_on_existing)
 
+        # Somebody curates a sidecar in the Editor, then re-converts that
+        # subject. Deciding at file level throws the curation away; deciding at
+        # field level keeps what a person stated and still takes what the fresh
+        # pass newly knows.
+        self._convert_preserve_curation = QCheckBox(
+            "Keep curated metadata (merge sidecars field by field instead of "
+            "overwriting them)"
+        )
+        self._convert_preserve_curation.setToolTip(
+            "When a subject you already curated in the Editor is converted "
+            "again, merge its JSON sidecars and _scans.tsv field by field: a "
+            "value you stated is kept, a TODO placeholder is replaced, and "
+            "anything the fresh conversion newly knows is added. Turn it off "
+            "to let the fresh conversion win outright. Only has an effect "
+            "with Update or Replace above. Recommended: on."
+        )
+        form.addRow("Curated metadata:", self._convert_preserve_curation)
+
         self._convert_skip_residuals = QCheckBox(
             "Skip residual volumes (drop dcm2niix secondary duplicates such "
             "as ..._bolda / _Eq_ / _ROI that are not real images)"
@@ -854,6 +872,9 @@ class SettingsDialog(QDialog):
         idx = self._convert_on_existing.findData(s.convert_on_existing)
         self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
         self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
+        self._convert_preserve_curation.setChecked(
+            s.convert_preserve_curation
+        )
         self._convert_force_edf.setChecked(s.convert_force_edf)
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
@@ -932,6 +953,9 @@ class SettingsDialog(QDialog):
         # Keep the legacy flag in sync for any old reader.
         s.convert_overwrite = (s.convert_on_existing == "replace")
         s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
+        s.convert_preserve_curation = (
+            self._convert_preserve_curation.isChecked()
+        )
         s.convert_force_edf = self._convert_force_edf.isChecked()
 
         s.post_run_metadata = self._post_run_metadata.isChecked()

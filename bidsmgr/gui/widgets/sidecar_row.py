@@ -16,9 +16,20 @@ Two display modes:
   * ``"num"``   → ``sc-val-num`` (purple, no quotes).
   * ``"str"``   → ``sc-val-str`` (blue, quoted).
 
-* **Editable** (``editable=True``) — value rendered as an inline
-  editor sized for the current :class:`bidsmgr.editor.types.SidecarField`
-  value kind:
+* **Editable** (``editable=True``) — value rendered as an inline editor.
+
+  When the caller supplies the field's ``schema_field``, the control is the
+  one the STANDARD implies, built by the same
+  :mod:`~bidsmgr.gui.widgets.template_form` code the metadata templates use:
+  a controlled vocabulary becomes a dropdown, a boolean becomes true/false, a
+  list of strings becomes an add-and-remove list, a number gets a numeric box
+  with its unit beside it. One implementation of "how do you fill a field of
+  this type", so the Editor and the templates cannot drift apart, and so a
+  user who has answered a field once in the template meets the same control
+  when they come back to it here.
+
+  Without a ``schema_field`` (a key the standard does not declare, which the
+  user is still entitled to keep) it falls back to the value-kind editors:
 
   * ``number`` → :class:`QLineEdit` with a permissive float validator.
   * ``bool``   → :class:`QComboBox` with ``true``/``false``.
@@ -145,6 +156,10 @@ class SidecarRow(QFrame):
     # focus-out or Enter, so without this the pane could not say a file
     # had unsaved changes until the user clicked somewhere else.
     editing_started = pyqtSignal(str)
+    # Right-click: which file this value is actually stated in. A form
+    # shows EFFECTIVE metadata, so a value can be inherited from a
+    # sidecar three levels up and editing here makes a second copy.
+    explain_requested = pyqtSignal(str)
 
     def __init__(
         self,
@@ -155,6 +170,7 @@ class SidecarRow(QFrame):
         *,
         editable: bool = False,
         raw_value: Any = None,
+        schema_field: Any = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -163,6 +179,7 @@ class SidecarRow(QFrame):
         self._key = key
         self._value_kind = value_kind
         self._editable = editable
+        self._schema_field = schema_field
         self._editor: Optional[QWidget] = None
 
         # An answer is rarely true of one file only. Right-clicking a row
@@ -184,8 +201,11 @@ class SidecarRow(QFrame):
         self._bar.setFixedSize(4, 18)
         h.addWidget(self._bar)
 
-        # Field name.
-        key_lbl = QLabel(f'"{key}"')
+        # Field name, with the unit the schema declares. A dose box that
+        # does not say MBq is a box somebody will put Bq in.
+        unit = getattr(schema_field, "unit", "") or ""
+        label_text = f'"{key}"' + (f"  ({unit})" if unit else "")
+        key_lbl = QLabel(label_text)
         key_lbl.setObjectName("sc-key-dep" if level == "dep" else "sc-key")
         key_lbl.setMinimumWidth(220)
         if level == "dep":
@@ -196,7 +216,11 @@ class SidecarRow(QFrame):
 
         # Value cell — read-only label or inline editor.
         if editable:
-            self._editor = self._build_editor(value, value_kind, raw_value)
+            self._editor = (
+                self._build_schema_editor(raw_value, value, value_kind)
+                if schema_field is not None else
+                self._build_editor(value, value_kind, raw_value)
+            )
             h.addWidget(self._editor, 1)
         else:
             val_lbl = self._build_readonly_value(value, value_kind)
@@ -216,13 +240,20 @@ class SidecarRow(QFrame):
 
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
-        act = menu.addAction("Apply this field to other files")
-        act.setToolTip(
+        apply_act = menu.addAction("Apply this field to other files")
+        apply_act.setToolTip(
             "Pick which other files should carry this field and value."
         )
+        where_act = menu.addAction("Where does this value come from?")
+        where_act.setToolTip(
+            "A form shows effective metadata. This says which file actually "
+            "states the value, which may not be the one you are looking at."
+        )
         chosen = menu.exec(self.mapToGlobal(pos))
-        if chosen is act:
+        if chosen is apply_act:
             self.apply_to_others_requested.emit(self._key)
+        elif chosen is where_act:
+            self.explain_requested.emit(self._key)
 
     @property
     def key(self) -> str:
@@ -275,6 +306,62 @@ class SidecarRow(QFrame):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         return lbl
+
+    def _build_schema_editor(
+        self, raw_value: Any, value: str, value_kind: str,
+    ) -> QWidget:
+        """The control the SCHEMA implies for this field.
+
+        Delegates to the template form so there is one answer to "how do you
+        fill a field of this type" rather than two that drift.
+        """
+        from .template_form import (
+            build_field_widget,
+            connect_field_widget,
+            write_field_widget,
+        )
+
+        widget = build_field_widget(self._schema_field)
+        seed = raw_value
+        if seed is None and value_kind not in ("missing", "null"):
+            seed = value
+        if seed is not None and seed != "":
+            try:
+                write_field_widget(widget, seed)
+            except (TypeError, ValueError, AttributeError):
+                # A value that does not fit the control it was given, which
+                # happens when a file states the wrong type. Leaving the
+                # control empty would hide that; the read-only view and the
+                # validator both still report it.
+                pass
+        connect_field_widget(widget, self._on_schema_committed)
+        self._connect_typing(widget)
+        widget.setObjectName("ent-input")
+        return widget
+
+    def _connect_typing(self, widget: QWidget) -> None:
+        """Announce the first keystroke, whatever kind of control this is.
+
+        The unsaved-changes indicator has to appear as the user types, not
+        when they click away, and only the text-bearing controls can say so.
+        """
+        edit = None
+        if isinstance(widget, QLineEdit):
+            edit = widget
+        elif isinstance(widget, QComboBox) and widget.isEditable():
+            edit = widget.lineEdit()
+        if edit is not None:
+            edit.textEdited.connect(
+                lambda _t: self.editing_started.emit(self._key)
+            )
+
+    def _on_schema_committed(self) -> None:
+        from .template_form import read_field_widget
+
+        if self._editor is None:
+            return
+        value = read_field_widget(self._editor, self._schema_field)
+        self.value_committed.emit(self._key, value, self._value_kind)
 
     def _build_editor(
         self,

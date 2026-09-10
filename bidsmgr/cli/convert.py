@@ -58,6 +58,7 @@ from ..converter import (
     dispatch,
     select_backend,
 )
+from ..metadata.preserve import is_mergeable, merge_file
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
@@ -182,6 +183,7 @@ def run_convert(
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     force_edf: bool = False,
+    preserve_curation: bool = True,
     cancel_check=None,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
@@ -198,6 +200,12 @@ def run_convert(
     ``skip_residuals`` (default True) drops the dcm2niix residual/secondary
     outputs -- derived single-volume duplicates split off one input series
     (e.g. ``..._bolda`` next to ``..._bold``). Pass False to keep them.
+
+    ``preserve_curation`` (default True) only matters when a subject already
+    exists and a file is being replaced. It merges JSON sidecars and
+    ``*_scans.tsv`` field by field instead of overwriting, so metadata somebody
+    curated in the Editor survives a re-conversion of the same subject. Pass
+    False to have the fresh conversion win outright.
     """
     tsv = Path(tsv)
     bids_parent = Path(bids_parent)
@@ -386,6 +394,7 @@ def run_convert(
                     dcm2niix_version=dcm2niix_version,
                     cancel_check=cancel_check,
                     spec=spec,
+                    preserve_curation=preserve_curation,
                 )
                 if existed:
                     n_merged += 1
@@ -434,6 +443,7 @@ def _convert_subject(
     dcm2niix_version: str,
     cancel_check=None,
     spec: Optional[RecordingMetaSpec] = None,
+    preserve_curation: bool = True,
 ) -> None:
     """Run Phases 1–3 for a single (dataset, subject, session) group."""
     subject = tasks[0].subject
@@ -489,7 +499,10 @@ def _convert_subject(
         # built for the staging dir so the commit target name is
         # consistent across OSes.
         target = bids_root / subj_segment
-        _merge_commit(staging, target, on_existing=on_existing)
+        _merge_commit(
+            staging, target, on_existing=on_existing,
+            preserve_curation=preserve_curation,
+        )
         _write_provenance(
             target, results, rename_map, n_intended_for, n_scans_tsv,
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
@@ -751,6 +764,7 @@ def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str)
 
 def _merge_commit(
     staging_subject: Path, target: Path, *, on_existing: str,
+    preserve_curation: bool = True,
 ) -> tuple[int, int, int]:
     """Commit a staged subject into the dataset, merging into an existing one.
 
@@ -770,6 +784,14 @@ def _merge_commit(
     A replaced file is first moved to
     ``<bids_root>/.bidsmgr/backup/<sub>_<utcstamp>/<relpath>``, so the merge path
     is reconstructable even though atomicity drops from subject- to file-level.
+
+    ``preserve_curation`` changes what "replace" means for the two file kinds a
+    person edits: a JSON sidecar and ``*_scans.tsv`` are merged FIELD by field
+    rather than overwritten, so an afternoon in the Editor survives a second
+    conversion of the same subject while the fresh pass still contributes
+    everything it newly knows. See :mod:`bidsmgr.metadata.preserve`. Every
+    other file is replaced exactly as before, and the backup is taken either
+    way, so the pre-merge state is always recoverable.
     """
     staged = [p for p in sorted(staging_subject.rglob("*")) if p.is_file()]
 
@@ -789,6 +811,7 @@ def _merge_commit(
 
     backup_dir = target.parent / ".bidsmgr" / "backup" / f"{target.name}_{_utc_stamp()}"
     added = replaced = kept = 0
+    preserved: list[str] = []
     for src in staged:
         rel = src.relative_to(staging_subject)
         dst = target / rel
@@ -806,10 +829,28 @@ def _merge_commit(
             continue
         bdst = backup_dir / rel
         bdst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(dst), str(bdst))
+        shutil.copy2(str(dst), str(bdst))
+        if preserve_curation and is_mergeable(dst):
+            outcome = merge_file(dst, src)
+            if outcome is not None:
+                src.unlink(missing_ok=True)
+                if isinstance(outcome, list) and outcome:
+                    preserved.extend(f"{rel}:{f}" for f in outcome)
+                replaced += 1
+                continue
+        # Not mergeable, or the merge could not be done correctly: the
+        # ordinary replace, with the original already backed up above.
+        dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
         replaced += 1
+    if preserved:
+        shown = ", ".join(preserved[:6])
+        more = "" if len(preserved) <= 6 else f" (+{len(preserved) - 6} more)"
+        log.info(
+            "kept %d curated field(s) through the re-conversion: %s%s",
+            len(preserved), shown, more,
+        )
     if added or replaced or kept:
         tail = (
             " (use --on-existing replace to overwrite the kept files)"
@@ -1491,6 +1532,16 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--overwrite-curation", action="store_true",
+        help=(
+            "When re-converting a subject that already exists, let the fresh "
+            "conversion win outright. By default a JSON sidecar and a "
+            "*_scans.tsv are merged field by field instead, so metadata "
+            "curated in the Editor survives the second pass. Only has an "
+            "effect together with --on-existing update / replace."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -1557,6 +1608,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
             pet_spreadsheet=args.pet_spreadsheet,
             raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
             skip_residuals=not args.keep_residuals,
+            preserve_curation=not args.overwrite_curation,
             force_edf=args.force_edf,
         )
 
@@ -1576,6 +1628,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         pet_spreadsheet=args.pet_spreadsheet,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
+        preserve_curation=not args.overwrite_curation,
         force_edf=args.force_edf,
     )
 

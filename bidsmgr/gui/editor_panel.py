@@ -96,6 +96,7 @@ class EditorPanel(QWidget):
 
         self._tree_pane = BidsTreePane()
         self._tree_pane.file_selected.connect(self._on_file_selected)
+        self._tree_pane.rename_requested.connect(self._on_rename)
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -113,6 +114,7 @@ class EditorPanel(QWidget):
         self._sidecar_form.apply_to_others_requested.connect(
             self._on_apply_field_to_others
         )
+        self._sidecar_form.explain_requested.connect(self._on_explain_field)
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
@@ -133,6 +135,9 @@ class EditorPanel(QWidget):
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
         self._validation_pane.fix_group_requested.connect(
             self._on_fix_group_requested
+        )
+        self._validation_pane.accept_requested.connect(
+            self._on_accept_finding
         )
         self._validation_pane.highlight_all_requested.connect(
             self._on_highlight_all_requested
@@ -361,6 +366,18 @@ class EditorPanel(QWidget):
         self._adopt_btn.clicked.connect(self._on_adopt)
         lay.addWidget(self._adopt_btn)
 
+        self._rename_btn = QPushButton("  Rename")
+        self._rename_btn.setObjectName("tb-btn")
+        self._rename_btn.setToolTip(
+            "Rename a subject, session, task or any other entity across "
+            "the whole dataset, including the references to it inside "
+            "IntendedFor, the scans tables and participants.tsv. You see "
+            "the full plan before anything moves."
+        )
+        self._rename_btn.setEnabled(False)
+        self._rename_btn.clicked.connect(self._on_rename)
+        lay.addWidget(self._rename_btn)
+
         # Deep-checks toggle — when on, "Validate dataset" reads NIfTI
         # headers and file contents (slower, more thorough); when off it
         # runs the fast structural pass used for live revalidation. Maps
@@ -492,6 +509,7 @@ class EditorPanel(QWidget):
         # Enable dataset-level validation now that we have a root.
         self._validate_dataset_btn.setEnabled(True)
         self._fixups_btn.setEnabled(True)
+        self._rename_btn.setEnabled(True)
         self._refresh_adopt_button()
         if persist:
             from .app_settings import AppSettings
@@ -675,11 +693,20 @@ class EditorPanel(QWidget):
             return
         allowed = self._allowed_severities()
         severities: dict[Path, str] = {}
+        counts: dict[Path, tuple[int, int]] = {}
         for fv in report.files:
             # Badge = worst ALLOWED issue on the file; clean / filtered-out
             # files get the green "ok" dot. So "errors only" leaves only error
             # files red and everything else green.
             issues = [i for i in fv.issues if i.severity in allowed]
+            # Mirrored findings are the same finding shown on the editable
+            # sidecar as well as on the data file. Counting both would double
+            # every number in the tree.
+            countable = [
+                i for i in issues if not getattr(i, "mirrored", False)
+            ]
+            n_err = sum(1 for i in countable if i.severity is Severity.ERR)
+            n_warn = sum(1 for i in countable if i.severity is Severity.WARN)
             if any(i.severity is Severity.ERR for i in issues):
                 value = "err"
             elif any(i.severity is Severity.WARN for i in issues):
@@ -689,7 +716,9 @@ class EditorPanel(QWidget):
             absolute = (root / fv.path).resolve() if not fv.path.is_absolute() \
                 else fv.path
             severities[absolute] = value
-        self._tree_pane.set_badges(severities)
+            if n_err or n_warn:
+                counts[absolute] = (n_err, n_warn)
+        self._tree_pane.set_badges(severities, counts)
 
     def _update_chips(self, report: ValidationReport) -> None:
         counts = report.counts
@@ -765,6 +794,7 @@ class EditorPanel(QWidget):
             # which files each pattern is hiding, which a text editor cannot
             # say.
             self._bidsignore_pane.set_root(root)
+            self._bidsignore_pane.set_report(self._report)
             self._center_stack.setCurrentWidget(self._bidsignore_pane)
             self._validation_pane.set_current_file(path, root)
             return
@@ -911,6 +941,30 @@ class EditorPanel(QWidget):
         self._refresh_adopt_button()
         self._tree_pane.set_root(root)
 
+    def _on_rename(self, entity: str = "", value: str = "") -> None:
+        """Rename an entity across the dataset, after showing the plan.
+
+        Called both from the toolbar with nothing preselected, and from the
+        tree's right-click menu with the entity the user clicked, which is
+        where the action is actually reached for: you notice a wrong subject
+        label while looking at the subject.
+        """
+        from .rename_entity_dialog import RenameEntityDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = RenameEntityDialog(
+            root, parent=self, entity=entity, value=value,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Paths the panes are holding may no longer exist.
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
     def _on_fixups(self) -> None:
         """Open the dataset-wide repairs, then revalidate what changed."""
         from .fixups_dialog import FixupsDialog
@@ -918,13 +972,73 @@ class EditorPanel(QWidget):
         root = self.current_root()
         if root is None:
             return
-        dlg = FixupsDialog(root, parent=self)
+        dlg = FixupsDialog(root, parent=self, report=self._report)
         dlg.exec()
         # Generating a file or moving citation fields changes what the
         # validator would say, so the board must not keep showing the old
         # answer.
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _on_accept_finding(self, path, rule_id: str, field: str) -> None:
+        """Record that a reviewer looked at a warning and kept it."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        from ..editor.review import accept
+
+        root = self.current_root()
+        if root is None or path is None:
+            return
+        note, ok = QInputDialog.getText(
+            self, "Accept this warning",
+            f"Why is {rule_id} acceptable here?\n\nThe note is stored in the "
+            "dataset, so whoever reviews it next sees your reasoning.",
+        )
+        if not ok:
+            return
+        try:
+            rel = str(Path(path).resolve().relative_to(Path(root).resolve()))
+        except (ValueError, OSError):
+            rel = str(path)
+        accept(root, file=rel, rule_id=rule_id, field=field, note=note)
+        self._validation_pane.reload_acceptances()
+        self.log_message.emit(f"accepted {rule_id} in {rel}")
+
+    def _on_explain_field(self, field: str) -> None:
+        """Say which file the value in front of the user is actually in."""
+        from ..editor import inheritance as inh
+
+        root = self.current_root()
+        current = self._sidecar_form.current_file()
+        if root is None or current is None:
+            return
+        sources = inh.explain(root, current, field)
+        if not sources:
+            QMessageBox.information(
+                self, field,
+                f"No sidecar that applies to this file states {field}. What "
+                "you see is the form offering the field, not a value.",
+            )
+            return
+        lines = []
+        for s in sources:
+            where = "this file" if s.level == 0 else f"{s.level} level(s) up"
+            mark = "  <- used" if s.winner else ""
+            lines.append(f"{s.rel}\n    {where}: {s.value!r}{mark}")
+        extra = ""
+        if len(sources) > 1:
+            extra = (
+                "\n\nThe nearest one wins. The others are shadowed, which "
+                "is legal but usually not what anyone intended."
+            )
+        elif sources[0].level > 0:
+            extra = (
+                "\n\nThis value is inherited. Editing it here writes a "
+                "second copy into this file, and the two can then disagree."
+            )
+        QMessageBox.information(
+            self, f"Where {field} comes from", "\n\n".join(lines) + extra,
+        )
 
     def _on_apply_field_to_others(self, field: str) -> None:
         """State the field the user is editing across other files too."""
@@ -955,6 +1069,112 @@ class EditorPanel(QWidget):
         )
         self._report_bulk_result(result)
 
+    def _offer_type_fix(self, root, group, paths) -> bool:
+        """A value of the wrong shape is repaired, not re-asked for."""
+        from ..editor import bulk_edit as be
+
+        plan = be.plan_coercions(root, group.field, paths=paths)
+        if not plan:
+            return False
+        lines = "\n".join(
+            f"  {c.rel}\n      {c.current_text()}" for c in plan[:12]
+        )
+        more = f"\n  and {len(plan) - 12} more" if len(plan) > 12 else ""
+        answer = QMessageBox.question(
+            self, f"Fix the type of {group.field}",
+            f"{len(plan)} file(s) state {group.field} in a shape the standard "
+            f"does not declare. Each value below would be converted, keeping "
+            f"what it says:\n\n{lines}{more}\n\nA value that cannot be "
+            "converted is left exactly as it is.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Ok,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return True
+        self._report_bulk_result(be.apply_coercions(root, plan, group.field))
+        return True
+
+    def _offer_tabular_fix(self, root, group, paths) -> bool:
+        """Missing column, wrong column type, wrong column order."""
+        from ..editor import tsv_edit as te
+
+        tsvs = [p for p in paths if p.name.endswith(".tsv")]
+        if not tsvs or not group.field:
+            return False
+        rule = (group.rule_id or "").upper()
+
+        if "COLUMN_MISSING" in rule:
+            plan = te.plan_add_column(root, tsvs, group.field)
+            actionable = [c for c in plan if c.applicable]
+            if not actionable:
+                return False
+            answer = QMessageBox.question(
+                self, f"Add the {group.field} column",
+                f"{len(actionable)} table(s) would gain a {group.field!r} "
+                f"column filled with {te.NA!r}, which is what BIDS uses for a "
+                "value that is not available.",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                written, failed = te.apply_add_column(
+                    root, actionable, group.field,
+                )
+                self._report_tabular(written, failed)
+            return True
+
+        if "ORDER" in rule:
+            plan = te.plan_reorder(root, tsvs)
+            actionable = [c for c in plan if c.applicable]
+            if not actionable:
+                return False
+            answer = QMessageBox.question(
+                self, "Reorder columns",
+                f"{len(actionable)} table(s) would have their known columns "
+                "put into the standard's order. No cell changes value; "
+                "columns the standard does not know keep their order at the "
+                "end.",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                self._report_tabular(*te.apply_reorder(root, actionable))
+            return True
+
+        if "TYPE" in rule or "VALUE" in rule:
+            plan = te.plan_coerce_column(root, tsvs, group.field)
+            actionable = [c for c in plan if c.applicable]
+            if not actionable:
+                return False
+            detail = "\n".join(f"  {c.rel}: {c.detail}" for c in actionable[:12])
+            answer = QMessageBox.question(
+                self, f"Fix the {group.field} column",
+                f"Only the cells that do not match the declared type are "
+                f"touched:\n\n{detail}",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                self._report_tabular(
+                    *te.apply_coerce_column(root, actionable, group.field)
+                )
+            return True
+        return False
+
+    def _report_tabular(self, written, failed) -> None:
+        if failed:
+            QMessageBox.warning(
+                self, "Some tables were not written",
+                "\n".join(f"{p}: {why}" for p, why in failed[:6]),
+            )
+        else:
+            self.log_message.emit(f"{len(written)} table(s) written")
+        if written and self._report is not None:
+            self.start_dataset_validation()
+
     def _on_fix_group_requested(self, group) -> None:
         """Fix one finding in every file it fired on.
 
@@ -971,10 +1191,19 @@ class EditorPanel(QWidget):
             return
         # A finding is recorded against the data file; the field is edited in
         # its sidecar. ``candidates`` follows that hop for us.
-        cands = be.candidates(
-            root, group.field,
-            paths=[root / p for p in group.files],
-        )
+        paths = [root / p for p in group.files]
+
+        # The repair depends on what is wrong, not just on which field. A
+        # value of the wrong TYPE is repaired from the value already there; a
+        # missing column is added; a value nobody has stated has to be asked
+        # for. Offering "type a value" for all three would invite a user to
+        # overwrite a number that was only badly formatted.
+        if self._offer_tabular_fix(root, group, paths):
+            return
+        if self._offer_type_fix(root, group, paths):
+            return
+
+        cands = be.candidates(root, group.field, paths=paths)
         if not cands:
             QMessageBox.information(
                 self, "Nothing to fix",

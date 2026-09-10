@@ -41,6 +41,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QLabel,
     QMenu,
@@ -52,7 +53,12 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import icons
-from ..delegates.bids_tree import BADGE_ROLE, BidsTreeDelegate
+from ..delegates.bids_tree import (
+    BADGE_ROLE,
+    COUNT_ROLE,
+    ISSUE_ROLE,
+    BidsTreeDelegate,
+)
 from ..theme_manager import CUR
 from .primitives import PaneHeader
 
@@ -81,6 +87,9 @@ _FOLDER_RECORDING_SUFFIXES: tuple[str, ...] = (".ds", ".mff")
 # Item data roles.
 PATH_ROLE = Qt.ItemDataRole.UserRole          # absolute path string
 COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1  # palette token for foreground
+# COUNT_ROLE and ISSUE_ROLE are defined by the delegate that paints them and
+# re-exported here, because every role the tree uses should be reachable from
+# the tree.
 
 
 def _color_token_for(entry_name: str, is_dir: bool) -> str:
@@ -130,6 +139,38 @@ def is_hidden_name(name: str) -> bool:
     Dotfiles plus the machinery directories in :data:`_SKIP_DIRS`.
     """
     return name.startswith(".") or name in _SKIP_DIRS
+
+
+def _renameable_entities(path: Path) -> list[tuple[str, str, str]]:
+    """Every entity the clicked row carries, as ``(key, value, label)``.
+
+    A folder named ``sub-01`` offers the subject; a file named
+    ``sub-01_task-rest_run-02_bold.nii.gz`` offers the task and the run as
+    well. Offering only what is actually in front of the user is the
+    difference between a menu that reads as an answer and one that reads as a
+    form to fill in.
+
+    The entity set and its display names come from the ACTIVE schema, in the
+    schema's own filename order, so this tracks the BIDS version in force
+    instead of whatever was true when the list was last hand-edited.
+    """
+    from ...editor.rename import entity_value
+    from ...schema import entity_key_info, entity_keys
+
+    name = path.name
+    if "-" not in name:
+        return []
+    out: list[tuple[str, str, str]] = []
+    for key in entity_keys():
+        value = entity_value(name, key)
+        if not value:
+            continue
+        try:
+            label = entity_key_info(key).display_name.lower()
+        except KeyError:
+            label = key
+        out.append((key, value, label))
+    return out
 
 
 def _walk(
@@ -186,6 +227,41 @@ def _walk(
                 Path(entry.path), item, depth=depth + 1, dirs=dirs,
                 show_hidden=show_hidden,
             )
+            _annotate_folder(item, entry.name)
+
+
+def _annotate_folder(item: QTreeWidgetItem, name: str) -> None:
+    """Put what is inside a folder on the folder's own row.
+
+    A subject with three sessions and forty-seven files is a fact a reader
+    wants without expanding anything, and it is the difference between a tree
+    you scan and a tree you excavate. Counted from the children already built,
+    so it costs nothing extra.
+    """
+    sessions = 0
+    files = 0
+    stack = [item]
+    while stack:
+        node = stack.pop()
+        for i in range(node.childCount()):
+            child = node.child(i)
+            child_name = child.text(0)
+            if child.childCount():
+                if child_name.startswith("ses-"):
+                    sessions += 1
+                stack.append(child)
+            else:
+                files += 1
+    if not files:
+        return
+    bits = []
+    if sessions and name.startswith("sub-"):
+        bits.append(f"{sessions} ses")
+    bits.append(f"{files} file" + ("s" if files != 1 else ""))
+    # A ROLE, not the text. The text is the folder's name and several things
+    # look items up by it; painting the count in the delegate keeps the name
+    # the name.
+    item.setData(0, COUNT_ROLE, ", ".join(bits))
 
 
 class BidsTreePane(QWidget):
@@ -197,6 +273,14 @@ class BidsTreePane(QWidget):
     """
 
     file_selected = pyqtSignal(Path)
+    # Every selected row, for actions that act on a set rather than a file.
+    # ``file_selected`` still carries the one the panes should show, so the
+    # centre pane's behaviour is unchanged by multi-select existing.
+    selection_changed = pyqtSignal(list)
+    # (entity, current value) for a rename the user started from the tree.
+    # The pane does not open the dialog itself: the tree knows what was
+    # clicked, the panel knows the dataset root and what to refresh after.
+    rename_requested = pyqtSignal(str, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -206,6 +290,8 @@ class BidsTreePane(QWidget):
         # re-applies them onto the freshly-walked items instead of dropping
         # them. Keyed by normalised absolute path string.
         self._last_badges: dict[str, str] = {}
+        # (errors, warnings) per file, kept for the same reason.
+        self._last_counts: dict[str, tuple[int, int]] = {}
 
         # Live refresh: every visible directory is registered with a
         # ``QFileSystemWatcher`` so files created / deleted / renamed under the
@@ -239,6 +325,11 @@ class BidsTreePane(QWidget):
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
         self._tree.setItemDelegate(BidsTreeDelegate(self._tree))
+        # Multi-select: the prerequisite for anything that acts on a set of
+        # files rather than one. Ctrl/Cmd-click adds, shift-click extends.
+        self._tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
@@ -289,11 +380,14 @@ class BidsTreePane(QWidget):
         if path is None or not path.exists() or not path.is_dir():
             self._root = None
             self._last_badges = {}
+            self._last_counts = {}
             self._stack.setCurrentIndex(0)
             return
 
         self._root = path
-        self._last_badges = {}  # new root -> stale badges no longer apply
+        # New root: stale badges and counts no longer apply to anything.
+        self._last_badges = {}
+        self._last_counts = {}
         dirs = self._populate(path)
         self._watch(dirs)
         self._tree.expandToDepth(2)
@@ -328,7 +422,7 @@ class BidsTreePane(QWidget):
         # Re-apply badges from the cache (validation has not re-run, but the
         # markers are still valid for files that survived the change).
         if self._last_badges:
-            self._apply_badge_map(self._last_badges)
+            self._apply_badge_map(self._last_badges, self._last_counts)
 
     def _populate(self, path: Path) -> list[str]:
         """Build the tree under ``path`` and return the dirs to watch."""
@@ -419,31 +513,51 @@ class BidsTreePane(QWidget):
             _walk_items(self._tree.topLevelItem(i))
         self._tree.verticalScrollBar().setValue(snap["scroll"])
 
-    def set_badges(self, severities: dict[Path, str]) -> None:
-        """Stamp per-row severity badges from a path → severity map.
+    def set_badges(
+        self,
+        severities: dict[Path, str],
+        counts: Optional[dict[Path, tuple[int, int]]] = None,
+    ) -> None:
+        """Stamp per-row severities, and how many findings each row has.
 
         ``severities`` keys must be absolute paths matching the paths
         stored at :data:`PATH_ROLE`. Files not in the map get no badge.
-        Directories receive the **rollup** (worst) severity across
-        their visible descendants.
+
+        ``counts`` maps the same paths to ``(errors, warnings)``. A folder
+        gets the SUM over its descendants, not the worst of them: the point
+        of a number is to say how much work is in there, and a subject with
+        one missing recommended field should not look like a subject with
+        ninety.
         """
         # Build a normalised lookup (string form) so we don't have to
         # construct ``Path`` for every tree item.
         leaf_map = {_norm_path(p): s for p, s in severities.items()}
+        count_map = {
+            _norm_path(p): (int(c[0]), int(c[1]))
+            for p, c in (counts or {}).items()
+        }
         # Remember so a live (watcher-driven) refresh can re-stamp the rebuilt
         # tree without re-running validation.
         self._last_badges = dict(leaf_map)
-        self._apply_badge_map(leaf_map)
+        self._last_counts = dict(count_map)
+        self._apply_badge_map(leaf_map, count_map)
 
-    def _apply_badge_map(self, leaf_map: dict[str, str]) -> None:
+    def _apply_badge_map(
+        self,
+        leaf_map: dict[str, str],
+        count_map: Optional[dict[str, tuple[int, int]]] = None,
+    ) -> None:
         """Stamp a normalised path -> severity map onto the current tree."""
+        count_map = count_map or {}
 
-        def visit(item: QTreeWidgetItem) -> str | None:
-            """Set this item's badge; return the rolled-up severity for
-            propagation to the parent."""
+        def visit(item: QTreeWidgetItem) -> tuple[str | None, int, int]:
+            """Set this item's badge and counts; return them rolled up."""
             children_worst: str | None = None
+            errors = warnings = 0
             for i in range(item.childCount()):
-                child_sev = visit(item.child(i))
+                child_sev, child_err, child_warn = visit(item.child(i))
+                errors += child_err
+                warnings += child_warn
                 if child_sev is not None:
                     if children_worst is None or \
                             _SEVERITY_RANK[child_sev] > _SEVERITY_RANK[children_worst]:
@@ -456,12 +570,15 @@ class BidsTreePane(QWidget):
             else:
                 # Leaf: look up by absolute path (normalised).
                 path_str = item.data(0, PATH_ROLE)
-                badge = leaf_map.get(_norm_path(path_str)) if path_str else None
-            if badge:
-                item.setData(0, BADGE_ROLE, badge)
-            else:
-                item.setData(0, BADGE_ROLE, None)
-            return badge
+                key = _norm_path(path_str) if path_str else None
+                badge = leaf_map.get(key) if key else None
+                errors, warnings = count_map.get(key, (0, 0)) if key else (0, 0)
+            item.setData(0, BADGE_ROLE, badge or None)
+            item.setData(
+                0, ISSUE_ROLE,
+                (errors, warnings) if (errors or warnings) else None,
+            )
+            return badge, errors, warnings
 
         for i in range(self._tree.topLevelItemCount()):
             visit(self._tree.topLevelItem(i))
@@ -471,8 +588,11 @@ class BidsTreePane(QWidget):
     def clear_badges(self) -> None:
         """Remove every badge from the tree (and forget the cached map)."""
         self._last_badges = {}
+        self._last_counts = {}
+
         def visit(item: QTreeWidgetItem) -> None:
             item.setData(0, BADGE_ROLE, None)
+            item.setData(0, ISSUE_ROLE, None)
             for i in range(item.childCount()):
                 visit(item.child(i))
 
@@ -510,11 +630,24 @@ class BidsTreePane(QWidget):
 
     def _on_selection_changed(self) -> None:
         items = self._tree.selectedItems()
+        self.selection_changed.emit(self.selected_paths())
         if not items:
             return
+        # The FIRST selected row drives the viewer. Extending a selection with
+        # shift should not make the centre pane flicker through every file on
+        # the way, so only the anchor is published as the shown file.
         path_str = items[0].data(0, PATH_ROLE)
         if path_str:
             self.file_selected.emit(Path(path_str))
+
+    def selected_paths(self) -> list[Path]:
+        """Every selected row as a path, in tree order."""
+        out: list[Path] = []
+        for item in self._tree.selectedItems():
+            value = item.data(0, PATH_ROLE)
+            if value:
+                out.append(Path(value))
+        return out
 
     def _on_show_context_menu(self, position: QPoint) -> None:
         item = self._tree.itemAt(position)
@@ -544,6 +677,24 @@ class BidsTreePane(QWidget):
         copy_rel_path_action.triggered.connect(
             lambda: self._copy_relative_path(path)
         )
+
+        # Every entity the clicked row actually carries, so the menu offers
+        # renaming exactly what is in front of the user. A folder named
+        # sub-01 offers the subject; a func file offers task, run and echo.
+        renames = _renameable_entities(Path(path))
+        if renames:
+            menu.addSeparator()
+            for entity, value, label in renames:
+                action = menu.addAction(f"Rename {label} {entity}-{value}...")
+                action.setToolTip(
+                    f"Rename {entity}-{value} everywhere in the dataset, "
+                    "including the references inside IntendedFor, "
+                    "*_scans.tsv and participants.tsv."
+                )
+                action.triggered.connect(
+                    lambda _checked=False, e=entity, v=value:
+                        self.rename_requested.emit(e, v)
+                )
 
         menu.addSeparator()
 

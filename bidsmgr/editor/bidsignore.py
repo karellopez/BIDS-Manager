@@ -164,6 +164,26 @@ def ignored_paths(root: Path) -> set[str]:
     return out
 
 
+def findings_hidden_by(root: Path, report) -> int:
+    """How many current findings the ignore file is suppressing.
+
+    The point of a pattern is to silence something, so the pane should be able
+    to say what. Counted against a report the caller already has, because
+    running the validator to answer a display question would be absurd.
+    """
+    if report is None:
+        return 0
+    ignored = ignored_paths(root)
+    if not ignored:
+        return 0
+    n = 0
+    for verdict in getattr(report, "files", []) or []:
+        rel = Path(verdict.path).as_posix()
+        if rel in ignored:
+            n += len(verdict.issues or [])
+    return n
+
+
 def suggest_pattern(rel_path: str) -> str:
     """A reasonable pattern for a path the user picked.
 
@@ -192,6 +212,7 @@ __all__ = [
     "BIDSIGNORE",
     "IgnorePattern",
     "dataset_paths",
+    "findings_hidden_by",
     "ignored_paths",
     "matches_for",
     "read_patterns",

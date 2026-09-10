@@ -38,18 +38,36 @@ log = logging.getLogger(__name__)
 # it cannot answer, so validation keeps reporting a stub nobody filled in.
 TODO = "TODO"
 
-# Datatypes whose recordings BIDS associates an ``events.tsv`` with when the
-# filename carries a task.
-_TASK_DATATYPES = frozenset({"func", "eeg", "meg", "ieeg", "nirs", "beh", "pet"})
+def _datatypes_with(suffix: str) -> frozenset[str]:
+    """Datatypes the ACTIVE schema allows ``suffix`` in.
 
-# Datatypes that carry a channels table.
-_CHANNEL_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
+    This used to be two hand-kept frozensets, and both were wrong: the events
+    list predated ``emg``, ``motion`` and ``mrs``, and the channels list
+    predated ``emg`` and ``motion``, so whole modalities were silently skipped
+    by a check that reported itself as complete. Which datatypes have an
+    events or channels table is a fact about the standard, so it is read from
+    the standard.
+    """
+    from ..schema import datatypes_with_suffix
 
-# Recording extensions we know how to open to derive channel names.
-_RECORDING_EXTS = (
-    ".fif", ".fif.gz", ".edf", ".bdf", ".gdf", ".set", ".vhdr",
-    ".cnt", ".con", ".sqd", ".kdf", ".mef", ".nwb", ".snirf",
-)
+    return frozenset(datatypes_with_suffix(suffix))
+
+# The files this module GENERATES, which is its own subject matter rather
+# than a schema fact. Their suffixes are excluded when deciding what counts
+# as a recording, because a companion is not a thing that has companions.
+_COMPANION_SUFFIXES = frozenset({
+    "events", "channels", "electrodes", "coordsystem", "photo",
+    "physio", "stim", "blood", "scans", "sessions", "participants",
+})
+
+# Extensions that are metadata about a recording rather than a recording, and
+# the sidecar halves of formats split across several files. BrainVision's
+# .eeg / .vmrk and EEGLAB's .fdt are listed by the schema beside the header
+# they belong to; treating each as its own recording would ask for three sets
+# of companions where there is one recording.
+_NOT_A_RECORDING_EXTS = frozenset({
+    ".json", ".vmrk", ".eeg", ".fdt", ".bvec", ".bval",
+})
 
 
 @dataclass
@@ -85,12 +103,14 @@ def _entities(name: str) -> dict[str, str]:
 
 
 def _stem(name: str) -> str:
-    for ext in (".nii.gz", ".tsv.gz", ".fif.gz") + tuple(_RECORDING_EXTS) + (
-        ".nii", ".tsv", ".json",
-    ):
-        if name.endswith(ext):
-            return name[: -len(ext)]
-    return Path(name).stem
+    """The filename without its extension, keeping ``.nii.gz`` as one thing.
+
+    Extension-list-free on purpose: it strips whatever the file actually has
+    rather than only the extensions somebody remembered to list, which is how
+    a new format silently produced a stem with half an extension still in it.
+    """
+    ext = _extension_of(name)
+    return name[: -len(ext)] if ext and name.lower().endswith(ext) else name
 
 
 def _datatype_of(path: Path, root: Path) -> Optional[str]:
@@ -101,11 +121,46 @@ def _datatype_of(path: Path, root: Path) -> Optional[str]:
     return rel.parts[-2] if len(rel.parts) >= 2 else None
 
 
-def _is_recording(path: Path) -> bool:
-    name = path.name.lower()
-    if name.endswith(".nii") or name.endswith(".nii.gz"):
-        return True
-    return name.endswith(_RECORDING_EXTS)
+def _suffix_of(name: str) -> str:
+    """The BIDS suffix in a filename: the last ``_``-separated part of the
+    stem, which is the part that says what KIND of thing the file is."""
+    stem = _stem(name)
+    return stem.rsplit("_", 1)[-1] if "_" in stem else stem
+
+
+def _extension_of(name: str) -> str:
+    """The extension as BIDS writes it, so ``.nii.gz`` stays one thing."""
+    lower = name.lower()
+    for double in (".nii.gz", ".tsv.gz", ".fif.gz"):
+        if lower.endswith(double):
+            return double
+    return Path(name).suffix.lower()
+
+
+def _is_recording(path: Path, datatype: Optional[str] = None) -> bool:
+    """Is this file a recording, as opposed to metadata about one?
+
+    Decided from the SCHEMA: the suffix has to be one the standard declares
+    for the datatype, and the extension one the standard pairs with that
+    suffix. A hardcoded extension list got this wrong for ``motion``, whose
+    recording IS a ``.tsv``, so no motion recording was ever offered its
+    companions.
+    """
+    from ..schema import list_extensions, list_suffixes
+
+    name = path.name
+    if _extension_of(name) in _NOT_A_RECORDING_EXTS:
+        return False
+    suffix = _suffix_of(name)
+    if not suffix or suffix in _COMPANION_SUFFIXES:
+        return False
+    if datatype is None:
+        return False
+    if suffix not in list_suffixes(datatype):
+        return False
+    return _extension_of(name) in {
+        e.lower() for e in list_extensions(datatype, suffix)
+    }
 
 
 def find_missing(root: Path) -> list[MissingAssociation]:
@@ -119,10 +174,8 @@ def find_missing(root: Path) -> list[MissingAssociation]:
     for path in sorted(root.rglob("*")):
         if not path.is_file() or ".bidsmgr" in path.parts:
             continue
-        if not _is_recording(path):
-            continue
         datatype = _datatype_of(path, root)
-        if datatype is None:
+        if datatype is None or not _is_recording(path, datatype):
             continue
         stem = _stem(path.name)
         ent = _entities(path.name)
@@ -133,13 +186,13 @@ def find_missing(root: Path) -> list[MissingAssociation]:
             out.append(_missing(root, sidecar, "sidecar", path, False))
 
         # An events table, when the recording names a task.
-        if datatype in _TASK_DATATYPES and "task" in ent:
+        if datatype in _datatypes_with("events") and "task" in ent:
             events = path.parent / f"{_strip_suffix(stem)}_events.tsv"
             if not events.exists():
                 out.append(_missing(root, events, "events", path, False))
 
         # A channels table, derivable from the recording itself.
-        if datatype in _CHANNEL_DATATYPES:
+        if datatype in _datatypes_with("channels"):
             channels = path.parent / f"{_strip_suffix(stem)}_channels.tsv"
             if not channels.exists():
                 out.append(_missing(root, channels, "channels", path, True))

@@ -361,6 +361,9 @@ def remove_field(
 
 __all__ = [
     "BulkResult",
+    "apply_coercions",
+    "declared_type",
+    "plan_coercions",
     "FileCandidate",
     "SCOPES",
     "SCOPE_DATASET",
@@ -372,3 +375,132 @@ __all__ = [
     "candidates",
     "remove_field",
 ]
+
+
+# --------------------------------------------------------------------------
+# Repairing a value's SHAPE rather than replacing it
+#
+# The distinction matters and is the rule the whole fix-all feature rests on:
+# a repair may change the TYPE of a value the file already states, because the
+# standard says what that type must be and the value carries the fact. It may
+# never invent the fact itself.
+
+
+def declared_type(datatype: Optional[str], suffix: Optional[str],
+                  field: str) -> tuple[str, str]:
+    """``(type, item_type)`` the standard declares, or ``("", "")``."""
+    if not datatype or not suffix:
+        return ("", "")
+    try:
+        from .. import schema as schema_mod
+
+        info = schema_mod.field_metadata(field)
+    except Exception:  # noqa: BLE001 - unknown field, nothing to say
+        return ("", "")
+    return (
+        str(getattr(info, "type", "") or ""),
+        str(getattr(info, "item_type", "") or ""),
+    )
+
+
+def _coerce(value: Any, kind: str, item_kind: str) -> tuple[Any, bool]:
+    """Reshape ``value`` to ``kind``. Returns ``(new, changed)``.
+
+    Only conversions that cannot lose information are performed. ``"3"`` to
+    ``3`` is safe; ``"about three"`` to anything is not, and is left alone so
+    the finding stays visible rather than being papered over with a guess.
+    """
+    if kind == "array":
+        if not isinstance(value, list):
+            items = [value]
+        else:
+            items = list(value)
+        if item_kind in ("number", "integer"):
+            out: list[Any] = []
+            changed = not isinstance(value, list)
+            for item in items:
+                new, did = _coerce(item, item_kind, "")
+                changed = changed or did
+                out.append(new)
+            return out, changed
+        return items, not isinstance(value, list)
+
+    if kind in ("number", "integer") and isinstance(value, str):
+        text = value.strip()
+        try:
+            number = int(text) if kind == "integer" else float(text)
+        except (TypeError, ValueError):
+            return value, False
+        return number, True
+
+    if kind == "string" and not isinstance(value, str) and value is not None:
+        if isinstance(value, (dict, list)):
+            return value, False          # not a lossless direction
+        return str(value), True
+
+    if kind == "boolean" and isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "false"):
+            return low == "true", True
+
+    return value, False
+
+
+def plan_coercions(
+    root: Path, field: str, *, paths: Optional[Iterable[Path]] = None,
+    scope: str = SCOPE_DATASET, anchor: Optional[Path] = None,
+) -> list[FileCandidate]:
+    """Candidates whose ``field`` is the wrong shape for what BIDS declares.
+
+    ``FileCandidate.current`` is what the file says now and ``reason`` carries
+    the repair in words, so the dialog can show both without re-deriving them.
+    """
+    out: list[FileCandidate] = []
+    for cand in candidates(root, field, paths=paths, scope=scope, anchor=anchor):
+        if not cand.applicable or not cand.present:
+            continue
+        kind, item_kind = declared_type(cand.datatype, cand.suffix, field)
+        if not kind:
+            continue
+        new, changed = _coerce(cand.current, kind, item_kind)
+        if not changed:
+            continue
+        cand.reason = (
+            f"the standard declares {kind}"
+            + (f" of {item_kind}" if item_kind else "")
+        )
+        out.append(cand)
+    return out
+
+
+def apply_coercions(
+    root: Path, selection: list[FileCandidate], field: str,
+) -> BulkResult:
+    """Rewrite ``field`` in each selected file as the type BIDS declares."""
+    from ..project.operations import begin_operation
+
+    written: list[Path] = []
+    skipped: list[Path] = []
+    failed: list[tuple[Path, str]] = []
+    if not selection:
+        return BulkResult(written, skipped, failed)
+    label = f"Fix the type of {field} in {len(selection)} file(s)"
+    with begin_operation(Path(root), label) as op:
+        for cand in selection:
+            data = _read_json(cand.path)
+            if data is None or field not in data:
+                skipped.append(cand.path)
+                continue
+            kind, item_kind = declared_type(cand.datatype, cand.suffix, field)
+            new, changed = _coerce(data[field], kind, item_kind)
+            if not changed:
+                skipped.append(cand.path)
+                continue
+            data[field] = new
+            try:
+                op.write_json(cand.path, data)
+            except OSError as exc:
+                failed.append((cand.path, str(exc)))
+                continue
+            written.append(cand.path)
+    return BulkResult(written, skipped, failed)

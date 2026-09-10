@@ -117,6 +117,34 @@ def _python_value_kind(val: Any) -> str:
     return "string"
 
 
+def _schema_specs(verdict, current_file) -> dict:
+    """What the standard declares about each field of this kind of file.
+
+    Keyed by field name, so a row can be given a control that matches the
+    field's actual type, vocabulary and unit. Returns an empty mapping rather
+    than raising when the file is not a kind the schema knows: a user is
+    still entitled to keep a key the standard has never heard of, and it gets
+    the plain text box.
+    """
+    from ...metadata.template_plan import as_template_field
+    from ...schema import dataset_description_fields, sidecar_fields
+
+    try:
+        if current_file is not None and \
+                current_file.name == "dataset_description.json":
+            specs = dataset_description_fields()
+        elif verdict is not None and verdict.datatype and verdict.suffix:
+            specs = sidecar_fields(verdict.datatype, verdict.suffix)
+        else:
+            return {}
+    except Exception as exc:  # noqa: BLE001 - a form must still render
+        log.debug("no schema specs available: %s", exc)
+        return {}
+    # Converted to the shape the shared control builder takes, which is
+    # also the shape the metadata templates use.
+    return {spec.name: as_template_field(spec) for spec in specs}
+
+
 def _format_value(field: SidecarField) -> tuple[str, str]:
     """Map a :class:`SidecarField` to ``(display_text, value_kind)``.
 
@@ -300,6 +328,8 @@ class SidecarFormPane(QWidget):
     # A row asked to state its field across more than one file. Carries
     # the field name; the host owns the dataset root and the picker.
     apply_to_others_requested = pyqtSignal(str)
+    # A row asked where its value is actually stated.
+    explain_requested = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -749,6 +779,9 @@ class SidecarFormPane(QWidget):
             and self._json_cache is not None
         )
         insert_idx = self._body_layout.count() - 1  # before the stretch
+        # What the standard says about each field, so the editor for it can be
+        # the one the standard implies rather than a text box for everything.
+        specs = _schema_specs(verdict, self._current_file)
         for field in fields_sorted:
             level_code = _LEVEL_CODE.get(field.level, "opt")
             text, kind = _format_value(field)
@@ -759,6 +792,7 @@ class SidecarFormPane(QWidget):
                 kind,
                 editable=editable,
                 raw_value=field.value,
+                schema_field=specs.get(field.name),
             )
             if field.description:
                 row.setToolTip(field.description)
@@ -768,6 +802,7 @@ class SidecarFormPane(QWidget):
                     self.apply_to_others_requested
                 )
                 row.editing_started.connect(self._on_editing_started)
+                row.explain_requested.connect(self.explain_requested)
             self._body_layout.insertWidget(insert_idx, row)
             insert_idx += 1
             self._rows.append(row)

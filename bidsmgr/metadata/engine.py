@@ -667,6 +667,12 @@ def _merge_participants(
     was no existing file to merge with. Merge rule: keep the existing
     file's columns and values verbatim; only fill cells that are blank
     or ``"n/a"`` with new data.
+
+    Columns are added before rows, which is not cosmetic: a dataset with no
+    demographics gets a ``participants.tsv`` holding nothing but
+    ``participant_id``, and adding a row to a frame with no columns raises. In
+    other words, doing it the other way round made the SECOND conversion into
+    the plainest possible dataset fail outright.
     """
     if df_existing is None or "participant_id" not in df_existing.columns:
         return df_new, False
@@ -674,12 +680,19 @@ def _merge_participants(
     merged = df_existing.set_index("participant_id")
     new_indexed = df_new.set_index("participant_id")
 
-    for sid in new_indexed.index:
-        if sid not in merged.index:
-            merged.loc[sid] = "n/a"
     for col in new_indexed.columns:
         if col not in merged.columns:
             merged[col] = "n/a"
+    incoming_subjects = [s for s in new_indexed.index if s not in merged.index]
+    if incoming_subjects:
+        merged = pd.concat([
+            merged,
+            pd.DataFrame(
+                "n/a", index=pd.Index(incoming_subjects, name=merged.index.name),
+                columns=merged.columns,
+            ),
+        ])
+    for col in new_indexed.columns:
         for sid in new_indexed.index:
             incoming = new_indexed.at[sid, col]
             if incoming and incoming != "n/a":

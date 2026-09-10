@@ -1,0 +1,494 @@
+"""Rename a BIDS entity, after showing exactly what that would do.
+
+Renaming a subject touches a folder, every file under it, and three kinds of
+cross-reference. That is far too much to do on trust, so the dialog is built
+around the dry run: pick an entity and a value, see the plan, then commit it.
+The button stays disabled until a plan exists.
+
+**A name that is already taken is offered as a merge, not reported as an
+error.** Renaming ``sub-12`` to ``sub-07`` when ``sub-07`` exists almost always
+means the two are one person, scanned twice or converted in two passes. The
+dialog notices, changes the button from Rename to Merge, and says in words what
+will happen to the sessions, the scans tables and the participants row. It is a
+separate confirmation because it is a different act: a merge cannot be undone by
+renaming back, it is undone from the Editor's history.
+
+Opened either from the Editor toolbar with nothing selected, or from a
+right-click in the file tree, in which case the entity and value the user
+clicked are already filled in.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSizePolicy,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..editor import rename as rn
+from ..schema import entity_key_info
+from .dialog_chrome import build_footer_with, build_header, card, hint
+
+def entity_choices() -> list[tuple[str, str]]:
+    """Every entity the ACTIVE schema defines, as ``(key, display name)``.
+
+    Read from the schema rather than listed here, for the reason every other
+    layer reads from it: the set of entities is a fact about the BIDS version
+    in force, and a hand-kept list silently omits whatever was added since
+    somebody last edited it. The schema's own filename order is kept, which is
+    also the order a user reads a name in, so Subject comes first.
+    """
+    from ..schema import entity_key_info, entity_keys
+
+    out: list[tuple[str, str]] = []
+    for key in entity_keys():
+        try:
+            info = entity_key_info(key)
+        except KeyError:
+            continue
+        out.append((key, info.display_name))
+    return out
+
+# Where a row keeps the plan key it stands for, so the dialog never has to
+# match a file back to the plan by its display text.
+_KEY_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+class RenameEntityDialog(QDialog):
+    """Pick an entity and a new label; preview; then apply."""
+
+    def __init__(
+        self,
+        root: Path,
+        parent: Optional[QWidget] = None,
+        *,
+        entity: str = "",
+        value: str = "",
+    ) -> None:
+        super().__init__(parent)
+        self._root = Path(root)
+        self._plan: Optional[rn.RenamePlan] = None
+        self.setWindowTitle("Rename an entity")
+        self.setModal(True)
+        self.resize(760, 560)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        outer.addWidget(build_header(
+            "Rename across the dataset",
+            "Entities are renamed as <b>values</b>, not as text, so "
+            "<b>run-1</b> never touches <b>run-10</b>. References inside "
+            "<b>IntendedFor</b>, <b>*_scans.tsv</b> and "
+            "<b>participants.tsv</b> travel with the rename, and the whole "
+            "thing is one step in the Editor's history.",
+        ))
+
+        body = QWidget()
+        body.setObjectName("issue-dialog-body")
+        body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(18, 14, 18, 12)
+        bl.setSpacing(10)
+
+        chooser, cl = card()
+        form = QFormLayout()
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._entity = QComboBox()
+        self._entity.setObjectName("ent-input")
+        for key, label in entity_choices():
+            self._entity.addItem(f"{label}  ({key}-)", key)
+            try:
+                info = entity_key_info(key)
+            except KeyError:
+                continue
+            self._entity.setItemData(
+                self._entity.count() - 1,
+                f"{info.description}\n\nValue format: {info.format.name} "
+                f"({info.format.pattern})",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self._entity.currentIndexChanged.connect(self._reload_values)
+        form.addRow("Entity:", self._entity)
+
+        self._old = QComboBox()
+        self._old.setObjectName("ent-input")
+        self._old.currentIndexChanged.connect(self._refresh_plan)
+        form.addRow("Rename:", self._old)
+
+        self._new = QLineEdit()
+        self._new.setObjectName("ent-input")
+        self._new.setPlaceholderText("")
+        self._new.textChanged.connect(self._refresh_plan)
+        form.addRow("To:", self._new)
+        cl.addLayout(form)
+
+        # Only ever shown when the target name is taken. A checkbox that is
+        # always there invites somebody to tick it before they need it.
+        self._fuse = QCheckBox("Merge them into one subject")
+        self._fuse.setToolTip(
+            "Move everything under the source into the existing one, "
+            "concatenate their scans tables and fold their two "
+            "participants.tsv rows into a single row that keeps every value "
+            "either of them states."
+        )
+        self._fuse.toggled.connect(self._refresh_plan)
+        self._fuse.setVisible(False)
+        cl.addWidget(self._fuse)
+        chooser.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum,
+        )
+        bl.addWidget(chooser)
+
+        self._summary = hint("")
+        bl.addWidget(self._summary)
+
+        preview_card, pl = card("What this would do")
+        pl.addWidget(hint(
+            "Untick anything you want left alone. References inside "
+            "<b>IntendedFor</b> and <b>*_scans.tsv</b> follow the files that "
+            "actually move, so what you leave behind keeps its own name and "
+            "nothing ends up pointing at a name that does not exist."
+        ))
+        self._preview = QTreeWidget()
+        self._preview.setObjectName("rename-preview")
+        self._preview.setColumnCount(2)
+        self._preview.setHeaderLabels(["Rename", "To"])
+        self._preview.setRootIsDecorated(True)
+        self._preview.setUniformRowHeights(True)
+        self._preview.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self._preview.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self._preview.itemChanged.connect(self._on_item_checked)
+        pl.addWidget(self._preview, 1)
+
+        tools = QHBoxLayout()
+        tools.setSpacing(8)
+        for label, state in (
+            ("Select all", Qt.CheckState.Checked),
+            ("Select none", Qt.CheckState.Unchecked),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("tb-btn")
+            btn.clicked.connect(
+                lambda _c=False, st=state: self._set_all(st)
+            )
+            tools.addWidget(btn)
+        tools.addStretch(1)
+        pl.addLayout(tools)
+
+        bl.addWidget(preview_card, 1)
+        outer.addWidget(body, 1)
+
+        self._status = QLabel("")
+        self._status.setObjectName("dlg-hint")
+        self._status.setWordWrap(True)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        self._ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._ok.setObjectName("tb-btn-primary")
+        self._ok.setText("Rename")
+        self._ok.setEnabled(False)
+        buttons.accepted.connect(self._on_apply)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(build_footer_with(self._status, buttons))
+
+        self._reload_values()
+        if entity:
+            self.preset(entity, value)
+
+    # -- opening on something the user clicked ---------------------------
+
+    def preset(self, entity: str, value: str = "") -> None:
+        """Start on the entity and value the user right-clicked in the tree."""
+        index = self._entity.findData(entity)
+        if index >= 0:
+            self._entity.setCurrentIndex(index)
+            self._reload_values()
+        if value:
+            at = self._old.findText(value)
+            if at >= 0:
+                self._old.setCurrentIndex(at)
+        self._new.setFocus()
+
+    # -- state ---------------------------------------------------------
+
+    def _entity_key(self) -> str:
+        return self._entity.currentData() or "sub"
+
+    def _describe_format(self) -> None:
+        """Say what this entity's value may be, in the schema's own terms.
+
+        ``run`` is an index and ``acq`` is a label, and the difference is not
+        cosmetic: one accepts digits only, the other accepts ``+``. A single
+        placeholder would be wrong for one of them.
+        """
+        try:
+            info = entity_key_info(self._entity_key())
+        except KeyError:
+            self._new.setPlaceholderText("new value")
+            return
+        if info.format.name == "index":
+            self._new.setPlaceholderText("digits only, for example 01")
+        else:
+            self._new.setPlaceholderText("letters, digits and + only")
+        self._new.setToolTip(
+            f"{info.display_name} ({info.format.name}): {info.format.pattern}"
+        )
+
+    def _reload_values(self) -> None:
+        self._describe_format()
+        self._old.blockSignals(True)
+        self._old.clear()
+        values = rn.list_values(self._root, self._entity_key())
+        self._old.addItems(values)
+        self._old.setEnabled(bool(values))
+        self._old.blockSignals(False)
+        if not values:
+            self._summary.setText(
+                f"No <b>{self._entity_key()}-</b> entity is used in this "
+                "dataset."
+            )
+            self._preview.clear()
+        self._refresh_plan()
+
+    def _refresh_plan(self) -> None:
+        self._plan = None
+        self._ok.setEnabled(False)
+        old = self._old.currentText().strip()
+        new = self._new.text().strip()
+
+        taken = bool(new) and rn.would_fuse(self._root, self._entity_key(), new)
+        self._fuse.setVisible(taken)
+        if not taken and self._fuse.isChecked():
+            self._fuse.blockSignals(True)
+            self._fuse.setChecked(False)
+            self._fuse.blockSignals(False)
+
+        if not old or not new:
+            self._preview.clear()
+            self._status.setText("")
+            self._ok.setText("Rename")
+            if old:
+                self._summary.setText("Type the new label.")
+            return
+        try:
+            plan = rn.plan_rename(
+                self._root, self._entity_key(), old, new,
+                fuse=self._fuse.isChecked(),
+            )
+        except rn.RenameError as exc:
+            self._summary.setText(str(exc))
+            self._preview.clear()
+            self._status.setText("")
+            return
+
+        self._plan = plan
+        self._populate(plan)
+        self._ok.setText("Merge" if plan.fusion else "Rename")
+
+        if plan.conflicts:
+            self._summary.setText(
+                "Two files would end up with the same name, so this cannot be "
+                "applied as asked."
+                if plan.fusion else
+                "That name is already taken. Tick <b>Merge them into one "
+                "subject</b> to combine them, or pick a different label."
+            )
+            self._status.setText(f"{len(plan.conflicts)} conflict(s)")
+        elif plan.is_empty:
+            self._summary.setText("Nothing uses that value.")
+            self._status.setText("")
+        else:
+            self._summary.setText(
+                f"Would merge <b>{plan.entity}-{plan.old}</b> into "
+                f"<b>{plan.entity}-{plan.new}</b>. This cannot be undone by "
+                "renaming back; use the Editor's history."
+                if plan.fusion else
+                f"Would change {plan.summary()}."
+            )
+            self._refresh_selection()
+
+    # -- choosing what to rename -----------------------------------------
+
+    def _populate(self, plan: rn.RenamePlan) -> None:
+        """Draw the plan as a list the user can untick items in."""
+        self._preview.blockSignals(True)
+        self._preview.clear()
+
+        # Files, grouped by the folder they live in, because that is how a
+        # user thinks about "these three runs" and "that whole session".
+        groups: dict[str, QTreeWidgetItem] = {}
+        for src, dst in plan.file_moves:
+            folder = str(Path(plan.file_key(self._root, src)).parent)
+            parent = groups.get(folder)
+            if parent is None:
+                parent = QTreeWidgetItem(self._preview, [folder, ""])
+                parent.setFlags(
+                    parent.flags()
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsAutoTristate
+                )
+                parent.setCheckState(0, Qt.CheckState.Checked)
+                parent.setExpanded(True)
+                groups[folder] = parent
+            item = QTreeWidgetItem(parent, [src.name, dst.name])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setData(0, _KEY_ROLE, plan.file_key(self._root, src))
+
+        # What follows the files, and cannot be chosen separately: a folder
+        # that empties, the tables a merge combines, the references that
+        # travel. Shown so the plan is complete, not checkable so nobody can
+        # produce a half-applied cross-reference.
+        extras: list[tuple[str, str]] = []
+        for src, dst in plan.fused_dirs:
+            extras.append((src.name, f"merged into the existing {dst.name}"))
+        for src, dst in plan.dir_moves:
+            extras.append((src.name, dst.name))
+        for src, dst in plan.table_merges:
+            extras.append((src.name, f"appended to {dst.name}"))
+        for path, column in plan.row_folds:
+            extras.append((path.name, f"two {column} rows folded into one"))
+        for edit in plan.content_edits:
+            extras.append((edit.rel, f"{edit.hits} x {edit.what} updated"))
+        if extras:
+            follows = QTreeWidgetItem(
+                self._preview, ["Follows automatically", ""],
+            )
+            follows.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            follows.setExpanded(True)
+            for left, right in extras:
+                child = QTreeWidgetItem(follows, [left, right])
+                child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+
+        if plan.conflicts:
+            blocked = QTreeWidgetItem(
+                self._preview, ["Refused, these names would collide", ""],
+            )
+            blocked.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            blocked.setExpanded(True)
+            for text in plan.conflicts:
+                child = QTreeWidgetItem(blocked, [text, ""])
+                child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+
+        self._preview.blockSignals(False)
+
+    def _set_all(self, state: Qt.CheckState) -> None:
+        self._preview.blockSignals(True)
+        for i in range(self._preview.topLevelItemCount()):
+            top = self._preview.topLevelItem(i)
+            if not (top.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+                continue
+            top.setCheckState(0, state)
+            for j in range(top.childCount()):
+                top.child(j).setCheckState(0, state)
+        self._preview.blockSignals(False)
+        self._refresh_selection()
+
+    def _on_item_checked(self, item: QTreeWidgetItem, column: int) -> None:
+        del item, column
+        self._refresh_selection()
+
+    def selected_keys(self) -> set[str]:
+        """The file moves currently ticked, by their path within the root."""
+        out: set[str] = set()
+        for i in range(self._preview.topLevelItemCount()):
+            top = self._preview.topLevelItem(i)
+            for j in range(top.childCount()):
+                child = top.child(j)
+                key = child.data(0, _KEY_ROLE)
+                if key and child.checkState(0) == Qt.CheckState.Checked:
+                    out.add(key)
+        return out
+
+    def _refresh_selection(self) -> None:
+        """Keep the button and the footer honest about what is ticked."""
+        if self._plan is None:
+            return
+        chosen = self.selected_keys()
+        total = len(self._plan.file_moves)
+        partial = bool(total) and len(chosen) < total
+        self._ok.setEnabled(bool(chosen) and not self._plan.conflicts)
+        if partial:
+            self._status.setText(
+                f"{len(chosen)} of {total} file(s) selected"
+            )
+            # A merge is about the subject as a whole. Choosing some of its
+            # files is a move, not a merge, and the button has to say so.
+            self._ok.setText("Rename selected")
+        else:
+            self._status.setText(self._plan.summary())
+            self._ok.setText("Merge" if self._plan.fusion else "Rename")
+
+    # -- doing it ------------------------------------------------------
+
+    def _is_partial(self) -> bool:
+        if self._plan is None:
+            return False
+        return len(self.selected_keys()) < len(self._plan.file_moves)
+
+    def _on_apply(self) -> None:
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+
+        if self._plan is None:
+            return
+        if self._plan.fusion and not self._is_partial():
+            confirm = QMessageBox.question(
+                self, "Merge two subjects",
+                f"{self._plan.verb()}?\n\n"
+                "Everything under the first moves into the second, the scans "
+                "tables are combined and the two participants rows become "
+                "one. It is a single step in the Editor's history, so it can "
+                "be undone from there.",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if confirm != QMessageBox.StandardButton.Ok:
+                return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            touched, errors = rn.apply_rename(
+                self._root, self._plan, only=self.selected_keys(),
+            )
+        except rn.RenameError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Rename refused", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if errors:
+            QMessageBox.warning(
+                self, "Some steps failed",
+                f"{touched} item(s) changed, but:\n\n" + "\n".join(errors[:8]),
+            )
+        self.accept()
+
+
+__all__ = ["RenameEntityDialog"]

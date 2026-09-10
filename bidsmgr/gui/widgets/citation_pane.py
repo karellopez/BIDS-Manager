@@ -73,7 +73,7 @@ class CitationPane(QWidget):
         bl.setContentsMargins(14, 6, 14, 6)
         bl.setSpacing(8)
         self._status = QLabel("")
-        self._status.setObjectName("pane-hint")
+        self._status.setObjectName("dlg-hint")
         bl.addWidget(self._status)
         bl.addStretch(1)
         self._revert_btn = QPushButton("Revert")

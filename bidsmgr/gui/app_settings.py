@@ -54,6 +54,7 @@ KEYS = {
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
     "convert_on_existing": "convert/on_existing",    # skip|update|replace|error
     "convert_skip_residuals": "convert/skip_residuals",
+    "convert_preserve_curation": "convert/preserve_curation",
     "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
     # Scan rules (user-extensible classifier hints + series exclusions).
     # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
@@ -169,6 +170,11 @@ class AppSettings:
     # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
     # ``..._bold``). Default on: they are derived duplicates, not real images.
     convert_skip_residuals: bool = True
+    # Re-converting a subject somebody already curated in the Editor:
+    # merge the sidecars field by field rather than overwrite them, so an
+    # afternoon of annotation survives the second pass. Only bites when a
+    # file would otherwise be replaced.
+    convert_preserve_curation: bool = True
     # Re-encode EEG / iEEG recordings to EDF on convert (mne-bids format="EDF").
     convert_force_edf: bool = False
 
@@ -352,6 +358,10 @@ class AppSettings:
         out.convert_skip_residuals = _as_bool(
             s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
         )
+        out.convert_preserve_curation = _as_bool(
+            s.value(KEYS["convert_preserve_curation"]),
+            out.convert_preserve_curation,
+        )
         out.convert_force_edf = _as_bool(
             s.value(KEYS["convert_force_edf"]), out.convert_force_edf,
         )
@@ -413,6 +423,7 @@ class AppSettings:
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
             ("convert_skip_residuals",   self.convert_skip_residuals),
+            ("convert_preserve_curation", self.convert_preserve_curation),
             ("convert_force_edf",        self.convert_force_edf),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
