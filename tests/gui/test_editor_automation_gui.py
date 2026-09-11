@@ -572,6 +572,18 @@ def _dialog(qtbot, root: Path, entity: str = "", value: str = ""):
     return dlg
 
 
+def _type(dlg, text: str) -> None:
+    """Type a new label and let the plan settle.
+
+    Planning is debounced, because walking the dataset on every keystroke is
+    what froze the window on a real one. A test that sets the text and reads
+    the plan in the same breath is not testing what a user does; it is racing
+    a timer that exists on purpose.
+    """
+    dlg._new.setText(text)
+    dlg.plan_now()
+
+
 def test_the_dialog_opens_on_what_the_user_clicked(
     qtbot, two_subjects: Path,
 ) -> None:
@@ -582,7 +594,7 @@ def test_the_dialog_opens_on_what_the_user_clicked(
 
 def test_a_free_name_is_an_ordinary_rename(qtbot, two_subjects: Path) -> None:
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
-    dlg._new.setText("99")
+    _type(dlg, "99")
     # isHidden, not isVisible: an unshown dialog's children are all invisible,
     # so isVisible would pass whatever the code did.
     assert dlg._fuse.isHidden()
@@ -595,7 +607,7 @@ def test_a_taken_name_offers_the_merge_instead_of_only_refusing(
     qtbot, two_subjects: Path,
 ) -> None:
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
-    dlg._new.setText("01")
+    _type(dlg, "01")
     assert not dlg._fuse.isHidden(), "the option must be offered where it bites"
     assert not dlg._ok.isEnabled(), "not until the user says merge"
     assert "Merge them into one subject" in dlg._summary.text()
@@ -613,9 +625,9 @@ def test_the_merge_option_disappears_when_the_name_frees_up(
     """A ticked checkbox that no longer applies would silently change the
     meaning of the next Rename."""
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
-    dlg._new.setText("01")
+    _type(dlg, "01")
     dlg._fuse.setChecked(True)
-    dlg._new.setText("99")
+    _type(dlg, "99")
     assert dlg._fuse.isHidden()
     assert not dlg._fuse.isChecked()
     assert dlg._ok.text() == "Rename"
@@ -632,7 +644,7 @@ def test_the_preview_names_the_tables_a_merge_would_touch(
         "filename\nses-pre/anat/sub-01_ses-pre_T1w.nii.gz\n"
     )
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
-    dlg._new.setText("01")
+    _type(dlg, "01")
     dlg._fuse.setChecked(True)
     text = _preview_text(dlg)
     assert "merged into the existing sub-01" in text
@@ -727,7 +739,7 @@ def test_every_file_starts_selected(qtbot, three_runs: Path) -> None:
     from PyQt6.QtCore import Qt as _Qt
 
     dlg = _dialog(qtbot, three_runs, "task", "rest")
-    dlg._new.setText("resting")
+    _type(dlg, "resting")
     rows = _file_rows(dlg)
     assert len(rows) == 6
     assert all(r.checkState(0) == _Qt.CheckState.Checked for r in rows)
@@ -740,7 +752,7 @@ def test_unticking_a_file_takes_it_out_of_the_rename(
     from PyQt6.QtCore import Qt as _Qt
 
     dlg = _dialog(qtbot, three_runs, "task", "rest")
-    dlg._new.setText("resting")
+    _type(dlg, "resting")
     for row in _file_rows(dlg):
         if "run-3" in row.text(0):
             row.setCheckState(0, _Qt.CheckState.Unchecked)
@@ -758,7 +770,7 @@ def test_the_button_says_what_a_partial_rename_is(
     from PyQt6.QtCore import Qt as _Qt
 
     dlg = _dialog(qtbot, three_runs, "task", "rest")
-    dlg._new.setText("resting")
+    _type(dlg, "resting")
     assert dlg._ok.text() == "Rename"
 
     _file_rows(dlg)[0].setCheckState(0, _Qt.CheckState.Unchecked)
@@ -770,7 +782,7 @@ def test_selecting_none_disables_the_button(qtbot, three_runs: Path) -> None:
     from PyQt6.QtCore import Qt as _Qt
 
     dlg = _dialog(qtbot, three_runs, "task", "rest")
-    dlg._new.setText("resting")
+    _type(dlg, "resting")
     dlg._set_all(_Qt.CheckState.Unchecked)
     assert not dlg.selected_keys()
     assert not dlg._ok.isEnabled()
@@ -791,7 +803,7 @@ def test_what_cannot_be_chosen_separately_is_not_offered_as_a_choice(
         "filename\nses-post/anat/sub-02_ses-post_T1w.nii.gz\n"
     )
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
-    dlg._new.setText("99")
+    _type(dlg, "99")
 
     tree = dlg._preview
     follows = [
@@ -807,7 +819,7 @@ def test_what_cannot_be_chosen_separately_is_not_offered_as_a_choice(
 def test_the_rows_are_grouped_by_folder(qtbot, two_subjects: Path) -> None:
     """"These three runs" and "that whole session" are how a user thinks."""
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
-    dlg._new.setText("99")
+    _type(dlg, "99")
     tree = dlg._preview
     groups = {
         tree.topLevelItem(i).text(0)

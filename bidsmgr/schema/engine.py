@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Optional
 
-from bidsval import schema as bidsval_schema
+from ..vendor.bidsval import schema as bidsval_schema
 
 from .loader import active_version, get_schema, register_cache
 from .types import Datatype, Entity, EntityFormat, EntityInfo, FieldInfo, Suffix
@@ -300,6 +300,9 @@ def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldIn
             type=spec.type,
             item_type=spec.item_type,
             enum=tuple(spec.enum),
+            accepts=tuple(getattr(spec, "accepts", ()) or ()),
+            accepts_free_text=bool(getattr(spec, "accepts_free_text", False)),
+            accepts_na=bool(getattr(spec, "accepts_na", False)),
             level=spec.level,
             unit=spec.unit,
             required=spec.is_required,
@@ -570,6 +573,9 @@ def _sidecar_fields(
             type=spec.type,
             item_type=spec.item_type,
             enum=tuple(spec.enum),
+            accepts=tuple(getattr(spec, "accepts", ()) or ()),
+            accepts_free_text=bool(getattr(spec, "accepts_free_text", False)),
+            accepts_na=bool(getattr(spec, "accepts_na", False)),
             level=spec.level,
             unit=spec.unit,
             required=spec.is_required,

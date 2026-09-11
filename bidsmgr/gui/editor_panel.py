@@ -23,6 +23,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QMenu,
     QDialog,
     QFileDialog,
     QFrame,
@@ -38,6 +39,7 @@ from PyQt6.QtWidgets import (
 from ..editor.types import FileVerdict, Severity, ValidationReport
 from ..workers import FileReportWorker, FolderReportWorker, ReportWorker
 from . import icons
+from .combo_popup import round_menu
 from .widgets.bidsignore_pane import BidsIgnorePane
 from .widgets.citation_pane import CitationPane
 from .widgets import (
@@ -339,44 +341,64 @@ class EditorPanel(QWidget):
         self._validate_dataset_btn.clicked.connect(self.start_dataset_validation)
         lay.addWidget(self._validate_dataset_btn)
 
-        # Repairs that act on the whole dataset rather than one finding:
-        # companion files a recording is missing, and the citation file.
-        self._fixups_btn = QPushButton("  Fix ups")
-        self._fixups_btn.setObjectName("tb-btn")
-        self._fixups_btn.setToolTip(
-            "Generate the companion files recordings are missing, and write "
-            "CITATION.cff from the dataset description. Nothing is written "
-            "until you choose it, and everything can be undone."
+        # Everything that acts on the dataset as a whole, behind one menu.
+        # Four separate toolbar buttons for four rarely-used actions crowded
+        # out the ones people press constantly, and the list is going to grow.
+        # The validation buttons deliberately stay outside: they are the
+        # Editor's main verb, not a tool.
+        self._tools_btn = QPushButton("  Tools")
+        self._tools_btn.setObjectName("tb-btn")
+        icons.apply_button(self._tools_btn, "settings")
+        self._tools_btn.setToolTip(
+            "Things that act on the whole dataset: repairs, renaming, and "
+            "the dashboard. Nothing here writes until you choose it, and "
+            "everything can be undone."
         )
-        self._fixups_btn.setEnabled(False)
-        self._fixups_btn.clicked.connect(self._on_fixups)
-        lay.addWidget(self._fixups_btn)
+        self._tools_btn.setEnabled(False)
+        self._tools_menu = QMenu(self._tools_btn)
+        round_menu(self._tools_menu)
+        self._tools_btn.setMenu(self._tools_menu)
+        lay.addWidget(self._tools_btn)
 
-        # Only meaningful for a dataset this tool did not convert, so it
-        # hides itself once the dataset carries a project bundle.
-        self._adopt_btn = QPushButton("  Track changes")
-        self._adopt_btn.setObjectName("tb-btn")
-        self._adopt_btn.setToolTip(
-            "This dataset was not converted here, so there is no record "
-            "of what it looked like before you started editing. Tracking "
-            "writes that baseline into .bidsmgr/ and changes nothing "
-            "else, so edits become reversible."
+        self._dashboard_action = self._tools_menu.addAction("Dashboard")
+        self._dashboard_action.setToolTip(
+            "What is actually in this dataset: subjects, sessions, "
+            "modalities, how much of the metadata is answered, and where "
+            "the findings are."
         )
-        self._adopt_btn.setVisible(False)
-        self._adopt_btn.clicked.connect(self._on_adopt)
-        lay.addWidget(self._adopt_btn)
+        self._dashboard_action.triggered.connect(self._on_dashboard)
 
-        self._rename_btn = QPushButton("  Rename")
-        self._rename_btn.setObjectName("tb-btn")
-        self._rename_btn.setToolTip(
+        self._tools_menu.addSeparator()
+
+        self._fixups_action = self._tools_menu.addAction("Fix ups...")
+        self._fixups_action.setToolTip(
+            "Generate the companion files recordings are missing, write "
+            "CITATION.cff, move repeated metadata up, and mark what is "
+            "unanswered."
+        )
+        self._fixups_action.triggered.connect(self._on_fixups)
+
+        self._rename_action = self._tools_menu.addAction("Rename entity...")
+        self._rename_action.setToolTip(
             "Rename a subject, session, task or any other entity across "
             "the whole dataset, including the references to it inside "
             "IntendedFor, the scans tables and participants.tsv. You see "
             "the full plan before anything moves."
         )
-        self._rename_btn.setEnabled(False)
-        self._rename_btn.clicked.connect(self._on_rename)
-        lay.addWidget(self._rename_btn)
+        self._rename_action.triggered.connect(self._on_rename)
+
+        # Only meaningful for a dataset this tool did not convert, so it
+        # hides itself once the dataset carries a project bundle.
+        self._tools_menu.addSeparator()
+        self._adopt_action = self._tools_menu.addAction("Track changes")
+        self._adopt_action.setToolTip(
+            "This dataset was not converted here, so there is no record "
+            "of what it looked like before you started editing. Tracking "
+            "writes that baseline into .bidsmgr/ and changes nothing "
+            "else, so edits become reversible."
+        )
+        self._adopt_action.setVisible(False)
+        self._adopt_action.triggered.connect(self._on_adopt)
 
         # Deep-checks toggle — when on, "Validate dataset" reads NIfTI
         # headers and file contents (slower, more thorough); when off it
@@ -508,8 +530,7 @@ class EditorPanel(QWidget):
         self._hide_chips()
         # Enable dataset-level validation now that we have a root.
         self._validate_dataset_btn.setEnabled(True)
-        self._fixups_btn.setEnabled(True)
-        self._rename_btn.setEnabled(True)
+        self._tools_btn.setEnabled(True)
         self._refresh_adopt_button()
         if persist:
             from .app_settings import AppSettings
@@ -864,7 +885,20 @@ class EditorPanel(QWidget):
             self._report, severity, self.current_root(), parent=self,
         )
         dlg.file_selected.connect(self.select_file_in_tree)
+        # The Fix buttons inside the listing go to the same place the
+        # validation pane's do. They used to be drawn and connected to
+        # nothing, so pressing one did nothing at all.
+        dlg.fix_requested.connect(self._on_fix_from_dialog)
         dlg.show()
+
+    def _on_fix_from_dialog(self, path: Path, field: str) -> None:
+        """Select the file, then route to the field, in that order.
+
+        The dialog lists files other than the one on screen, so the panes have
+        to be showing the right file before the field can be focused in it.
+        """
+        self.select_file_in_tree(path)
+        self._on_fix_requested(path, field)
 
     def select_file_in_tree(self, path: Path) -> None:
         """Select ``path`` in the BIDS tree (cascades to all panes).
@@ -900,7 +934,7 @@ class EditorPanel(QWidget):
         from ..project.adopt import is_managed
 
         root = self.current_root()
-        self._adopt_btn.setVisible(
+        self._adopt_action.setVisible(
             root is not None and not is_managed(root)
         )
 
@@ -964,6 +998,21 @@ class EditorPanel(QWidget):
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _on_dashboard(self) -> None:
+        """What is in this dataset, counted.
+
+        Uses the report already in hand rather than revalidating: drawing a
+        summary is not a reason to re-run the validator over a whole dataset.
+        """
+        from .dashboard_dialog import DashboardDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dialog = DashboardDialog(root, report=self._report, parent=self)
+        dialog.file_selected.connect(self.select_file_in_tree)
+        dialog.show()
 
     def _on_fixups(self) -> None:
         """Open the dataset-wide repairs, then revalidate what changed."""

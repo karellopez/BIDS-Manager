@@ -243,11 +243,45 @@ def rename_in_name(name: str, entity: str, old: str, new: str) -> str:
 
 
 def _skip(path: Path, root: Path) -> bool:
+    """Is this path outside what a rename may touch?
+
+    No ``resolve()``. It was called on BOTH sides for every path in the
+    dataset, and ``realpath`` is a syscall per component: on a 1,262-file tree
+    that alone was 216 ms of a 294 ms plan, and the dialog re-planned on every
+    keystroke. Paths handed to this come from walking ``root``, so they are
+    already under it and a plain ``relative_to`` is both correct and free.
+    """
     try:
-        rel = path.resolve().relative_to(root.resolve())
+        rel = path.relative_to(root)
     except ValueError:
-        return True
+        try:
+            rel = path.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            return True
     return bool(rel.parts) and rel.parts[0] in _skip_top_level()
+
+
+def walk_dataset(root: Path) -> list[Path]:
+    """Every file a rename may touch, in one pass.
+
+    Prunes the out-of-scope directories AS IT DESCENDS rather than walking
+    them and filtering afterwards, so a dataset with a large ``derivatives/``
+    costs nothing to skip. This used to be three separate ``rglob`` calls over
+    the whole tree plus a per-path filter.
+    """
+    import os
+
+    skip = set(_skip_top_level())
+    out: list[Path] = []
+    root_str = str(root)
+    for dirpath, dirnames, filenames in os.walk(root_str):
+        if dirpath == root_str:
+            dirnames[:] = [d for d in dirnames if d not in skip]
+        else:
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        base = Path(dirpath)
+        out.extend(base / name for name in filenames)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -311,9 +345,8 @@ def plan_rename(
     moved_dirs = {src: dst for src, dst in plan.dir_moves}
     moved_dirs.update({src: dst for src, dst in plan.fused_dirs})
 
-    for f in sorted(root.rglob("*")):
-        if not f.is_file() or _skip(f, root):
-            continue
+    files = sorted(walk_dataset(root))
+    for f in files:
         if entity_value(f.name, entity) != old:
             continue
         parent = _remap_parent(f.parent, moved_dirs)
@@ -336,7 +369,7 @@ def plan_rename(
             continue
         plan.file_moves.append((f, target))
 
-    plan.content_edits = _plan_content_edits(root, entity, old, new)
+    plan.content_edits = _plan_content_edits(root, entity, old, new, files)
 
     if plan.fusion and entity == "sub":
         # participants.tsv must not simply have its label rewritten: that
@@ -382,11 +415,25 @@ def would_fuse(root: Path, entity: str, new: str) -> bool:
     """
     if entity not in folder_entities():
         return False
+    import os
+
     root = Path(root)
     token = f"{entity}-{new.strip()}"
-    return any(
-        d.is_dir() and not _skip(d, root) for d in root.rglob(token)
-    )
+    skip = set(_skip_top_level())
+    # A folder entity only ever names a directory at a fixed depth (subjects
+    # at the top, sessions under one), so this looks there instead of walking
+    # the whole tree, which it used to do on every keystroke.
+    if (root / token).is_dir():
+        return True
+    try:
+        for entry in os.scandir(root):
+            if not entry.is_dir() or entry.name in skip:
+                continue
+            if (Path(entry.path) / token).is_dir():
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _remap_parent(parent: Path, moved: dict[Path, Path]) -> Path:
@@ -401,23 +448,29 @@ def _remap_parent(parent: Path, moved: dict[Path, Path]) -> Path:
 
 def _plan_content_edits(
     root: Path, entity: str, old: str, new: str,
+    files: Optional[list[Path]] = None,
 ) -> list[ContentEdit]:
-    """The three places BIDS points at a filename from inside a file."""
+    """The three places BIDS points at a filename from inside a file.
+
+    Takes the file list the caller already walked. Re-globbing the tree twice
+    more here was most of what made planning slow enough to freeze the dialog.
+    """
     out: list[ContentEdit] = []
     old_token = f"{entity}-{old}"
+    files = walk_dataset(root) if files is None else files
 
-    for p in sorted(root.rglob("*.json")):
-        if _skip(p, root):
+    for p in files:
+        if p.suffix != ".json":
             continue
         data = _load_json(p)
-        if not data or "IntendedFor" in data is None:
+        if not data or "IntendedFor" not in data:
             continue
         hits = _count_intended_for(data.get("IntendedFor"), old_token)
         if hits:
             out.append(ContentEdit(p, _rel(root, p), "IntendedFor", hits))
 
-    for p in sorted(root.rglob("*_scans.tsv")):
-        if _skip(p, root):
+    for p in files:
+        if not p.name.endswith("_scans.tsv"):
             continue
         hits = _count_column(p, "filename", old_token)
         if hits:
@@ -540,6 +593,46 @@ def apply_rename(
     moved_names: Optional[set[str]] = None if whole else {
         src.name for src in chosen
     }
+    # When a SUBJECT rename moves only some of a subject's files, the result is
+    # two subjects where there was one. That is a split, and it needs more than
+    # the moves: the scans table has to follow the rows that left, the new
+    # subject needs a participants row, and the folders the files vacated have
+    # to go. Worked out before anything moves, from the moves themselves.
+    splits = (
+        _plan_splits(root, moves) if plan.entity == "sub" and not whole else []
+    )
+    # The folder renames that will ACTUALLY happen. A folder is only renamed
+    # as a unit when nothing inside it is staying, so a partial selection
+    # leaves it where it is and moves the chosen files one at a time. Deciding
+    # this once, here, is load-bearing: the scans planning below asked the
+    # PLAN which folders move, the plan said "sub-001 becomes sub-002", the
+    # apply loop then declined to move it, and every row that should have
+    # been relocated was left pointing at a file in another subject.
+    renaming_dirs: dict[Path, Path] = {
+        src: dst for src, dst in plan.dir_moves
+        if _folder_fully_selected(src, chosen, whole)
+    }
+    # Where each directory's CONTENTS end up, which is not the same list. A
+    # fused directory is not renamed (its target already exists) but its
+    # contents do land somewhere new, and anything working out a destination
+    # has to know that. Treating the two as one list tried to rename a folder
+    # onto a directory that was already there.
+    path_mapping: dict[Path, Path] = dict(renaming_dirs)
+    path_mapping.update({src: dst for src, dst in plan.fused_dirs})
+
+    # Which scans rows have to change table, worked out from the pre-move tree
+    # so the answer does not depend on what has been applied yet. A row only
+    # moves when its file leaves the scope of the table describing it; when the
+    # table travels with the file, the ordinary column rewrite covers it.
+    # ``renaming_dirs``, not ``path_mapping``: a table only travels when its
+    # own directory is renamed or when the table file is itself in the move
+    # list. A FUSED directory is never renamed, and its unselected contents,
+    # the scans table among them, stay exactly where they are.
+    row_moves = plan_scans_rows(root, moves, renaming_dirs)
+    relocating = {move.from_table for move in row_moves}
+    # Tables that are themselves being moved still need their column rewritten:
+    # their rows name the old entity and are going with them.
+    travelling = {src for src, _dst in moves if src.name.endswith("_scans.tsv")}
 
     label = (
         f"Rename {old_token} to {new_token}" if whole else
@@ -561,6 +654,12 @@ def apply_rename(
                         op, edit.path, "participant_id",
                         old_token, new_token, None,
                     )
+                elif edit.path in relocating and edit.path not in travelling:
+                    # Rows in this table are being moved to another table.
+                    # Rewriting them here would leave it pointing at files
+                    # that have left its scope, which is exactly the dangling
+                    # reference this used to produce.
+                    pass
                 else:
                     _rewrite_column(
                         op, edit.path, "filename",
@@ -575,13 +674,8 @@ def apply_rename(
         # effect, and the folder rename then collides with the directory it
         # just caused to exist.
         moved_dirs: dict[Path, Path] = {}
-        for src, dst in sorted(
-            plan.dir_moves, key=lambda m: len(m[0].parts),
-        ):
-            if not _folder_fully_selected(src, chosen, whole):
-                # Something inside is staying. Renaming the folder would drag
-                # it along under a label that is not its own.
-                continue
+        for src in sorted(renaming_dirs, key=lambda p: len(p.parts)):
+            dst = renaming_dirs[src]
             try:
                 if src.exists():
                     op.rename(src, dst)
@@ -609,12 +703,13 @@ def apply_rename(
         # Both are about the subject as a whole, so neither applies to a
         # partial move.
         if whole:
-            for src, dst in plan.table_merges:
-                try:
-                    _merge_tables(op, src, dst)
-                    touched += 1
-                except OSError as exc:
-                    errors.append(f"{_rel(root, src)}: {exc}")
+            # ``table_merges`` is NOT applied here. It used to append the
+            # source table's rows verbatim, which left them naming the subject
+            # they came from, and it ran before the general relocation and
+            # deleted the table that relocation was about to read.
+            # ``apply_scans_rows`` above moves every row correctly and deletes
+            # the table it emptied, so the special case is gone. The plan
+            # still reports the merge, because the dry run has to say it.
             for path, column in plan.row_folds:
                 try:
                     _fold_row(op, path, column, old_token, new_token)
@@ -622,13 +717,385 @@ def apply_rename(
                 except OSError as exc:
                     errors.append(f"{_rel(root, path)}: {exc}")
 
+        # Every row that has to change table, whichever level the table is at.
+        try:
+            touched += apply_scans_rows(op, row_moves)
+        except OSError as exc:
+            errors.append(f"scans tables: {exc}")
+
+        # A split: finish making the new subject a subject rather than a
+        # folder of orphaned files.
+        for split in splits:
+            try:
+                touched += _apply_split(op, root, split)
+            except OSError as exc:
+                errors.append(f"{split.target_label}: {exc}")
+
         # The source subject's folder, now that everything is out of it. Left
         # behind it would validate as an empty subject, which is worse than
         # the rename not having happened. ``_remove_if_empty`` is a no-op when
         # a partial selection left files in it.
         for d in sorted(plan.emptied, key=lambda p: len(p.parts), reverse=True):
-            _remove_if_empty(op, d)
+            _remove_if_empty(op, d, root)
+
+        # Every directory this operation could have emptied: the folders the
+        # moved files came out of, and the source of any folder rename that
+        # did not happen as a whole. An empty anat/ is not wrong exactly, but
+        # it is a folder claiming a modality is there when it is not, and an
+        # empty sub-XXX/ claims a subject.
+        candidates = list(_emptied_by(moves))
+        candidates += [src for src, _dst in plan.dir_moves]
+        candidates += [src for src, _dst in plan.fused_dirs]
+        # Deepest first, so a datatype folder goes before the session holding
+        # it, and deduplicated: every moved file contributes its ancestors.
+        for directory in sorted(
+            dict.fromkeys(candidates), key=lambda p: len(p.parts), reverse=True,
+        ):
+            if directory != root:
+                _remove_if_empty(op, directory, root)
     return touched, errors
+
+
+@dataclass
+class _Split:
+    """One subject becoming two, because only some of its files were renamed.
+
+    Renaming a few of ``sub-001``'s files to ``sub-002`` does not produce a
+    folder of loose files: it produces a SUBJECT, and a subject is more than a
+    directory. It needs its own ``*_scans.tsv`` carrying the rows that left,
+    a row in ``participants.tsv``, and the folders its files vacated have to
+    go, or the old subject keeps an empty ``anat/`` that every tool reading
+    the tree will take for a modality that is there.
+    """
+
+    source: Path            # the subject directory files are leaving
+    target: Path            # the subject directory they are joining
+    moved: list[tuple[str, str]]   # (path within source, path within target)
+
+    @property
+    def source_label(self) -> str:
+        return self.source.name
+
+    @property
+    def target_label(self) -> str:
+        return self.target.name
+
+
+def _subject_dir(root: Path, path: Path) -> Optional[Path]:
+    """The ``sub-*`` directory a path lives under, if any."""
+    try:
+        parts = Path(path).resolve().relative_to(Path(root).resolve()).parts
+    except (ValueError, OSError):
+        return None
+    return root / parts[0] if parts and parts[0].startswith("sub-") else None
+
+
+def _plan_splits(root: Path, moves: list[tuple[Path, Path]]) -> list[_Split]:
+    """Group the moves by the subject they leave and the one they join.
+
+    Only moves that actually cross subjects count. A rename that keeps every
+    file under the same subject is not a split, however partial it is.
+    """
+    grouped: dict[tuple[Path, Path], list[tuple[str, str]]] = {}
+    for src, dst in moves:
+        source = _subject_dir(root, src)
+        target = _subject_dir(root, dst)
+        if source is None or target is None or source == target:
+            continue
+        grouped.setdefault((source, target), []).append((
+            _rel(source, src), _rel(target, dst),
+        ))
+    return [
+        _Split(source=source, target=target, moved=moved)
+        for (source, target), moved in grouped.items()
+    ]
+
+
+def _owns_any_move(path: Path, splits: list[_Split]) -> bool:
+    """Is this table one a split is moving rows out of?"""
+    return any(
+        Path(path).parent == split.source for split in splits
+    )
+
+
+def _apply_split(op, root: Path, split: _Split) -> int:
+    """Give the new subject the one thing only a split can know it needs.
+
+    The scans rows are handled by :func:`apply_scans_rows` for EVERY move,
+    split or not, because a row has to follow its file whether or not the
+    subject changed. What is left here is the participants row, which exists
+    only because a new subject exists.
+    """
+    return _add_participant_row(op, root, split)
+
+
+def scans_home(path: Path, root: Path) -> Optional[Path]:
+    """The directory whose ``*_scans.tsv`` governs ``path``.
+
+    BIDS puts the table beside the thing it describes: at the SESSION level
+    when there are sessions, at the subject level when there are not, and the
+    ``filename`` column is relative to whichever of those it is. Looking only
+    at the subject level, which is what this used to do, meant that every
+    dataset with sessions was handled by accident or not at all.
+
+    Returned whether or not a table exists there yet, because a split has to
+    be able to CREATE one.
+    """
+    try:
+        parts = Path(path).resolve().relative_to(Path(root).resolve()).parts
+    except (ValueError, OSError):
+        return None
+    if not parts or not parts[0].startswith("sub-"):
+        return None
+    subject = root / parts[0]
+    if len(parts) > 1 and parts[1].startswith("ses-"):
+        session = subject / parts[1]
+        # The session level is where BIDS puts it, and where a split should
+        # create one. But a dataset that keeps a single subject-level table
+        # despite having sessions is not unheard of, and quietly ignoring the
+        # table it actually has would be worse than reading it: prefer an
+        # EXISTING table, and only fall back to the standard location when
+        # neither exists.
+        if scans_table_in(session).exists():
+            return session
+        if scans_table_in(subject).exists():
+            return subject
+        return session
+    return subject
+
+
+def scans_table_in(directory: Path) -> Path:
+    """Where this directory's scans table lives, existing or not.
+
+    Named for the directory's own entities, which is what BIDS requires:
+    ``sub-01/ses-pre`` holds ``sub-01_ses-pre_scans.tsv``.
+    """
+    try:
+        rel = directory.relative_to(directory.parents[-1])
+    except (ValueError, IndexError):
+        rel = Path(directory.name)
+    del rel
+    parts = [p for p in (directory.parent.name, directory.name)
+             if p.startswith(("sub-", "ses-"))]
+    if directory.name.startswith("sub-"):
+        parts = [directory.name]
+    stem = "_".join(dict.fromkeys(parts))
+    return directory / f"{stem}_scans.tsv"
+
+
+@dataclass
+class _RowMove:
+    """One scans row that has to follow the file it describes."""
+
+    from_table: Path
+    to_table: Path
+    old_rel: str
+    new_rel: str
+
+
+def plan_scans_rows(
+    root: Path,
+    moves: list[tuple[Path, Path]],
+    moved_dirs: dict[Path, Path],
+) -> list[_RowMove]:
+    """Which scans rows have to move, and where to.
+
+    A row only has to MOVE when the file leaves the scope of the table that
+    described it. When the table travels with the file, which is what happens
+    on a whole-subject or whole-session rename, the ordinary column rewrite
+    has already done the work and there is nothing to relocate.
+
+    Everything here is computed from the pre-move tree, so the answer does not
+    depend on what has been applied yet.
+    """
+    # A scans table is a file, and a rename can move the table itself: it
+    # carries the entity being renamed, so ``sub-001_ses-01_scans.tsv`` is in
+    # the move list beside the recordings it describes. When that happens the
+    # rows travel WITH it and only need the ordinary column rewrite. Missing
+    # this left a moved table full of rows naming the subject it came from.
+    moved_files = {src: dst for src, dst in moves}
+    out: list[_RowMove] = []
+    for src, dst in moves:
+        home = scans_home(src, root)
+        if home is None:
+            continue
+        # The destination table goes at the SAME LEVEL the source keeps its
+        # tables at. BIDS puts them beside the session, but a dataset that
+        # keeps one per subject despite having sessions is internally
+        # consistent, and a split that silently switched convention would
+        # make it inconsistent. Mirror what is there.
+        target_home = _mirror_home(home, root, dst)
+        if target_home is None:
+            continue
+        table = scans_table_in(home)
+        if table in moved_files:
+            # The table is moving too. Where does it land?
+            if moved_files[table].parent == target_home:
+                continue                 # with the file: the rewrite covers it
+            landed = moved_files[table].parent
+        else:
+            landed = _remap_parent(home, moved_dirs)
+        if landed == target_home:
+            continue                     # the table came along; nothing to do
+        out.append(_RowMove(
+            from_table=scans_table_in(landed)
+            if table not in moved_files else moved_files[table],
+            to_table=scans_table_in(target_home),
+            old_rel=_rel(home, src),
+            new_rel=_rel(target_home, dst),
+        ))
+    return out
+
+
+def _mirror_home(home: Path, root: Path, dst: Path) -> Optional[Path]:
+    """Where ``dst``'s table belongs, at the same level as ``home``.
+
+    ``home`` is either a subject directory or a session directory under one.
+    The answer is the corresponding directory on the destination's side.
+    """
+    try:
+        depth = len(home.relative_to(root).parts)
+        parts = dst.relative_to(root).parts
+    except ValueError:
+        return scans_home(dst, root)
+    if len(parts) < depth:
+        return None
+    return root.joinpath(*parts[:depth])
+
+
+def apply_scans_rows(op, row_moves: list[_RowMove]) -> int:
+    """Move each row out of its old table and into the one that now owns it.
+
+    Grouped per table so each file is read and written once, however many rows
+    changed hands.
+    """
+    from .tsv_edit import NA, TsvTable, read_table
+
+    if not row_moves:
+        return 0
+
+    leaving: dict[Path, dict[str, str]] = {}
+    for move in row_moves:
+        leaving.setdefault(move.from_table, {})[move.old_rel] = move.new_rel
+    destination: dict[Path, Path] = {
+        move.from_table: move.to_table for move in row_moves
+    }
+
+    touched = 0
+    for source_table, mapping in leaving.items():
+        target_table = destination[source_table]
+        if not source_table.exists():
+            # Nothing described these files. A subject with no scans table is
+            # allowed; inventing one here would state times nobody recorded.
+            continue
+        table = read_table(source_table)
+        if table is None or "filename" not in table.header:
+            continue
+        index = table.header.index("filename")
+
+        def cell(row: list[str]) -> str:
+            return row[index] if index < len(row) else ""
+
+        moving = [r for r in table.rows if cell(r) in mapping]
+        if not moving:
+            continue
+        staying = [r for r in table.rows if cell(r) not in mapping]
+        for row in moving:
+            row[index] = mapping[cell(row)]
+
+        existing = read_table(target_table) if target_table.exists() else None
+        if existing is None or "filename" not in (existing.header or []):
+            merged = TsvTable(header=list(table.header), rows=moving)
+        else:
+            header = list(existing.header) + [
+                c for c in table.header if c not in existing.header
+            ]
+            rows = [_widen(r, existing.header, header, NA) for r in existing.rows]
+            rows += [_widen(r, table.header, header, NA) for r in moving]
+            merged = TsvTable(header=header, rows=rows)
+
+        op.write_text(target_table, merged.to_text())
+        if staying:
+            op.write_text(
+                source_table,
+                TsvTable(header=table.header, rows=staying).to_text(),
+            )
+        else:
+            # Every row left. An empty table is not a table.
+            op.delete(source_table)
+        touched += 1
+    return touched
+
+
+def _widen(row: list[str], header: list[str], target: list[str], fill: str):
+    """One row re-expressed against a wider header."""
+    values = {name: row[i] if i < len(row) else fill
+              for i, name in enumerate(header)}
+    return [values.get(name, fill) for name in target]
+
+
+def _add_participant_row(op, root: Path, split: _Split) -> int:
+    """Give the new subject a row, copied from the one it came from.
+
+    ``participants.tsv`` has to list every subject, and a split creates one.
+    The source's values are the only information that exists about the new
+    subject, so they are copied rather than left blank, and the user can
+    correct them: a split usually means the files were a different session or
+    a different person, and only the user knows which.
+    """
+    from .tsv_edit import NA, read_table
+
+    participants = root / "participants.tsv"
+    if not participants.exists():
+        return 0
+    table = read_table(participants)
+    if table is None or "participant_id" not in table.header:
+        return 0
+    index = table.header.index("participant_id")
+
+    def cell(row: list[str]) -> str:
+        return row[index] if index < len(row) else ""
+
+    if any(cell(row) == split.target_label for row in table.rows):
+        return 0
+    source_row = next(
+        (row for row in table.rows if cell(row) == split.source_label), None,
+    )
+    new_row = list(source_row) if source_row else [NA] * len(table.header)
+    while len(new_row) < len(table.header):
+        new_row.append(NA)
+    new_row[index] = split.target_label
+    table.rows.append(new_row)
+    # Sorted, because a participants table out of order is hard to read and
+    # every tool that writes one writes it sorted.
+    table.rows.sort(key=cell)
+    op.write_text(participants, table.to_text())
+    return 1
+
+
+def _emptied_by(moves: list[tuple[Path, Path]]) -> list[Path]:
+    """Directories the moves may have emptied, deepest first.
+
+    Only the ones files actually left. Checking the whole tree would be both
+    slower and wrong: an empty folder that was already there is not this
+    operation's business.
+    """
+    seen: dict[Path, None] = {}
+    for src, _dst in moves:
+        parent = src.parent
+        while parent != parent.parent:
+            seen.setdefault(parent, None)
+            parent = parent.parent
+    return sorted(seen, key=lambda p: len(p.parts), reverse=True)
+
+
+def _within(path: Path, root: Path) -> bool:
+    """Is this inside the dataset? Pruning must never climb out of it."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return path != root
 
 
 def _folder_fully_selected(
@@ -647,32 +1114,6 @@ def _folder_fully_selected(
         if path.is_file() and path not in chosen:
             return False
     return True
-
-
-def _merge_tables(op, src: Path, dst: Path) -> None:
-    """Append ``src``'s rows to ``dst``, unioning the columns.
-
-    Used when two subjects fuse and both carry a ``*_scans.tsv``. A row is
-    never dropped and a column one table lacks is filled with ``n/a``, which
-    is what BIDS says a table says when it has nothing to say.
-    """
-    from .tsv_edit import NA, TsvTable, read_table
-
-    a, b = read_table(dst), read_table(src)
-    if a is None or b is None:
-        return
-    header = list(a.header) + [c for c in b.header if c not in a.header]
-    rows = [
-        [row[a.header.index(c)] if c in a.header
-         and a.header.index(c) < len(row) else NA for c in header]
-        for row in a.rows
-    ] + [
-        [row[b.header.index(c)] if c in b.header
-         and b.header.index(c) < len(row) else NA for c in header]
-        for row in b.rows
-    ]
-    op.write_text(dst, TsvTable(header, rows).to_text())
-    op.delete(src)
 
 
 def _fold_row(op, path: Path, column: str,
@@ -717,22 +1158,28 @@ def _fold_row(op, path: Path, column: str,
     op.write_text(path, table.to_text())
 
 
-def _remove_if_empty(op, directory: Path) -> None:
-    """Drop a directory tree that holds no files. Deepest first."""
-    if not directory.is_dir():
-        return
-    for child in sorted(
-        directory.rglob("*"), key=lambda p: len(p.parts), reverse=True,
-    ):
-        if child.is_dir():
-            try:
-                child.rmdir()
-            except OSError:
-                return          # something is still in it; leave the tree
-    try:
-        directory.rmdir()
-    except OSError:
-        log.debug("%s is not empty after the merge; left in place", directory)
+def _remove_if_empty(op, directory: Path, root: Path) -> None:
+    """Drop ``directory`` if nothing is in it, and any parent it empties.
+
+    Just asks the filesystem. ``rmdir`` fails harmlessly on a directory that
+    still holds something, which is exactly the test, so there is no need to
+    look inside first.
+
+    That matters more than it sounds: this used to ``rglob`` the whole subtree
+    of every candidate directory, and callers hand it one candidate per
+    ancestor of every moved file. On a twelve-file dataset that was 270,000
+    ``rglob`` calls and 7.8 of a 8.7 second rename.
+
+    Walking UP afterwards is what removes a session folder whose only
+    datatype folder just went.
+    """
+    current = directory
+    while current.is_dir() and _within(current, root):
+        try:
+            current.rmdir()
+        except OSError:
+            return              # still holds something; so does everything above
+        current = current.parent
 
 
 def _rewrite_intended_for(
@@ -792,9 +1239,7 @@ def list_values(root: Path, entity: str) -> list[str]:
     """Every value ``entity`` currently takes in the dataset, sorted."""
     root = Path(root)
     seen: set[str] = set()
-    for p in root.rglob("*"):
-        if not p.is_file() or _skip(p, root):
-            continue
+    for p in walk_dataset(root):
         value = entity_value(p.name, entity)
         if value:
             seen.add(value)

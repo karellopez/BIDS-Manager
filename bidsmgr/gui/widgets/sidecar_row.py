@@ -85,7 +85,9 @@ def _parse_commit_text(
     Rules:
 
     * ``number`` → ``float(text)`` (int when it has no fractional part).
-      Empty text returns ``None`` so the user can clear a value.
+      Empty text returns :data:`~bidsmgr.editor.field_values.REMOVE`, because
+      a number has no empty form: there is no numeral meaning "unanswered",
+      and ``null`` is a validation error. The caller deletes the key instead.
     * ``bool``   → handled by the combo's index, not this helper.
     * ``array`` / ``object`` → JSON-first parse; containers accepted
       because the field was already a container — the user is
@@ -98,7 +100,9 @@ def _parse_commit_text(
     text = text.strip()
     if value_kind == "number":
         if text == "":
-            return None
+            from ...editor.field_values import REMOVE
+
+            return REMOVE
         try:
             f = float(text)
         except ValueError:
@@ -320,8 +324,20 @@ class SidecarRow(QFrame):
             connect_field_widget,
             write_field_widget,
         )
+        from ...recording_meta import CURATED_SUGGESTIONS
 
-        widget = build_field_widget(self._schema_field)
+        def curated_suggestions(name: str) -> tuple:
+            return tuple(CURATED_SUGGESTIONS.get(name, ()))
+
+        # The schema's own vocabulary comes with the field. On top of it,
+        # the values BIDS Manager has seen for fields the standard leaves
+        # free text: the amplifiers, the tracers, the cap manufacturers. They
+        # were only ever offered in the metadata templates, so the same field
+        # was a dropdown in one place and a bare box in the other. They are
+        # suggestions, never a restriction: the box stays typable.
+        widget = build_field_widget(
+            self._schema_field, curated_suggestions(self._key),
+        )
         seed = raw_value
         if seed is None and value_kind not in ("missing", "null"):
             seed = value
@@ -356,11 +372,18 @@ class SidecarRow(QFrame):
             )
 
     def _on_schema_committed(self) -> None:
+        from ...editor.field_values import empty_value_for
         from .template_form import read_field_widget
 
         if self._editor is None:
             return
         value = read_field_widget(self._editor, self._schema_field)
+        if value is None:
+            # The control is empty. ``None`` would be written as JSON null,
+            # which is the one thing BIDS never accepts: measured against the
+            # validator, ``{"Authors": null}`` is an error while ``[]`` and an
+            # absent key are both clean. The empty form comes from the type.
+            value = empty_value_for(self._schema_field)
         self.value_committed.emit(self._key, value, self._value_kind)
 
     def _build_editor(
@@ -436,6 +459,10 @@ class SidecarRow(QFrame):
             return
         parsed = _parse_commit_text(edit.text(), self._value_kind)
         self.value_committed.emit(self._key, parsed, self._value_kind)
+
+    def schema_field(self):
+        """What the standard says about this field, or ``None``."""
+        return self._schema_field
 
     def _on_combo_activated(self, _index: int) -> None:
         combo = self._editor

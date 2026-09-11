@@ -39,10 +39,9 @@ from collections import OrderedDict
 from typing import Any, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QStyleOptionViewItem,
     QTreeWidget,
     QTreeWidgetItem,
 )
@@ -93,6 +92,15 @@ _LEVEL_DISPLAY_ORDER: dict[str, int] = {
 # Fields with no level info (e.g. user-added keys before validation
 # has classified them) sort after the four schema levels.
 _NO_LEVEL_RANK = 4
+
+# The requirement level in words. A colour bar needs a legend; a word does
+# not, and the BIDS view has always said it.
+_LEVEL_WORDS: dict[str, str] = {
+    "req": "required",
+    "rec": "recommended",
+    "opt": "optional",
+    "dep": "deprecated",
+}
 
 # Regex used to detect list-style keys (``[0]``, ``[1]``, …) when
 # converting the tree back into Python.
@@ -173,7 +181,8 @@ class JsonTreeView(QTreeWidget):
         super().__init__(parent)
         self.setObjectName("json-tree")
         self.setColumnCount(2)
-        self.setHeaderLabels(["Key", "Value"])
+        self.setHeaderLabels(["Key", "Value", "Required?"])
+        self.setColumnCount(3)
         self.setAlternatingRowColors(True)
         self.setIndentation(18)
         self.setUniformRowHeights(True)
@@ -237,6 +246,8 @@ class JsonTreeView(QTreeWidget):
         *,
         levels: Optional[dict[str, str]] = None,
         placeholders: Optional[list[str]] = None,
+        describe: Optional[dict[str, str]] = None,
+        units: Optional[dict[str, str]] = None,
     ) -> None:
         """Render an :class:`OrderedDict` as the tree.
 
@@ -250,6 +261,12 @@ class JsonTreeView(QTreeWidget):
         matching the BIDS form. Within each level the order from
         ``data`` is preserved. On-disk key order is held in the host
         pane's cache and is not affected by the display sort.
+
+        ``describe`` and ``units`` carry the schema's own words for each
+        field. Without them this view showed a key and a value and nothing
+        else, so the same field explained itself in the BIDS view and was
+        silent here, which made the two views feel like different tools
+        rather than two ways of reading one file.
         """
         self._suppress = True
         try:
@@ -288,6 +305,7 @@ class JsonTreeView(QTreeWidget):
                     )
                 else:
                     item = self._make_item(key, data[key])
+                self._annotate(item, key, levels, describe or {}, units or {})
                 self.addTopLevelItem(item)
                 if key in levels:
                     item.setData(0, LEVEL_ROLE, levels[key])
@@ -295,6 +313,32 @@ class JsonTreeView(QTreeWidget):
         finally:
             self._suppress = False
         self.resizeColumnToContents(0)
+
+    def _annotate(
+        self, item, key: str, levels: dict, describe: dict, units: dict,
+    ) -> None:
+        """Say what the standard asks of this field, in its own words.
+
+        The level goes in its own column rather than only into the colour of
+        the bar, because a colour is a legend away from being an answer and a
+        word is not. The unit goes beside it: a dose box that does not say
+        MBq is a box somebody will put Bq in.
+        """
+        level = levels.get(key, "")
+        unit = units.get(key, "")
+        item.setText(2, _LEVEL_WORDS.get(level, ""))
+        if unit:
+            item.setText(2, (item.text(2) + f"  ({unit})").strip())
+        description = describe.get(key, "")
+        if description:
+            tip = description
+            if level:
+                tip = f"{_LEVEL_WORDS.get(level, level)}. {tip}"
+            if unit:
+                tip = f"{tip}\n\nUnit: {unit}"
+            for column in range(self.columnCount()):
+                if not item.toolTip(column):
+                    item.setToolTip(column, tip)
 
     def set_highlights(self, severities: dict[str, str]) -> None:
         """Tint top-level rows whose key is in ``severities`` ({name: sev});

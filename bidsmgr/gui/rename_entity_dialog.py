@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -69,6 +69,12 @@ def entity_choices() -> list[tuple[str, str]]:
 # Where a row keeps the plan key it stands for, so the dialog never has to
 # match a file back to the plan by its display text.
 _KEY_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# How long to wait after the last keystroke before re-planning. Planning walks
+# the whole dataset, so doing it per keystroke froze the window on anything
+# real. Short enough to feel immediate, long enough that typing a three-digit
+# label plans once.
+_REPLAN_DELAY_MS = 300
 
 
 class RenameEntityDialog(QDialog):
@@ -133,13 +139,23 @@ class RenameEntityDialog(QDialog):
 
         self._old = QComboBox()
         self._old.setObjectName("ent-input")
-        self._old.currentIndexChanged.connect(self._refresh_plan)
+        self._old.currentIndexChanged.connect(self._on_typed)
         form.addRow("Rename:", self._old)
 
         self._new = QLineEdit()
         self._new.setObjectName("ent-input")
         self._new.setPlaceholderText("")
-        self._new.textChanged.connect(self._refresh_plan)
+        # Debounced. Planning walks the dataset, and on a real one that is
+        # hundreds of milliseconds; doing it per keystroke is what froze the
+        # window. The pause is short enough to feel immediate and long enough
+        # that typing "002" plans once instead of three times.
+        self._replan = QTimer(self)
+        self._replan.setSingleShot(True)
+        self._replan.setInterval(_REPLAN_DELAY_MS)
+        self._replan.timeout.connect(self._refresh_plan)
+        self._new.textChanged.connect(self._on_typed)
+        # Enter means "I have finished typing", so there is nothing to wait for.
+        self._new.returnPressed.connect(self.plan_now)
         form.addRow("To:", self._new)
         cl.addLayout(form)
 
@@ -152,7 +168,7 @@ class RenameEntityDialog(QDialog):
             "participants.tsv rows into a single row that keeps every value "
             "either of them states."
         )
-        self._fuse.toggled.connect(self._refresh_plan)
+        self._fuse.toggled.connect(self._refresh_plan)  # cheap: no re-walk
         self._fuse.setVisible(False)
         cl.addWidget(self._fuse)
         chooser.setSizePolicy(
@@ -237,6 +253,28 @@ class RenameEntityDialog(QDialog):
         self._new.setFocus()
 
     # -- state ---------------------------------------------------------
+
+    def _on_typed(self, _text: str = "") -> None:
+        """A keystroke. Say the plan is stale, and schedule one.
+
+        The button goes dead immediately rather than staying live against a
+        plan for the previous text, which is the way a debounce can be worse
+        than none: it would let somebody apply the rename they just finished
+        typing over.
+        """
+        self._plan = None
+        self._ok.setEnabled(False)
+        self._status.setText("working...")
+        self._replan.start()
+
+    def plan_now(self) -> None:
+        """Plan immediately instead of waiting out the debounce.
+
+        For the moments where a user has clearly finished: pressing Enter, or
+        the dialog being asked for its plan by something else.
+        """
+        self._replan.stop()
+        self._refresh_plan()
 
     def _entity_key(self) -> str:
         return self._entity.currentData() or "sub"

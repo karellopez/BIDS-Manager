@@ -16,9 +16,71 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 from .status_badge import StatusBadge
+
+
+class _Elided(QLabel):
+    """A single-line label that shortens rather than setting a width floor.
+
+    A plain QLabel reports its whole text as its MINIMUM width, so one long
+    rule id or schema path stopped the whole validation pane from being
+    narrowed. This one reports zero and elides to whatever it is given.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._full = text
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._full = text
+        super().setText(text)
+        self._elide()
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        width = self.width()
+        if width <= 0 or not self._full:
+            return
+        super().setText(
+            self.fontMetrics().elidedText(
+                self._full, Qt.TextElideMode.ElideMiddle, width,
+            )
+        )
+
+    def full_text(self) -> str:
+        return self._full
+
+
+def _caption(text: str) -> QLabel:
+    """The small uppercase word that says what the next line IS.
+
+    The parts of a finding used to run together: a rule id, a message and a
+    schema path stacked with nothing saying which was which. Naming them costs
+    one quiet line each and makes the block scannable.
+    """
+    label = QLabel(text)
+    label.setObjectName("val-caption")
+    return label
 
 
 _OBJECT_NAME_BY_SEVERITY: dict[str, str] = {
@@ -63,94 +125,98 @@ class ValMessage(QFrame):
         super().__init__(parent)
         self.setObjectName(_OBJECT_NAME_BY_SEVERITY.get(severity, "val-msg"))
 
-        h = QHBoxLayout(self)
-        h.setContentsMargins(10, 7, 10, 7)
-        h.setSpacing(10)
-
-        h.addWidget(StatusBadge(severity), 0, Qt.AlignmentFlag.AlignTop)
-
-        right = QVBoxLayout()
-        right.setSpacing(4)
-
-        # Header row: rule label + optional field chip on the right.
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        rule_l = QLabel(rule)
-        rule_l.setObjectName("val-rule")
-        head.addWidget(rule_l)
-        head.addStretch(1)
-        if field:
-            field_chip = QLabel(field)
-            field_chip.setObjectName("val-field")
-            field_chip.setToolTip(
-                "JSON field this finding refers to."
-            )
-            head.addWidget(field_chip, 0, Qt.AlignmentFlag.AlignTop)
-        right.addLayout(head)
-
-        body_widget = QHBoxLayout()
-        body_widget.setSpacing(8)
-
-        body_l = QLabel(body_html)
-        body_l.setObjectName("val-body")
-        body_l.setWordWrap(True)
-        body_l.setTextFormat(Qt.TextFormat.RichText)
-        body_widget.addWidget(body_l, 1)
-
-        # Where the standard says this, when there is a schema rule behind it.
-        # Findings BIDS Manager raises itself have none, and show none rather
-        # than an invented provenance.
         self._schema_rule = schema_rule or ""
         self._rule_id = rule or ""
         self._field_name = field or ""
-        if str(severity).lower().startswith("warn"):
-            self.setContextMenuPolicy(
-                Qt.ContextMenuPolicy.CustomContextMenu
-            )
-            self.customContextMenuRequested.connect(self._on_context_menu)
 
+        # Vertical, not horizontal. The old layout put the badge in a column
+        # beside everything else and the field chip out on the right, which
+        # set a width floor: the pane could not be squeezed narrower than
+        # "badge + widest line + chip", and the chip collided with the rule
+        # name long before that. Stacking means the only floor is the badge,
+        # and every part is free to wrap.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(5)
+
+        # Line 1: what KIND of thing this is, and what it is about.
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        head.addWidget(StatusBadge(severity), 0, Qt.AlignmentFlag.AlignVCenter)
+        rule_l = _Elided(rule)
+        rule_l.setObjectName("val-rule")
+        rule_l.setToolTip(rule)
+        head.addWidget(rule_l, 1)
         if fix_label:
             btn = QPushButton(fix_label)
             btn.setObjectName("val-fix")
             btn.clicked.connect(
                 lambda: self.fix_requested.emit(self._field_name)
             )
-            body_widget.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
+            head.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        outer.addLayout(head)
 
-        right.addLayout(body_widget)
+        # Line 2: WHICH field, on its own row rather than fighting the rule
+        # name for the same line. Labelled, because a bare word in a chip
+        # does not say what it is a chip of.
+        if field:
+            field_row = QHBoxLayout()
+            field_row.setSpacing(6)
+            field_row.addWidget(_caption("Field"))
+            chip = _Elided(field)
+            chip.setObjectName("val-field")
+            chip.setToolTip("The metadata field this finding is about.")
+            # Hugs its text rather than stretching: a chip that spans the pane
+            # reads as an input box, which it is not.
+            chip.setMaximumWidth(
+                chip.fontMetrics().horizontalAdvance(field) + 18
+            )
+            field_row.addWidget(chip, 0)
+            field_row.addStretch(1)
+            outer.addLayout(field_row)
 
-        # What the rule is FOR, when we have prose for it. The rule id lets a
-        # user CHECK the claim; this says why the claim matters, which the
-        # codes never do: TSV_ADDITIONAL_COLUMNS_UNDEFINED is precise and
-        # tells a first-time reader nothing.
+        # Line 3: what the validator actually said.
+        outer.addWidget(_caption("What is wrong"))
+        body_l = QLabel(body_html)
+        body_l.setObjectName("val-body")
+        body_l.setWordWrap(True)
+        body_l.setTextFormat(Qt.TextFormat.RichText)
+        body_l.setMinimumWidth(0)
+        outer.addWidget(body_l)
+
+        # Line 4: what the rule is FOR. The id lets a user CHECK the claim;
+        # this says why the claim matters, which the codes never do.
         from ...editor.rule_help import explain as _explain_rule
 
         help_text = _explain_rule(rule)
         if help_text:
             meaning, action = help_text
-            note = QLabel(meaning + "  " + action)
+            outer.addWidget(_caption("Why it matters"))
+            note = QLabel(meaning + " " + action)
             note.setObjectName("val-explanation")
             note.setWordWrap(True)
+            note.setMinimumWidth(0)
             note.setToolTip(meaning + "\n\n" + action)
-            right.addWidget(note)
+            outer.addWidget(note)
 
-        # Provenance last, quiet, and only when there is one: the schema path
-        # the finding came from, so the standard can be checked rather than the
-        # message trusted.
+        # Line 5: where the standard says it, when there is a schema rule
+        # behind it. Findings BIDS Manager raises itself have none, and show
+        # none rather than an invented provenance.
         if self._schema_rule:
-            prov = QLabel(self._schema_rule)
+            outer.addWidget(_caption("Defined in"))
+            prov = _Elided(self._schema_rule)
             prov.setObjectName("val-provenance")
-            prov.setWordWrap(True)
             prov.setToolTip(
                 "Where this comes from in the BIDS schema.\n"
                 "Look it up in the specification to see what the standard says."
             )
-            prov.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            right.addWidget(prov)
+            outer.addWidget(prov)
 
-        h.addLayout(right, 1)
+        if str(severity).lower().startswith("warn"):
+            self.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            self.customContextMenuRequested.connect(self._on_context_menu)
 
 
     def _on_context_menu(self, pos) -> None:

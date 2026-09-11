@@ -6,8 +6,9 @@ Three things sit to the right of a row's name, in this order:
   subject can be read without expanding it;
 * **how many findings it has**, from :data:`ISSUE_ROLE` as ``(errors,
   warnings)``, painted as small counted pills;
-* nothing at all when a file is clean and validated, apart from a quiet
-  success tick.
+* a green pill carrying a tick when a file was checked and is clean. Same
+  shape as the counts, because it answers the same question; a bare dot beside
+  two counted pills read as a different kind of thing.
 
 The counts replaced a coloured dot. A dot says "something is wrong in here"
 and stops; on a folder holding four hundred files that is the beginning of a
@@ -47,6 +48,10 @@ _BADGE_TOKEN: dict[str, str] = {
 _EDGE = 8
 # Gap between two painted chips.
 _GAP = 5
+
+# What a clean row shows instead of a number. A tick rather than a count,
+# because "clean" has no quantity.
+_TICK = "\u2713"
 
 
 def _small_font(option: QStyleOptionViewItem, delta: int = -1) -> QFont:
@@ -135,7 +140,10 @@ class BidsTreeDelegate(QStyledItemDelegate):
                         + 2 * scaled_px(5) + _GAP
                     )
         elif index.data(BADGE_ROLE) == "ok":
-            total += scaled_px(7) + _GAP
+            height = metrics.height() + scaled_px(2)
+            total += max(
+                height, metrics.horizontalAdvance(_TICK) + 2 * scaled_px(5),
+            ) + _GAP
         summary = index.data(COUNT_ROLE)
         if summary:
             total += metrics.horizontalAdvance(str(summary)) + _GAP
@@ -196,20 +204,33 @@ class BidsTreeDelegate(QStyledItemDelegate):
         self, painter: QPainter, option: QStyleOptionViewItem, index,
         right: int,
     ) -> int:
-        """A quiet dot for a row that was checked and is clean.
+        """A green pill with a tick, for a row that was checked and is clean.
 
-        Kept as a dot: "clean" has no quantity, so there is no number to
-        show, and a tick beside every valid file would shout as loudly as
-        the problems.
+        The same shape the counts use, because they answer the same question
+        and a bare dot beside two counted pills read as a different kind of
+        thing. "Clean" has no quantity, so the pill carries a tick instead of
+        a number.
         """
         if index.data(BADGE_ROLE) != "ok" or index.data(ISSUE_ROLE):
             return right
-        size = scaled_px(7)
-        centre_y = option.rect.center().y()
+        pal = CUR()
+        painter.setFont(_small_font(option))
+        metrics = painter.fontMetrics()
+        height = metrics.height() + scaled_px(2)
+        width = max(height, metrics.horizontalAdvance(_TICK) + 2 * scaled_px(5))
+        top = option.rect.center().y() - height // 2
+        rect = QRect(right - width, top, width, height)
+
+        colour = QColor(pal[_BADGE_TOKEN["ok"]])
+        fill = QColor(colour)
+        fill.setAlpha(56)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(CUR()[_BADGE_TOKEN["ok"]]))
-        painter.drawEllipse(right - size, centre_y - size // 2, size, size)
-        return right - size - _GAP
+        painter.setBrush(fill)
+        radius = height / 2.0
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(colour)
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), _TICK)
+        return rect.left() - _GAP
 
     def _paint_count(
         self, painter: QPainter, option: QStyleOptionViewItem, index,

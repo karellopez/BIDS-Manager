@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
     QHBoxLayout,
+    QComboBox,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -182,7 +183,35 @@ class FixupsDialog(QDialog):
             "participants.tsv and the scans tables.",
             hint=True,
         ))
-        self._todo_btn = QPushButton("Stamp TODO placeholders")
+
+        # How much to mark. Seeded from the same setting the post-convert
+        # chain uses, so a dataset gets the same result whichever moment the
+        # user chooses, and changing it here changes it for both.
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(8)
+        scope_row.addWidget(QLabel("Mark which fields:"))
+        self._todo_scope = QComboBox()
+        self._todo_scope.setObjectName("ent-input")
+        for value, label in (
+            ("required", "Required only"),
+            ("recommended", "Required and recommended"),
+            ("optional", "Everything declared, including optional"),
+        ):
+            self._todo_scope.addItem(label, userData=value)
+        self._todo_scope.setToolTip(
+            "The scopes nest. A field whose type admits no honest marker (a "
+            "number, a boolean, a controlled vocabulary) is left absent and "
+            "reported rather than given a value nobody stated, so a wider "
+            "scope never introduces a validation error."
+        )
+        self._todo_scope.currentIndexChanged.connect(self._on_scope_changed)
+        scope_row.addWidget(self._todo_scope, 1)
+        todo_body.addLayout(scope_row)
+
+        self._todo_unmarkable = _wrapped("", hint=True)
+        todo_body.addWidget(self._todo_unmarkable)
+
+        self._todo_btn = QPushButton("Mark missing metadata")
         self._todo_btn.setObjectName("tb-btn")
         self._todo_btn.clicked.connect(self._on_stamp_todos)
         todo_actions.addWidget(self._todo_btn)
@@ -207,10 +236,28 @@ class FixupsDialog(QDialog):
 
         self.refresh()
 
+    def _on_scope_changed(self, _index: int) -> None:
+        """Persist the choice, so Fix ups and the post-convert chain agree."""
+        from .app_settings import AppSettings
+
+        settings = AppSettings.load()
+        settings.metadata_fill_scope = (
+            self._todo_scope.currentData() or "recommended"
+        )
+        settings.save()
+
     # -- state ---------------------------------------------------------
 
     def refresh(self) -> None:
         """Re-scan the dataset and redraw every section."""
+        from .app_settings import AppSettings
+
+        scope = AppSettings.load().metadata_fill_scope
+        index = self._todo_scope.findData(scope)
+        if index >= 0 and index != self._todo_scope.currentIndex():
+            self._todo_scope.blockSignals(True)
+            self._todo_scope.setCurrentIndex(index)
+            self._todo_scope.blockSignals(False)
         self._refresh_readiness()
         self._missing = assoc.find_missing(self._root)
         self._table.setRowCount(0)
@@ -396,18 +443,32 @@ class FixupsDialog(QDialog):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             report = run_metadata(
-                self._root, fill_todos=True, write_report=False,
+                self._root, fill_todos=True,
+                fill_scope=self._todo_scope.currentData() or "recommended",
+                write_report=False,
             )
         except Exception as exc:  # noqa: BLE001 - report rather than crash
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Could not stamp placeholders", str(exc))
             return
         QApplication.restoreOverrideCursor()
-        filled = len(getattr(report, "todo_fills", []) or [])
+        filled = sum(
+            len(f.fields) for f in getattr(report, "todo_fills", []) or []
+        )
+        files = len(getattr(report, "todo_fills", []) or [])
+        unmarkable = len(getattr(report, "unmarkable", []) or [])
+        tail = (
+            f"\n\n{unmarkable} field(s) could take no placeholder and were "
+            "left absent: a number, a boolean or a controlled vocabulary has "
+            "no honest marker, and inventing one would write a value nobody "
+            "stated. They stay in the validation report."
+            if unmarkable else ""
+        )
         QMessageBox.information(
-            self, "Placeholders written",
-            f"{filled} field(s) now carry TODO. Validation will report each "
-            "one until it is answered.",
+            self, "Missing metadata marked",
+            f"{filled} field(s) across {files} file(s) now carry a "
+            f"placeholder. Validation will report each one until it is "
+            f"answered.{tail}",
         )
         self.refresh()
 

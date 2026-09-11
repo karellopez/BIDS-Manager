@@ -418,15 +418,22 @@ class SidecarFormPane(QWidget):
         # which set it is.
         self._scope_combo = QComboBox()
         self._scope_combo.setObjectName("ent-input")
-        self._scope_combo.addItem("All fields", SCOPE_ALL)
-        self._scope_combo.addItem("In file", SCOPE_PRESENT)
-        self._scope_combo.addItem("Not in file", SCOPE_ABSENT)
+        self._scope_combo.addItem("In file + declared", SCOPE_ALL)
+        self._scope_combo.addItem("Only what is in the file", SCOPE_PRESENT)
+        self._scope_combo.addItem("Only what is missing", SCOPE_ABSENT)
         self._scope_combo.setToolTip(
-            "Which fields to show.\n\n"
-            "All fields: what the file states, plus everything the standard "
-            "declares for this kind of file.\n"
-            "In file: only what the file actually states.\n"
-            "Not in file: only what is declared and missing."
+            "Which fields this form OFFERS. It changes what you see, never "
+            "what is in the file.\n\n"
+            "In file + declared: everything the file states, plus every field "
+            "the standard declares for this kind of file, so you can fill one "
+            "in without knowing its name. A declared field you do not type "
+            "into is never written.\n"
+            "Only what is in the file: exactly the keys the file holds.\n"
+            "Only what is missing: the declared fields the file does not "
+            "carry, which is the list of work.\n\n"
+            "If fields seem to appear after validating, this is why: a "
+            "validated file knows its datatype, so the form can offer what "
+            "the standard declares for it. Nothing was added to the file."
         )
         idx = self._scope_combo.findData(self._field_scope)
         if idx >= 0:
@@ -818,6 +825,16 @@ class SidecarFormPane(QWidget):
         self._typing = False
         if self._current_file is None or self._json_cache is None:
             return
+        from ...editor.field_values import REMOVE
+
+        if parsed_value is REMOVE:
+            # The field was cleared and its type has no empty form: a number
+            # and a boolean have none, and ``null`` is a validation error.
+            # Deleting the key is the only reading of "empty" that stays
+            # valid, and an absent field is reported honestly as missing.
+            if self._json_cache.pop(key, REMOVE) is not REMOVE:
+                self._after_edit()
+            return
         # No-ops don't touch the cache — keeps the dirty count honest.
         current = self._json_cache.get(key, _UNSET)
         if current == parsed_value:
@@ -901,16 +918,45 @@ class SidecarFormPane(QWidget):
     def undo(self) -> None:
         if self._json_cache is None:
             return
+        was_saved = not self.is_dirty()
         snap = self._history.undo(self._snapshot())
         if snap is not None:
             self._restore(snap)
+            self._persist_if_it_was_saved(was_saved)
 
     def redo(self) -> None:
         if self._json_cache is None:
             return
+        was_saved = not self.is_dirty()
         snap = self._history.redo(self._snapshot())
         if snap is not None:
             self._restore(snap)
+            self._persist_if_it_was_saved(was_saved)
+
+    def _persist_if_it_was_saved(self, was_saved: bool) -> None:
+        """Write the file back when the step being undone had been saved.
+
+        Without this, undoing after a save changed only the in-memory cache:
+        the file kept the value that had been written, the pane went dirty
+        again, and the user saw a button that did nothing. Half an undo is
+        worse than none, because it leaves the screen and the disk disagreeing.
+
+        The rule is the one a user already holds: what you see is what is on
+        disk, unless you have unsaved changes. So an undo from a CLEAN state
+        writes, and an undo from a dirty one does not, because in that case
+        nothing had reached the disk to revert.
+        """
+        if not was_saved or self._current_file is None:
+            return
+        try:
+            self._write_json_cache(self._current_file)
+        except OSError as exc:
+            log.warning("undo could not write %s: %s", self._current_file, exc)
+            self.save_failed.emit(self._current_file, str(exc))
+            return
+        self._original_json = copy.deepcopy(self._json_cache)
+        self._refresh_dirty_ui()
+        self.file_saved.emit(self._current_file)
 
     # ----------------------------------------------------------------------
     # View-mode toggle + tree handlers
@@ -970,11 +1016,19 @@ class SidecarFormPane(QWidget):
                 if editor is not None:
                     self._scroll_widget_visible(editor)
                     editor.setFocus(Qt.FocusReason.OtherFocusReason)
-                    # ``QLineEdit`` highlights its content on focus when
-                    # ``setFocus`` is called this way - a clear visual cue +
-                    # lets the user type to overwrite.
-                    if hasattr(editor, "selectAll"):
-                        editor.selectAll()
+                    # Highlight what is there, so the field reads as ready to
+                    # be typed over. A combo has no ``selectAll`` of its own;
+                    # its text lives in the line edit underneath, and a field
+                    # with a curated vocabulary is a combo, so asking the
+                    # outer widget silently did nothing for exactly the
+                    # fields most likely to be jumped to.
+                    target = (
+                        editor.lineEdit()
+                        if hasattr(editor, "lineEdit") and editor.lineEdit()
+                        else editor
+                    )
+                    if hasattr(target, "selectAll"):
+                        target.selectAll()
                 else:
                     # Read-only mode: still scroll so the user sees it.
                     self._scroll_widget_visible(row)
@@ -1076,12 +1130,24 @@ class SidecarFormPane(QWidget):
             data = OrderedDict(
                 (k, v) for k, v in self._json_cache.items() if k in shown
             )
+            # The same schema facts the BIDS view puts on each row, so the
+            # two views explain a field identically rather than one of them
+            # showing a bare key and a value.
+            specs = _schema_specs(verdict, self._current_file)
             self._tree_view.set_data(
                 data,
                 levels=self._levels_from_fields(fields),
                 placeholders=[
                     f.name for f in fields if f.name not in self._json_cache
                 ],
+                describe={
+                    name: spec.description
+                    for name, spec in specs.items() if spec.description
+                },
+                units={
+                    name: spec.unit
+                    for name, spec in specs.items() if spec.unit
+                },
             )
         else:
             self._rebuild_form_with_fields(fields, verdict)

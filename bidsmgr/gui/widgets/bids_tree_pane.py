@@ -45,6 +45,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
     QMenu,
+    QPushButton,
+    QHBoxLayout,
     QStackedLayout,
     QTreeWidget,
     QTreeWidgetItem,
@@ -308,7 +310,38 @@ class BidsTreePane(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addWidget(PaneHeader("BIDS dataset"))
+        # A header row rather than a bare label: a tree of any size needs a
+        # way to get back to the top, and a way to go down one level at a
+        # time. Expand-all on a real dataset produces thousands of rows and
+        # is almost never what somebody wants.
+        header_row = QWidget()
+        header_line = QHBoxLayout(header_row)
+        header_line.setContentsMargins(0, 0, 6, 0)
+        header_line.setSpacing(4)
+        header_line.addWidget(PaneHeader("BIDS dataset"), 1)
+
+        self._collapse_btn = QPushButton("\u2013")
+        self._collapse_btn.setObjectName("tb-btn-ghost")
+        self._collapse_btn.setFixedWidth(26)
+        self._collapse_btn.setToolTip(
+            "Collapse everything.\n\nBack to the top of a tree you have "
+            "opened your way into."
+        )
+        self._collapse_btn.clicked.connect(self.collapse_all)
+        header_line.addWidget(self._collapse_btn)
+
+        self._expand_btn = QPushButton("\u2304")
+        self._expand_btn.setObjectName("tb-btn-ghost")
+        self._expand_btn.setFixedWidth(26)
+        self._expand_btn.setToolTip(
+            "Open the next level.\n\nOne click opens the shallowest depth "
+            "that still has anything folded, so a deep tree is explored a "
+            "level at a time instead of all at once. Greyed out when "
+            "everything is already open."
+        )
+        self._expand_btn.clicked.connect(self.expand_next_level)
+        header_line.addWidget(self._expand_btn)
+        v.addWidget(header_row)
 
         # Stack the tree on top of an empty-state hint; we flip between
         # them as the user opens / clears a root.
@@ -353,6 +386,55 @@ class BidsTreePane(QWidget):
     def root(self) -> Optional[Path]:
         return self._root
 
+    # -- opening and closing -------------------------------------------
+
+    def collapse_all(self) -> None:
+        """Fold everything, and leave the dataset row itself open.
+
+        Collapsing the root as well would hide the whole tree behind one
+        chevron, which is not "back to the top", it is "gone".
+        """
+        self._tree.collapseAll()
+        root = self._tree.topLevelItem(0)
+        if root is not None:
+            root.setExpanded(True)
+        self._refresh_expand_button()
+
+    def expand_next_level(self) -> None:
+        """Open the shallowest depth that still has anything folded.
+
+        One level per click. Expand-all on a real dataset produces thousands
+        of rows, and the useful gesture is almost always "show me one more
+        step down".
+        """
+        depth = self._next_folded_depth()
+        if depth is None:
+            return
+        self._tree.expandToDepth(depth)
+        self._refresh_expand_button()
+
+    def _next_folded_depth(self) -> Optional[int]:
+        """The shallowest depth holding a folded folder, or ``None``."""
+        best: Optional[int] = None
+
+        def visit(item: QTreeWidgetItem, depth: int) -> None:
+            nonlocal best
+            if item.childCount() and not item.isExpanded():
+                if best is None or depth < best:
+                    best = depth
+                return          # nothing under a folded node is reachable yet
+            for i in range(item.childCount()):
+                visit(item.child(i), depth + 1)
+
+        for i in range(self._tree.topLevelItemCount()):
+            visit(self._tree.topLevelItem(i), 0)
+        return best
+
+    def _refresh_expand_button(self) -> None:
+        """Grey out Expand when there is nothing left folded."""
+        if hasattr(self, "_expand_btn"):
+            self._expand_btn.setEnabled(self._next_folded_depth() is not None)
+
     def set_root(self, path: Optional[Path]) -> None:
         """Switch the tree to a new BIDS root (or clear it with ``None``).
 
@@ -391,6 +473,7 @@ class BidsTreePane(QWidget):
         dirs = self._populate(path)
         self._watch(dirs)
         self._tree.expandToDepth(2)
+        self._refresh_expand_button()
         self._stack.setCurrentIndex(1)
 
     def refresh(self) -> None:

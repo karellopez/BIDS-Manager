@@ -521,7 +521,12 @@ def test_a_partial_subject_rename_moves_files_and_keeps_the_folder(
 
 def test_half_a_subject_is_still_the_old_participant(tmp_path: Path) -> None:
     """participants.tsv describes a person. Moving three of their files does
-    not rename them."""
+    not RENAME them: sub-01 is still sub-01 and keeps its values.
+
+    It does gain a neighbour, because the move created a second subject and
+    the table has to list every subject that exists. That is the split, and
+    :mod:`tests.unit.test_rename_split` covers what the new row carries.
+    """
     root = _runs(tmp_path)
     (root / "participants.tsv").write_text(
         "participant_id\tage\nsub-01\t31\n"
@@ -529,9 +534,13 @@ def test_half_a_subject_is_still_the_old_participant(tmp_path: Path) -> None:
     plan = rn.plan_rename(root, "sub", "01", "02")
     chosen = {k for k in plan.file_keys(root) if "run-1_" in k}
     rn.apply_rename(root, plan, only=chosen)
-    assert read_table(root / "participants.tsv").column("participant_id") == [
-        "sub-01"
-    ]
+
+    table = read_table(root / "participants.tsv")
+    ids = table.column("participant_id")
+    assert "sub-01" in ids, "the original participant must not be renamed away"
+    assert ids == ["sub-01", "sub-02"], "and the new subject must be listed"
+    rows = {r[0]: dict(zip(table.header, r)) for r in table.rows}
+    assert rows["sub-01"]["age"] == "31"
 
 
 def test_selecting_everything_is_the_same_as_selecting_nothing_special(

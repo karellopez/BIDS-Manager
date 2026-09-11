@@ -623,9 +623,45 @@ class SettingsDialog(QDialog):
         )
         pv.addWidget(self._post_run_metadata)
         self._post_metadata_fill_todos = QCheckBox(
-            "Insert 'TODO' placeholders for missing recommended fields"
+            "Mark missing metadata with a placeholder"
+        )
+        self._post_metadata_fill_todos.setToolTip(
+            "Writes a placeholder into every declared field the file does "
+            "not carry, so the gap is visible in the file and reported by "
+            "validation instead of being an absence nobody notices. Existing "
+            "values are never overwritten."
         )
         pv.addWidget(_indented(self._post_metadata_fill_todos))
+
+        # How much to mark. Separate from whether, because "mark the required
+        # fields" and "mark everything the standard declares" are different
+        # amounts of work and different amounts of noise.
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(8)
+        scope_label = QLabel("Mark which fields:")
+        self._metadata_fill_scope = QComboBox()
+        for value, label in (
+            ("required", "Required only"),
+            ("recommended", "Required and recommended (default)"),
+            ("optional", "Everything declared, including optional"),
+        ):
+            self._metadata_fill_scope.addItem(label, userData=value)
+        self._metadata_fill_scope.setToolTip(
+            "The scopes nest. A field whose type admits no honest marker (a "
+            "number, a boolean, a controlled vocabulary) is left absent and "
+            "reported rather than given a value nobody stated, so a wider "
+            "scope never introduces a validation error.\n\n"
+            "Used by the post-convert chain and by the Editor's Fix ups, so "
+            "both do the same thing."
+        )
+        scope_row.addWidget(scope_label)
+        scope_row.addWidget(self._metadata_fill_scope, 1)
+        scope_holder = QWidget()
+        scope_holder.setLayout(scope_row)
+        pv.addWidget(_indented(scope_holder, indent=40))
+        self._post_metadata_fill_todos.toggled.connect(
+            self._metadata_fill_scope.setEnabled
+        )
 
         # Dataset repairs. They run between metadata and validation, and they
         # are the same code the Editor's Fix ups button runs, so a dataset
@@ -879,6 +915,9 @@ class SettingsDialog(QDialog):
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
         self._post_metadata_fill_todos.setChecked(s.post_metadata_fill_todos)
+        idx = self._metadata_fill_scope.findData(s.metadata_fill_scope)
+        self._metadata_fill_scope.setCurrentIndex(idx if idx >= 0 else 1)
+        self._metadata_fill_scope.setEnabled(s.post_metadata_fill_todos)
         self._post_fixup_companions.setChecked(s.post_fixup_companions)
         self._post_fixup_citation.setChecked(s.post_fixup_citation)
         self._post_run_validate.setChecked(s.post_run_validate)
@@ -960,6 +999,9 @@ class SettingsDialog(QDialog):
 
         s.post_run_metadata = self._post_run_metadata.isChecked()
         s.post_metadata_fill_todos = self._post_metadata_fill_todos.isChecked()
+        s.metadata_fill_scope = (
+            self._metadata_fill_scope.currentData() or "recommended"
+        )
         s.post_fixup_companions = self._post_fixup_companions.isChecked()
         s.post_fixup_citation = self._post_fixup_citation.isChecked()
         s.post_run_validate = self._post_run_validate.isChecked()

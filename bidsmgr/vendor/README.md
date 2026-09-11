@@ -22,8 +22,35 @@ clean. The current motivation list:
 * **Small surface, well-defined behaviour.** The vendored code is
   small enough to read end to end and stable enough that we are
   comfortable owning future maintenance.
+* **We are the upstream, and the round trip is the cost.** A package
+  written for this tool whose fixes cannot be tested from this tool
+  without publishing a release first.
 
 ## Currently vendored
+
+### `bidsmgr.vendor.bidsval`
+
+**Upstream:** `bidsval` (`karellopez/bidsval`, MIT), vendored at 0.1.1.
+
+**Why:** it is BIDS Manager's own package and the single implementation of two
+things the tool rests on: validation, and the interpretation of the BIDS
+schema. `bidsmgr/schema/` is a thin adapter over `bidsval.schema` (CLAUDE.md
+guard 8) and `bidsmgr/editor/validator.py` a thin adapter over
+`bidsval.validate`, precisely so neither fact is derived twice. Depending on it
+through PyPI made that arrangement expensive: changing a schema rule meant
+editing bidsval, bumping, building, uploading, and only then testing. In tree
+it is one edit and one test run.
+
+**What changed during the copy:** nothing. The package imports itself
+relatively throughout, so it works unmodified at a new path, and it needs only
+`bidsschematools`, `pydantic`, `nibabel`, `pandas`, `mne` and `pyyaml`, all
+already shipped.
+
+**Keeping it in step:** `bidsval/` still exists as a standalone repository. When
+it changes there the copy here is refreshed wholesale rather than patched.
+`tests/unit/test_vendored_bidsval.py` fails if anything reaches the installed
+package instead of this one.
+
 
 ### `bidsmgr.vendor.bidsphysio`
 

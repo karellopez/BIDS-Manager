@@ -1343,3 +1343,38 @@ QTreeWidget#rename-preview::indicator:indeterminate {
     background: $accent_bg;
     border: 1px solid $accent;
 }
+
+/* ---------------------------------------------------------------------------
+ * Dashboard
+ *
+ * A headline number and its caption, and the chips saying which of the files
+ * that describe a dataset are present. Sizes in px so they follow the font
+ * scale, like everything else painted rather than laid out.
+ * ------------------------------------------------------------------------ */
+QLabel#stat-value-text { color: $text;    font-size: 20px; font-weight: 600; }
+QLabel#stat-value-err  { color: $error;   font-size: 20px; font-weight: 600; }
+QLabel#stat-value-warn { color: $warning; font-size: 20px; font-weight: 600; }
+QLabel#stat-caption {
+    color: $dim;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+QLabel#dash-have {
+    color: $success;
+    background: $success_bg;
+    border: 1px solid $success_border;
+    border-radius: 8px;
+    padding: 2px 8px;
+    font-size: 10px;
+}
+
+/* The small word that says what the next line of a finding IS. The parts used
+   to run together: a rule id, a message and a schema path stacked with nothing
+   telling them apart. */
+QLabel#val-caption {
+    color: $dim;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+}

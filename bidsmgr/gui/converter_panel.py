@@ -1795,6 +1795,7 @@ class ConverterPanel(QWidget):
             # name (i.e. the dataset slug) when ``name`` is None.
             name=None,
             fill_todos=s.post_metadata_fill_todos,
+            fill_scope=s.metadata_fill_scope,
             generate_companions=s.post_fixup_companions,
             write_citation_file=s.post_fixup_citation,
             parent=self,

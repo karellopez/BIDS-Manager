@@ -50,6 +50,13 @@ class _FileCard(QFrame):
     """One file's findings: path button header + stacked ValMessages."""
 
     activated = pyqtSignal(Path)
+    # A Fix button inside one of this card's messages. Carries the file as
+    # well as the field, because the dialog lists many files and the button
+    # alone cannot say which one it belongs to.
+    #
+    # This was the defect: the button was drawn whenever the finding had a
+    # fix label, and connected to nothing, so it did nothing at all.
+    fix_requested = pyqtSignal(Path, str)
 
     def __init__(
         self,
@@ -115,14 +122,19 @@ class _FileCard(QFrame):
                     if isinstance(issue.severity, Severity)
                     else str(issue.severity)
                 )
-                v.addWidget(ValMessage(
+                message = ValMessage(
                     severity=sev_str,
                     rule=issue.rule_id,
                     body_html=issue.message,
                     fix_label=issue.fix_label,
                     field=issue.field,
                     schema_rule=issue.schema_rule,
-                ))
+                )
+                message.fix_requested.connect(
+                    lambda field, p=self._path:
+                        self.fix_requested.emit(p, field)
+                )
+                v.addWidget(message)
 
 
 class EditorIssuesDialog(QDialog):
@@ -138,6 +150,10 @@ class EditorIssuesDialog(QDialog):
     """
 
     file_selected = pyqtSignal(Path)
+    # (file, field) when a Fix button inside the listing is pressed. The panel
+    # decides where that lands, because it owns the panes; this dialog only
+    # knows which file and which field the button belonged to.
+    fix_requested = pyqtSignal(Path, str)
 
     def __init__(
         self,
@@ -228,6 +244,7 @@ class EditorIssuesDialog(QDialog):
                     suffix=f.suffix,
                 )
                 card.activated.connect(self._on_card_activated)
+                card.fix_requested.connect(self._on_fix_requested)
                 bl.addWidget(card)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
@@ -301,6 +318,15 @@ class EditorIssuesDialog(QDialog):
         if rel_or_abs.is_absolute():
             return rel_or_abs
         return (self._bids_root / rel_or_abs).resolve()
+
+    def _on_fix_requested(self, path: Path, field: str) -> None:
+        """Take the user to where the finding is actually edited.
+
+        Same destination the validation pane's Fix button reaches, because it
+        is the same question: the panel owns the routing, and this dialog only
+        has to say which file and which field.
+        """
+        self.fix_requested.emit(path, field)
 
     def _on_card_activated(self, path: Path) -> None:
         self.file_selected.emit(path)

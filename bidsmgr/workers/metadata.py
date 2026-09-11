@@ -46,6 +46,7 @@ class MetadataWorker(QThread):
         inventory_tsv: Optional[Path] = None,
         name: Optional[str] = None,
         fill_todos: bool = False,
+        fill_scope: str = "",
         generate_companions: bool = False,
         write_citation_file: bool = False,
         datasets=None,
@@ -60,6 +61,7 @@ class MetadataWorker(QThread):
         self._inventory_tsv = Path(inventory_tsv) if inventory_tsv else None
         self._name = name
         self._fill_todos = fill_todos
+        self._fill_scope = fill_scope
         self._generate_companions = generate_companions
         self._write_citation_file = write_citation_file
 
@@ -80,6 +82,7 @@ class MetadataWorker(QThread):
                 inventory_tsv=self._inventory_tsv,
                 name=self._name,
                 fill_todos=self._fill_todos,
+                fill_scope=self._fill_scope or None,
                 generate_companions=self._generate_companions,
                 write_citation_file=self._write_citation_file,
                 datasets=self._datasets,

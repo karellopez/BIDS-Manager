@@ -55,8 +55,13 @@ def test_parse_commit_number_ints_and_floats() -> None:
     assert _parse_commit_text("3", "number") == 3
     assert _parse_commit_text("3.0", "number") == 3.0
     assert _parse_commit_text("1.5e2", "number") == 150.0
-    # Empty number-field text means "clear" → None so we can write null.
-    assert _parse_commit_text("", "number") is None
+    # Empty number-field text means "clear". It returns REMOVE, not None,
+    # because a number has NO empty form: there is no numeral meaning
+    # "unanswered", and writing JSON null is a validation error. The caller
+    # deletes the key instead. See bidsmgr.editor.field_values.
+    from bidsmgr.editor.field_values import REMOVE
+
+    assert _parse_commit_text("", "number") is REMOVE
 
 
 def test_parse_commit_json_literal_first_string_fallback() -> None:

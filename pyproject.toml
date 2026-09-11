@@ -49,17 +49,14 @@ dependencies = [
     "bidsschematools>=1.0,<=1.2.2",
     "ancpbids>=0.3,<=0.3.1",
 
-    # BIDS validation engine, and the interpreter of the BIDS schema. The Editor
-    # validator + ``bidsmgr-validate`` delegate to bidsval (schema-driven,
-    # pydantic-typed, false-positive-verified against the reference validator),
-    # and since 0.1.0 ``bidsmgr/schema/`` reads which sidecar fields the standard
-    # declares from ``bidsval.schema`` rather than deriving them again here (see
-    # CLAUDE.md guard 8). It pulls only deps BIDS Manager already ships
-    # (bidsschematools, pydantic, nibabel, pandas, mne), so the footprint barely
-    # changes. 0.1.0 is the first release carrying that namespace; 0.1.1 adds
-    # the INVALID_LOCATION check for a well-named file in a folder that is not
-    # a datatype, which the Editor needs to stop painting such files green.
-    "bidsval>=0.1.1,<0.2.0",
+    # bidsval, the BIDS validation engine and the interpreter of the schema,
+    # is VENDORED at ``bidsmgr/vendor/bidsval`` rather than depended on. It is
+    # the single implementation of every schema fact BIDS Manager acts on
+    # (guard 8: which fields apply, at what level, of what type) as well as of
+    # validation itself. Depending on it through PyPI meant a schema fix could
+    # not be tested from here without publishing a release first. It pulls only
+    # deps BIDS Manager already ships, so vendoring costs nothing new. See
+    # ``bidsmgr/vendor/README.md``.
 
     # GUI.
     "pyqt6>=6.5,<=6.11.0",
@@ -166,6 +163,7 @@ include = ["bidsmgr*"]
 "bidsmgr.schema"            = ["bundled/**/*"]
 "bidsmgr.vendor"            = ["README.md"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
+"bidsmgr.vendor.bidsval"    = ["LICENSE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

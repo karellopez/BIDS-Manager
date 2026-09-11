@@ -64,6 +64,7 @@ KEYS = {
     "post_run_metadata":  "post_convert/run_metadata",
     "post_run_validate":  "post_convert/run_validate",
     "post_metadata_fill_todos": "post_convert/metadata_fill_todos",
+    "metadata_fill_scope": "post_convert/metadata_fill_scope",
     "post_validate_strict": "post_convert/validate_strict",
     "post_validate_html": "post_convert/validate_html",
     "post_fixup_companions": "post_convert/fixup_companions",
@@ -183,6 +184,11 @@ class AppSettings:
     post_run_metadata: bool = True
     post_run_validate: bool = True
     post_metadata_fill_todos: bool = True
+    # How much of what the standard declares the placeholder fill marks.
+    # required | recommended | optional, nested. Used by the post-convert
+    # chain AND by the Editor's Fix ups, so the two cannot disagree about
+    # what the user asked for.
+    metadata_fill_scope: str = "recommended"
     post_validate_strict: bool = True
     post_validate_html: bool = True
     # Dataset repairs, run after metadata and before validation. Both default
@@ -372,6 +378,13 @@ class AppSettings:
                                          out.post_run_validate)
         out.post_metadata_fill_todos = _as_bool(s.value(KEYS["post_metadata_fill_todos"]),
                                                 out.post_metadata_fill_todos)
+        out.metadata_fill_scope = _as_str(
+            s.value(KEYS["metadata_fill_scope"]), out.metadata_fill_scope,
+        )
+        if out.metadata_fill_scope not in (
+            "required", "recommended", "optional",
+        ):
+            out.metadata_fill_scope = "recommended"
         out.post_validate_strict = _as_bool(s.value(KEYS["post_validate_strict"]),
                                             out.post_validate_strict)
         out.post_validate_html = _as_bool(s.value(KEYS["post_validate_html"]),
@@ -428,6 +441,7 @@ class AppSettings:
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
+            ("metadata_fill_scope",      self.metadata_fill_scope),
             ("post_validate_strict",     self.post_validate_strict),
             ("post_validate_html",       self.post_validate_html),
             ("post_fixup_companions",    self.post_fixup_companions),

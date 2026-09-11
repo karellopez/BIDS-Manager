@@ -46,6 +46,7 @@ def run_metadata_cli(
     references_and_links: Optional[list[str]] = None,
     dataset_doi: Optional[str] = None,
     fill_todos: bool = False,
+    fill_scope: str = "",
     write_report: bool = True,
     generate_companions: bool = False,
     write_citation_file: bool = False,
@@ -104,6 +105,7 @@ def run_metadata_cli(
                 inventory_tsv=inventory_tsv,
                 dataset_meta=meta,
                 fill_todos=fill_todos,
+                fill_scope=fill_scope or None,
                 write_report=write_report,
                 participants_file=participants_file,
                 phenotype_files=phenotype_files,
@@ -329,12 +331,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--fill-todos",
         action="store_true",
         help=(
-            "For every sidecar with a missing required or recommended "
-            "field (and for missing recommended fields of "
-            "dataset_description.json), write the literal string "
-            "\"TODO\" as the value. Existing values are never "
-            "overwritten. Lets you sweep through the BIDS root and fill "
-            "the placeholders by hand later."
+            "Mark the gaps. For every sidecar field the standard declares "
+            "and the file does not carry, write a placeholder the field can "
+            "legally hold, so the gap is visible in the file and reported by "
+            "validation instead of being an absence nobody notices. Existing "
+            "values are NEVER overwritten. Same as --fill-scope recommended."
+        ),
+    )
+    parser.add_argument(
+        "--fill-scope",
+        choices=("required", "recommended", "optional"),
+        default="",
+        metavar="LEVEL",
+        help=(
+            "How much of what the standard declares to mark. The scopes "
+            "nest: 'required' is the floor, 'recommended' (the default) adds "
+            "what analyses usually need, 'optional' adds everything else. "
+            "Deprecated fields are never marked. A field whose type admits "
+            "no honest marker (a number, a boolean, a real vocabulary) is "
+            "left absent and reported, rather than given a value nobody "
+            "stated."
         ),
     )
     parser.add_argument(
@@ -411,7 +427,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         ethics_approvals=args.ethics_approvals,
         references_and_links=args.references_and_links,
         dataset_doi=args.dataset_doi,
-        fill_todos=args.fill_todos,
+        fill_todos=args.fill_todos or bool(args.fill_scope),
+        fill_scope=args.fill_scope,
         generate_companions=args.generate_companions,
         write_citation_file=args.write_citation,
         write_report=args.write_report,
