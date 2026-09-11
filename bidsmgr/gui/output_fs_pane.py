@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from PyQt6 import sip
 from PyQt6.QtCore import (
     QFileSystemWatcher,
     QObject,
@@ -152,7 +153,18 @@ class _ScanRunnable(QRunnable):
         except Exception:  # pragma: no cover — defensive
             log.exception("output tree scan failed for %s", self._root)
             result = None
-        self._signals.done.emit(self._generation, result)
+        # The pane owns the signals object, and a directory walk takes long
+        # enough that the pane can be torn down while this runs. Emitting into
+        # a deleted QObject raises on the WORKER thread, where nothing catches
+        # it. Checked first because that is cheap and covers almost every
+        # case, and caught as well because the check and the emit are two
+        # steps and the object can die between them.
+        if sip.isdeleted(self._signals):
+            return
+        try:
+            self._signals.done.emit(self._generation, result)
+        except RuntimeError:
+            log.debug("output pane went away before its scan finished")
 
 
 def _walk_dir(
@@ -340,6 +352,38 @@ class OutputFsPane(QWidget):
         QThreadPool.globalInstance().start(runnable)
 
     def _on_scan_done(
+        self,
+        generation: int,
+        result: Optional[_ScanResult],
+    ) -> None:
+        """Render a finished scan, or drop it if the pane has gone.
+
+        The scan runs on the global thread pool and comes back through a
+        queued connection, so the emit is already sitting in the event loop
+        when the pane is torn down. Delivering it then reaches a Python
+        wrapper whose C++ tree is gone, and touching it raises
+        ``RuntimeError: wrapped C/C++ object ... has been deleted``. The
+        generation guard does not cover this: the generation is still current,
+        the widget is just no longer there.
+
+        Both a check AND a catch, and the catch is not belt-and-braces. The
+        C++ tree is destroyed when its parent panel is, and the parent can be
+        collected by Python's CYCLIC garbage collector, which runs on
+        allocation, which means between any two statements in here. A check at
+        the top is therefore necessary and provably not sufficient. That race
+        is what made this look like a flake: it landed on whichever test
+        happened to be running when the collector got round to the panel.
+        """
+        if sip.isdeleted(self) or sip.isdeleted(self._tree):
+            return
+        try:
+            self._render_scan(generation, result)
+        except RuntimeError:
+            if not (sip.isdeleted(self) or sip.isdeleted(self._tree)):
+                raise      # a real error, not a teardown; do not swallow it
+            log.debug("output pane went away while rendering its scan")
+
+    def _render_scan(
         self,
         generation: int,
         result: Optional[_ScanResult],

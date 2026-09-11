@@ -139,6 +139,15 @@ class ValMessage(QFrame):
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(5)
 
+        # A finding with no rule id, no field and no schema path is a plain
+        # sentence: the scanner notes the Converter shows are exactly that.
+        # Captioning a single sentence with "WHAT IS WRONG" adds a row and
+        # says nothing, and the empty rule slot adds another. Those messages
+        # get a one-line treatment instead.
+        if not (rule or field or self._schema_rule):
+            self._build_plain(outer, severity, body_html, fix_label)
+            return
+
         # Line 1: what KIND of thing this is, and what it is about.
         head = QHBoxLayout()
         head.setSpacing(6)
@@ -163,13 +172,16 @@ class ValMessage(QFrame):
             field_row = QHBoxLayout()
             field_row.setSpacing(6)
             field_row.addWidget(_caption("Field"))
-            chip = _Elided(field)
+            chip = QLabel(field)
             chip.setObjectName("val-field")
             chip.setToolTip("The metadata field this finding is about.")
-            # Hugs its text rather than stretching: a chip that spans the pane
-            # reads as an input box, which it is not.
-            chip.setMaximumWidth(
-                chip.fontMetrics().horizontalAdvance(field) + 18
+            # A plain label with a Maximum policy: it hugs its text and can be
+            # squeezed, but is never given zero width. ``_Elided`` here took
+            # an Ignored policy and a maximum width, and between them the chip
+            # collapsed to nothing: the caption showed and the field name did
+            # not.
+            chip.setSizePolicy(
+                QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred,
             )
             field_row.addWidget(chip, 0)
             field_row.addStretch(1)
@@ -218,6 +230,44 @@ class ValMessage(QFrame):
             )
             self.customContextMenuRequested.connect(self._on_context_menu)
 
+
+    def _build_plain(
+        self,
+        outer: QVBoxLayout,
+        severity: str,
+        body_html: str,
+        fix_label: Optional[str],
+    ) -> None:
+        """Badge and sentence on one line, for findings with no structure.
+
+        No caption, no rule row, no provenance: there is nothing to tell
+        apart. Tighter margins too, because these stack several-per-card in
+        the Converter's chip dialogs and the padding was most of the height.
+
+        No accept-this-warning menu either. An acceptance is recorded against
+        a rule id, and these have none.
+        """
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(4)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(
+            StatusBadge(severity), 0, Qt.AlignmentFlag.AlignTop,
+        )
+        body = QLabel(body_html)
+        body.setObjectName("val-body")
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setMinimumWidth(0)
+        row.addWidget(body, 1)
+        if fix_label:
+            btn = QPushButton(fix_label)
+            btn.setObjectName("val-fix")
+            btn.clicked.connect(
+                lambda: self.fix_requested.emit(self._field_name)
+            )
+            row.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
+        outer.addLayout(row)
 
     def _on_context_menu(self, pos) -> None:
         from PyQt6.QtWidgets import QMenu

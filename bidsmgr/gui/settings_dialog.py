@@ -685,13 +685,36 @@ class SettingsDialog(QDialog):
             "Write CITATION.cff from the dataset description"
         )
         self._post_fixup_citation.setToolTip(
-            "BIDS treats the citation file as the single source for Authors, "
-            "License, HowToAcknowledge and ReferencesAndLinks, so those move "
-            "out of dataset_description.json rather than being duplicated. "
-            "Leaving them in both is an error, not a duplicate. An existing "
-            "CITATION.cff is never overwritten."
+            "Writes CITATION.cff from what dataset_description.json already "
+            "says. This runs without asking, so here is exactly what it "
+            "changes.\n\n"
+            "MOVED: Authors. It is taken OUT of dataset_description.json, "
+            "because stating authorship in both files is an error "
+            "(AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE).\n\n"
+            "COPIED and KEPT: License, HowToAcknowledge and "
+            "ReferencesAndLinks. They are written into the citation file and "
+            "left where they are, so a value you typed does not disappear "
+            "from the file you typed it into. The validator would rather "
+            "each lived in one place only and says so as a warning "
+            "(SINGLE_SOURCE_CITATION_FIELDS). That warning is the cost of "
+            "not deleting your answer.\n\n"
+            "An existing CITATION.cff is never overwritten."
         )
+        # Said on the face of the setting too, not only on hover. This one
+        # runs unattended at the end of a conversion, and a fix up that
+        # removes a field a user typed cannot announce itself in a tooltip.
         pv.addWidget(_indented(self._post_fixup_citation))
+        citation_note = QLabel(
+            "Moves <b>Authors</b> out of dataset_description.json (stating it "
+            "in both is an error). License, HowToAcknowledge and "
+            "ReferencesAndLinks are copied and kept."
+        )
+        citation_note.setObjectName("dlg-hint")
+        citation_note.setWordWrap(True)
+        # Indented by margin rather than by ``_indented``, whose trailing
+        # stretch would stop a wrapping label from using the width.
+        citation_note.setContentsMargins(44, 0, 0, 4)
+        pv.addWidget(citation_note)
 
         self._post_run_validate = QCheckBox(
             "Validate dataset (bidsval schema-driven validation)"

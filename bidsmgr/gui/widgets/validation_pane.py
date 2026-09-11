@@ -38,6 +38,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QComboBox,
     QSizePolicy,
     QFrame,
     QHBoxLayout,
@@ -63,16 +64,32 @@ from .val_message import ValMessage
 log = logging.getLogger(__name__)
 
 
-def _count_chip_kind(issues: list[Issue]) -> str:
-    """Pick the :class:`Chip` ``kind`` for a section count chip.
+def _count_chips(issues: list[Issue]) -> list[Chip]:
+    """One chip per severity present, rather than one chip for the total.
 
-    Worst severity wins — one ``err`` in a section flips its chip red.
+    "5" in amber, for three warnings and two errors, is wrong twice: it hides
+    that there are errors at all, and it hides how many. Two chips say both,
+    in the colours the rest of the interface already uses. A section with only
+    one severity still shows one chip, so nothing gets noisier than it was.
+
+    Errors first, because that is the order they should be read in.
     """
-    if any(i.severity is Severity.ERR for i in issues):
-        return "err"
-    if any(i.severity is Severity.WARN for i in issues):
-        return "warn"
-    return ""  # default (neutral) chip
+    errors = sum(1 for i in issues if i.severity is Severity.ERR)
+    warnings = sum(1 for i in issues if i.severity is Severity.WARN)
+    if not errors and not warnings:
+        # Neutral zero: an empty section still needs its chip, or the header
+        # jumps sideways as findings appear and disappear.
+        return [Chip(str(len(issues)), "")]
+    out: list[Chip] = []
+    if errors:
+        chip = Chip(str(errors), "err")
+        chip.setToolTip(f"{errors} error" + ("" if errors == 1 else "s"))
+        out.append(chip)
+    if warnings:
+        chip = Chip(str(warnings), "warn")
+        chip.setToolTip(f"{warnings} warning" + ("" if warnings == 1 else "s"))
+        out.append(chip)
+    return out
 
 
 def _find_verdict(
@@ -225,6 +242,46 @@ class ValidationPane(QWidget):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
         )
         v.addWidget(mode)
+
+        # Which severities to list, and what order to put them in. A file with
+        # two errors and ninety warnings shows the errors last if the source
+        # order happens to put them there, and scrolling past ninety
+        # recommendations to reach the thing that is actually broken is the
+        # commonest complaint about any validator.
+        filter_row = _ClipRow()
+        filter_row.setObjectName("val-filter-row")
+        fl = QHBoxLayout(filter_row)
+        fl.setContentsMargins(14, 6, 14, 0)
+        fl.setSpacing(6)
+
+        self._sev_filter = QComboBox()
+        self._sev_filter.setObjectName("ent-input")
+        for value, label in (
+            ("all", "Errors and warnings"),
+            ("err", "Errors only"),
+            ("warn", "Warnings only"),
+        ):
+            self._sev_filter.addItem(label, userData=value)
+        self._sev_filter.setToolTip(
+            "Which findings to list here. The counts beside the files in the "
+            "tree always show everything, so narrowing this cannot hide a "
+            "problem from you, only from this list."
+        )
+        self._sev_filter.currentIndexChanged.connect(lambda _i: self._render())
+        fl.addWidget(self._sev_filter, 1)
+
+        self._sev_sort = QPushButton("Worst first")
+        self._sev_sort.setObjectName("tb-btn-toggle")
+        self._sev_sort.setCheckable(True)
+        self._sev_sort.setChecked(True)
+        self._sev_sort.setToolTip(
+            "Put errors above warnings.\n\nOff, the findings keep the order "
+            "the validator produced them in, which follows the file rather "
+            "than the severity."
+        )
+        self._sev_sort.toggled.connect(lambda _c: self._render())
+        fl.addWidget(self._sev_sort)
+        v.addWidget(filter_row)
 
         # Scrollable body. ``val-panel`` carries the QSS background.
         self._body = QWidget()
@@ -414,10 +471,10 @@ class ValidationPane(QWidget):
         target_file: Optional[Path] = None,
         highlight_button: bool = False,
     ) -> None:
-        # Apply the "Show findings" severity filter (errors only / warnings
-        # only / both). The count chip + empty state reflect the filtered list.
-        allowed = getattr(self, "_allowed", {Severity.ERR, Severity.WARN})
-        issues = [i for i in issues if i.severity in allowed]
+        # The global "Show findings" setting, narrowed by this pane's own
+        # dropdown and ordered by its Worst-first toggle. The count chip and
+        # the empty state both reflect what is actually listed.
+        issues = self._arrange(issues)
 
         section = QFrame()
         section.setObjectName("val-section")
@@ -431,25 +488,34 @@ class ValidationPane(QWidget):
         head.setContentsMargins(0, 0, 0, 0)
         title_l = QLabel(title)
         title_l.setObjectName("val-section-title")
-        head.addWidget(title_l)
-        head.addStretch(1)
+        title_l.setToolTip(title)
+        # The filename gives way before the button and the count do. A long
+        # BIDS basename is most of a narrow pane, and it is the part the user
+        # already knows: they chose the file. Same treatment the whole-dataset
+        # rows already had.
+        title_l.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        head.addWidget(title_l, 1)
         # "Highlight in editor" — only on the File section, only when there are
         # field/column findings to point at.
         if highlight_button and target_file is not None and any(i.field for i in issues):
-            hl_btn = QPushButton("Highlight in editor")
+            hl_btn = QPushButton("Highlight")
+            hl_btn.setMinimumWidth(0)
             # Distinct object name so it is not mistaken for a per-finding fix
             # button (it carries the same styling token plus its own).
             hl_btn.setObjectName("val-highlight-all")
             hl_btn.setToolTip(
-                "Highlight every shown error / warning field (JSON) or column "
-                "(TSV) for this file in the editor."
+                "Highlight in editor\n\n"
+                "Marks every shown error and warning field (JSON) or column "
+                "(TSV) for this file where you edit it."
             )
             hl_btn.clicked.connect(
                 lambda _=False, p=target_file: self.highlight_all_requested.emit(p)
             )
             head.addWidget(hl_btn)
-        count_l = Chip(str(len(issues)), _count_chip_kind(issues))
-        head.addWidget(count_l)
+        for chip in _count_chips(issues):
+            head.addWidget(chip)
         sl.addLayout(head)
 
         # Messages (or an empty-state hint).
@@ -512,7 +578,12 @@ class ValidationPane(QWidget):
 
     def _render_grouped(self) -> None:
         """One row per kind of finding, with the file count beside it."""
-        groups = group_report(self._report, allowed=self._allowed)
+        groups = group_report(self._report, allowed=self._severity_filter())
+        if self._sev_sort.isChecked():
+            rank = {Severity.ERR: 0, Severity.WARN: 1, Severity.OK: 2}
+            groups = sorted(
+                groups, key=lambda g: (rank.get(g.severity, 3), -g.count),
+            )
         self._mode_summary.setText(summarise(groups))
         if not groups:
             hint = QLabel("No findings at the current severity filter.")
@@ -559,9 +630,12 @@ class ValidationPane(QWidget):
                 lambda _=False, g=grp: self.fix_group_requested.emit(g)
             )
             head.addWidget(fix)
+        # ``sev`` is the enum's value, which is "err", not "error". Comparing
+        # against the wrong spelling meant the test never passed and EVERY
+        # group chip, errors included, was painted as a warning.
         head.addWidget(Chip(
             "{n} file{s}".format(n=grp.count, s="" if grp.count == 1 else "s"),
-            "err" if sev == "error" else "warn",
+            sev if sev in ("err", "warn", "ok") else "warn",
         ))
         cl.addLayout(head)
 
@@ -617,6 +691,34 @@ class ValidationPane(QWidget):
         self._accepted = None
         self._render()
 
+    def _severity_filter(self) -> set:
+        """Which severities this pane lists, from its own dropdown.
+
+        Narrower than ``validate_show`` in Settings, which is global. This is
+        a per-pane view, and the counts in the tree are unaffected, so
+        narrowing it cannot hide a problem from the user, only from the list.
+        """
+        allowed = set(self._allowed)
+        chosen = (
+            self._sev_filter.currentData()
+            if hasattr(self, "_sev_filter") else "all"
+        )
+        if chosen == "err":
+            return allowed & {Severity.ERR}
+        if chosen == "warn":
+            return allowed & {Severity.WARN}
+        return allowed
+
+    def _arrange(self, issues: list) -> list:
+        """The findings to show, filtered and ordered."""
+        allowed = self._severity_filter()
+        shown = [i for i in issues if i.severity in allowed]
+        if hasattr(self, "_sev_sort") and self._sev_sort.isChecked():
+            rank = {Severity.ERR: 0, Severity.WARN: 1, Severity.OK: 2}
+            # Stable, so within a severity the validator's own order survives.
+            shown.sort(key=lambda i: rank.get(i.severity, 3))
+        return shown
+
     def _insert_section_widget(self, widget: QWidget) -> None:
         """Insert ``widget`` before the trailing stretch and remember it."""
         insert_idx = self._body_layout.count() - 1
@@ -659,19 +761,19 @@ class ValidationPane(QWidget):
         missing_req = [f for f in by_level[FieldLevel.REQUIRED] if not f.present]
         missing_rec = [f for f in by_level[FieldLevel.RECOMMENDED] if not f.present]
 
-        # Header chip — severity reflects the worst missing level.
+        # One chip per level that is short, rather than only the worst one.
+        # An ``elif`` here meant a file missing required fields never showed
+        # how many recommended ones it was also missing, which is the same
+        # thing the section count chips used to do.
         total_fields = sum(len(v) for v in by_level.values())
         if missing_req:
-            chip_kind = "err"
-            chip_text = f"{len(missing_req)} missing required"
-        elif missing_rec:
-            chip_kind = "warn"
-            chip_text = f"{len(missing_rec)} missing recommended"
-        else:
-            chip_kind = ""
-            chip_text = f"{total_fields} fields"
-        chip = Chip(chip_text, chip_kind)
-        head.addWidget(chip)
+            head.addWidget(Chip(f"{len(missing_req)} missing required", "err"))
+        if missing_rec:
+            head.addWidget(
+                Chip(f"{len(missing_rec)} missing recommended", "warn")
+            )
+        if not missing_req and not missing_rec:
+            head.addWidget(Chip(f"{total_fields} fields", ""))
         sl.addLayout(head)
 
         # Per-level lines.

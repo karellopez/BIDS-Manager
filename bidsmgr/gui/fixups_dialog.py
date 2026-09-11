@@ -140,14 +140,18 @@ class FixupsDialog(QDialog):
         # --- Citation file --------------------------------------------
         cite_card, cite_body, cite_actions = _repair_card(
             "Citation file",
-            "BIDS treats CITATION.cff as the single source of authorship, so "
-            "writing one MOVES Authors, License, HowToAcknowledge and "
-            "ReferencesAndLinks out of dataset_description.json rather than "
-            "copying them: the two are mutually exclusive and may not "
-            "disagree about who made the dataset.",
+            "BIDS treats CITATION.cff as the single source of AUTHORSHIP, so "
+            "writing one moves <b>Authors</b> out of "
+            "dataset_description.json: stating it in both is an error. "
+            "Everything else, the licence included, is copied into the "
+            "citation file and <b>left where it is</b>.",
         )
         self._citation_hint = _wrapped("", hint=True)
         cite_body.addWidget(self._citation_hint)
+        # Said before it happens, naming the field. A repair that silently
+        # removes something a user typed is the worst kind.
+        self._citation_moves = _wrapped("", hint=True)
+        cite_body.addWidget(self._citation_moves)
         self._citation_btn = QPushButton("Write CITATION.cff")
         self._citation_btn.setObjectName("tb-btn")
         self._citation_btn.clicked.connect(self._on_citation)
@@ -287,6 +291,16 @@ class FixupsDialog(QDialog):
             )
         self._generate_btn.setEnabled(bool(self._missing))
 
+        from ..fixups.citation import fields_moved_by_citation
+
+        moving = fields_moved_by_citation(self._root)
+        self._citation_moves.setText(
+            "Writing it will move <b>" + "</b>, <b>".join(moving)
+            + "</b> out of dataset_description.json. Nothing else is removed."
+            if moving else ""
+        )
+        self._citation_moves.setVisible(bool(moving))
+
         from ..editor.inheritance import consolidation_candidates
 
         self._shared = consolidation_candidates(self._root)
@@ -310,10 +324,12 @@ class FixupsDialog(QDialog):
             "CITATION.cff is already here. Writing it again would overwrite "
             "it, so the button is disabled."
             if exists else
-            "Generated from dataset_description.json. BIDS treats the "
-            "citation file as the single source for Authors, License, "
-            "HowToAcknowledge and ReferencesAndLinks, so those move out of "
-            "the description rather than being duplicated."
+            "Generated from dataset_description.json. Only <b>Authors</b> "
+            "moves: stating it in both files is an error. License, "
+            "HowToAcknowledge and ReferencesAndLinks are copied and kept, so "
+            "nothing you typed disappears from the description. The "
+            "validator will note that it would rather those lived in one "
+            "place only, which is a warning, not an error."
         )
         self._citation_btn.setEnabled(not exists)
 

@@ -129,12 +129,28 @@ FIELDS: tuple[CffField, ...] = (
 
 FIELDS_BY_NAME: dict[str, CffField] = {f.name: f for f in FIELDS}
 
-# The BIDS keys the citation file takes ownership of. Leaving them in
-# dataset_description.json as well is an error, not a duplicate: measured
-# against bidsval, keeping Authors produced
-# AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE and
-# SINGLE_SOURCE_CITATION_FIELDS.
-MOVED_FIELDS = ("Authors", "HowToAcknowledge", "License", "ReferencesAndLinks")
+# The only BIDS key the citation file takes OWNERSHIP of.
+#
+# Measured against the validator, one field at a time, with a CITATION.cff
+# present:
+#
+#   Authors             -> AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE
+#   License             -> no finding
+#   HowToAcknowledge    -> no finding
+#   ReferencesAndLinks  -> no finding
+#
+# This used to move all four. That was wrong, and it was destructive in a way
+# a user could not see: somebody typed MIT into the licence field, the
+# conversion wrote it into dataset_description.json correctly, and writing the
+# citation file then deleted it from there. The standard forbids duplicating
+# ONE field, so exactly one is moved. The other three are COPIED into the
+# citation file, which is what makes it a complete citation, and left where
+# they were.
+MOVED_FIELDS = ("Authors",)
+
+# Copied into the citation file and kept in dataset_description.json too. The
+# citation file is a rendering of them, not their new home.
+COPIED_FIELDS = ("HowToAcknowledge", "License", "ReferencesAndLinks")
 
 
 def split_person(name: str) -> dict[str, str]:
@@ -275,6 +291,7 @@ __all__ = [
     "FIELDS",
     "FIELDS_BY_NAME",
     "FILENAME",
+    "COPIED_FIELDS",
     "MOVED_FIELDS",
     "REQUIRED",
     "CffField",

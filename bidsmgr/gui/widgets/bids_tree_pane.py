@@ -47,6 +47,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QHBoxLayout,
+    QSizePolicy,
     QStackedLayout,
     QTreeWidget,
     QTreeWidgetItem,
@@ -62,6 +63,7 @@ from ..delegates.bids_tree import (
     BidsTreeDelegate,
 )
 from ..theme_manager import CUR
+from .panel_frame import HEADER_EXTRAS
 from .primitives import PaneHeader
 
 # Severity ordering for folder rollup — pick the worst of any descendant.
@@ -141,6 +143,16 @@ def is_hidden_name(name: str) -> bool:
     Dotfiles plus the machinery directories in :data:`_SKIP_DIRS`.
     """
     return name.startswith(".") or name in _SKIP_DIRS
+
+
+def _is_hidden_item(item: QTreeWidgetItem) -> bool:
+    """A row the tree shows only because "show hidden" is on.
+
+    The fold and unfold buttons are about the DATASET. ``.bidsmgr/`` holds the
+    operation log and every backup it has taken, which is a great many rows
+    nobody asked to see, and somebody who opened it did so on purpose.
+    """
+    return is_hidden_name(item.text(0))
 
 
 def _renameable_entities(path: Path) -> list[tuple[str, str, str]]:
@@ -318,29 +330,63 @@ class BidsTreePane(QWidget):
         header_line = QHBoxLayout(header_row)
         header_line.setContentsMargins(0, 0, 6, 0)
         header_line.setSpacing(4)
-        header_line.addWidget(PaneHeader("BIDS dataset"), 1)
+        # Stretch 0 plus an explicit stretch after it. When this pane is
+        # wrapped in a ``PanelFrame`` the frame HIDES this header (it draws
+        # its own title), and a hidden widget is ignored by the layout: with
+        # the stretch on the label, the button group inherited the whole width
+        # and rendered as two buttons the width of the pane.
+        header_line.addWidget(PaneHeader("BIDS dataset"), 0)
+        header_line.addStretch(1)
 
-        self._collapse_btn = QPushButton("\u2013")
-        self._collapse_btn.setObjectName("tb-btn-ghost")
-        self._collapse_btn.setFixedWidth(26)
+        # Two buttons in one group, because they are one control: fold the
+        # tree, or open one more level of it. Separating them across the
+        # header made them read as unrelated.
+        #
+        # Named ``HEADER_EXTRAS`` so that when this pane is wrapped in a
+        # ``PanelFrame`` the pair is lifted up beside the frame's title,
+        # rather than sitting on a row of its own under it. The group keeps a
+        # plain ``tree-nav`` styling hook through a dynamic property, because
+        # the object name is now spoken for.
+        group = QWidget()
+        group.setObjectName(HEADER_EXTRAS)
+        group.setProperty("navGroup", True)
+        group.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed,
+        )
+        group_line = QHBoxLayout(group)
+        group_line.setContentsMargins(0, 0, 0, 0)
+        group_line.setSpacing(0)
+
+        self._collapse_btn = QPushButton()
+        self._collapse_btn.setObjectName("tree-nav-left")
+        icons.apply_button(self._collapse_btn, "tree_collapse", size=15)
         self._collapse_btn.setToolTip(
             "Collapse everything.\n\nBack to the top of a tree you have "
             "opened your way into."
         )
         self._collapse_btn.clicked.connect(self.collapse_all)
-        header_line.addWidget(self._collapse_btn)
+        group_line.addWidget(self._collapse_btn)
 
-        self._expand_btn = QPushButton("\u2304")
-        self._expand_btn.setObjectName("tb-btn-ghost")
-        self._expand_btn.setFixedWidth(26)
+        self._expand_btn = QPushButton()
+        self._expand_btn.setObjectName("tree-nav-right")
+        icons.apply_button(self._expand_btn, "tree_expand", size=15)
         self._expand_btn.setToolTip(
             "Open the next level.\n\nOne click opens the shallowest depth "
             "that still has anything folded, so a deep tree is explored a "
-            "level at a time instead of all at once. Greyed out when "
-            "everything is already open."
+            "level at a time instead of all at once. Hidden folders are not "
+            "opened. Greyed out when everything is already open."
         )
         self._expand_btn.clicked.connect(self.expand_next_level)
-        header_line.addWidget(self._expand_btn)
+        group_line.addWidget(self._expand_btn)
+
+        # Sized here rather than in the QSS, because a button that is allowed
+        # to grow WILL grow: these two are a fixed-size control, not text.
+        from ..theme_manager import scaled_px
+        for button in (self._collapse_btn, self._expand_btn):
+            button.setFixedSize(scaled_px(30), scaled_px(22))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        header_line.addWidget(group, 0)
         v.addWidget(header_row)
 
         # Stack the tree on top of an empty-state hint; we flip between
@@ -389,14 +435,25 @@ class BidsTreePane(QWidget):
     # -- opening and closing -------------------------------------------
 
     def collapse_all(self) -> None:
-        """Fold everything, and leave the dataset row itself open.
+        """Fold the dataset, and leave the dataset row itself open.
 
         Collapsing the root as well would hide the whole tree behind one
         chevron, which is not "back to the top", it is "gone".
+
+        Hidden folders fold along with everything else. The asymmetry with
+        :meth:`expand_next_level` is deliberate and is about rows: opening
+        ``.bidsmgr/`` produces hundreds nobody asked for, closing it produces
+        none, and a "collapse all" that leaves something open is a lie.
         """
-        self._tree.collapseAll()
-        root = self._tree.topLevelItem(0)
-        if root is not None:
+        def visit(item: QTreeWidgetItem) -> None:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                visit(child)
+                child.setExpanded(False)
+
+        for i in range(self._tree.topLevelItemCount()):
+            root = self._tree.topLevelItem(i)
+            visit(root)
             root.setExpanded(True)
         self._refresh_expand_button()
 
@@ -406,11 +463,24 @@ class BidsTreePane(QWidget):
         One level per click. Expand-all on a real dataset produces thousands
         of rows, and the useful gesture is almost always "show me one more
         step down".
+
+        Hidden folders are not opened: ``.bidsmgr/`` holds the operation log
+        and its backups, which is a great many rows nobody asked for.
         """
         depth = self._next_folded_depth()
         if depth is None:
             return
-        self._tree.expandToDepth(depth)
+
+        def visit(item: QTreeWidgetItem, level: int) -> None:
+            if level > depth or _is_hidden_item(item):
+                return
+            if item.childCount():
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                visit(item.child(i), level + 1)
+
+        for i in range(self._tree.topLevelItemCount()):
+            visit(self._tree.topLevelItem(i), 0)
         self._refresh_expand_button()
 
     def _next_folded_depth(self) -> Optional[int]:
@@ -419,6 +489,8 @@ class BidsTreePane(QWidget):
 
         def visit(item: QTreeWidgetItem, depth: int) -> None:
             nonlocal best
+            if _is_hidden_item(item):
+                return          # not ours to open
             if item.childCount() and not item.isExpanded():
                 if best is None or depth < best:
                     best = depth
@@ -472,8 +544,11 @@ class BidsTreePane(QWidget):
         self._last_counts = {}
         dirs = self._populate(path)
         self._watch(dirs)
-        self._tree.expandToDepth(2)
-        self._refresh_expand_button()
+        # Opens shut, showing the dataset row and nothing else. Guessing at
+        # two levels meant a dataset with many subjects opened as a wall of
+        # rows the user then had to close, and it is the unfold button's job
+        # to go down anyway.
+        self.collapse_all()
         self._stack.setCurrentIndex(1)
 
     def refresh(self) -> None:
@@ -710,6 +785,11 @@ class BidsTreePane(QWidget):
 
         for i in range(self._tree.topLevelItemCount()):
             visit(self._tree.topLevelItem(i))
+
+        # The fold/unfold pair is tinted from the palette too, and its icons
+        # came out of the cache that was just cleared.
+        icons.apply_button(self._collapse_btn, "tree_collapse", size=15)
+        icons.apply_button(self._expand_btn, "tree_expand", size=15)
 
     def _on_selection_changed(self) -> None:
         items = self._tree.selectedItems()

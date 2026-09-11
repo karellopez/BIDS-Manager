@@ -93,6 +93,47 @@ def test_track_changes_hides_once_the_dataset_is_tracked(
     assert not panel._adopt_action.isVisible()
 
 
+def test_it_sits_after_the_deep_checks_toggle(panel: EditorPanel) -> None:
+    """Toolbars read left to right, and the ordering is the grouping.
+
+    Tools is a menu of occasional dataset-wide actions. Putting it before the
+    deep-checks toggle broke the run of validation controls in half.
+    """
+    bar = panel._tools_btn.parentWidget().layout()
+    order = [bar.itemAt(i).widget() for i in range(bar.count())]
+    assert order.index(panel._tools_btn) > order.index(panel._strict_btn)
+
+
+def test_it_does_not_wear_the_settings_cog(panel: EditorPanel) -> None:
+    """Two different things must not share a glyph."""
+    from bidsmgr.gui import icons
+
+    assert icons.NAMES["tools"][0] != icons.NAMES["settings"][0]
+    assert "toolbox" in icons.NAMES["tools"][0]
+    assert not panel._tools_btn.icon().isNull()
+
+
+def test_its_icon_re_tints_with_the_theme(panel: EditorPanel) -> None:
+    """The cached icon is built at one palette. Without an explicit re-apply
+    on theme swap it keeps the old tint and reads as disabled."""
+    from bidsmgr.gui import icons
+    from bidsmgr.gui.theme_manager import CUR
+
+    applied: list[str] = []
+    real = icons.apply_button
+
+    def spy(button, name, **kwargs):
+        applied.append(name)
+        return real(button, name, **kwargs)
+
+    icons.apply_button = spy
+    try:
+        panel.repaint_for_palette(CUR())
+    finally:
+        icons.apply_button = real
+    assert "tools" in applied
+
+
 def test_every_entry_explains_itself(panel: EditorPanel) -> None:
     for action in panel._tools_menu.actions():
         if action.text():

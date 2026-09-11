@@ -65,12 +65,41 @@ def write_citation(root: Path, *, overwrite: bool = False) -> Optional[Path]:
         description = {}
     if not isinstance(description, dict):
         description = {}
+    # Only what the standard forbids duplicating leaves the description. The
+    # rest is rendered into the citation file AND kept where it was, so
+    # writing a citation never silently deletes an answer.
     remaining = {k: v for k, v in description.items() if k not in MOVED_FIELDS}
+    moved = sorted(set(description) & set(MOVED_FIELDS))
     with begin_operation(root, "Write CITATION.cff") as op:
         op.write_text(target, build_citation(description))
-        if len(remaining) != len(description):
+        if moved:
             op.write_json(dd, remaining)
+    if moved:
+        log.info(
+            "moved %s from dataset_description.json into CITATION.cff "
+            "(the standard forbids stating them in both)", ", ".join(moved),
+        )
     return target
 
 
-__all__ = ["MOVED_FIELDS", "build_citation", "citation_path", "write_citation"]
+def fields_moved_by_citation(root: Path) -> list[str]:
+    """Which fields writing the citation file would take out of the
+    description, so a caller can say so before doing it."""
+    try:
+        description = json.loads(
+            (Path(root) / "dataset_description.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    if not isinstance(description, dict):
+        return []
+    return sorted(set(description) & set(MOVED_FIELDS))
+
+
+__all__ = [
+    "MOVED_FIELDS",
+    "build_citation",
+    "citation_path",
+    "fields_moved_by_citation",
+    "write_citation",
+]

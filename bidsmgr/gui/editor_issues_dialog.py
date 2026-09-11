@@ -28,15 +28,13 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from ..editor.types import FileVerdict, Severity, ValidationReport
-from .widgets import StatusBadge, ValMessage
+from .widgets import ElidedPushButton, StatusBadge, ValMessage
 
 
 _SEVERITY_LABEL: dict[str, str] = {
@@ -72,26 +70,21 @@ class _FileCard(QFrame):
         self._path = path
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(8)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(5)
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(8)
+        head.setSpacing(6)
 
+        # A long path must not force the dialog wide. This button elides to
+        # the room it is given (full path stays in the tooltip), rather than
+        # clipping a word in half the way a plain QPushButton does.
         title_text = str(path)
-        self._title_btn = QPushButton(title_text)
+        self._title_btn = ElidedPushButton(title_text)
         self._title_btn.setObjectName("issue-card-title")
         self._title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._title_btn.setFlat(True)
-        self._title_btn.setToolTip(title_text)
-        # Ignored horizontal policy: a long path must not force the dialog
-        # wide. The button clips to the available width (full path stays in
-        # the tooltip) so the chips dialog stays compact.
-        self._title_btn.setMinimumWidth(40)
-        self._title_btn.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
-        )
         self._title_btn.clicked.connect(
             lambda: self.activated.emit(self._path)
         )
@@ -214,8 +207,8 @@ class EditorIssuesDialog(QDialog):
         body = QWidget()
         body.setObjectName("issue-dialog-body")
         bl = QVBoxLayout(body)
-        bl.setContentsMargins(16, 14, 16, 14)
-        bl.setSpacing(10)
+        bl.setContentsMargins(10, 8, 10, 8)
+        bl.setSpacing(6)
         if not matched:
             empty = QLabel(
                 f"No files with severity ‘{severity}’ in this report."

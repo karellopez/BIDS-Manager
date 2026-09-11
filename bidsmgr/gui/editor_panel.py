@@ -341,6 +341,35 @@ class EditorPanel(QWidget):
         self._validate_dataset_btn.clicked.connect(self.start_dataset_validation)
         lay.addWidget(self._validate_dataset_btn)
 
+        # Deep-checks toggle — when on, "Validate dataset" reads NIfTI
+        # headers and file contents (slower, more thorough); when off it
+        # runs the fast structural pass used for live revalidation. Maps
+        # to the validator's read-headers mode. State persists via
+        # AppSettings (the ``editor_strict_validate`` key, kept for
+        # back-compat).
+        from .app_settings import AppSettings
+        self._strict_btn = QPushButton("  Deep checks")
+        self._strict_btn.setObjectName("tb-btn-toggle")
+        icons.apply_button(self._strict_btn, "strict")
+        self._strict_btn.setCheckable(True)
+        self._strict_btn.setChecked(AppSettings.load().editor_strict_validate)
+        self._strict_btn.setToolTip(
+            "Deep validation checks\n\n"
+            "When ON, “Validate dataset” also opens NIfTI image headers to "
+            "catch truncated or corrupt .nii / .nii.gz files. This is the "
+            "only extra file read, and the only thing this toggle changes.\n\n"
+            "When OFF, the validator runs the fast structural pass — file "
+            "naming, entities, sidecar fields, TSV columns, associations. "
+            "This is the mode used for live revalidation as you edit.\n\n"
+            "Note: EEG / MEG / iEEG recordings are validated from their "
+            "sidecars + channels.tsv and are never opened, so this toggle "
+            "has no effect on a recordings-only dataset.\n\n"
+            "Tip: leave this OFF while editing and flip it ON once before "
+            "a final review."
+        )
+        self._strict_btn.toggled.connect(self._on_strict_toggled)
+        lay.addWidget(self._strict_btn)
+
         # Everything that acts on the dataset as a whole, behind one menu.
         # Four separate toolbar buttons for four rarely-used actions crowded
         # out the ones people press constantly, and the list is going to grow.
@@ -348,7 +377,7 @@ class EditorPanel(QWidget):
         # Editor's main verb, not a tool.
         self._tools_btn = QPushButton("  Tools")
         self._tools_btn.setObjectName("tb-btn")
-        icons.apply_button(self._tools_btn, "settings")
+        icons.apply_button(self._tools_btn, "tools")
         self._tools_btn.setToolTip(
             "Things that act on the whole dataset: repairs, renaming, and "
             "the dashboard. Nothing here writes until you choose it, and "
@@ -358,7 +387,6 @@ class EditorPanel(QWidget):
         self._tools_menu = QMenu(self._tools_btn)
         round_menu(self._tools_menu)
         self._tools_btn.setMenu(self._tools_menu)
-        lay.addWidget(self._tools_btn)
 
         self._dashboard_action = self._tools_menu.addAction("Dashboard")
         self._dashboard_action.setToolTip(
@@ -400,34 +428,7 @@ class EditorPanel(QWidget):
         self._adopt_action.setVisible(False)
         self._adopt_action.triggered.connect(self._on_adopt)
 
-        # Deep-checks toggle — when on, "Validate dataset" reads NIfTI
-        # headers and file contents (slower, more thorough); when off it
-        # runs the fast structural pass used for live revalidation. Maps
-        # to the validator's read-headers mode. State persists via
-        # AppSettings (the ``editor_strict_validate`` key, kept for
-        # back-compat).
-        from .app_settings import AppSettings
-        self._strict_btn = QPushButton("  Deep checks")
-        self._strict_btn.setObjectName("tb-btn-toggle")
-        icons.apply_button(self._strict_btn, "strict")
-        self._strict_btn.setCheckable(True)
-        self._strict_btn.setChecked(AppSettings.load().editor_strict_validate)
-        self._strict_btn.setToolTip(
-            "Deep validation checks\n\n"
-            "When ON, “Validate dataset” also opens NIfTI image headers to "
-            "catch truncated or corrupt .nii / .nii.gz files. This is the "
-            "only extra file read, and the only thing this toggle changes.\n\n"
-            "When OFF, the validator runs the fast structural pass — file "
-            "naming, entities, sidecar fields, TSV columns, associations. "
-            "This is the mode used for live revalidation as you edit.\n\n"
-            "Note: EEG / MEG / iEEG recordings are validated from their "
-            "sidecars + channels.tsv and are never opened, so this toggle "
-            "has no effect on a recordings-only dataset.\n\n"
-            "Tip: leave this OFF while editing and flip it ON once before "
-            "a final review."
-        )
-        self._strict_btn.toggled.connect(self._on_strict_toggled)
-        lay.addWidget(self._strict_btn)
+        lay.addWidget(self._tools_btn)
 
         lay.addWidget(VSep())
 
@@ -1487,6 +1488,7 @@ class EditorPanel(QWidget):
         icons.apply_button(self._redo_btn, "redo")
         icons.apply_button(self._validate_dataset_btn, "dataset")
         icons.apply_button(self._strict_btn, "strict")
+        icons.apply_button(self._tools_btn, "tools")
         # The two partial-validate buttons get their tint from the
         # current tree selection (green when their kind is selected,
         # accent blue otherwise) — defer to the sync helper so the

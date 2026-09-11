@@ -1378,3 +1378,37 @@ QLabel#val-caption {
     text-transform: uppercase;
     letter-spacing: 0.07em;
 }
+
+/* The fold / unfold pair in the dataset tree header. One control, so one
+   rounded outline with a divider between the halves rather than two separate
+   buttons that happen to sit next to each other. */
+QWidget[navGroup="true"] { background: transparent; }
+QPushButton#tree-nav-left, QPushButton#tree-nav-right {
+    background: $surface2;
+    border: 1px solid $input_border;
+    padding: 0px;
+    min-width: 0;
+}
+QPushButton#tree-nav-left {
+    border-top-left-radius: 5px;
+    border-bottom-left-radius: 5px;
+    border-right: none;
+}
+QPushButton#tree-nav-right {
+    border-top-right-radius: 5px;
+    border-bottom-right-radius: 5px;
+}
+QPushButton#tree-nav-left:hover, QPushButton#tree-nav-right:hover {
+    background: $surface3;
+    border-color: $accent_border;
+}
+QPushButton#tree-nav-left:pressed, QPushButton#tree-nav-right:pressed {
+    background: $accent_bg;
+}
+QPushButton#tree-nav-right:disabled {
+    background: $surface;
+    border-color: $border;
+}
+
+/* The validation pane's own severity filter row. */
+QFrame#val-filter-row { background: transparent; border: none; }
