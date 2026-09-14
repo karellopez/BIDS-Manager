@@ -101,8 +101,21 @@ def _load(path_key: str) -> Namespace:
 
 
 def _bundled_dir() -> Path:
-    """Filesystem directory holding the bundled schema files."""
-    return Path(str(resources.files("bidsval.schema"))) / "bundled"
+    """Filesystem directory holding the bundled schema files.
+
+    VENDORED CHANGE. Upstream names the package absolutely, as
+    ``resources.files("bidsval.schema")``. Inside this tree the package is
+    ``bidsmgr.vendor.bidsval.schema``, so that spelling imports the SEPARATELY
+    INSTALLED bidsval if there is one and raises ``ModuleNotFoundError`` if
+    there is not. Both outcomes are wrong, and the first hides the second:
+    on a developer machine with bidsval pip-installed the vendored copy
+    silently read the installed package's schemas and looked fine, while a
+    clean Linux or Windows machine could not import BIDS Manager at all.
+
+    ``__package__`` is this module's own package whatever the tree is called,
+    which is the whole point of vendoring.
+    """
+    return Path(str(resources.files(__package__))) / "bundled"
 
 
 def _bundled_file(version: str) -> Path | None:

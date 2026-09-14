@@ -160,10 +160,17 @@ include = ["bidsmgr*"]
     "assets/macos/*.icns",
     "assets/windows/*.ico",
 ]
-"bidsmgr.schema"            = ["bundled/**/*"]
+# NOTE: no "bidsmgr.schema" entry. That package is a pure adapter over
+# bidsval and ships no data; it used to carry a "bundled/**/*" glob pointing
+# at a directory that does not exist, which quietly matched nothing.
 "bidsmgr.vendor"            = ["README.md"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
 "bidsmgr.vendor.bidsval"    = ["LICENSE"]
+# The schema files bidsval resolves against. Vendoring the code without this
+# ships a validator that cannot find a schema: it fell back to a separately
+# installed bidsval on a developer machine and crashed on import everywhere
+# else. 2.9 MB, six BIDS versions.
+"bidsmgr.vendor.bidsval.schema" = ["bundled/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

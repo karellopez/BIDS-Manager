@@ -20,12 +20,22 @@ from .report import FileVerdict, ValidationReport
 from .schema import available_versions, bids_version, resolve, schema_version
 from .validate import validate, validate_file, validate_subject
 
-try:  # populated from package metadata once installed
-    from importlib.metadata import version
-
-    __version__ = version("bidsval")
-except Exception:  # pragma: no cover - source checkout without metadata
-    __version__ = "0.0.0"
+# VENDORED CHANGE. Upstream reads this from installed package metadata with
+# ``version("bidsval")``. There is no such distribution here: this tree is a
+# copy inside BIDS Manager. That lookup reported the version of a SEPARATELY
+# INSTALLED bidsval when the developer happened to have one, and "0.0.0"
+# otherwise, so the number never described the code actually running.
+#
+# The local segment is not decoration. This copy is bidsval 0.1.1 PLUS an
+# addition that upstream does not have (the anyOf-aware field typing in
+# schema/fields.py), so calling it plain "0.1.1" would name a released
+# artefact that does not contain this code. `+bidsmgr.N` is PEP 440's local
+# version identifier and says exactly that: 0.1.1 with local changes on top.
+#
+# Bump the local segment when the local delta changes; drop it entirely once
+# upstream carries the addition and this is a clean copy again. See the
+# divergence table in ``bidsmgr/vendor/README.md``.
+__version__ = "0.1.1+bidsmgr.1"
 
 __all__ = [
     "Severity",
