@@ -10,6 +10,15 @@ showing its current value and what it would become, ticked by default only
 when it would actually change. A file the standard does not declare the field
 for is shown greyed with the reason, rather than hidden, because a user who
 expected it there deserves to know why it is not.
+
+The value is asked for with the SAME control the sidecar form uses, built from
+the schema by :func:`bidsmgr.gui.widgets.template_form.build_field_widget`. It
+used to be a bare text box with the placeholder "text, or JSON for a number,
+list or object", which made fixing one field in twelve files a strictly worse
+experience than fixing it in one: the vocabulary a field has was not offered,
+its type was not enforced, its unit and description were not shown, and the
+user was asked to hand-write JSON for a list. A field is filled the same way
+wherever it is filled.
 """
 
 from __future__ import annotations
@@ -45,6 +54,20 @@ _COL_NOW = 1
 _COL_NEXT = 2
 
 
+def _curated_for(field: str) -> tuple:
+    """Values BIDS Manager offers for a field the standard leaves open.
+
+    The same list the sidecar form uses, so a field is filled from the same
+    options wherever it is filled. Imported here rather than at module scope
+    to keep this dialog importable without the recording-metadata models.
+    """
+    try:
+        from ..recording_meta.models import CURATED_SUGGESTIONS
+    except ImportError:       # pragma: no cover - defensive
+        return ()
+    return tuple(CURATED_SUGGESTIONS.get(field, ()))
+
+
 class BulkFieldDialog(QDialog):
     """Choose which files receive ``field = value``.
 
@@ -71,6 +94,7 @@ class BulkFieldDialog(QDialog):
         self._anchor = anchor
         self._fixed_candidates = candidates
         self._candidates: list[be.FileCandidate] = []
+        self._initial_value = initial_value
         self.setWindowTitle(title or f"Apply {field} to other files")
         self.setModal(True)
         self.resize(760, 520)
@@ -92,20 +116,13 @@ class BulkFieldDialog(QDialog):
         v.setContentsMargins(18, 14, 18, 12)
         v.setSpacing(10)
 
-        # Value.
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(QLabel("Value:"))
-        self._value_edit = QLineEdit()
-        self._value_edit.setObjectName("ent-input")
-        self._value_edit.setPlaceholderText(
-            "text, or JSON for a number, list or object"
-        )
-        if initial_value is not None:
-            self._value_edit.setText(_as_text(initial_value))
-        self._value_edit.textChanged.connect(self._refresh_preview)
-        row.addWidget(self._value_edit, 1)
-        v.addLayout(row)
+        # Value. The schema's own control when the schema knows this field,
+        # which is the same one the sidecar form builds, so a vocabulary is a
+        # dropdown here too and a list is a row editor rather than hand-typed
+        # JSON. ``self._spec`` is None when it does not, and the plain box is
+        # the fallback rather than the default.
+        self._spec = self._resolve_spec(candidates)
+        v.addLayout(self._build_value_row())
 
         # Scope.
         self._scope_combo = QComboBox()
@@ -207,8 +224,126 @@ class BulkFieldDialog(QDialog):
 
     # -- value ---------------------------------------------------------
 
+    def _resolve_spec(self, candidates):
+        """What the schema says about this field, for these files.
+
+        The datatype and suffix come from the candidates, because a field's
+        declaration depends on them: ``EchoTime`` is a number under ``func``
+        and is not declared at all for ``eeg``. The first applicable candidate
+        decides, since a grouped finding fired on one rule and a rule belongs
+        to one datatype; a group spanning datatypes falls back to whichever
+        comes first, which is still better than no schema at all.
+
+        Returns ``None`` when the field is not declared anywhere we can see,
+        which is the honest answer for a finding BIDS Manager raises itself.
+        """
+        from ..metadata.template_plan import as_template_field
+        from .. import schema as schema_mod
+
+        pool = candidates if candidates is not None else []
+        pairs = [
+            (c.datatype, c.suffix) for c in pool
+            if getattr(c, "datatype", None) and getattr(c, "suffix", None)
+        ]
+        for datatype, suffix in pairs:
+            try:
+                specs = schema_mod.sidecar_fields(datatype, suffix)
+            except (KeyError, ValueError, OSError):
+                continue
+            for spec in specs:
+                if spec.name == self._field:
+                    return as_template_field(spec)
+        return None
+
+    def _build_value_row(self) -> QHBoxLayout:
+        """The label and control for the value being written."""
+        from .widgets.template_form import (
+            build_field_widget,
+            connect_field_widget,
+            field_label_widget,
+            write_field_widget,
+        )
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        if self._spec is None:
+            # No schema declaration: a plain box, and say why rather than
+            # pretending the field is free text by design.
+            row.addWidget(QLabel("Value:"))
+            self._value_edit = QLineEdit()
+            self._value_edit.setObjectName("ent-input")
+            self._value_edit.setPlaceholderText(
+                "text, or JSON for a number, list or object"
+            )
+            self._value_edit.setToolTip(
+                "The standard does not declare this field for these files, so "
+                "there is no type or vocabulary to offer. JSON is parsed when "
+                "it parses; anything else is written as text."
+            )
+            if self._initial_value is not None:
+                self._value_edit.setText(_as_text(self._initial_value))
+            self._value_edit.textChanged.connect(self._refresh_preview)
+            row.addWidget(self._value_edit, 1)
+            return row
+
+        # The label carries the requirement level and the description, exactly
+        # as it does in the sidecar form.
+        row.addWidget(field_label_widget(self._spec))
+        # The schema's vocabulary arrives with the field. On top of it, the
+        # values BIDS Manager curates for the fields the standard leaves as
+        # free text: the amplifiers, the caps, the electrode references, the
+        # tracers. Passing nothing here left the same field a dropdown in the
+        # sidecar form and a bare box in this dialog, which is the whole
+        # complaint this change exists to answer. Suggestions, never a
+        # restriction: the box stays typable either way.
+        self._value_edit = build_field_widget(
+            self._spec, _curated_for(self._field),
+        )
+        if isinstance(self._value_edit, (QLineEdit, QComboBox)):
+            # Only the simple controls take the shared input styling; a row
+            # list draws its own.
+            self._value_edit.setObjectName("ent-input")
+        if self._initial_value is not None:
+            write_field_widget(self._value_edit, self._initial_value)
+        connect_field_widget(self._value_edit, self._refresh_preview)
+        # ...and again on every keystroke. ``connect_field_widget`` settles on
+        # editingFinished, which is right for a form that commits on focus-out
+        # and wrong here: this dialog shows what each file WOULD become, and a
+        # preview that waits for focus to leave the only editable control
+        # never updates at all.
+        self._connect_live(self._value_edit)
+        row.addWidget(self._value_edit, 1)
+        if self._spec.unit:
+            unit = QLabel(self._spec.unit)
+            unit.setObjectName("dlg-hint")
+            row.addWidget(unit)
+        return row
+
+    def _connect_live(self, widget: QWidget) -> None:
+        """Refresh the preview on every keystroke, whatever the control is."""
+        if isinstance(widget, QComboBox):
+            widget.currentTextChanged.connect(lambda _t: self._refresh_preview())
+            if widget.isEditable():
+                widget.lineEdit().textChanged.connect(
+                    lambda _t: self._refresh_preview()
+                )
+            return
+        if isinstance(widget, QLineEdit):
+            widget.textChanged.connect(lambda _t: self._refresh_preview())
+
     def value(self) -> Any:
-        """The typed value, parsed as JSON when it parses, else as text."""
+        """The value to write, in the shape the schema declares.
+
+        Read through ``read_field_widget`` when the schema knows the field, so
+        a number arrives as a number and a list as a list rather than as the
+        text of one. The JSON fallback is only for a field it does not know.
+        """
+        if self._spec is not None:
+            from .widgets.template_form import read_field_widget
+
+            got = read_field_widget(self._value_edit, self._spec)
+            return "" if got is None else got
         text = self._value_edit.text().strip()
         if text == "":
             return ""
