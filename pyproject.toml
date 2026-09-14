@@ -178,4 +178,5 @@ testpaths = ["tests"]
 markers = [
     "real_data: requires real datasets at /Users/karelo/Development/datasets/BIDS_Manager/raw_data, gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG}_DATA",
     "gui: pytest-qt smoke tests, headless OK with QT_QPA_PLATFORM=offscreen",
+    "integration: end-to-end CLI runs against the published sample datasets; fetches ~56 MB on first use and caches it outside the checkout",
 ]

@@ -1,0 +1,186 @@
+# Full test matrix on the lab's own machines.
+#
+# Modelled on MEEGqc's tests.yml, with two deliberate differences.
+#
+# 1. SELF-HOSTED RUNNERS, not GitHub's.
+#    MEEGqc's suite is `workflow_dispatch` only, and says why in its own
+#    comment: "to conserve GitHub Actions minutes". This one is manual too,
+#    for a different reason: two office laptops should not grind through a
+#    35-cell matrix because somebody pushed a typo fix. Self-hosted also keeps
+#    the datasets on the machines that already hold them.
+#
+#    The trade is real and worth naming. A manual gate only catches what
+#    somebody remembers to check, so run it before a release, after touching
+#    anything platform-shaped (paths, subprocesses, Qt windows, packaging),
+#    and whenever a change felt bigger than it looked.
+#
+# 2. nox + uv, not setup-python + pip.
+#    `noxfile.py` is the ONE definition of "run the tests". The same command
+#    works on your Mac, over SSH, and here, so CI cannot drift away from what
+#    you run by hand. uv fetches whatever interpreter a cell needs: nothing is
+#    pre-installed on the runners beyond uv itself.
+#
+# And one tier MEEGqc does not have. It runs `pip install -e .`, which proves
+# the DEPENDENCIES resolve on each Python. The `installed` job below builds
+# the wheel, installs it into a clean environment and drives the tool from
+# outside the checkout. Only the second kind can see a broken wheel, and this
+# repository shipped one: the vendored bidsval schemas were absent from every
+# wheel for weeks while the source tree was complete and every test green.
+#
+# SECURITY. A self-hosted runner on a PUBLIC repository executes whatever a
+# workflow tells it to, on real hardware in a real office. There is therefore
+# no `pull_request` trigger: a fork's PR gets no run here. If one is ever
+# added, set Settings -> Actions -> "Require approval for all outside
+# collaborators" in the same change.
+
+name: tests
+
+on:
+  # MANUAL ONLY, the same choice MEEGqc's tests.yml makes, for a different
+  # reason: there it conserves paid GitHub minutes, here it keeps two office
+  # laptops from grinding through a 35-cell matrix every time somebody pushes
+  # a typo fix. Run it when you want an answer.
+  #
+  #   Actions -> tests -> Run workflow
+  #   gh workflow run tests.yml
+  #   gh workflow run tests.yml -f full=false     # skip the slow GUI row
+  #
+  # To make it automatic again, uncomment either block below. Note that
+  # `pull_request` must stay OFF while the runners are self-hosted and this
+  # repository is public: see the security note at the top of this file.
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the slow GUI tier on every Python (off = 3.12 only)"
+        type: boolean
+        default: true
+  # push:
+  #   branches: ["main"]
+  # schedule:
+  #   - cron: "0 3 * * *"      # 03:00 UTC, laptops idle
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep uv's interpreters and wheels between runs, outside the workspace so
+  # a checkout does not wipe them. A cold matrix is mostly resolving.
+  UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+
+defaults:
+  run:
+    # bash on Windows too, so one script works on both runners. This is the
+    # single most useful line MEEGqc's workflow has.
+    shell: bash
+
+jobs:
+  # A tiny job whose only purpose is to decide whether the GUI tier runs on
+  # one Python or five, so the decision is written once instead of repeated
+  # in every matrix expression.
+  #
+  # `inputs.full` is empty for any trigger that is not workflow_dispatch, so
+  # the default here is the full row: if the push or schedule blocks above are
+  # ever uncommented, they get everything rather than silently getting one
+  # cell and looking like a passing full run.
+  plan:
+    runs-on: [self-hosted, linux]
+    outputs:
+      gui_pythons: ${{ steps.pick.outputs.gui_pythons }}
+    steps:
+      - id: pick
+        run: |
+          if [ "${{ inputs.full }}" = "false" ]; then
+            echo 'gui_pythons=["3.12"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'gui_pythons=["3.10","3.11","3.12","3.13","3.14"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  lint:
+    name: lint
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv tool run nox -s lint
+
+  unit:
+    name: unit ${{ matrix.os }} py${{ matrix.python }}
+    strategy:
+      fail-fast: false          # a matrix exists to say WHICH cells fail
+      matrix:
+        os: [linux, windows]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv tool run nox -s "unit-${{ matrix.python }}"
+
+  installed:
+    # The pip-installation tier, and stronger than `pip install -e .`: it
+    # builds the wheel, force-reinstalls it into a clean environment, and runs
+    # the tool from a directory where the checkout cannot shadow it. Console
+    # scripts, a real EEG + MEG conversion, the GUI.
+    #
+    # Every Python, because "the wheel installs on 3.10 but not 3.14" is a
+    # real failure mode and the only way to know is to try each one.
+    name: installed ${{ matrix.os }} py${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv tool run nox -s "installed-${{ matrix.python }}"
+
+  gui:
+    # About five minutes per cell, so ten cells is most of the matrix's wall
+    # clock: roughly 25 minutes on each laptop, in parallel. Run with
+    # `full=false` when you want the rest of the matrix back in a few minutes
+    # and do not need the whole GUI row.
+    name: gui ${{ matrix.os }} py${{ matrix.python }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+        python: ${{ fromJSON(needs.plan.outputs.gui_pythons) }}
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv tool run nox -s "gui-${{ matrix.python }}"
+
+  integration:
+    # scan -> convert -> metadata -> validate against the multimodal sample
+    # the documentation publishes: one participant, 56 MB, real Siemens and GE
+    # DICOM, real EDF, real FIF. The tier the last three defects belonged to,
+    # every one of them an end-to-end behaviour no unit test could see.
+    #
+    # Fetches the sample once per runner and caches it in the user's cache
+    # directory, OUTSIDE the workspace, because actions/checkout runs
+    # `git clean -ffdx` and would otherwise force a re-download every run. A
+    # runner with no network and no cache skips these rather than failing.
+    name: integration ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv tool run nox -s "integration-3.12"
+
+  wheel:
+    # Cheap structural check on the artefact: does the zip carry its package
+    # data. `installed` proves the stronger thing; this names the missing glob
+    # directly when it fails.
+    name: wheel contents
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv tool run nox -s wheel
