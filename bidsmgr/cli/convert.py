@@ -10,7 +10,8 @@ Pipeline per (dataset, subject, session)::
 
     Phase 2   sequential per-subject post-conv:
               - fixups.fieldmaps.apply_fieldmap_renames
-              - fixups.scans_tsv.update_scans_tsv (no-op today)
+              - fixups.scans_tsv.update_scans_tsv (mne-bids has
+                already written a scans table for any EEG/MEG)
               - fixups.intended_for.populate_intended_for
 
     Phase 3   sequential per-subject merge commit:

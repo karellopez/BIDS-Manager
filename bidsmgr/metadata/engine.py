@@ -827,41 +827,162 @@ def _write_changes(bids_root: Path, report: MetadataReport) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Files that live in a datatype folder but are NOT the recording. BIDS is
+# explicit that the scans file describes "each neural recording file", so the
+# tables and sidecars that accompany one do not get a row.
+_SCANS_COMPANION_SUFFIXES: frozenset[str] = frozenset({
+    "events", "channels", "electrodes", "coordsystem", "headshape", "markers",
+    "photo", "physio", "stim", "blood", "scans", "sessions", "participants",
+})
+
+# Extensions that are part of a recording rather than a recording themselves.
+# A BrainVision recording is a .vhdr header plus a .eeg binary and a .vmrk
+# marker file, and an EEGLAB one is a .set plus a .fdt: the header is the
+# recording and gets the row, the rest would be duplicates of it. ``.eeg``
+# here is always the BrainVision binary, because the other format that uses
+# the extension (Nihon Kohden) is not BIDS-native and cannot appear in a
+# converted dataset. ``.dat``, ``.mrk`` and ``.pos`` are the MEG calibration,
+# marker and headshape side files.
+_SCANS_COMPANION_EXTS: frozenset[str] = frozenset({
+    ".json", ".tsv", ".gz", ".vmrk", ".eeg", ".fdt", ".dat", ".mrk", ".pos",
+})
+
+# MEG system files mne-bids writes beside the data, named by entity rather
+# than by suffix: acq-calibration_meg.dat and acq-crosstalk_meg.fif. The
+# second carries a .fif extension, which is a real recording extension, so
+# only the entity tells them apart.
+_SCANS_SYSTEM_ENTITIES: tuple[str, ...] = ("acq-calibration", "acq-crosstalk")
+
+# Recordings that are a DIRECTORY: CTF and EGI. One row each, and the walk
+# must not descend into them or every internal file would get a row.
+_SCANS_DIR_EXTS: frozenset[str] = frozenset({".ds", ".mff"})
+
+
+def _is_recording_file(path: Path) -> bool:
+    """Does this path get a row in ``*_scans.tsv``?
+
+    True for the data files themselves, of every modality, and false for the
+    sidecars, tables and format side files that accompany them.
+    """
+    name = path.name
+    if name.endswith(".tsv.gz") or name.endswith(".nii.gz"):
+        ext = ".tsv.gz" if name.endswith(".tsv.gz") else ".nii.gz"
+    else:
+        ext = path.suffix.lower()
+    if ext == ".nii.gz":
+        return True
+    if ext in _SCANS_COMPANION_EXTS or ext == ".tsv.gz":
+        return False
+    if any(token in name for token in _SCANS_SYSTEM_ENTITIES):
+        return False
+    # The BIDS suffix is the last underscore-delimited token that carries no
+    # hyphen; entity tokens all do.
+    stem = name.split(".")[0]
+    for token in reversed(stem.split("_")):
+        if "-" not in token:
+            return token not in _SCANS_COMPANION_SUFFIXES
+    return False
+
+
+def _scans_rows_for(root: Path) -> list[dict[str, str]]:
+    """One row per recording under ``root``, in path order.
+
+    Walks by hand rather than with ``rglob`` so a folder-shaped recording
+    (CTF ``.ds``, EGI ``.mff``) is taken as a single entry and not descended
+    into.
+    """
+    rows: list[dict[str, str]] = []
+
+    def walk(folder: Path) -> None:
+        for entry in sorted(folder.iterdir(), key=lambda p: p.name):
+            if entry.is_dir():
+                if entry.suffix.lower() in _SCANS_DIR_EXTS:
+                    rows.append({
+                        "filename": entry.relative_to(root).as_posix(),
+                        "acq_time": _acq_time_for(entry),
+                    })
+                else:
+                    walk(entry)
+            elif entry.is_file() and _is_recording_file(entry):
+                rows.append({
+                    "filename": entry.relative_to(root).as_posix(),
+                    "acq_time": _acq_time_for(entry),
+                })
+
+    walk(root)
+    return rows
+
+
+def _acq_time_for(recording: Path) -> str:
+    """``acq_time`` from the recording's own sidecar, or ``"n/a"``.
+
+    Only the MRI sidecars carry an acquisition time we can read this way.
+    EEG and MEG get theirs from mne-bids, which reads ``meas_date`` off the
+    recording at conversion and writes it into the scans table; that value is
+    preserved by the merge rather than recomputed here, because the sidecar
+    does not hold it.
+    """
+    json_path = _matching_json(recording)
+    if not json_path.exists():
+        return _NA_VALUE
+    try:
+        meta = json.loads(json_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return _NA_VALUE
+    adt = meta.get("AcquisitionDateTime") or meta.get("AcquisitionTime")
+    return adt if isinstance(adt, str) and adt else _NA_VALUE
+
+
 def _refresh_scans_tsv(bids_root: Path, report: MetadataReport) -> None:
     """Generate one ``*_scans.tsv`` per subject (or subject/session).
 
-    Lists every NIfTI under the subject's tree with its ``acq_time``
-    parsed from the JSON sidecar's ``AcquisitionDateTime`` /
-    ``AcquisitionTime``. Missing acq times are recorded as ``"n/a"`` per
-    BIDS convention. Regenerated on every run (no merge).
+    Lists EVERY recording, of every modality, not just the NIfTIs. The
+    previous version globbed ``*.nii*``, which had two consequences on any
+    dataset holding EEG, MEG, iEEG or ECAT PET. A subject with no NIfTI at all
+    produced no scans table, and a mixed session produced one that listed the
+    images and silently omitted the recordings beside them.
+
+    Worse, mne-bids WRITES this table during conversion, with a real
+    ``acq_time`` taken from the recording's ``meas_date``. Regenerating it
+    from the NIfTIs deleted those rows and the only acquisition times the
+    dataset had for its recordings. So the fresh rows are MERGED into what is
+    already there rather than replacing it: existing rows keep their values
+    and their extra columns (mne-bids adds ``source`` when asked), rows for
+    recordings that are new get appended, and nothing that was measured at
+    conversion time is thrown away.
     """
+    from .preserve import merge_scans_table
+
     for subj_dir in sorted(bids_root.glob("sub-*")):
         if not subj_dir.is_dir():
             continue
         ses_dirs = [s for s in sorted(subj_dir.glob("ses-*")) if s.is_dir()]
         roots = ses_dirs or [subj_dir]
         for root in roots:
-            rows: list[dict[str, str]] = []
-            for nii in sorted(root.rglob("*.nii*")):
-                if not nii.is_file():
-                    continue
-                rel = nii.relative_to(root).as_posix()
-                json_path = _matching_json(nii)
-                acq_time = "n/a"
-                if json_path.exists():
-                    try:
-                        meta = json.loads(json_path.read_text())
-                        adt = meta.get("AcquisitionDateTime") or meta.get("AcquisitionTime")
-                        if isinstance(adt, str) and adt:
-                            acq_time = adt
-                    except (OSError, json.JSONDecodeError):
-                        pass
-                rows.append({"filename": rel, "acq_time": acq_time})
+            rows = _scans_rows_for(root)
             if not rows:
                 continue
             ses_part = f"_{root.name}" if root.name.startswith("ses-") else ""
             out = root / f"{subj_dir.name}{ses_part}_scans.tsv"
-            pd.DataFrame(rows).to_csv(out, sep="\t", index=False)
+
+            existing: list[dict[str, str]] = []
+            if out.is_file():
+                try:
+                    existing = pd.read_csv(
+                        out, sep="\t", dtype=str, keep_default_na=False,
+                    ).to_dict("records")
+                except (OSError, ValueError) as exc:
+                    log.warning("could not read %s: %s", out, exc)
+            # Rows whose file is gone are dropped: a stale filename is an
+            # error the validator reports (SCANS_FILENAME_NOT_MATCH_DATASET),
+            # and after a rename the old name is exactly that.
+            present = {row["filename"] for row in rows}
+            existing = [r for r in existing if r.get("filename", "") in present]
+
+            fields, merged = merge_scans_table(existing, rows)
+            pd.DataFrame(merged, columns=fields).to_csv(
+                out, sep="\t", index=False,
+            )
             report.files_written.append(out)
 
 
