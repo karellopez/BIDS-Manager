@@ -154,7 +154,11 @@ def _folder_key_for(root: Optional[Path], path: Optional[Path]) -> Optional[str]
     parent = rel.parent
     if str(parent) in ("", "."):
         return ""
-    return str(parent)
+    # POSIX separators, because this is looked up in
+    # ``ValidationReport.folder_issues``, whose keys are BIDS-style relative
+    # paths. ``str()`` gave "sub-01\\ses-01\\anat" on Windows, which matched
+    # no key, so folder-level findings silently never appeared there.
+    return parent.as_posix()
 
 
 class ValidationPane(QWidget):
@@ -674,11 +678,13 @@ class ValidationPane(QWidget):
         if self._accepted is None:
             self._accepted = load(self._current_root)
         try:
-            rel = str(
-                Path(target_file).resolve().relative_to(
-                    Path(self._current_root).resolve()
-                )
-            )
+            # The same spelling the acceptance was STORED under, which is
+            # POSIX (see editor_panel's accept call). With ``str()`` here the
+            # lookup missed on Windows and an accepted warning came back
+            # undimmed on every subsequent run.
+            rel = Path(target_file).resolve().relative_to(
+                Path(self._current_root).resolve()
+            ).as_posix()
         except (ValueError, OSError):
             return None
         return is_accepted(

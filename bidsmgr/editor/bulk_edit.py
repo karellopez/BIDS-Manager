@@ -248,9 +248,12 @@ def candidates(
         if data is None and target.exists():
             applicable, reason = False, "not readable as a JSON object"
         try:
-            rel = str(target.resolve().relative_to(root.resolve()))
+            # POSIX separators on every platform: this is matched against
+            # BIDS-declared paths and shown to a user who reads them with
+            # slashes. See editor/rename.py::_rel.
+            rel = target.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
-            rel = str(target)
+            rel = Path(target).as_posix()
         out.append(FileCandidate(
             path=target,
             rel=rel,

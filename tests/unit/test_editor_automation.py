@@ -12,6 +12,7 @@ implementation:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -121,12 +122,21 @@ def test_an_operation_that_changed_nothing_leaves_no_history(
     assert read_log(dataset) == []
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the premise cannot be set up on Windows: os.chmod there only toggles "
+        "the read-only attribute, and Windows ignores that attribute for "
+        "directories, so the root stays writable and there is nothing to "
+        "refuse. Making a directory unwritable needs an ACL change, which is "
+        "more test scaffolding than the assertion is worth."
+    ),
+)
 def test_a_read_only_root_is_refused_rather_than_half_written(
     dataset: Path,
 ) -> None:
     """The history lives in the dataset, so an unwritable one cannot be
     edited safely. Say so instead of failing on the first write."""
-    import os
     import stat
 
     mode = dataset.stat().st_mode

@@ -1047,9 +1047,12 @@ class EditorPanel(QWidget):
         if not ok:
             return
         try:
-            rel = str(Path(path).resolve().relative_to(Path(root).resolve()))
+            # The acceptance is keyed by this string and looked up again on
+            # the next validation run, so it has to be spelled the same way
+            # everywhere. POSIX, as BIDS does. See editor/rename.py::_rel.
+            rel = Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
         except (ValueError, OSError):
-            rel = str(path)
+            rel = Path(path).as_posix()
         accept(root, file=rel, rule_id=rule_id, field=field, note=note)
         self._validation_pane.reload_acceptances()
         self.log_message.emit(f"accepted {rule_id} in {rel}")

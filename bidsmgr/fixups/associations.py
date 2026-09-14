@@ -215,9 +215,10 @@ def _missing(
     root: Path, target: Path, kind: str, source: Path, derivable: bool,
 ) -> MissingAssociation:
     try:
-        rel = str(target.resolve().relative_to(root.resolve()))
+        # POSIX separators on every platform. See editor/rename.py::_rel.
+        rel = target.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
-        rel = str(target)
+        rel = Path(target).as_posix()
     return MissingAssociation(
         target=target, rel=rel, kind=kind, source=source, derivable=derivable,
     )

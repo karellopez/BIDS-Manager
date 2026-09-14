@@ -657,12 +657,19 @@ class MainWindow(QMainWindow):
         """
         from PyQt6.QtWidgets import QMessageBox
 
+        from .fs_watch import watchers_released
+
         root = Path(root)
         target = root.parent / new_name
         if target == root:
             return
         try:
-            root.rename(target)
+            # The open handles this docstring mentions include the ones
+            # QFileSystemWatcher keeps on every directory the panes are
+            # watching under ``root``. On Windows those alone are enough to
+            # make the move fail outright. See bidsmgr.gui.fs_watch.
+            with watchers_released():
+                root.rename(target)
         except OSError as exc:
             QMessageBox.warning(
                 self, "Could not rename the project",

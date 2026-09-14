@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 from ..editor import rename as rn
 from ..schema import entity_key_info
 from .dialog_chrome import build_footer_with, build_header, card, hint
+from .fs_watch import watchers_released
 
 def entity_choices() -> list[tuple[str, str]]:
     """Every entity the ACTIVE schema defines, as ``(key, display name)``.
@@ -383,7 +384,11 @@ class RenameEntityDialog(QDialog):
         # user thinks about "these three runs" and "that whole session".
         groups: dict[str, QTreeWidgetItem] = {}
         for src, dst in plan.file_moves:
-            folder = str(Path(plan.file_key(self._root, src)).parent)
+            # ``.as_posix()``, not ``str()``: the key is already POSIX, and
+            # putting it through a native Path on Windows hands the label
+            # back with backslashes, so the tree reads in a spelling that
+            # appears nowhere in the dataset.
+            folder = Path(plan.file_key(self._root, src)).parent.as_posix()
             parent = groups.get(folder)
             if parent is None:
                 parent = QTreeWidgetItem(self._preview, [folder, ""])
@@ -512,9 +517,15 @@ class RenameEntityDialog(QDialog):
                 return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            touched, errors = rn.apply_rename(
-                self._root, self._plan, only=self.selected_keys(),
-            )
+            # A rename moves folders, and on Windows a folder being watched
+            # cannot be moved: QFileSystemWatcher holds an open handle on it
+            # and MoveFile returns ERROR_ACCESS_DENIED. The rename then fell
+            # back to moving the files one by one, which works, and left the
+            # emptied original folder on disk. See bidsmgr.gui.fs_watch.
+            with watchers_released():
+                touched, errors = rn.apply_rename(
+                    self._root, self._plan, only=self.selected_keys(),
+                )
         except rn.RenameError as exc:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Rename refused", str(exc))

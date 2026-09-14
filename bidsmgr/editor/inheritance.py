@@ -144,9 +144,10 @@ def explain(root: Path, target: Path, field: str) -> list[Source]:
             continue
         depth = len(target.parent.parts) - len(candidate.parent.parts)
         try:
-            rel = str(candidate.resolve().relative_to(root.resolve()))
+            # POSIX separators on every platform. See editor/rename.py::_rel.
+            rel = candidate.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
-            rel = str(candidate)
+            rel = Path(candidate).as_posix()
         found.append(Source(
             path=candidate, rel=rel, value=data[field],
             level=max(depth, 0), winner=False,

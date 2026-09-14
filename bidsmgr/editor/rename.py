@@ -534,10 +534,29 @@ def _load_json(path: Path) -> Optional[dict]:
 
 
 def _rel(root: Path, path: Path) -> str:
+    """``path`` relative to ``root``, spelled with forward slashes.
+
+    POSIX separators, on every platform, because every consumer of this string
+    wants them:
+
+    * the ``filename`` column of a ``*_scans.tsv`` is defined by BIDS as a
+      POSIX relative path, and :func:`plan_scans_rows` builds its lookup keys
+      here and matches them against what is written in the table;
+    * ``file_key`` identifies one move to the dialog, and a key that changes
+      spelling by platform is not stable;
+    * the rest are shown to a user, who reads BIDS paths with slashes.
+
+    ``str()`` gave ``anat\\sub-001_T1w.nii.gz`` on Windows, which matched no
+    row in any scans table. Splitting a subject there moved the files, found
+    nothing to move in the tables, and wrote no new ``*_scans.tsv`` at all —
+    while macOS and Linux, where ``str()`` and ``as_posix()`` are the same
+    string, were correct by coincidence. Sixteen tests in
+    ``test_rename_split.py`` had been failing on Windows for the same reason.
+    """
     try:
-        return str(Path(path).resolve().relative_to(Path(root).resolve()))
+        return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return Path(path).as_posix()
 
 
 # --------------------------------------------------------------------------

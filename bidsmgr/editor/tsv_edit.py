@@ -368,10 +368,16 @@ def _apply(root, changes, edit, label, *, per_path: bool = False):
 
 
 def _rel(root: Path, path: Path) -> str:
+    """``path`` relative to ``root``, with forward slashes on every platform.
+
+    BIDS spells relative paths POSIX-style, so anything compared against a
+    value read out of a dataset file has to as well. See the longer note on
+    the twin of this function in ``editor/rename.py``.
+    """
     try:
-        return str(Path(path).resolve().relative_to(Path(root).resolve()))
+        return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return Path(path).as_posix()
 
 
 __all__ = [
