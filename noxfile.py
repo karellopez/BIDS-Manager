@@ -85,9 +85,36 @@ def integration(session: nox.Session) -> None:
 
 @nox.session(python=PYTHONS[-1])
 def lint(session: nox.Session) -> None:
-    """Ruff, on one interpreter only. Style does not vary by Python."""
-    session.install("ruff")
-    session.run("ruff", "check", "bidsmgr", "tests", *session.posargs)
+    """Ruff on the code, actionlint on the workflows. One interpreter: neither
+    varies by Python.
+
+    actionlint is here because GitHub validates a workflow only when it tries
+    to RUN it, and rejects the whole file for one bad expression. The first
+    version of ci.yml used ``${{ runner.temp }}`` in a workflow-level ``env``,
+    where the ``runner`` context does not exist, and the only way to find out
+    was to push it and watch the run refuse to start. That is a slow way to
+    learn a typo.
+    """
+    # Ruff is PINNED. Unpinned, this job goes red the day ruff ships a
+    # release that enables a rule by default, which is a linter release and
+    # not a change to this code. Measured: 0.15.22 reports 82 findings on
+    # bidsmgr, 0.16.7 reports 1,418, almost all of them UP045 and I001.
+    session.install("ruff==0.15.22", "actionlint-py")
+
+    # actionlint FIRST. nox stops a session at the first failing command, so
+    # running ruff first would mean a style finding hides a broken workflow,
+    # and a broken workflow is the more expensive of the two: GitHub rejects
+    # the whole file and nothing runs at all.
+    workflows = HERE / ".github" / "workflows"
+    if workflows.is_dir():
+        session.run(
+            "actionlint", *[str(p) for p in sorted(workflows.glob("*.yml"))],
+        )
+
+    # bidsmgr only, and bidsmgr/vendor excluded in pyproject: the tests are
+    # not linted today, and widening the target is a separate decision from
+    # getting a matrix running.
+    session.run("ruff", "check", "bidsmgr", *session.posargs)
 
 
 @nox.session(python=PYTHONS[0])

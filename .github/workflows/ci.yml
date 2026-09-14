@@ -63,10 +63,16 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Keep uv's interpreters and wheels between runs, outside the workspace so
-  # a checkout does not wipe them. A cold matrix is mostly resolving.
-  UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+# NOTE: no UV_CACHE_DIR here. An earlier version set it to
+# `${{ runner.temp }}/uv-cache`, which is invalid: `runner` is a JOB context
+# and only `github`, `inputs`, `secrets` and `vars` exist at workflow level.
+# GitHub rejects the whole file for it.
+#
+# It was unnecessary anyway. uv already caches outside the workspace by
+# default (~/.cache/uv, or %LOCALAPPDATA%\uv\cache), which is the entire
+# reason the override existed: actions/checkout runs `git clean -ffdx` and
+# would wipe anything inside the checkout. The default already survives that
+# and persists between runs on a self-hosted runner.
 
 defaults:
   run:

@@ -172,6 +172,16 @@ include = ["bidsmgr*"]
 # else. 2.9 MB, six BIDS versions.
 "bidsmgr.vendor.bidsval.schema" = ["bundled/*.json"]
 
+[tool.ruff]
+# Vendored code is a verbatim copy of somebody else's package and is not ours
+# to restyle: see bidsmgr/vendor/README.md, where the refresh policy is
+# "wholesale rather than patched". Linting it reports 21 findings we would
+# have to re-introduce on every refresh, including the five that look like
+# real defects (an undefined name, two `is` comparisons against literals, two
+# `== True`). Those are worth reporting UPSTREAM, not silencing locally, and
+# they are tracked there rather than here.
+extend-exclude = ["bidsmgr/vendor"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
