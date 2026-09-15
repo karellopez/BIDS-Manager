@@ -15,7 +15,7 @@ from typing import Optional
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap
 
 
 def _trim_transparent_bbox(img: QImage) -> QImage:

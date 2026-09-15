@@ -161,6 +161,14 @@ jobs:
     needs: plan
     strategy:
       fail-fast: false
+      # At most two GUI cells at a time, however many runner instances exist.
+      #
+      # Each one starts a Qt application and a 600 MB environment, and with
+      # nine runners on one laptop they all landed together: two segfaulted
+      # inside Qt while the same suite passes run singly. The per-session
+      # cache isolation in noxfile.py removes the sharing; this removes the
+      # pile-up. The other tiers stay unlimited because they are cheap.
+      max-parallel: 2
       matrix:
         os: [linux, windows]
         python: ${{ fromJSON(needs.plan.outputs.gui_pythons) }}

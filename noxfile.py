@@ -75,6 +75,25 @@ def gui(session: nox.Session) -> None:
     """
     _install(session, "pytest", "pytest-qt")
     session.env["QT_QPA_PLATFORM"] = "offscreen"
+
+    # Every mutable cache Qt touches gets its own directory, per session.
+    #
+    # Several matrix cells run at once on one laptop, each starting offscreen
+    # Qt as the same user, and by default they share ~/.cache/fontconfig and
+    # $XDG_RUNTIME_DIR. Concurrent fontconfig cache builds are a known crash,
+    # and two GUI cells segfaulted inside Qt on the Linux runner while the
+    # same suite passes when run by hand, where there is only ever one copy.
+    #
+    # Isolating costs a few megabytes per session and removes the sharing.
+    private = Path(session.create_tmp())
+    for var in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME"):
+        home = private / var.lower()
+        home.mkdir(parents=True, exist_ok=True)
+        # XDG_RUNTIME_DIR is required to be 0700 and Qt complains otherwise.
+        home.chmod(0o700)
+        session.env[var] = str(home)
+
     session.run(
         "pytest", "tests/gui", "-v", "-ra", "--durations=10",
         "-p", "no:randomly", *session.posargs,

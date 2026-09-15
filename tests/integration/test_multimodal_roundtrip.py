@@ -196,11 +196,19 @@ def test_the_eeg_and_meg_are_in_the_table(converted) -> None:
 
 
 def _errors(root) -> list[tuple[str, str, str]]:
+    """Every error, with its path spelled POSIX.
+
+    as_posix(), not str(). The callers below filter on "/pet/", and on Windows
+    str(v.path) is "sub-002\\pet\\sub-002_pet.json", so the filter matched
+    nothing: the PET errors were never excluded and the MRI/EEG/MEG assertion
+    failed carrying a list of PET findings. CROSS_PLATFORM_RULES section 1.1,
+    in a test written two commits after it.
+    """
     from bidsmgr.editor.validator import validate
 
     report = validate(root)
     return [
-        (str(v.path), i.rule_id, i.field or "")
+        (v.path.as_posix(), i.rule_id, i.field or "")
         for v in report.files for i in (v.issues or [])
         if i.severity.value == "err" and not getattr(i, "mirrored", False)
     ]

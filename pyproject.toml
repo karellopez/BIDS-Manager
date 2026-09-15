@@ -182,6 +182,28 @@ include = ["bidsmgr*"]
 # they are tracked there rather than here.
 extend-exclude = ["bidsmgr/vendor"]
 
+[tool.ruff.lint]
+# Ruff's default set is E4, E7, E9, F. Kept, minus three rules this codebase
+# deliberately works against. Three named rules rather than dropping whole
+# families, so E711/E712 (comparing to None or True), E722 (bare except) and
+# E741 keep working: those catch real mistakes, and the three below are
+# formatting opinions.
+ignore = [
+    # One-line signal handlers. gui/widgets/nifti_gl_view.py has ~30 of the
+    # form `def _on_gmix(self, v): self.gl.gradient_mix = v / 100; self.gl.update()`.
+    # As a block they read as a table of slider-to-uniform bindings, and one
+    # per three lines would be 90 lines of noise. A deliberate choice.
+    "E702",   # multiple statements on one line (semicolon)
+    # Deferred imports. The architecture keeps Qt out of the engine modules
+    # (CLAUDE.md guard 2), which means importing inside a function on purpose,
+    # and the worker threads import their heavy readers in run() so the GUI
+    # starts fast. Both show up as "import not at top of file".
+    "E402",   # module level import not at top of file
+    # Assigning a lambda. Used for small local callbacks where a def would be
+    # more ceremony than the callback.
+    "E731",   # do not assign a lambda expression, use a def
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

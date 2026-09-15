@@ -68,7 +68,6 @@ import logging
 import os
 import shutil
 import subprocess
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
