@@ -100,6 +100,7 @@ class EditorPanel(QWidget):
         self._tree_pane.file_selected.connect(self._on_file_selected)
         self._tree_pane.rename_requested.connect(self._on_rename)
         self._tree_pane.entities_requested.connect(self._on_edit_entities)
+        self._tree_pane.delete_requested.connect(self._on_delete)
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -439,6 +440,15 @@ class EditorPanel(QWidget):
         self._sessions_action.triggered.connect(
             lambda: self._on_edit_entities(session_mode=True)
         )
+
+        self._delete_action = self._tools_menu.addAction("Delete...")
+        self._delete_action.setToolTip(
+            "Delete the selected recordings, datatypes or sessions. The "
+            "*_scans.tsv rows, the IntendedFor entries, a participants row "
+            "left describing nothing and any emptied folder go with them, as "
+            "one undoable step. Acts on the tree selection."
+        )
+        self._delete_action.triggered.connect(self._on_delete)
 
         # Only meaningful for a dataset this tool did not convert, so it
         # hides itself once the dataset carries a project bundle.
@@ -1064,6 +1074,38 @@ class EditorPanel(QWidget):
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_delete(self, targets: Optional[list] = None) -> None:
+        """Delete recordings, datatypes or sessions, after showing the plan.
+
+        Reached from the Tools menu, where it acts on the tree selection, and
+        from the tree's right-click, which passes what was clicked. The
+        refresh afterwards is the one a rename needs, for a stronger reason:
+        every path a pane is holding may name a file that is now gone.
+        """
+        from .delete_dialog import DeleteDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        if not chosen:
+            QMessageBox.information(
+                self, "Nothing selected",
+                "Select a session, a datatype folder or a recording in the "
+                "tree first. Deleting acts on what you pick, and its "
+                "companion files go with it.",
+            )
+            return
+        dlg = DeleteDialog(root, chosen, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Deliberately clears the centre pane before refreshing: the file it
+        # was showing is one of the things that may have just been deleted.
         self._sidecar_form.set_file(None, None, None)
         self._tree_pane.set_root(root)
         if self._report is not None:

@@ -195,6 +195,75 @@ def raw_root(name: str = "multimodal") -> Path:
     return subdirs[0] if len(subdirs) == 1 else inner
 
 
+# ---------------------------------------------------------------------------
+# PET, which ships every one of its source formats in one published sample
+# ---------------------------------------------------------------------------
+#
+# Thirteen PET tests used to gate on ``BIDS_MANAGER_REAL_PET_DATA=1`` plus a
+# local copy of the OpenNeuroPET phantom set, which meant they ran on one
+# laptop and skipped on every runner: the coverage existed on paper and nowhere
+# else. The published sample carries all three sources the tool has to read,
+# so the honest gate is "could this machine get the sample", which any machine
+# with a network can.
+#
+# Each accessor returns ``None`` rather than raising when the piece is not
+# there, so a module-level constant can be defined on a machine with no data
+# and the skip is decided by the gate rather than by an import error.
+
+
+def _pet_tree() -> Optional[Path]:
+    try:
+        top = fetch("pet")
+    except LookupError:
+        return None
+    inner = top / SAMPLES["pet"].root if SAMPLES["pet"].root else top
+    return inner if inner.is_dir() else top
+
+
+def pet_dicom_dir() -> Optional[Path]:
+    """A folder of real PET DICOM, as a scanner wrote it."""
+    tree = _pet_tree()
+    if tree is None:
+        return None
+    hits = sorted(p for p in tree.rglob("*.dcm"))
+    return hits[0].parent if hits else None
+
+
+def pet_ecat_file() -> Optional[Path]:
+    """The ECAT ``.v``, PET's non-DICOM native format.
+
+    Found by extension here because the sample's layout is known. The
+    SCANNER-side detection deliberately does not: ``inventory/pet_ecat`` keys
+    on the ``MATRIX7x`` signature, since ``.v`` is not a reserved extension.
+    """
+    tree = _pet_tree()
+    if tree is None:
+        return None
+    hits = sorted(tree.rglob("*.v"))
+    return hits[0] if hits else None
+
+
+def pet_blood_dir() -> Optional[Path]:
+    """The folder holding the PMOD ``.bld`` blood curves."""
+    tree = _pet_tree()
+    if tree is None:
+        return None
+    hits = sorted(tree.rglob("*.bld"))
+    return hits[0].parent if hits else None
+
+
+def pet_dose_sheet(ecat: bool = False) -> Optional[Path]:
+    """The lab's own dose table, which the scanner does not record."""
+    tree = _pet_tree()
+    if tree is None:
+        return None
+    hits = sorted(tree.rglob("dose_sheet*.csv"))
+    for path in hits:
+        if ("ecat" in path.name.lower()) == ecat:
+            return path
+    return hits[0] if hits else None
+
+
 def require(name: str = "multimodal") -> Path:
     """``raw_root``, but skipping the test when the data cannot be had.
 
@@ -209,6 +278,10 @@ def require(name: str = "multimodal") -> Path:
 
 __all__ = [
     "AUTO_FETCH_MB",
+    "pet_blood_dir",
+    "pet_dicom_dir",
+    "pet_dose_sheet",
+    "pet_ecat_file",
     "SAMPLES",
     "VERSION",
     "Sample",

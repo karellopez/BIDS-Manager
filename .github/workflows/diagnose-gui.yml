@@ -1,0 +1,155 @@
+# Find out why gui-3.10 segfaults on the Linux runner.
+#
+# The ordinary tier reports a Python traceback that says the main thread was
+# inside pytest-qt's `_process_events`. That is where the process was when it
+# died, not what killed it: the fault is in C++, and no Python-level output can
+# show it. This workflow is the set of questions that narrow it down, run in
+# one go so the whole picture arrives together rather than one push at a time.
+#
+# Every step is `continue-on-error`, on purpose. A step that crashes is a
+# RESULT here, not a failure, and the later steps are the ones that explain it.
+# Read the log top to bottom; the job itself is expected to end green.
+#
+# Linux only, Python 3.10 only, manual only. It answers one question about one
+# cell and has no business running anywhere else.
+#
+#   Actions -> diagnose gui -> Run workflow
+#   gh workflow run diagnose-gui.yml
+
+name: diagnose gui
+
+on:
+  workflow_dispatch:
+    inputs:
+      python:
+        description: "Which Python to reproduce on"
+        type: string
+        default: "3.10"
+
+jobs:
+  diagnose:
+    name: diagnose gui py${{ inputs.python }} on linux
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 90
+    defaults:
+      run:
+        # Linux job, so bash is a safe assumption here in a way it is not in
+        # ci.yml, which has to run the same steps on a Windows runner with no
+        # Git Bash.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build an environment by hand
+        # Deliberately NOT through nox. nox appends posargs after `tests/gui`,
+        # so it cannot be asked to run one file INSTEAD of the directory, and
+        # running one file instead of the directory is the whole first
+        # question.
+        run: |
+          uv venv --python "${{ inputs.python }}" .diag
+          uv pip install --python .diag/bin/python -e . pytest pytest-qt
+
+      - name: What this machine actually has
+        continue-on-error: true
+        run: |
+          echo "--- interpreter ---"
+          .diag/bin/python -VV
+          echo "--- Qt and PyQt ---"
+          .diag/bin/python - <<'PY'
+          from PyQt6.QtCore import QT_VERSION_STR, PYQT_VERSION_STR
+          print("PyQt", PYQT_VERSION_STR, "Qt", QT_VERSION_STR)
+          PY
+          echo "--- offscreen platform plugin ---"
+          ls .diag/lib/python*/site-packages/PyQt6/Qt6/plugins/platforms/ || true
+          echo "--- OpenGL libraries present ---"
+          ldconfig -p | grep -iE "libGL\.|libEGL|libOpenGL" || echo "  none found"
+          echo "--- is gdb available? ---"
+          command -v gdb || echo "  gdb is NOT installed; step D will be skipped"
+          echo "--- core dump policy ---"
+          ulimit -c || true
+          cat /proc/sys/kernel/core_pattern || true
+
+      - name: "A. The suspect file, alone"
+        continue-on-error: true
+        # If this crashes, the defect is in this file and needs nothing else to
+        # reproduce, which makes it tractable. If it passes, the crash is an
+        # INTERACTION with something that ran earlier, and B and C are the
+        # ones that matter.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -x
+          .diag/bin/python -X faulthandler -m pytest \
+            tests/gui/test_converter_panel.py -v -p no:randomly
+
+      - name: "B. The suspect file, ten times over"
+        continue-on-error: true
+        # Deterministic or intermittent? The ordinary tier has crashed on this
+        # test on every run so far, which suggests deterministic, and that is
+        # worth confirming before anybody goes looking for a race.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          for i in $(seq 1 10); do
+            echo "=== attempt $i ==="
+            .diag/bin/python -X faulthandler -m pytest \
+              tests/gui/test_converter_panel.py -q -p no:randomly \
+              || echo "ATTEMPT $i CRASHED OR FAILED"
+          done
+
+      - name: "C. Everything up to and including it"
+        continue-on-error: true
+        # The same order the failing tier uses, stopping at the suspect. If A
+        # passed and this crashes, the cause is state left behind by an
+        # earlier test and the two files bracket it.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          .diag/bin/python -X faulthandler -m pytest \
+            tests/gui/test_bulk_edit.py \
+            tests/gui/test_bulk_field_dialog_schema.py \
+            tests/gui/test_column_manager.py \
+            tests/gui/test_convert_worker.py \
+            tests/gui/test_converter_panel.py \
+            -v -p no:randomly
+
+      - name: "D. A C-level backtrace, which is the actual answer"
+        continue-on-error: true
+        # The Python traceback names the main thread's position. The fault is
+        # in Qt, so only a native backtrace says which call. `thread apply all
+        # bt` matters more than the main thread here: the suspicion is a pool
+        # thread, and its frames are invisible to Python entirely.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if ! command -v gdb >/dev/null; then
+            echo "gdb is not installed on this runner."
+            echo "To get the answer this step exists for:"
+            echo "    sudo apt-get install -y gdb"
+            echo "and re-run this workflow."
+            exit 0
+          fi
+          ulimit -c unlimited || true
+          gdb -batch \
+              -ex "set pagination off" \
+              -ex "run" \
+              -ex "echo \n===== FAULTING THREAD =====\n" \
+              -ex "bt full" \
+              -ex "echo \n===== ALL THREADS =====\n" \
+              -ex "thread apply all bt" \
+              --args .diag/bin/python -m pytest \
+                tests/gui/test_converter_panel.py -q -p no:randomly
+
+      - name: "E. The whole tier, for the record"
+        continue-on-error: true
+        # Confirms the runner still reproduces what ci.yml reports, so a green
+        # A-to-D above is not just a different environment behaving.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          .diag/bin/python -X faulthandler -m pytest \
+            tests/gui -q -p no:randomly
+
+      - name: Clean up
+        if: always()
+        run: rm -rf .diag

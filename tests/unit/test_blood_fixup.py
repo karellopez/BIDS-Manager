@@ -79,7 +79,11 @@ any_blood = pytest.mark.skipif(
 real_blood = pytest.mark.skipif(
     os.environ.get("BIDS_MANAGER_REAL_PET_BLOOD") != "1"
     or BLOOD_DATA is None or not BLOOD_DATA.is_dir(),
-    reason="needs BIDS_MANAGER_REAL_PET_BLOOD=1 and the PMOD example files",
+    reason=(
+        "needs the lab's PMOD collection: the mixed manual/autosampled case "
+        "has no published example. The whole-blood and plasma pair, which "
+        "does, is covered above from the downloaded sample."
+    ),
 )
 
 

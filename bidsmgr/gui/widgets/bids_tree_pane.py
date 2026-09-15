@@ -318,6 +318,9 @@ class BidsTreePane(QWidget):
     # division of labour as ``rename_requested``: the tree knows what was
     # clicked, the panel owns the root and the refresh.
     entities_requested = pyqtSignal(list, str, bool)
+    # The paths to delete. Same division of labour again: the tree knows what
+    # was clicked, the panel owns the root, the dialog and the refresh.
+    delete_requested = pyqtSignal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -926,6 +929,22 @@ class BidsTreePane(QWidget):
             session.triggered.connect(
                 lambda _c=False, s=scope, m=mode:
                     self.entities_requested.emit(s, m, True)
+            )
+
+            menu.addSeparator()
+            what = (
+                f"{len(scope)} items" if len(scope) > 1
+                else ("this folder and everything in it" if clicked.is_dir()
+                      else "this recording")
+            )
+            delete = menu.addAction(f"Delete {what}...")
+            delete.setToolTip(
+                "Shows what would go first, including the *_scans.tsv rows, "
+                "the IntendedFor entries and the folders this empties. One "
+                "step in the Editor's history, so it can be undone."
+            )
+            delete.triggered.connect(
+                lambda _c=False, s=scope: self.delete_requested.emit(s)
             )
 
         menu.addSeparator()

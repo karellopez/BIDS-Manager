@@ -97,6 +97,44 @@ class MovePreviewTree(QTreeWidget):
         self.blockSignals(False)
         self._expand(count)
 
+    def show_removals(
+        self,
+        root: Path,
+        removals: Sequence[tuple[str, Path]],
+        *,
+        extras: Iterable[tuple[str, str]] = (),
+        conflicts: Iterable[str] = (),
+        verb: str = "deleted",
+    ) -> None:
+        """Draw ``removals`` as ``(key, path)``, nested the same way.
+
+        Same tree, same ticking, same sections, because "what is about to
+        happen to my dataset" is one question whether the answer is a move or
+        a removal, and two widgets answering it would drift.
+        """
+        self.setHeaderLabels(["In the dataset", "What happens"])
+        self.blockSignals(True)
+        self.clear()
+
+        folders: dict[str, QTreeWidgetItem] = {}
+        count = 0
+        for key, path in removals:
+            rel = _rel(root, path)
+            parts = rel.split("/")
+            parent = self._folder(folders, parts[:-1])
+            leaf = QTreeWidgetItem(parent, [parts[-1], verb])
+            leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            leaf.setCheckState(0, Qt.CheckState.Checked)
+            leaf.setData(0, KEY_ROLE, key)
+            leaf.setToolTip(0, rel)
+            count += 1
+
+        self._add_section("Follows automatically", extras)
+        self._add_section("Refused", ((text, "") for text in conflicts))
+
+        self.blockSignals(False)
+        self._expand(count)
+
     def _folder(
         self, folders: dict[str, QTreeWidgetItem], parts: Sequence[str],
     ) -> Optional[QTreeWidgetItem]:
@@ -232,6 +270,36 @@ def _becomes(root: Path, src: Path, dst: Path) -> str:
     return _rel(root, dst)
 
 
+def delete_extras(plan) -> list[tuple[str, str]]:
+    """What a deletion does BESIDES removing the files, as display rows.
+
+    Kept visible and not checkable for the same reason the move version is:
+    a scans row for a recording that is not there, or an ``IntendedFor``
+    naming a file nothing has, is exactly the damage this feature exists to
+    avoid, and letting somebody untick the repair would reintroduce it.
+    """
+    out: list[tuple[str, str]] = []
+    for drop in getattr(plan, "scans_drops", ()):
+        what = (
+            "emptied, so the table goes too" if drop.empties
+            else f"{len(drop.rows)} row(s) removed"
+        )
+        out.append((drop.rel, what))
+    for drop in getattr(plan, "ref_drops", ()):
+        what = (
+            "IntendedFor emptied, so the key is removed" if drop.empties
+            else f"{len(drop.entries)} IntendedFor entry(ies) removed"
+        )
+        out.append((drop.rel, what))
+    for label in getattr(plan, "participants", ()):
+        out.append(("participants.tsv", f"row for {label} removed"))
+    for sidecar in getattr(plan, "orphaned_sidecars", ()):
+        out.append((sidecar.name, "describes nothing now, so it is removed"))
+    for folder in getattr(plan, "emptied", ()):
+        out.append((folder.name, "folder left empty, so it is removed"))
+    return out
+
+
 def plan_extras(plan) -> list[tuple[str, str]]:
     """Everything a plan does BESIDES moving the files, as display rows.
 
@@ -254,4 +322,9 @@ def plan_extras(plan) -> list[tuple[str, str]]:
     return out
 
 
-__all__ = ["KEY_ROLE", "MovePreviewTree", "plan_extras"]
+__all__ = [
+    "KEY_ROLE",
+    "MovePreviewTree",
+    "delete_extras",
+    "plan_extras",
+]

@@ -50,6 +50,7 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "Rename entity...",
         "Add or remove an entity...",
         "Sessions...",
+        "Delete...",
         "Track changes",
     ]
 
