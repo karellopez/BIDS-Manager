@@ -33,6 +33,7 @@ from .rename import (
     RenameError,
     _load_json,
     _rel,
+    PATH_FIELDS,
     build_ref_map,
     scans_home,
     scans_table_in,
@@ -67,6 +68,8 @@ class RefDrop:
 
     path: Path
     rel: str
+    # Which field: IntendedFor, AssociatedEmptyRoom, Sources, ...
+    field: str = "IntendedFor"
     entries: list[str] = dc_field(default_factory=list)
     # Nothing would be left, so the key is removed rather than left as an
     # empty list. An empty list is a claim that the fieldmap is intended for
@@ -372,24 +375,41 @@ def _ref_drops(
         if path.suffix != ".json" or path in going:
             continue
         data = _load_json(path)
-        if not data or "IntendedFor" not in data:
+        if not data:
             continue
-        value = data["IntendedFor"]
-        items = [str(v) for v in (value if isinstance(value, list) else [value])]
-        doomed = [v for v in items if _body(v) in keys]
-        if not doomed:
-            continue
-        out.append(RefDrop(
-            path=path,
-            rel=_rel(root, path),
-            entries=doomed,
-            empties=len(doomed) == len(items),
-        ))
+        # Every field that points at another file. A deleted empty-room
+        # recording has to be taken out of the MEG sidecar naming it just as
+        # much as out of a fieldmap's IntendedFor. See rename.PATH_FIELDS.
+        for field in PATH_FIELDS:
+            if field not in data:
+                continue
+            value = data[field]
+            items = [
+                str(v) for v in
+                (value if isinstance(value, list) else [value])
+            ]
+            doomed = [v for v in items if _body(v) in keys]
+            if not doomed:
+                continue
+            out.append(RefDrop(
+                path=path,
+                rel=_rel(root, path),
+                field=field,
+                entries=doomed,
+                empties=len(doomed) == len(items),
+            ))
     return out
 
 
 def _body(text: str) -> str:
-    return text[len("bids::"):] if text.startswith("bids::") else text
+    """The path inside a BIDS URI, or the text unchanged.
+
+    Shares rename's scheme handling so bids:derivatives: is understood
+    too, not only the bare bids:: form.
+    """
+    from .rename import _split_uri
+
+    return _split_uri(text)[1]
 
 
 def _orphaned_sidecars(root: Path, going: set[Path]) -> list[Path]:
@@ -629,19 +649,19 @@ def _drop_scans_rows(op, drop: ScansDrop) -> int:
 
 def _drop_intended_for(op, drop: RefDrop) -> None:
     data = _load_json(drop.path)
-    if data is None or "IntendedFor" not in data:
+    if data is None or drop.field not in data:
         return
-    value = data["IntendedFor"]
+    value = data[drop.field]
     was_list = isinstance(value, list)
     items = [str(v) for v in (value if was_list else [value])]
     kept = [v for v in items if v not in set(drop.entries)]
     if kept:
-        data["IntendedFor"] = kept if was_list else kept[0]
+        data[drop.field] = kept if was_list else kept[0]
     else:
         # Removed rather than left as an empty list. An empty list states that
         # this fieldmap is intended for nothing, which is a claim; saying
         # nothing is the honest result of the files having gone.
-        data.pop("IntendedFor", None)
+        data.pop(drop.field, None)
     op.write_json(drop.path, data)
 
 

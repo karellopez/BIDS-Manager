@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .rename import (
+    PATH_FIELDS,
     ContentEdit,
     RenameError,
     RenamePlan,
@@ -644,17 +645,24 @@ def _plan_ref_edits(
     for path in walk_dataset(root):
         if path.suffix == ".json":
             data = _load_json(path)
-            if not data or "IntendedFor" not in data:
+            if not data:
                 continue
-            value = data["IntendedFor"]
-            items = value if isinstance(value, list) else [value]
-            hits = sum(
-                1 for v in items
-                if _lookup(str(v), ref_map) is not None
-            )
-            if hits:
-                out.append(ContentEdit(path, _rel(root, path),
-                                       "IntendedFor", hits))
+            # Every field that points at another file, not just IntendedFor.
+            # A recording moving into a session has to be followed by the MEG
+            # sidecar naming it as an empty room just as much as by a
+            # fieldmap. See rename.PATH_FIELDS.
+            for field in PATH_FIELDS:
+                if field not in data:
+                    continue
+                value = data[field]
+                items = value if isinstance(value, list) else [value]
+                hits = sum(
+                    1 for v in items
+                    if _lookup(str(v), ref_map) is not None
+                )
+                if hits:
+                    out.append(ContentEdit(path, _rel(root, path),
+                                           field, hits))
         elif path.name.endswith("_scans.tsv"):
             hits = _count_rows(path, "filename", ref_map)
             if hits:
@@ -664,8 +672,9 @@ def _plan_ref_edits(
 
 
 def _lookup(text: str, ref_map: dict[str, str]) -> Optional[str]:
-    body = text[len("bids::"):] if text.startswith("bids::") else text
-    return ref_map.get(body)
+    from .rename import _split_uri
+
+    return ref_map.get(_split_uri(text)[1])
 
 
 def _count_rows(path: Path, column: str, ref_map: dict[str, str]) -> int:

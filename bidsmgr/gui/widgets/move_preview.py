@@ -286,9 +286,10 @@ def delete_extras(plan) -> list[tuple[str, str]]:
         )
         out.append((drop.rel, what))
     for drop in getattr(plan, "ref_drops", ()):
+        field = getattr(drop, "field", "IntendedFor")
         what = (
-            "IntendedFor emptied, so the key is removed" if drop.empties
-            else f"{len(drop.entries)} IntendedFor entry(ies) removed"
+            f"{field} emptied, so the key is removed" if drop.empties
+            else f"{len(drop.entries)} {field} entry(ies) removed"
         )
         out.append((drop.rel, what))
     for label in getattr(plan, "participants", ()):

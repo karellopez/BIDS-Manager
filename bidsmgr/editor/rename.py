@@ -101,6 +101,41 @@ def _label_pattern(entity: str) -> re.Pattern:
     return re.compile(f"^(?:{pattern})$")
 
 
+# Every sidecar field that POINTS AT ANOTHER FILE, and therefore has to follow
+# a rename the way ``IntendedFor`` always has. Read from the standard, not
+# guessed: each is documented as holding a BIDS URI or a path relative to the
+# dataset root.
+#
+# Only ``IntendedFor`` was handled for a long time, so renaming a subject left
+# an MEG sidecar's ``AssociatedEmptyRoom`` naming a recording that no longer
+# existed, and did it silently.
+PATH_FIELDS = (
+    "IntendedFor",          # fmap, micr, perf: the images a fieldmap corrects
+    "AssociatedEmptyRoom",  # meg: the empty-room recording for this subject
+    "Sources",              # every datatype: what this was derived from
+    "RawSources",           # the deprecated spelling of Sources, still in data
+    "AnatomicalImage",      # mrs: the anat this spectroscopy corresponds to
+)
+
+# Table columns that hold an entity value rather than a path. Each is the same
+# shape as ``participant_id``, which was handled alone for the same reason
+# ``IntendedFor`` was: it is the one somebody hit first.
+ENTITY_COLUMNS = {
+    "sub": ("participants.tsv", "participant_id"),
+    "ses": ("_sessions.tsv", "session_id"),
+    "sample": ("samples.tsv", "sample_id"),
+}
+
+
+def _derived_label(task_name: str) -> str:
+    """The task LABEL that ``TaskName`` would produce, per the standard.
+
+    BIDS: "The task label included in the filename MAY be derived from this
+    TaskName field by removing all non-alphanumeric or ``+`` characters."
+    """
+    return re.sub(r"[^0-9a-zA-Z+]", "", str(task_name))
+
+
 class RenameError(ValueError):
     """The rename cannot be performed as asked."""
 
@@ -111,7 +146,9 @@ class ContentEdit:
 
     path: Path
     rel: str
-    what: str        # "IntendedFor" | "scans.tsv filename" | "participant_id"
+    # A PATH_FIELDS name, "scans.tsv filename", "TaskName", or the entity
+    # column being rewritten ("participant_id", "session_id", "sample_id").
+    what: str
     hits: int
 
 
@@ -473,7 +510,19 @@ def _plan_content_edits(
     root: Path, entity: str, old: str, new: str,
     files: Optional[list[Path]] = None,
 ) -> list[ContentEdit]:
-    """The three places BIDS points at a filename from inside a file.
+    """Everywhere BIDS names this entity value from INSIDE a file.
+
+    Four kinds, and only the first two were handled for a long time, which is
+    why a rename could leave a dataset internally inconsistent in ways nothing
+    reported:
+
+    * the sidecar fields that point at another file (:data:`PATH_FIELDS`);
+    * the ``filename`` column of every ``*_scans.tsv``;
+    * the table column that LISTS this entity (:data:`ENTITY_COLUMNS`):
+      ``participant_id`` for a subject, ``session_id`` for a session,
+      ``sample_id`` for a sample;
+    * ``TaskName``, for a task rename, where the sidecar carries the human
+      name the filename label is derived from.
 
     Takes the file list the caller already walked. Re-globbing the tree twice
     more here was most of what made planning slow enough to freeze the dialog.
@@ -486,11 +535,16 @@ def _plan_content_edits(
         if p.suffix != ".json":
             continue
         data = _load_json(p)
-        if not data or "IntendedFor" not in data:
+        if not data:
             continue
-        hits = _count_intended_for(data.get("IntendedFor"), old_token)
-        if hits:
-            out.append(ContentEdit(p, _rel(root, p), "IntendedFor", hits))
+        for field in PATH_FIELDS:
+            if field not in data:
+                continue
+            hits = _count_path_field(data.get(field), old_token)
+            if hits:
+                out.append(ContentEdit(p, _rel(root, p), field, hits))
+        if entity == "task" and _task_name_follows(data, old):
+            out.append(ContentEdit(p, _rel(root, p), "TaskName", 1))
 
     for p in files:
         if not p.name.endswith("_scans.tsv"):
@@ -499,18 +553,55 @@ def _plan_content_edits(
         if hits:
             out.append(ContentEdit(p, _rel(root, p), "scans.tsv filename", hits))
 
-    if entity == "sub":
-        participants = root / "participants.tsv"
-        if participants.exists():
-            hits = _count_column(participants, "participant_id", old_token)
-            if hits:
-                out.append(ContentEdit(
-                    participants, "participants.tsv", "participant_id", hits,
-                ))
+    for table, column in _entity_tables(root, entity):
+        hits = _count_column(table, column, old_token)
+        if hits:
+            out.append(ContentEdit(table, _rel(root, table), column, hits))
     return out
 
 
-def _count_intended_for(value, token: str) -> int:
+def _entity_tables(root: Path, entity: str) -> list[tuple[Path, str]]:
+    """The tables that LIST this entity, and the column that names it.
+
+    ``participants.tsv`` and ``samples.tsv`` sit at the dataset root and there
+    is one of each. ``*_sessions.tsv`` is per subject, so there are as many as
+    there are subjects and they are found rather than named.
+    """
+    try:
+        name, column = ENTITY_COLUMNS[entity]
+    except KeyError:
+        return []
+    if name.startswith("_"):
+        return [
+            (p, column) for p in sorted(root.rglob(f"*{name}"))
+            if p.is_file() and not _skip(p, root)
+        ]
+    table = root / name
+    return [(table, column)] if table.exists() else []
+
+
+def _task_name_follows(data: dict, old: str) -> bool:
+    """Should this sidecar's ``TaskName`` be rewritten by a task rename?
+
+    Only when the value it holds DERIVES to the label being renamed, which is
+    the relation BIDS defines between the two: the label "MAY be derived from
+    this TaskName field by removing all non-alphanumeric or ``+``
+    characters". ``TaskName: "faces n-back"`` derives to ``facesnback``, so a
+    file named ``task-facesnback`` is in step with its sidecar and both should
+    move together.
+
+    A ``TaskName`` that does NOT derive to the old label is left alone. It was
+    already out of step with the filename before this rename, so the rename is
+    not what broke it, and overwriting it would be guessing at what the person
+    meant rather than following what they wrote.
+    """
+    value = data.get("TaskName")
+    if not isinstance(value, str) or not value:
+        return False
+    return _derived_label(value) == old
+
+
+def _count_path_field(value, token: str) -> int:
     if value is None:
         return 0
     items = value if isinstance(value, list) else [value]
@@ -699,16 +790,31 @@ def apply_rename(
         # written are the post-rename ones.
         for edit in plan.content_edits:
             try:
-                if edit.what == "IntendedFor":
-                    _rewrite_intended_for(
-                        op, edit.path, old_token, new_token, moved_names,
-                        ref_map=ref_map,
+                if edit.what in PATH_FIELDS:
+                    _rewrite_path_field(
+                        op, edit.path, edit.what, old_token, new_token,
+                        moved_names, ref_map=ref_map,
                     )
-                elif edit.what == "participant_id":
+                elif edit.what == "TaskName":
                     if not whole:
-                        continue     # half a subject is still the old one
+                        # Half the task's recordings keep the old label, so
+                        # the sidecar of the half that moved is rewritten and
+                        # the rest are not. The per-file sidecar IS in
+                        # ``moved_names`` when it moved, so this is decided
+                        # per file rather than for the whole rename.
+                        if edit.path.name not in (moved_names or set()):
+                            continue
+                    _rewrite_task_name(op, edit.path, plan.new)
+                elif edit.what in ("participant_id", "session_id", "sample_id"):
+                    if not whole:
+                        # Half a subject is still the old participant, and
+                        # half a session is still the old session. Splitting
+                        # one into two is a different operation from renaming
+                        # it, and the row follows only when the whole thing
+                        # moved.
+                        continue
                     _rewrite_column(
-                        op, edit.path, "participant_id",
+                        op, edit.path, edit.what,
                         old_token, new_token, None,
                     )
                 elif edit.path in relocating and edit.path not in travelling:
@@ -1301,23 +1407,43 @@ def build_ref_map(root: Path, moves: list[tuple[Path, Path]]) -> dict[str, str]:
 
 
 def _map_reference(text: str, ref_map: dict[str, str]) -> str:
-    """Look one reference up in the map, keeping any ``bids::`` prefix."""
-    prefix, body = "", text
-    if body.startswith("bids::"):
-        prefix, body = "bids::", body[len("bids::"):]
+    """Look one reference up in the map, keeping any ``bids:`` scheme."""
+    prefix, body = _split_uri(text)
     landed = ref_map.get(body)
     return text if landed is None else prefix + landed
 
 
-def _rewrite_intended_for(
-    op, path: Path, old_token: str, new_token: str,
+def _rewrite_task_name(op, path: Path, new_label: str) -> None:
+    """Put the new label in ``TaskName``.
+
+    The label verbatim, not an attempt to reconstruct a human-readable form.
+    A ``TaskName`` of "faces n-back" renamed to ``task-nback`` becomes
+    "nback": some of what the person wrote is lost, and inventing "faces
+    n-back" back out of "nback" would be worse, because the tool would be
+    asserting something nobody said. The change is listed in the preview so it
+    is seen rather than discovered.
+    """
+    data = _load_json(path)
+    if data is None or "TaskName" not in data:
+        return
+    data["TaskName"] = new_label
+    op.write_json(path, data)
+
+
+def _rewrite_path_field(
+    op, path: Path, field: str, old_token: str, new_token: str,
     moved_names: Optional[set[str]] = None,
     ref_map: Optional[dict[str, str]] = None,
 ) -> None:
+    """Rewrite one path-valued sidecar field: IntendedFor and its relatives.
+
+    Handles both shapes BIDS allows, a single string or a list of them, and
+    writes back whichever it found.
+    """
     data = _load_json(path)
-    if data is None or "IntendedFor" not in data:
+    if data is None or field not in data:
         return
-    value = data["IntendedFor"]
+    value = data[field]
     items = value if isinstance(value, list) else [value]
     if ref_map is not None:
         fixed = [_map_reference(str(v), ref_map) for v in items]
@@ -1327,7 +1453,7 @@ def _rewrite_intended_for(
             if _names_a_moved_file(str(v), moved_names) else str(v)
             for v in items
         ]
-    data["IntendedFor"] = fixed if isinstance(value, list) else fixed[0]
+    data[field] = fixed if isinstance(value, list) else fixed[0]
     op.write_json(path, data)
 
 
@@ -1363,12 +1489,37 @@ def _rewrite_column(op, path: Path, column: str,
     op.write_text(path, table.to_text())
 
 
+# A BIDS URI is ``bids:[dataset-name]:relative/path``, so the scheme is glued
+# to the first path segment unless it is peeled off first.
+_BIDS_URI = re.compile(r"^(bids:[^:/]*:)(.*)$", re.DOTALL)
+
+
+def _split_uri(text: str) -> tuple[str, str]:
+    """``("bids::", "sub-01/...")``, or ``("", text)`` for a plain path."""
+    match = _BIDS_URI.match(text)
+    return (match.group(1), match.group(2)) if match else ("", text)
+
+
 def _swap_token(text: str, old_token: str, new_token: str) -> str:
-    """Replace whole ``key-value`` segments only, never substrings."""
+    """Replace whole ``key-value`` segments only, never substrings.
+
+    The ``bids::`` scheme is peeled off before splitting, and that is not
+    cosmetic. Splitting on ``[/_]`` alone makes the first chunk of
+    ``bids::sub-001/anat/sub-001_T1w.nii.gz`` the string ``bids::sub-001``,
+    which never equals ``sub-001``, so a SUBJECT rename rewrote the basename
+    and left the directory naming the old subject:
+    ``bids::sub-001/anat/sub-002_T1w.nii.gz``. The URI then pointed at
+    nothing, and no validator said so.
+
+    Only subject renames could hit it, because ``sub-`` is the only entity
+    that appears in the first path segment, which is why it survived: every
+    other entity is somewhere the split handles correctly.
+    """
+    prefix, body = _split_uri(text)
     out = []
-    for chunk in re.split(r"([/_])", text):
+    for chunk in re.split(r"([/_])", body):
         out.append(new_token if chunk == old_token else chunk)
-    return "".join(out)
+    return prefix + "".join(out)
 
 
 def list_values(root: Path, entity: str) -> list[str]:

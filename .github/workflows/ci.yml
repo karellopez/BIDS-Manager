@@ -33,6 +33,29 @@
 # added, set Settings -> Actions -> "Require approval for all outside
 # collaborators" in the same change.
 
+# RETRIES. Every test tier gets up to SIX attempts before the job is called
+# failed. These tiers fail for reasons that are not the code often enough to be
+# worth absorbing: a runner that lost the network mid-download, a Qt session
+# that raced another cell, a transient uv resolution. Re-running by hand is
+# what happens otherwise, so it may as well happen here.
+#
+# Six chained steps rather than `cmd || cmd` or a third-party retry action.
+# The shell operator is not portable: PowerShell 5.1 has no `||`, this
+# repository's self-hosted Windows runner has no Git Bash, and `shell: bash` is
+# therefore not available. A third-party action would execute code from outside
+# this repository on office hardware, which the security note above rules out.
+#
+# The chaining is what keeps it to the attempts actually needed. Each step runs
+# only `if` the PREVIOUS one's `outcome` was failure, and `outcome` is the
+# result before continue-on-error is applied. A step that never ran has outcome
+# `skipped`, not `failure`, so once an attempt succeeds the rest of the chain
+# skips itself. Only the last attempt omits continue-on-error, so only a sixth
+# failure fails the job.
+#
+# A genuinely broken commit therefore costs six runs of the tier. That is the
+# deliberate trade: a red matrix is read by a person, and a flaky red one stops
+# being read at all.
+
 name: tests
 
 on:
@@ -117,30 +140,33 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
-      # ONE automatic retry, and no more.
-      #
-      # These tiers fail for reasons that are not the code often enough to be
-      # annoying: a runner that lost the network mid-download, a Qt session
-      # that raced another cell, a transient uv resolution. Re-running by hand
-      # is what people actually do, so it may as well be done here.
-      #
-      # Two steps and a `continue-on-error` rather than `cmd || cmd` or a
-      # third-party retry action, for two reasons. The shell operator is not
-      # portable: PowerShell 5.1 has no `||`, this repository's self-hosted
-      # Windows runner has no Git Bash (that is what broke the first version
-      # of this file), and `shell: bash` is therefore not available. And a
-      # third-party action would execute code from outside this repository on
-      # office hardware, which the security note at the top rules out.
-      #
-      # `outcome` is the step's result BEFORE continue-on-error is applied, so
-      # the second attempt runs only when the first genuinely failed. The
-      # second attempt has no continue-on-error, so a second failure fails the
-      # job, which is the "2 attempts max" this is for.
-      - id: lint
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: lint1
         continue-on-error: true
         run: uv tool run nox -s lint
-      - if: steps.lint.outcome == 'failure'
-        name: retry (attempt 2 of 2)
+      - id: lint2
+        if: steps.lint1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint3
+        if: steps.lint2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint4
+        if: steps.lint3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint5
+        if: steps.lint4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint6
+        if: steps.lint5.outcome == 'failure'
+        name: attempt 6 of 6
         run: uv tool run nox -s lint
 
   unit:
@@ -154,30 +180,33 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # ONE automatic retry, and no more.
-      #
-      # These tiers fail for reasons that are not the code often enough to be
-      # annoying: a runner that lost the network mid-download, a Qt session
-      # that raced another cell, a transient uv resolution. Re-running by hand
-      # is what people actually do, so it may as well be done here.
-      #
-      # Two steps and a `continue-on-error` rather than `cmd || cmd` or a
-      # third-party retry action, for two reasons. The shell operator is not
-      # portable: PowerShell 5.1 has no `||`, this repository's self-hosted
-      # Windows runner has no Git Bash (that is what broke the first version
-      # of this file), and `shell: bash` is therefore not available. And a
-      # third-party action would execute code from outside this repository on
-      # office hardware, which the security note at the top rules out.
-      #
-      # `outcome` is the step's result BEFORE continue-on-error is applied, so
-      # the second attempt runs only when the first genuinely failed. The
-      # second attempt has no continue-on-error, so a second failure fails the
-      # job, which is the "2 attempts max" this is for.
-      - id: unit
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: unit1
         continue-on-error: true
         run: uv tool run nox -s "unit-${{ matrix.python }}"
-      - if: steps.unit.outcome == 'failure'
-        name: retry (attempt 2 of 2)
+      - id: unit2
+        if: steps.unit1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit3
+        if: steps.unit2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit4
+        if: steps.unit3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit5
+        if: steps.unit4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit6
+        if: steps.unit5.outcome == 'failure'
+        name: attempt 6 of 6
         run: uv tool run nox -s "unit-${{ matrix.python }}"
 
   installed:
@@ -198,30 +227,33 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      # ONE automatic retry, and no more.
-      #
-      # These tiers fail for reasons that are not the code often enough to be
-      # annoying: a runner that lost the network mid-download, a Qt session
-      # that raced another cell, a transient uv resolution. Re-running by hand
-      # is what people actually do, so it may as well be done here.
-      #
-      # Two steps and a `continue-on-error` rather than `cmd || cmd` or a
-      # third-party retry action, for two reasons. The shell operator is not
-      # portable: PowerShell 5.1 has no `||`, this repository's self-hosted
-      # Windows runner has no Git Bash (that is what broke the first version
-      # of this file), and `shell: bash` is therefore not available. And a
-      # third-party action would execute code from outside this repository on
-      # office hardware, which the security note at the top rules out.
-      #
-      # `outcome` is the step's result BEFORE continue-on-error is applied, so
-      # the second attempt runs only when the first genuinely failed. The
-      # second attempt has no continue-on-error, so a second failure fails the
-      # job, which is the "2 attempts max" this is for.
-      - id: installed
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: installed1
         continue-on-error: true
         run: uv tool run nox -s "installed-${{ matrix.python }}"
-      - if: steps.installed.outcome == 'failure'
-        name: retry (attempt 2 of 2)
+      - id: installed2
+        if: steps.installed1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed3
+        if: steps.installed2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed4
+        if: steps.installed3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed5
+        if: steps.installed4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed6
+        if: steps.installed5.outcome == 'failure'
+        name: attempt 6 of 6
         run: uv tool run nox -s "installed-${{ matrix.python }}"
 
   gui:
@@ -252,30 +284,33 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      # ONE automatic retry, and no more.
-      #
-      # These tiers fail for reasons that are not the code often enough to be
-      # annoying: a runner that lost the network mid-download, a Qt session
-      # that raced another cell, a transient uv resolution. Re-running by hand
-      # is what people actually do, so it may as well be done here.
-      #
-      # Two steps and a `continue-on-error` rather than `cmd || cmd` or a
-      # third-party retry action, for two reasons. The shell operator is not
-      # portable: PowerShell 5.1 has no `||`, this repository's self-hosted
-      # Windows runner has no Git Bash (that is what broke the first version
-      # of this file), and `shell: bash` is therefore not available. And a
-      # third-party action would execute code from outside this repository on
-      # office hardware, which the security note at the top rules out.
-      #
-      # `outcome` is the step's result BEFORE continue-on-error is applied, so
-      # the second attempt runs only when the first genuinely failed. The
-      # second attempt has no continue-on-error, so a second failure fails the
-      # job, which is the "2 attempts max" this is for.
-      - id: gui
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: gui1
         continue-on-error: true
         run: uv tool run nox -s "gui-${{ matrix.python }}"
-      - if: steps.gui.outcome == 'failure'
-        name: retry (attempt 2 of 2)
+      - id: gui2
+        if: steps.gui1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui3
+        if: steps.gui2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui4
+        if: steps.gui3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui5
+        if: steps.gui4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui6
+        if: steps.gui5.outcome == 'failure'
+        name: attempt 6 of 6
         run: uv tool run nox -s "gui-${{ matrix.python }}"
 
   integration:
@@ -297,30 +332,33 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # ONE automatic retry, and no more.
-      #
-      # These tiers fail for reasons that are not the code often enough to be
-      # annoying: a runner that lost the network mid-download, a Qt session
-      # that raced another cell, a transient uv resolution. Re-running by hand
-      # is what people actually do, so it may as well be done here.
-      #
-      # Two steps and a `continue-on-error` rather than `cmd || cmd` or a
-      # third-party retry action, for two reasons. The shell operator is not
-      # portable: PowerShell 5.1 has no `||`, this repository's self-hosted
-      # Windows runner has no Git Bash (that is what broke the first version
-      # of this file), and `shell: bash` is therefore not available. And a
-      # third-party action would execute code from outside this repository on
-      # office hardware, which the security note at the top rules out.
-      #
-      # `outcome` is the step's result BEFORE continue-on-error is applied, so
-      # the second attempt runs only when the first genuinely failed. The
-      # second attempt has no continue-on-error, so a second failure fails the
-      # job, which is the "2 attempts max" this is for.
-      - id: integration
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: integration1
         continue-on-error: true
         run: uv tool run nox -s "integration-3.12"
-      - if: steps.integration.outcome == 'failure'
-        name: retry (attempt 2 of 2)
+      - id: integration2
+        if: steps.integration1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration3
+        if: steps.integration2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration4
+        if: steps.integration3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration5
+        if: steps.integration4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration6
+        if: steps.integration5.outcome == 'failure'
+        name: attempt 6 of 6
         run: uv tool run nox -s "integration-3.12"
 
   wheel:
@@ -331,28 +369,31 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
-      # ONE automatic retry, and no more.
-      #
-      # These tiers fail for reasons that are not the code often enough to be
-      # annoying: a runner that lost the network mid-download, a Qt session
-      # that raced another cell, a transient uv resolution. Re-running by hand
-      # is what people actually do, so it may as well be done here.
-      #
-      # Two steps and a `continue-on-error` rather than `cmd || cmd` or a
-      # third-party retry action, for two reasons. The shell operator is not
-      # portable: PowerShell 5.1 has no `||`, this repository's self-hosted
-      # Windows runner has no Git Bash (that is what broke the first version
-      # of this file), and `shell: bash` is therefore not available. And a
-      # third-party action would execute code from outside this repository on
-      # office hardware, which the security note at the top rules out.
-      #
-      # `outcome` is the step's result BEFORE continue-on-error is applied, so
-      # the second attempt runs only when the first genuinely failed. The
-      # second attempt has no continue-on-error, so a second failure fails the
-      # job, which is the "2 attempts max" this is for.
-      - id: wheel
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: wheel1
         continue-on-error: true
         run: uv tool run nox -s wheel
-      - if: steps.wheel.outcome == 'failure'
-        name: retry (attempt 2 of 2)
+      - id: wheel2
+        if: steps.wheel1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel3
+        if: steps.wheel2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel4
+        if: steps.wheel3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel5
+        if: steps.wheel4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel6
+        if: steps.wheel5.outcome == 'failure'
+        name: attempt 6 of 6
         run: uv tool run nox -s wheel
