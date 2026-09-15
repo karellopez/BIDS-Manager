@@ -45,7 +45,12 @@ def _labels(panel: EditorPanel) -> list[str]:
 
 def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
     assert _labels(panel) == [
-        "Dashboard", "Fix ups...", "Rename entity...", "Track changes",
+        "Dashboard",
+        "Fix ups...",
+        "Rename entity...",
+        "Add or remove an entity...",
+        "Sessions...",
+        "Track changes",
     ]
 
 

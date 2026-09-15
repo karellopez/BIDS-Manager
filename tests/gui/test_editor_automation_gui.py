@@ -529,6 +529,41 @@ def test_the_tree_announces_a_rename_rather_than_doing_one(
     assert seen == [("sub", "01")]
 
 
+def test_the_tree_announces_an_entity_edit_the_same_way(
+    qtbot, dataset: Path,
+) -> None:
+    """Same division of labour for adding and removing entities, and for the
+    sessions made out of them: the tree says what was clicked and what was
+    asked for, the panel owns the root, the dialog and the refresh."""
+    pane = BidsTreePane()
+    qtbot.addWidget(pane)
+    pane.set_root(dataset)
+    seen: list[tuple] = []
+    pane.entities_requested.connect(lambda *a: seen.append(a))
+
+    target = dataset / "sub-01"
+    pane.entities_requested.emit([target], "add", True)
+    assert seen == [([target], "add", True)]
+
+
+def test_restructuring_is_offered_only_at_or_under_a_subject() -> None:
+    """Above a subject there is no recording to speak of, and the tool's own
+    ``.bidsmgr/`` holds the operation log, which is the one thing a
+    restructuring must not restructure."""
+    from bidsmgr.gui.widgets.bids_tree_pane import (
+        _can_restructure,
+        _in_session,
+    )
+
+    assert _can_restructure(Path("ds/sub-01/anat/sub-01_T1w.nii.gz"))
+    assert _can_restructure(Path("ds/sub-01"))
+    assert not _can_restructure(Path("ds/participants.tsv"))
+    assert not _can_restructure(Path("ds/.bidsmgr/sub-01/anything"))
+
+    assert _in_session(Path("ds/sub-01/ses-pre/anat/sub-01_ses-pre_T1w.nii.gz"))
+    assert not _in_session(Path("ds/sub-01/anat/sub-01_T1w.nii.gz"))
+
+
 # ---------------------------------------------------------------------------
 # The rename dialog, including the merge it offers instead of a refusal
 # ---------------------------------------------------------------------------
@@ -717,14 +752,21 @@ def three_runs(tmp_path: Path) -> Path:
 
 
 def _file_rows(dlg):
-    tree = dlg._preview
+    """Every checkable FILE row, at whatever depth it sits.
+
+    Recursive, because the preview is a dataset tree: a file lives under its
+    datatype, which lives under its session, which lives under its subject.
+    Walking exactly two levels found the rows only while the tree was a flat
+    list of folder groups.
+    """
     out = []
-    for i in range(tree.topLevelItemCount()):
-        top = tree.topLevelItem(i)
-        for j in range(top.childCount()):
-            child = top.child(j)
-            if child.data(0, _key_role()):
-                out.append(child)
+    tree = dlg._preview
+    stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    while stack:
+        item = stack.pop()
+        stack.extend(item.child(j) for j in range(item.childCount()))
+        if item.data(0, _key_role()):
+            out.append(item)
     return out
 
 
@@ -816,13 +858,35 @@ def test_what_cannot_be_chosen_separately_is_not_offered_as_a_choice(
         assert not (child.flags() & _Qt.ItemFlag.ItemIsUserCheckable)
 
 
-def test_the_rows_are_grouped_by_folder(qtbot, two_subjects: Path) -> None:
-    """"These three runs" and "that whole session" are how a user thinks."""
+def test_the_rows_are_nested_like_the_dataset(qtbot, two_subjects: Path) -> None:
+    """"These three runs" and "that whole session" are how a user thinks, and
+    thinking that way needs a session to untick.
+
+    The preview used to key its groups on the whole folder PATH, so
+    ``sub-02/ses-post/anat`` and ``sub-02/ses-post/func`` came out as two
+    unrelated top-level rows that happened to start with the same text. There
+    was no subject to collapse and no session to untick.
+    """
     dlg = _dialog(qtbot, two_subjects, "sub", "02")
     _type(dlg, "99")
     tree = dlg._preview
-    groups = {
-        tree.topLevelItem(i).text(0)
+
+    tops = {
+        tree.topLevelItem(i).text(0): tree.topLevelItem(i)
         for i in range(tree.topLevelItemCount())
     }
-    assert "sub-02/ses-post/anat" in groups
+    assert "sub-02" in tops, "the subject should be the top-level row"
+    assert not [name for name in tops if "/" in name], (
+        "a folder path as a row label is the flat grouping this replaced"
+    )
+
+    sessions = {
+        tops["sub-02"].child(i).text(0)
+        for i in range(tops["sub-02"].childCount())
+    }
+    assert "ses-post" in sessions
+
+    post = [tops["sub-02"].child(i)
+            for i in range(tops["sub-02"].childCount())
+            if tops["sub-02"].child(i).text(0) == "ses-post"][0]
+    assert "anat" in {post.child(i).text(0) for i in range(post.childCount())}

@@ -135,6 +135,27 @@ class RenamePlan:
     # Folders left behind once everything under them has moved out.
     emptied: list[Path] = dc_field(default_factory=list)
 
+    # -- the general case ---------------------------------------------------
+    #
+    # A rename is one entity VALUE becoming another, so every reference to a
+    # moved file can be fixed by swapping one ``key-value`` token wherever it
+    # appears. Adding or removing an entity is not that: the basename gains or
+    # loses a segment, and when the entity is ``ses`` the path gains or loses a
+    # folder as well, so there is no token to swap. Those plans set
+    # ``ref_by_path``, and the applier rewrites references by looking each one
+    # up in a map built from the moves it is actually performing. Exact
+    # matching, so a partial selection cannot rewrite a reference to a file
+    # that stayed put. See :mod:`bidsmgr.editor.restructure`.
+    ref_by_path: bool = False
+    # Where a moved file's scans table belongs once it lands. ``False`` mirrors
+    # the level the source kept its tables at, which is right for a rename.
+    # ``True`` asks for the level BIDS defines, which is what a file entering
+    # or leaving a session needs: the table follows it to the session folder,
+    # or back up to the subject when the last session is removed.
+    standard_scans_home: bool = False
+    # What this operation is, in words, when it is not a value rename.
+    title: str = ""
+
     @property
     def is_empty(self) -> bool:
         return not (
@@ -165,6 +186,8 @@ class RenamePlan:
 
     def verb(self) -> str:
         """What this actually is, for a dialog that must not mislead."""
+        if self.title:
+            return self.title
         if not self.fusion:
             return f"Rename {self.entity}-{self.old} to {self.entity}-{self.new}"
         return (
@@ -647,16 +670,30 @@ def apply_rename(
     # own directory is renamed or when the table file is itself in the move
     # list. A FUSED directory is never renamed, and its unselected contents,
     # the scans table among them, stay exactly where they are.
-    row_moves = plan_scans_rows(root, moves, renaming_dirs)
+    row_moves = plan_scans_rows(
+        root, moves, renaming_dirs, standard_home=plan.standard_scans_home,
+    )
     relocating = {move.from_table for move in row_moves}
     # Tables that are themselves being moved still need their column rewritten:
     # their rows name the old entity and are going with them.
     travelling = {src for src, _dst in moves if src.name.endswith("_scans.tsv")}
 
-    label = (
-        f"Rename {old_token} to {new_token}" if whole else
-        f"Rename {len(moves)} file(s) from {old_token} to {new_token}"
-    )
+    # References are rewritten by exact lookup for the operations where there
+    # is no single token to swap, and the map is built from the moves ACTUALLY
+    # being made rather than from the plan, so an unticked file keeps every
+    # pointer aimed at it.
+    ref_map = build_ref_map(root, moves) if plan.ref_by_path else None
+
+    if plan.title:
+        label = (
+            plan.title if whole
+            else f"{plan.title} ({len(moves)} selected file(s))"
+        )
+    else:
+        label = (
+            f"Rename {old_token} to {new_token}" if whole else
+            f"Rename {len(moves)} file(s) from {old_token} to {new_token}"
+        )
     with begin_operation(root, label) as op:
         # Contents first, while the paths they name still exist. The values
         # written are the post-rename ones.
@@ -665,6 +702,7 @@ def apply_rename(
                 if edit.what == "IntendedFor":
                     _rewrite_intended_for(
                         op, edit.path, old_token, new_token, moved_names,
+                        ref_map=ref_map,
                     )
                 elif edit.what == "participant_id":
                     if not whole:
@@ -682,7 +720,7 @@ def apply_rename(
                 else:
                     _rewrite_column(
                         op, edit.path, "filename",
-                        old_token, new_token, moved_names,
+                        old_token, new_token, moved_names, ref_map=ref_map,
                     )
                 touched += 1
             except OSError as exc:
@@ -916,6 +954,8 @@ def plan_scans_rows(
     root: Path,
     moves: list[tuple[Path, Path]],
     moved_dirs: dict[Path, Path],
+    *,
+    standard_home: bool = False,
 ) -> list[_RowMove]:
     """Which scans rows have to move, and where to.
 
@@ -943,7 +983,10 @@ def plan_scans_rows(
         # keeps one per subject despite having sessions is internally
         # consistent, and a split that silently switched convention would
         # make it inconsistent. Mirror what is there.
-        target_home = _mirror_home(home, root, dst)
+        target_home = (
+            _standard_home(root, dst) if standard_home
+            else _mirror_home(home, root, dst)
+        )
         if target_home is None:
             continue
         table = scans_table_in(home)
@@ -964,6 +1007,28 @@ def plan_scans_rows(
             new_rel=_rel(target_home, dst),
         ))
     return out
+
+
+def _standard_home(root: Path, dst: Path) -> Optional[Path]:
+    """Where BIDS says ``dst``'s scans table belongs, whatever is there now.
+
+    The session level when the file sits inside a session, the subject level
+    when it does not. :func:`_mirror_home` deliberately preserves whatever
+    level a dataset already uses, which is right for a rename and wrong for a
+    file crossing INTO or OUT OF a session: mirroring would leave a
+    subject-level table describing files that now live one folder deeper, or a
+    session-level table for a session that no longer exists.
+    """
+    try:
+        parts = Path(dst).resolve().relative_to(Path(root).resolve()).parts
+    except (ValueError, OSError):
+        return None
+    if not parts or not parts[0].startswith("sub-"):
+        return None
+    home = root / parts[0]
+    if len(parts) > 1 and parts[1].startswith("ses-"):
+        home = home / parts[1]
+    return home
 
 
 def _mirror_home(home: Path, root: Path, dst: Path) -> Optional[Path]:
@@ -1201,20 +1266,67 @@ def _remove_if_empty(op, directory: Path, root: Path) -> None:
         current = current.parent
 
 
+def build_ref_map(root: Path, moves: list[tuple[Path, Path]]) -> dict[str, str]:
+    """Every spelling of "where this file was" mapped to "where it now is".
+
+    BIDS points at a file from inside another file in three different
+    spellings, and which one is in front of you depends on the pointer:
+
+    * ``IntendedFor`` as a ``bids::`` URI is relative to the DATASET root;
+    * ``IntendedFor`` in its older form is relative to the SUBJECT;
+    * the ``filename`` column of a ``*_scans.tsv`` is relative to whichever
+      directory holds that table.
+
+    All three are produced here, keyed by the old spelling, so rewriting a
+    reference is an exact dictionary lookup rather than a pattern match. That
+    matters more than it sounds: a lookup built from the moves being performed
+    cannot touch a reference to a file that stayed behind, which is the way a
+    partial selection turns working pointers into dangling ones.
+
+    The three key spaces cannot collide, because every BIDS basename carries
+    its own ``sub-`` label, so the same relative path cannot name two files.
+    """
+    out: dict[str, str] = {}
+    for src, dst in moves:
+        out[_rel(root, src)] = _rel(root, dst)
+        for base_of in (
+            _subject_dir,
+            lambda r, p: scans_home(p, r),
+        ):
+            src_base, dst_base = base_of(root, src), base_of(root, dst)
+            if src_base is None or dst_base is None:
+                continue
+            out[_rel(src_base, src)] = _rel(dst_base, dst)
+    return out
+
+
+def _map_reference(text: str, ref_map: dict[str, str]) -> str:
+    """Look one reference up in the map, keeping any ``bids::`` prefix."""
+    prefix, body = "", text
+    if body.startswith("bids::"):
+        prefix, body = "bids::", body[len("bids::"):]
+    landed = ref_map.get(body)
+    return text if landed is None else prefix + landed
+
+
 def _rewrite_intended_for(
     op, path: Path, old_token: str, new_token: str,
     moved_names: Optional[set[str]] = None,
+    ref_map: Optional[dict[str, str]] = None,
 ) -> None:
     data = _load_json(path)
     if data is None or "IntendedFor" not in data:
         return
     value = data["IntendedFor"]
     items = value if isinstance(value, list) else [value]
-    fixed = [
-        _swap_token(str(v), old_token, new_token)
-        if _names_a_moved_file(str(v), moved_names) else str(v)
-        for v in items
-    ]
+    if ref_map is not None:
+        fixed = [_map_reference(str(v), ref_map) for v in items]
+    else:
+        fixed = [
+            _swap_token(str(v), old_token, new_token)
+            if _names_a_moved_file(str(v), moved_names) else str(v)
+            for v in items
+        ]
     data["IntendedFor"] = fixed if isinstance(value, list) else fixed[0]
     op.write_json(path, data)
 
@@ -1233,7 +1345,8 @@ def _names_a_moved_file(text: str, moved_names: Optional[set[str]]) -> bool:
 
 def _rewrite_column(op, path: Path, column: str,
                     old_token: str, new_token: str,
-                    moved_names: Optional[set[str]] = None) -> None:
+                    moved_names: Optional[set[str]] = None,
+                    ref_map: Optional[dict[str, str]] = None) -> None:
     from .tsv_edit import read_table
 
     table = read_table(path)
@@ -1241,7 +1354,11 @@ def _rewrite_column(op, path: Path, column: str,
         return
     idx = table.header.index(column)
     for row in table.rows:
-        if idx < len(row) and _names_a_moved_file(row[idx], moved_names):
+        if idx >= len(row):
+            continue
+        if ref_map is not None:
+            row[idx] = _map_reference(row[idx], ref_map)
+        elif _names_a_moved_file(row[idx], moved_names):
             row[idx] = _swap_token(row[idx], old_token, new_token)
     op.write_text(path, table.to_text())
 
@@ -1268,6 +1385,9 @@ def list_values(root: Path, entity: str) -> list[str]:
 __all__ = [
     "folder_entities",
     "would_fuse",
+    "build_ref_map",
+    "scans_home",
+    "walk_dataset",
     "ContentEdit",
     "RenameError",
     "RenamePlan",

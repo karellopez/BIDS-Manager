@@ -31,12 +31,10 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QSizePolicy,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -46,6 +44,7 @@ from ..editor import rename as rn
 from ..schema import entity_key_info
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
+from .widgets.move_preview import KEY_ROLE, MovePreviewTree, plan_extras
 
 def entity_choices() -> list[tuple[str, str]]:
     """Every entity the ACTIVE schema defines, as ``(key, display name)``.
@@ -68,8 +67,10 @@ def entity_choices() -> list[tuple[str, str]]:
     return out
 
 # Where a row keeps the plan key it stands for, so the dialog never has to
-# match a file back to the plan by its display text.
-_KEY_ROLE = Qt.ItemDataRole.UserRole + 1
+# match a file back to the plan by its display text. It lives with the tree
+# now, since three dialogs share that tree; re-exported here because it was
+# part of this module's surface first.
+_KEY_ROLE = KEY_ROLE
 
 # How long to wait after the last keystroke before re-planning. Planning walks
 # the whole dataset, so doing it per keystroke froze the window on anything
@@ -187,18 +188,7 @@ class RenameEntityDialog(QDialog):
             "actually move, so what you leave behind keeps its own name and "
             "nothing ends up pointing at a name that does not exist."
         ))
-        self._preview = QTreeWidget()
-        self._preview.setObjectName("rename-preview")
-        self._preview.setColumnCount(2)
-        self._preview.setHeaderLabels(["Rename", "To"])
-        self._preview.setRootIsDecorated(True)
-        self._preview.setUniformRowHeights(True)
-        self._preview.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        self._preview.header().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
-        )
+        self._preview = MovePreviewTree()
         self._preview.itemChanged.connect(self._on_item_checked)
         pl.addWidget(self._preview, 1)
 
@@ -376,82 +366,19 @@ class RenameEntityDialog(QDialog):
     # -- choosing what to rename -----------------------------------------
 
     def _populate(self, plan: rn.RenamePlan) -> None:
-        """Draw the plan as a list the user can untick items in."""
-        self._preview.blockSignals(True)
-        self._preview.clear()
-
-        # Files, grouped by the folder they live in, because that is how a
-        # user thinks about "these three runs" and "that whole session".
-        groups: dict[str, QTreeWidgetItem] = {}
-        for src, dst in plan.file_moves:
-            # ``.as_posix()``, not ``str()``: the key is already POSIX, and
-            # putting it through a native Path on Windows hands the label
-            # back with backslashes, so the tree reads in a spelling that
-            # appears nowhere in the dataset.
-            folder = Path(plan.file_key(self._root, src)).parent.as_posix()
-            parent = groups.get(folder)
-            if parent is None:
-                parent = QTreeWidgetItem(self._preview, [folder, ""])
-                parent.setFlags(
-                    parent.flags()
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsAutoTristate
-                )
-                parent.setCheckState(0, Qt.CheckState.Checked)
-                parent.setExpanded(True)
-                groups[folder] = parent
-            item = QTreeWidgetItem(parent, [src.name, dst.name])
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(0, Qt.CheckState.Checked)
-            item.setData(0, _KEY_ROLE, plan.file_key(self._root, src))
-
-        # What follows the files, and cannot be chosen separately: a folder
-        # that empties, the tables a merge combines, the references that
-        # travel. Shown so the plan is complete, not checkable so nobody can
-        # produce a half-applied cross-reference.
-        extras: list[tuple[str, str]] = []
-        for src, dst in plan.fused_dirs:
-            extras.append((src.name, f"merged into the existing {dst.name}"))
-        for src, dst in plan.dir_moves:
-            extras.append((src.name, dst.name))
-        for src, dst in plan.table_merges:
-            extras.append((src.name, f"appended to {dst.name}"))
-        for path, column in plan.row_folds:
-            extras.append((path.name, f"two {column} rows folded into one"))
-        for edit in plan.content_edits:
-            extras.append((edit.rel, f"{edit.hits} x {edit.what} updated"))
-        if extras:
-            follows = QTreeWidgetItem(
-                self._preview, ["Follows automatically", ""],
-            )
-            follows.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            follows.setExpanded(True)
-            for left, right in extras:
-                child = QTreeWidgetItem(follows, [left, right])
-                child.setFlags(Qt.ItemFlag.ItemIsEnabled)
-
-        if plan.conflicts:
-            blocked = QTreeWidgetItem(
-                self._preview, ["Refused, these names would collide", ""],
-            )
-            blocked.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            blocked.setExpanded(True)
-            for text in plan.conflicts:
-                child = QTreeWidgetItem(blocked, [text, ""])
-                child.setFlags(Qt.ItemFlag.ItemIsEnabled)
-
-        self._preview.blockSignals(False)
+        """Draw the plan as a dataset tree the user can untick items in."""
+        self._preview.show_moves(
+            self._root,
+            [
+                (plan.file_key(self._root, src), src, dst)
+                for src, dst in plan.file_moves
+            ],
+            extras=plan_extras(plan),
+            conflicts=plan.conflicts,
+        )
 
     def _set_all(self, state: Qt.CheckState) -> None:
-        self._preview.blockSignals(True)
-        for i in range(self._preview.topLevelItemCount()):
-            top = self._preview.topLevelItem(i)
-            if not (top.flags() & Qt.ItemFlag.ItemIsUserCheckable):
-                continue
-            top.setCheckState(0, state)
-            for j in range(top.childCount()):
-                top.child(j).setCheckState(0, state)
-        self._preview.blockSignals(False)
+        self._preview.set_all(state)
         self._refresh_selection()
 
     def _on_item_checked(self, item: QTreeWidgetItem, column: int) -> None:
@@ -460,15 +387,7 @@ class RenameEntityDialog(QDialog):
 
     def selected_keys(self) -> set[str]:
         """The file moves currently ticked, by their path within the root."""
-        out: set[str] = set()
-        for i in range(self._preview.topLevelItemCount()):
-            top = self._preview.topLevelItem(i)
-            for j in range(top.childCount()):
-                child = top.child(j)
-                key = child.data(0, _KEY_ROLE)
-                if key and child.checkState(0) == Qt.CheckState.Checked:
-                    out.add(key)
-        return out
+        return self._preview.selected_keys()
 
     def _refresh_selection(self) -> None:
         """Keep the button and the footer honest about what is ticked."""

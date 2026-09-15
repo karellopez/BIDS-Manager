@@ -187,6 +187,24 @@ def _renameable_entities(path: Path) -> list[tuple[str, str, str]]:
     return out
 
 
+def _in_session(path: Path) -> bool:
+    """Is this row inside a ``ses-`` folder, or does it name one?"""
+    return any(part.startswith("ses-") for part in path.parts)
+
+
+def _can_restructure(path: Path) -> bool:
+    """Is it meaningful to change the entities of what was clicked?
+
+    Anything at or under a subject. Above that there is no recording to speak
+    of, and the tool's own ``.bidsmgr/`` holds the operation log, which is the
+    one thing a restructuring must not restructure.
+    """
+    parts = path.parts
+    if any(is_hidden_name(part) for part in parts):
+        return False
+    return any(part.startswith("sub-") for part in parts)
+
+
 def _walk(
     folder: Path,
     parent_item: QTreeWidgetItem,
@@ -295,6 +313,11 @@ class BidsTreePane(QWidget):
     # The pane does not open the dialog itself: the tree knows what was
     # clicked, the panel knows the dataset root and what to refresh after.
     rename_requested = pyqtSignal(str, str)
+    # (paths, mode, session_mode) for adding or removing an entity, and for
+    # creating or removing a session, on what the user right-clicked. Same
+    # division of labour as ``rename_requested``: the tree knows what was
+    # clicked, the panel owns the root and the refresh.
+    entities_requested = pyqtSignal(list, str, bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -858,6 +881,52 @@ class BidsTreePane(QWidget):
                     lambda _checked=False, e=entity, v=value:
                         self.rename_requested.emit(e, v)
                 )
+
+        # Restructuring, on whatever the click covers. A right-click inside an
+        # existing multi-selection acts on the whole selection, which is what
+        # every file manager does and what makes "these four runs" one step;
+        # a click outside it acts on the one row, because that is plainly what
+        # was meant.
+        chosen = self.selected_paths()
+        clicked = Path(path)
+        scope = chosen if clicked in chosen and len(chosen) > 1 else [clicked]
+        if _can_restructure(clicked):
+            menu.addSeparator()
+            add_entity = menu.addAction("Add or change an entity...")
+            add_entity.setToolTip(
+                "Give these files an entity the schema allows them, placed "
+                "where the standard puts it. Sidecars and companion files "
+                "travel with the recording."
+            )
+            add_entity.triggered.connect(
+                lambda _c=False, s=scope:
+                    self.entities_requested.emit(s, "add", False)
+            )
+            drop_entity = menu.addAction("Remove an entity...")
+            drop_entity.setToolTip(
+                "Take an optional entity off these files. Required ones are "
+                "not offered, because a name without them has no reading."
+            )
+            drop_entity.triggered.connect(
+                lambda _c=False, s=scope:
+                    self.entities_requested.emit(s, "remove", False)
+            )
+
+            if _in_session(clicked):
+                session = menu.addAction("Remove from its session...")
+                mode = "remove"
+            else:
+                session = menu.addAction("Create a session for this...")
+                mode = "add"
+            session.setToolTip(
+                "A session is a folder and an entity at once. The "
+                "*_scans.tsv travels to the level BIDS puts it at and every "
+                "reference follows."
+            )
+            session.triggered.connect(
+                lambda _c=False, s=scope, m=mode:
+                    self.entities_requested.emit(s, m, True)
+            )
 
         menu.addSeparator()
 
