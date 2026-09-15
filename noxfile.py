@@ -54,12 +54,13 @@ def _install(session: nox.Session, *extras: str) -> None:
 def unit(session: nox.Session) -> None:
     """Engine and CLI unit tests. No display, no data, no network."""
     _install(session, "pytest")
-    # -q for 1,417 tests, because a verbose list of that length is not read.
-    # -ra prints a reason for every skip and xfail at the end, which IS read,
-    # and --durations names the slow ones so a cell that suddenly takes twice
-    # as long says which test did it.
+    # -v: every test is named as it runs. A progress bar tells you how far
+    # along a failing run got and nothing about what it was doing, and the
+    # point of a CI log is to be readable after the fact by somebody who was
+    # not watching. -ra then repeats every skip and xfail WITH ITS REASON at
+    # the end, so "why was that not run" is answerable without scrolling.
     session.run(
-        "pytest", "tests/unit", "-q", "-ra", "--durations=10",
+        "pytest", "tests/unit", "-v", "-ra", "--durations=10",
         *session.posargs,
     )
 
@@ -75,7 +76,7 @@ def gui(session: nox.Session) -> None:
     _install(session, "pytest", "pytest-qt")
     session.env["QT_QPA_PLATFORM"] = "offscreen"
     session.run(
-        "pytest", "tests/gui", "-q", "-ra", "--durations=10",
+        "pytest", "tests/gui", "-v", "-ra", "--durations=10",
         "-p", "no:randomly", *session.posargs,
     )
 

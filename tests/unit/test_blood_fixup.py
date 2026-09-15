@@ -29,12 +29,12 @@ from bidsmgr.fixups.blood import (
     is_blood_role,
     parse_blood_role,
 )
+from tests.fixtures.data_root import dataset
 
-BLOOD_DATA = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_BLOOD/pmod"
-)
+BLOOD_DATA = dataset("PET_BLOOD", "pmod")
 real_blood = pytest.mark.skipif(
-    os.environ.get("BIDS_MANAGER_REAL_PET_BLOOD") != "1" or not BLOOD_DATA.is_dir(),
+    os.environ.get("BIDS_MANAGER_REAL_PET_BLOOD") != "1"
+    or BLOOD_DATA is None or not BLOOD_DATA.is_dir(),
     reason="needs BIDS_MANAGER_REAL_PET_BLOOD=1 and the PMOD example files",
 )
 

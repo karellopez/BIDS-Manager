@@ -44,6 +44,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Every subprocess started here gets UTF-8 output.
+#
+# Python picks its stdout encoding from the console, and a Windows console
+# through a PIPE reports cp1252. `bidsmgr-scan --help` prints an arrow, which
+# cp1252 cannot encode, so argparse raised UnicodeEncodeError and the command
+# exited 1 under CI while working perfectly in a terminal, because Windows
+# Terminal is UTF-8. The difference was the pipe, not the tool.
+#
+# A test that runs a CLI owns the environment it runs it in, so it says what
+# encoding it wants rather than inheriting whatever the harness had.
+CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
 PASS, FAIL = [], []
 
 
@@ -141,6 +153,7 @@ for _name in SCRIPTS:
             raise AssertionError("not on PATH")
         proc = subprocess.run(
             [exe, "--help"], capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace", env=CHILD_ENV,
         )
         if proc.returncode != 0:
             raise AssertionError(
@@ -212,6 +225,7 @@ def _scan() -> str:
     proc = subprocess.run(
         [shutil.which("bidsmgr-scan"), str(WORK / "raw"), str(out)],
         capture_output=True, text=True, timeout=900,
+        encoding="utf-8", errors="replace", env=CHILD_ENV,
     )
     if proc.returncode != 0:
         raise AssertionError(
@@ -229,6 +243,7 @@ def _convert() -> str:
         [shutil.which("bidsmgr-convert"), str(WORK / "inv.tsv"),
          str(WORK / "bids"), "--raw-root", str(WORK / "raw")],
         capture_output=True, text=True, timeout=1800,
+        encoding="utf-8", errors="replace", env=CHILD_ENV,
     )
     if proc.returncode != 0:
         raise AssertionError(
@@ -257,6 +272,7 @@ def _metadata() -> str:
     proc = subprocess.run(
         [shutil.which("bidsmgr-metadata"), str(root)],
         capture_output=True, text=True, timeout=900,
+        encoding="utf-8", errors="replace", env=CHILD_ENV,
     )
     if proc.returncode != 0:
         raise AssertionError(

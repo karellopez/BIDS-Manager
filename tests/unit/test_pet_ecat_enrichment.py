@@ -25,11 +25,12 @@ from bidsmgr.inventory.pet_ecat import (
     _units_from_ecat,
     ecat_sidecar_fields,
 )
+from tests.fixtures.data_root import dataset
 
-ECAT_DIR = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS/"
-    "PN000001/OpenNeuroPET-Phantoms/sourcedata"
-)
+# ``dataset`` returns None on a machine with no BIDSMGR_TEST_DATA.
+# A placeholder keeps module-level path arithmetic below importable;
+# the skip gates are what actually stop these tests running.
+ECAT_DIR = dataset("PET_DICOMS", "PN000001", "OpenNeuroPET-Phantoms", "sourcedata") or Path("__no_local_dataset__")
 ECAT_FILES = {
     "jhu": ECAT_DIR / "SiemensHRRT-JHU" / "Hoffman.v",
     "nru": ECAT_DIR / "SiemensHRRT-NRU" / "XCal-Hrrt-2022.04.21.15.43.05_EM_3D.v",

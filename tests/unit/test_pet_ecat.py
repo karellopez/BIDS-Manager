@@ -24,15 +24,24 @@ from bidsmgr.inventory.pet_ecat import (
     find_ecat_files,
     is_ecat_file,
 )
+from tests.fixtures.data_root import dataset
 
-REAL_DATA = os.environ.get("BIDS_MANAGER_REAL_PET_DATA") == "1"
 # The three ECAT phantoms, in the raw data where they persist. This used to
 # point at a scratch directory under bids_manager_outputs, which is conversion
 # OUTPUT and gets cleared, so these tests silently found nothing the moment the
 # folder was tidied away.
-PHANTOMS = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS"
-    "/PN000001/OpenNeuroPET-Phantoms/sourcedata"
+# ``dataset`` returns None on a machine with no BIDSMGR_TEST_DATA.
+# A placeholder keeps module-level path arithmetic below importable;
+# the skip gates are what actually stop these tests running.
+PHANTOMS = dataset("PET_DICOMS", "PN000001", "OpenNeuroPET-Phantoms", "sourcedata") or Path("__no_local_dataset__")
+
+# Both halves. Opting in on a machine that has no data is a machine without
+# the data, not a failing test: the gate says "I want this tier AND it is
+# here". Checking only the variable made three tests fail on a runner that
+# set it hopefully.
+REAL_DATA = (
+    os.environ.get("BIDS_MANAGER_REAL_PET_DATA") == "1"
+    and PHANTOMS.is_dir()
 )
 
 
@@ -156,7 +165,7 @@ def test_unreadable_ecat_reports_an_error_rather_than_raising(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1 and $BIDSMGR_TEST_DATA")
 def test_real_phantoms_probe_cleanly() -> None:
     from bidsmgr.inventory.pet_ecat import probe_ecat
 
@@ -220,7 +229,7 @@ def test_a_missing_orientation_field_is_survived() -> None:
     assert np.array_equal(_orient_to_affine(_Img(), data), data)
 
 
-@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1 and $BIDSMGR_TEST_DATA")
 def test_a_single_frame_scan_is_written_as_3d(tmp_path) -> None:
     """A static scan must not look dynamic. nibabel reports ECAT as
     (x, y, z, frames) whatever the count, and a trailing length-1 axis makes
@@ -234,7 +243,7 @@ def test_a_single_frame_scan_is_written_as_3d(tmp_path) -> None:
     assert nibabel.load(str(nii)).ndim == 3
 
 
-@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1 and $BIDSMGR_TEST_DATA")
 def test_real_phantom_converts_with_matching_voxels(tmp_path) -> None:
     """The written NIfTI must carry the ECAT's scaled data, not raw counts."""
     import nibabel

@@ -22,13 +22,12 @@ from bidsmgr.inventory.pet_dicom_meta import (
     dicom_sidecar_fields,
     enrich_pet_sidecar,
 )
+from tests.fixtures.data_root import dataset
 
-PHANTOMS = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS"
-    "/PN000001/OpenNeuroPET-Phantoms/sourcedata"
-)
+PHANTOMS = dataset("PET_DICOMS", "PN000001", "OpenNeuroPET-Phantoms", "sourcedata")
 real_pet = pytest.mark.skipif(
-    os.environ.get("BIDS_MANAGER_REAL_PET_DATA") != "1" or not PHANTOMS.is_dir(),
+    os.environ.get("BIDS_MANAGER_REAL_PET_DATA") != "1"
+    or PHANTOMS is None or not PHANTOMS.is_dir(),
     reason="needs BIDS_MANAGER_REAL_PET_DATA=1 and the OpenNeuroPET phantom set",
 )
 

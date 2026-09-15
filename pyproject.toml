@@ -186,7 +186,7 @@ extend-exclude = ["bidsmgr/vendor"]
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
-    "real_data: requires real datasets at /Users/karelo/Development/datasets/BIDS_Manager/raw_data, gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG}_DATA",
+    "real_data: requires real datasets under $BIDSMGR_TEST_DATA (see tests/fixtures/data_root.py), gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG,PET}_DATA",
     "gui: pytest-qt smoke tests, headless OK with QT_QPA_PLATFORM=offscreen",
     "integration: end-to-end CLI runs against the published sample datasets; fetches ~56 MB on first use and caches it outside the checkout",
 ]
