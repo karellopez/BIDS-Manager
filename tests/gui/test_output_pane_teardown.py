@@ -93,22 +93,48 @@ def test_a_real_error_is_still_raised(qtbot, output_dir) -> None:
         pane._on_scan_done(pane._scan_generation, None)
 
 
-def test_the_worker_does_not_emit_into_a_dead_pane(qtbot, output_dir) -> None:
-    """The other half, one frame earlier.
+def test_the_worker_cannot_emit_into_a_dead_signals_object(
+    qtbot, output_dir,
+) -> None:
+    """The other half, one frame earlier, and it is now a lifetime guarantee
+    rather than a guard.
 
-    The slot guard only helps if the emit itself succeeds. When the pane dies
-    mid-walk the worker emits on a deleted QObject, which raises on the WORKER
-    thread where nothing catches it.
+    This test used to parent the signals object to the pane, delete it by
+    hand, and assert that ``run()`` did not raise. That pinned the wrong fix
+    in place. Guarding the emit cannot work: ``sip.isdeleted`` followed by
+    ``emit`` is two steps with a window between them, and no ``except`` clause
+    catches the segmentation fault that emitting through a freed QObject
+    produces. Destroying a QObject on the GUI thread while a pool thread emits
+    its signal is undefined behaviour in Qt, because emission takes the
+    sender's connection mutex and that mutex is part of what is being freed.
+    It surfaced as a segfault on a loaded Linux runner and never on macOS,
+    which is what a timing race looks like.
+
+    So the object is no longer parented to the pane, and the property to
+    assert is that the runnable's own reference keeps it alive: the pane can
+    go, and the emit is still safe, delivering to a slot PyQt has already
+    disconnected.
     """
-    from bidsmgr.gui.output_fs_pane import _ScanRunnable, _ScanSignals
+    import gc
 
-    holder = OutputFsPane()
-    qtbot.addWidget(holder)
-    signals = _ScanSignals(holder)
+    from bidsmgr.gui.output_fs_pane import _ScanRunnable
+
+    pane = OutputFsPane()
+    qtbot.addWidget(pane)
+    signals = pane._scan_signals
     runnable = _ScanRunnable(1, output_dir, signals)
-    sip.delete(signals)
 
-    runnable.run()   # must not raise
+    # Destroy the pane the way teardown does, and let the collector run.
+    pane.deleteLater()
+    pane.setParent(None)
+    sip.delete(pane._tree)
+    del pane
+    gc.collect()
+
+    assert not sip.isdeleted(signals), (
+        "the runnable still holds this object, so nothing may have freed it"
+    )
+    runnable.run()   # must neither raise nor crash
 
 
 def test_a_real_scan_still_renders(qtbot, output_dir) -> None:

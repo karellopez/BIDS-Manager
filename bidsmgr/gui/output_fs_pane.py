@@ -113,9 +113,27 @@ class _ScanResult:
 class _ScanSignals(QObject):
     """Bridges a worker-thread scan back to the GUI thread.
 
-    Held on the pane (parented for QObject lifetime). ``QueuedConnection``
-    is enforced when wiring the slot so the emit hops to the GUI event
-    loop even when fired from the thread pool.
+    **Deliberately UNPARENTED, and that is the whole point.** Its lifetime is
+    Python's: the pane holds one reference and every in-flight
+    :class:`_ScanRunnable` holds another, so the C++ object outlives whichever
+    of them goes first.
+
+    Parented to the pane, as it used to be, the C++ object was destroyed with
+    the pane while a pool thread could still be inside ``done.emit(...)``.
+    Destroying a QObject on one thread while another emits its signal is
+    undefined behaviour in Qt, not a Python-level error: signal emission takes
+    the sender's connection mutex, and that mutex is part of the object being
+    freed. Neither guard the emit used to carry could help. ``sip.isdeleted``
+    followed by ``emit`` is two steps with a window between them, and a
+    ``try/except RuntimeError`` catches a PyQt wrapper error, never a
+    segmentation fault.
+
+    Unparented, there is nothing to race: the object is alive for as long as
+    anyone can emit through it, and when the PANE is destroyed PyQt drops the
+    connection to its slot, so a late emit is a no-op rather than a crash.
+
+    ``QueuedConnection`` is still enforced when wiring the slot, so the emit
+    hops to the GUI event loop even when fired from the thread pool.
     """
 
     done = pyqtSignal(int, object)  # (generation, _ScanResult | None)
@@ -153,18 +171,18 @@ class _ScanRunnable(QRunnable):
         except Exception:  # pragma: no cover — defensive
             log.exception("output tree scan failed for %s", self._root)
             result = None
-        # The pane owns the signals object, and a directory walk takes long
-        # enough that the pane can be torn down while this runs. Emitting into
-        # a deleted QObject raises on the WORKER thread, where nothing catches
-        # it. Checked first because that is cheap and covers almost every
-        # case, and caught as well because the check and the emit are two
-        # steps and the object can die between them.
-        if sip.isdeleted(self._signals):
-            return
-        try:
-            self._signals.done.emit(self._generation, result)
-        except RuntimeError:
-            log.debug("output pane went away before its scan finished")
+        # Safe without a guard, and the absence of one is deliberate. This
+        # runnable holds a reference to the signals object, which is NOT
+        # parented to the pane, so the C++ object cannot be destroyed while we
+        # are inside the emit. If the pane has gone, PyQt has already dropped
+        # the connection to its slot and this delivers to nobody.
+        #
+        # The previous ``sip.isdeleted`` check plus ``except RuntimeError``
+        # looked like defence and was not: the check and the emit are two
+        # steps with a window between them, and no Python except clause
+        # catches the segmentation fault that emitting through a freed
+        # QObject produces. The lifetime had to be fixed instead.
+        self._signals.done.emit(self._generation, result)
 
 
 def _walk_dir(
@@ -234,7 +252,10 @@ class OutputFsPane(QWidget):
         self._scan_generation = 0
         self._completed_scan_generation = 0
         self._scan_in_progress = False
-        self._scan_signals = _ScanSignals(self)
+        # No parent. See _ScanSignals: parenting it to the pane put its C++
+        # lifetime on the GUI thread while pool threads were still emitting
+        # through it.
+        self._scan_signals = _ScanSignals()
         self._scan_signals.done.connect(
             self._on_scan_done,
             Qt.ConnectionType.QueuedConnection,

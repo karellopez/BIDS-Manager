@@ -296,3 +296,131 @@ def test_renaming_a_subject_carries_every_modality(converted, tmp_path) -> None:
         frame = pd.read_csv(table, sep="\t", dtype=str, keep_default_na=False)
         for name in frame["filename"]:
             assert f"sub-{old}" not in name, f"stale name in {table.name}: {name}"
+
+
+def test_a_session_can_be_removed_and_put_back(converted, tmp_path) -> None:
+    """Restructuring is an end-to-end operation over a converted tree, so this
+    is the only tier that can test it against real output.
+
+    Real data is what caught the defect this covers: the planner and the
+    applier disagreed about how a path was SPELLED, and the result was a
+    removed session that still existed, holding empty datatype folders and a
+    scans table describing files that had moved out of it. Every unit test
+    passed, because pytest's tmp_path is already canonical on macOS.
+
+    A round trip rather than one direction, because the two halves have to
+    agree: what comes out of a session has to be able to go back into one.
+    """
+    import shutil
+
+    from bidsmgr.editor import restructure as rs
+    from bidsmgr.editor.rename import apply_rename
+
+    root = tmp_path / "restructured"
+    shutil.copytree(converted["root"], root)
+
+    subject = next(p for p in sorted(root.glob("sub-*")) if p.is_dir())
+    sessions = sorted(p.name for p in subject.glob("ses-*") if p.is_dir())
+    if not sessions:
+        pytest.skip("the converted sample has no session to remove")
+    before = _recordings(root)
+
+    # Out of the session.
+    _touched, errors = apply_rename(
+        root, rs.plan_remove_session(root, [subject]),
+    )
+    assert not errors, errors
+    assert not (subject / sessions[0]).exists(), (
+        "the session folder was left behind"
+    )
+    assert (subject / f"{subject.name}_scans.tsv").is_file(), (
+        "the scans table did not follow its recordings up to the subject"
+    )
+    assert not [n for n in _recordings(root) if sessions[0] in n]
+
+    # And back into one.
+    _touched, errors = apply_rename(
+        root, rs.plan_add_session(root, "redo", [subject]),
+    )
+    assert not errors, errors
+    table = subject / "ses-redo" / f"{subject.name}_ses-redo_scans.tsv"
+    assert table.is_file(), "the table did not follow into the session"
+    assert not (subject / f"{subject.name}_scans.tsv").exists()
+
+    # Same recordings, every modality, none lost or duplicated on the way.
+    after = _recordings(root)
+    assert len(after) == len(before), (
+        f"{len(before)} recording(s) before, {len(after)} after"
+    )
+    assert {_suffix_of(n) for n in after} == {_suffix_of(n) for n in before}
+
+    # And every row in the table points at something that is there.
+    frame = pd.read_csv(table, sep="\t", dtype=str, keep_default_na=False)
+    for name in frame["filename"]:
+        assert (table.parent / name).exists(), (
+            f"scans row points at a file that does not exist: {name}"
+        )
+
+
+def test_an_entity_can_be_added_across_a_real_tree(converted, tmp_path) -> None:
+    """Adding an entity has to place it where the STANDARD puts it, and carry
+    every companion the conversion produced.
+
+    On real output that means the sidecar, and for EEG and MEG the
+    ``_channels.tsv`` and ``_events.tsv`` the converter wrote beside the
+    recording. A synthetic fixture can be made to have those; only real
+    output proves the conversion's own naming lines up with what the
+    restructurer expects.
+    """
+    import shutil
+
+    from bidsmgr.editor import restructure as rs
+    from bidsmgr.editor.rename import apply_rename
+
+    root = tmp_path / "entity-added"
+    shutil.copytree(converted["root"], root)
+
+    anat = sorted(root.rglob("*_T1w.nii.gz"))
+    if not anat:
+        pytest.skip("the converted sample has no T1w to work on")
+    target = anat[0]
+    companions = {p.name for p in rs.companions(root, target)}
+    assert len(companions) >= 2, (
+        f"a converted T1w should have at least a sidecar, got {companions}"
+    )
+
+    plan = rs.plan_entity_edit(root, "acq", [target], value="restructured")
+    assert not plan.conflicts, plan.conflicts
+    _touched, errors = apply_rename(root, plan)
+    assert not errors, errors
+
+    landed = sorted(root.rglob("*acq-restructured*"))
+    assert len(landed) == len(companions), (
+        "every companion should have travelled with the recording"
+    )
+    for path in landed:
+        stem = path.name.split(".")[0]
+        parts = stem.split("_")
+        assert parts[0].startswith("sub-"), stem
+        # acq must sit before the suffix and after sub/ses, which is the
+        # schema's order, not the order it was typed in.
+        assert any(p.startswith("acq-") for p in parts[:-1]), stem
+        assert not parts[-1].startswith("acq-"), (
+            f"acq landed in the suffix position: {stem}"
+        )
+
+
+def _recordings(root: Path) -> list[str]:
+    """Every data file in the tree, by name, excluding tables and our state."""
+    skip = ("_scans.tsv", "_channels.tsv", "_events.tsv", ".json")
+    return sorted(
+        p.name for p in root.rglob("*")
+        if p.is_file()
+        and ".bidsmgr" not in p.parts
+        and p.parent.name not in ("", root.name)
+        and not p.name.endswith(skip)
+    )
+
+
+def _suffix_of(name: str) -> str:
+    return name.split(".")[0].split("_")[-1]

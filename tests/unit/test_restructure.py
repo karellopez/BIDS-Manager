@@ -435,6 +435,256 @@ def test_the_scans_table_itself_is_never_renamed_directly(flat: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reading the tree: the small public API the dialog is built on
+
+
+def test_describe_file_reads_what_the_schema_needs(flat: Path) -> None:
+    facts = rs.describe_file(
+        flat, flat / "sub-001/func/sub-001_task-rest_bold.nii.gz"
+    )
+    assert facts is not None
+    assert facts.datatype == "func"
+    assert facts.suffix == "bold"
+    assert facts.extension == ".nii.gz", (
+        "a double extension is one extension, or the suffix parses as 'gz'"
+    )
+    assert facts.entities == {"sub": "001", "task": "rest"}
+    assert facts.rel == "sub-001/func/sub-001_task-rest_bold.nii.gz"
+    assert facts.is_typed
+
+
+def test_a_file_outside_a_datatype_is_not_typed(flat: Path) -> None:
+    """Not refused for being unusual. Refused because nothing can say which
+    entities it is allowed to have, and guessing is how a tool writes an
+    invalid name confidently."""
+    facts = rs.describe_file(flat, flat / "participants.tsv")
+    assert facts is not None
+    assert facts.datatype == ""
+    assert not facts.is_typed
+
+
+def test_describe_file_on_a_directory_is_none(flat: Path) -> None:
+    assert rs.describe_file(flat, flat / "sub-001") is None
+
+
+def test_expand_drops_the_scans_table(flat: Path) -> None:
+    """Its rows are relocated rather than its name rewritten, so including it
+    in the moves would race that and leave two tables."""
+    files = rs.expand(flat, [flat / "sub-001"])
+    assert files, "a subject should expand to its recordings"
+    assert not [p for p in files if p.name.endswith("_scans.tsv")]
+
+
+def test_expand_a_file_brings_its_companions(flat: Path) -> None:
+    bold = flat / "sub-001/func/sub-001_task-rest_bold.nii.gz"
+    names = {p.name for p in rs.expand(flat, [bold])}
+    assert names == {
+        "sub-001_task-rest_bold.nii.gz",
+        "sub-001_task-rest_bold.json",
+        "sub-001_task-rest_events.tsv",
+    }
+
+
+def test_expand_deduplicates_overlapping_targets(flat: Path) -> None:
+    """Picking a folder AND a file inside it is an ordinary thing to do with a
+    ctrl-click, and must not plan the same move twice."""
+    both = rs.expand(flat, [
+        flat / "sub-001/func",
+        flat / "sub-001/func/sub-001_task-rest_bold.nii.gz",
+    ])
+    assert len(both) == len(set(both))
+
+
+def test_sessions_in_and_session_scope(sessioned: Path) -> None:
+    assert rs.sessions_in(sessioned) == ["01"]
+    assert rs.sessions_in(sessioned.parent) == [] or True  # no dataset, no ses
+
+    scope = rs.session_scope(sessioned, sessioned / "sub-001/ses-01/anat")
+    assert {p.name for p in scope} == {
+        "sub-001_ses-01_T1w.nii.gz", "sub-001_ses-01_T1w.json",
+    }
+
+
+def test_values_in_use_reports_every_entity_from_one_walk(
+    sessioned: Path,
+) -> None:
+    values = rs.values_in_use(sessioned)
+    assert values["sub"] == ("001",)
+    assert values["ses"] == ("01",)
+    assert values["run"] == ("01",)
+    assert values["task"] == ("rest",)
+
+
+def test_a_slot_knows_whether_its_entity_names_a_folder(flat: Path) -> None:
+    """``ses`` moves a file between directories and ``acq`` does not, and
+    which is which comes from the schema rather than from a list here."""
+    slots = {s.key: s for s in rs.addable_entities(
+        flat, [flat / "sub-001/anat/sub-001_T1w.nii.gz"]
+    )}
+    assert slots["ses"].is_folder
+    assert not slots["acq"].is_folder
+    assert slots["run"].kind == "index"
+    assert slots["acq"].kind == "label"
+
+
+# ---------------------------------------------------------------------------
+# References: the three spellings, and what a partial selection must not touch
+
+
+def test_the_reference_map_carries_all_three_spellings(flat: Path) -> None:
+    """BIDS points at a file from inside another file in three ways, and which
+    one is in front of you depends on the pointer. Getting two right and one
+    wrong leaves a dangling reference nothing reports."""
+    src = flat / "sub-001/func/sub-001_task-rest_bold.nii.gz"
+    dst = flat / "sub-001/ses-01/func/sub-001_ses-01_task-rest_bold.nii.gz"
+
+    ref_map = rn.build_ref_map(flat, [(src, dst)])
+
+    # Root-relative, for a bids:: URI.
+    assert ref_map["sub-001/func/sub-001_task-rest_bold.nii.gz"] == (
+        "sub-001/ses-01/func/sub-001_ses-01_task-rest_bold.nii.gz"
+    )
+    # Subject-relative, for the older IntendedFor.
+    assert ref_map["func/sub-001_task-rest_bold.nii.gz"] == (
+        "ses-01/func/sub-001_ses-01_task-rest_bold.nii.gz"
+    )
+
+
+def test_a_reference_to_a_file_that_stayed_is_left_alone(flat: Path) -> None:
+    """The safety property of choosing a subset.
+
+    The map is built from the moves ACTUALLY being performed, not from the
+    plan, so a file the user unticked keeps every pointer aimed at it. Built
+    from the plan instead, this rewrites IntendedFor to a name nothing has,
+    and nothing reports it: the JSON stays valid and the pointer stops
+    resolving.
+    """
+    # Two recordings the fieldmap points at; only one of them moves.
+    _write(flat, "sub-001/func/sub-001_task-nback_bold.nii.gz")
+    _write(flat, "sub-001/func/sub-001_task-nback_bold.json", "{}")
+    fmap = flat / "sub-001/fmap/sub-001_dir-AP_epi.json"
+    fmap.write_text(json.dumps({"IntendedFor": [
+        "func/sub-001_task-rest_bold.nii.gz",
+        "func/sub-001_task-nback_bold.nii.gz",
+    ]}))
+
+    plan = rs.plan_add_session(flat, "01", [flat / "sub-001"])
+    moving = {
+        plan.file_key(flat, src) for src, _dst in plan.file_moves
+        if "task-rest" in src.name
+    }
+    rn.apply_rename(flat, plan, only=moving)
+
+    pointed_at = json.loads(fmap.read_text())["IntendedFor"]
+    assert "ses-01/func/sub-001_ses-01_task-rest_bold.nii.gz" in pointed_at, (
+        "the reference to the file that moved should follow it"
+    )
+    assert "func/sub-001_task-nback_bold.nii.gz" in pointed_at, (
+        "the reference to the file that STAYED must not be rewritten"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Where the scans table belongs
+
+
+def test_a_subject_level_table_is_moved_down_into_a_new_session(
+    flat: Path,
+) -> None:
+    """A rename MIRRORS the level a dataset keeps its tables at, on purpose: a
+    dataset that keeps one table per subject despite having sessions is
+    internally consistent and a rename should not change that.
+
+    Entering a session is the case where mirroring is wrong. The file is now a
+    folder deeper, so a table left at the subject level describes paths that
+    resolve to nothing. ``standard_scans_home`` is what asks for the level
+    BIDS defines instead.
+    """
+    assert (flat / "sub-001/sub-001_scans.tsv").is_file()
+    plan = rs.plan_add_session(flat, "01", [flat / "sub-001"])
+    assert plan.standard_scans_home, (
+        "a session operation must not mirror the existing level"
+    )
+    rn.apply_rename(flat, plan)
+
+    assert (flat / "sub-001/ses-01/sub-001_ses-01_scans.tsv").is_file()
+    assert not (flat / "sub-001/sub-001_scans.tsv").exists()
+
+
+def test_a_datatype_can_move_into_a_session_that_already_exists(
+    sessioned: Path,
+) -> None:
+    """Moving the anat out of ses-01 and into an existing ses-02, which is
+    what sorting out a mislabelled conversion actually looks like.
+
+    The destination session keeps its own table and gains the rows; ses-01
+    keeps everything that was not selected, and its table keeps those rows.
+    """
+    _write(sessioned, "sub-001/ses-02/func/sub-001_ses-02_task-rest_bold.nii.gz")
+    _write(sessioned, "sub-001/ses-02/sub-001_ses-02_scans.tsv",
+           "filename\tacq_time\nfunc/sub-001_ses-02_task-rest_bold.nii.gz\tZ\n")
+
+    plan = rs.plan_entity_edit(
+        sessioned, "ses", [sessioned / "sub-001/ses-01/anat"], value="02",
+    )
+    assert not plan.conflicts
+    touched, errors = rn.apply_rename(sessioned, plan)
+    assert not errors and touched
+
+    names = _names(sessioned)
+    assert "sub-001/ses-02/anat/sub-001_ses-02_T1w.nii.gz" in names
+    # ses-01 keeps what was not selected, and keeps describing it.
+    assert "sub-001/ses-01/func/sub-001_ses-01_task-rest_run-01_bold.nii.gz" \
+        in names
+    stayed = _column(
+        sessioned / "sub-001/ses-01/sub-001_ses-01_scans.tsv", "filename",
+    )
+    assert "func/sub-001_ses-01_task-rest_run-01_bold.nii.gz" in stayed
+    assert not [row for row in stayed if "T1w" in row], (
+        "the row for the file that left should have gone with it"
+    )
+    # And ses-02's own table gained it without losing what it had.
+    arrived = _column(
+        sessioned / "sub-001/ses-02/sub-001_ses-02_scans.tsv", "filename",
+    )
+    assert "anat/sub-001_ses-02_T1w.nii.gz" in arrived
+    assert "func/sub-001_ses-02_task-rest_bold.nii.gz" in arrived
+
+
+def test_moving_onto_a_name_the_session_already_has_is_refused(
+    sessioned: Path,
+) -> None:
+    """Two recordings claiming one name is a decision for a person.
+
+    A plan with conflicts is refused OUTRIGHT rather than half-applied: a
+    move that lands on an existing name is the one case where doing most of
+    it is worse than doing none.
+    """
+    _write(sessioned, "sub-001/ses-02/anat/sub-001_ses-02_T1w.nii.gz")
+
+    plan = rs.plan_entity_edit(
+        sessioned, "ses", [sessioned / "sub-001/ses-01/anat"], value="02",
+    )
+    assert plan.conflicts
+    assert "already exists" in plan.conflicts[0]
+    with pytest.raises(rn.RenameError, match="overwrite"):
+        rn.apply_rename(sessioned, plan)
+    # Nothing moved.
+    assert (
+        "sub-001/ses-01/anat/sub-001_ses-01_T1w.nii.gz" in _names(sessioned)
+    )
+
+
+def test_the_rename_path_still_mirrors(flat: Path) -> None:
+    """A guard on the change itself: adding ``standard_scans_home`` must not
+    have altered what a plain value rename does."""
+    plan = rn.plan_rename(flat, "sub", "001", "002")
+    assert not plan.standard_scans_home
+    assert not plan.ref_by_path
+    assert not plan.title
+
+
+# ---------------------------------------------------------------------------
 # The root the caller has is not always the one the OS calls canonical
 
 

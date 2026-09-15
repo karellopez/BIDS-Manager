@@ -155,6 +155,28 @@ def lint(session: nox.Session) -> None:
     # getting a matrix running.
     session.run("ruff", "check", "bidsmgr", *session.posargs)
 
+    # Vendored-copy drift, when a bidsval checkout is next to us. Vendoring is
+    # copy-and-forget right up until it is not, and both failure modes have
+    # already happened here: an edit made in the copy and never written down,
+    # which the next wholesale refresh would silently delete, and a file not
+    # copied at all, which is how 2.9 MB of schema data was left behind while
+    # the copy still looked complete (it read the INSTALLED package instead,
+    # so it worked on the machine it was written on and died on Linux).
+    #
+    # Skipped rather than failed when there is no checkout to compare
+    # against, because a runner that does not carry one is not a defect. The
+    # tests in tests/unit/test_vendored_bidsval.py cover what can be checked
+    # from inside the copy alone; this is the half that needs the original.
+    checkout = HERE.parent / "bidsval"
+    checker = HERE / "tools" / "check_vendored_bidsval.py"
+    if checkout.is_dir() and checker.is_file():
+        session.run("python", str(checker), str(checkout))
+    else:
+        session.log(
+            f"no bidsval checkout at {checkout}, skipping the vendor drift "
+            "check (tests/unit/test_vendored_bidsval.py still runs)"
+        )
+
 
 @nox.session(python=PYTHONS[0])
 def real_data(session: nox.Session) -> None:
