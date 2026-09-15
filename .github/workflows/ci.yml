@@ -74,11 +74,18 @@ concurrency:
 # would wipe anything inside the checkout. The default already survives that
 # and persists between runs on a self-hosted runner.
 
-defaults:
-  run:
-    # bash on Windows too, so one script works on both runners. This is the
-    # single most useful line MEEGqc's workflow has.
-    shell: bash
+# NOTE: no workflow-level `defaults: run: shell: bash`.
+#
+# An earlier version had one, copied from MEEGqc's tests.yml. That works there
+# because MEEGqc uses GitHub-HOSTED Windows runners, which ship Git Bash. This
+# workflow runs on a bare Windows laptop, where every Windows job died before
+# it started with:
+#
+#     Error: bash: command not found
+#
+# Nothing here needs bash. Every step is a single `uv tool run nox` command,
+# which runs the same in PowerShell as in sh. The one place that does need a
+# shell (`plan`, below) sets it on the step, and runs on Linux anyway.
 
 jobs:
   # A tiny job whose only purpose is to decide whether the GUI tier runs on
@@ -95,6 +102,9 @@ jobs:
       gui_pythons: ${{ steps.pick.outputs.gui_pythons }}
     steps:
       - id: pick
+        # The one step in this file that is shell-specific. It is a Linux job,
+        # so bash is a safe assumption here in a way it was not globally.
+        shell: bash
         run: |
           if [ "${{ inputs.full }}" = "false" ]; then
             echo 'gui_pythons=["3.12"]' >> "$GITHUB_OUTPUT"

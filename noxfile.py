@@ -54,7 +54,14 @@ def _install(session: nox.Session, *extras: str) -> None:
 def unit(session: nox.Session) -> None:
     """Engine and CLI unit tests. No display, no data, no network."""
     _install(session, "pytest")
-    session.run("pytest", "tests/unit", "-q", *session.posargs)
+    # -q for 1,417 tests, because a verbose list of that length is not read.
+    # -ra prints a reason for every skip and xfail at the end, which IS read,
+    # and --durations names the slow ones so a cell that suddenly takes twice
+    # as long says which test did it.
+    session.run(
+        "pytest", "tests/unit", "-q", "-ra", "--durations=10",
+        *session.posargs,
+    )
 
 
 @nox.session(python=PYTHONS)
@@ -67,20 +74,32 @@ def gui(session: nox.Session) -> None:
     """
     _install(session, "pytest", "pytest-qt")
     session.env["QT_QPA_PLATFORM"] = "offscreen"
-    session.run("pytest", "tests/gui", "-q", "-p", "no:randomly", *session.posargs)
+    session.run(
+        "pytest", "tests/gui", "-q", "-ra", "--durations=10",
+        "-p", "no:randomly", *session.posargs,
+    )
 
 
 @nox.session(python=PYTHONS)
 def integration(session: nox.Session) -> None:
-    """End-to-end CLI runs against synthetic datasets.
+    """End-to-end CLI runs against the published sample data.
 
-    Empty today. This is the tier the recent defects belonged to, and it is
-    the one that most needs to run on all three platforms, because the
-    failures there are about paths, processes and exit codes.
+    scan -> convert -> metadata -> validate on one participant with MRI, PET,
+    EEG and MEG, plus a real two-worker joblib run. This is the tier the
+    recent defects belonged to, and the one that most needs all three
+    platforms: its failures are about paths, processes and exit codes.
+
+    VERBOSE, unlike the other tiers. There are a couple of dozen tests here
+    and each one is a named behaviour ("the scans table lists every
+    recording"), so a CI log that prints them is a readable account of what
+    was checked. The same flag on 1,417 unit tests would be a wall.
     """
     _install(session, "pytest")
     session.env["QT_QPA_PLATFORM"] = "offscreen"
-    session.run("pytest", "tests/integration", "-q", *session.posargs)
+    session.run(
+        "pytest", "tests/integration", "-v", "-ra", "--durations=10",
+        *session.posargs,
+    )
 
 
 @nox.session(python=PYTHONS[-1])
