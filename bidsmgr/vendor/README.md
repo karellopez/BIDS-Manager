@@ -94,8 +94,7 @@ static check in `tests/unit/test_vendored_bidsval.py` did not see them: one
 names the module in a string argument and the other in a metadata lookup.
 That file now also blocks the installed package outright and does real work
 through the copy, which is the only check that covers every way a module can
-be named. `tools/check_vendored_bidsval.py` diffs this tree against a source
-checkout and fails on any divergence that is not in the table above.
+be named.
 
 **The bundled schemas travel too.** `schema/bundled/*.json` (2.9 MB, six BIDS
 versions) is the data the resolver resolves against. Copying the code without
@@ -106,14 +105,21 @@ is opt-in and a correct tree otherwise still builds a broken wheel.
 Dependencies are unchanged: `bidsschematools`, `pydantic`, `nibabel`,
 `pandas`, `mne` and `pyyaml`, all already shipped.
 
-**Keeping it in step:** `bidsval/` still exists as a standalone repository and
-is published to PyPI. When it changes there the copy here is refreshed
-wholesale rather than patched, and the three changes above are re-applied.
-Run `python tools/check_vendored_bidsval.py` after any refresh: it diffs this
-tree against a checkout and fails on a file that was not copied, a file only
-in the copy, an edit nobody wrote down, or an entry in the table that is no
-longer a difference (which is how you find out upstream took the change and
-the local delta can go).
+**This copy is the version BIDS Manager maintains.** It is not kept in step
+with anything: `bidsval` exists as a standalone repository and on PyPI, but
+BIDS Manager neither depends on it nor tracks it, and changes are made HERE.
+The table above therefore records history rather than a to-do list, and the
+copy is free to move ahead of the standalone package.
+
+There used to be a `tools/check_vendored_bidsval.py` that diffed this tree
+against a checkout of that repository. It was removed once the copy became the
+maintained version: with nothing to be in step with, every local change looked
+like drift to be written down. What the copy must satisfy is now stated
+entirely by `tests/unit/test_vendored_bidsval.py`, which asks the question that
+still matters. Not "does this match somewhere else" but "is this complete and
+self-sufficient": nothing reaches an installed `bidsval`, the imports are
+relative, the schemas and licence travelled, the wheel carries them, and
+validation runs with the standalone package absent.
 
 `tests/unit/test_vendored_bidsval.py` also blocks the installed package and
 does real work through the copy, so a lookup that reaches the wrong one fails

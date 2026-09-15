@@ -290,34 +290,6 @@ def test_the_wheel_will_carry_them() -> None:
     assert "bundled/*.json" in entry, entry
 
 
-def test_the_copy_matches_upstream_except_where_documented() -> None:
-    """Runs the audit tool, when a bidsval checkout is next door.
-
-    This is the check that would have caught the missing ``schema/bundled``
-    data: nothing in BIDS Manager's own history shows a file that was never
-    copied, because the vendored tree is checked in as a unit and looks
-    complete on its own. Only a comparison against the real package sees it.
-
-    It also catches the other direction, which nearly cost us the ``anyOf``
-    field typing: a local edit nobody wrote down, which a wholesale refresh
-    would delete.
-
-    Skipped where there is no checkout, since a released install has none.
-    """
-    import subprocess
-
-    repo = Path(__file__).resolve().parents[2]
-    checkout = repo.parent / "bidsval"
-    if not checkout.is_dir():
-        pytest.skip("no bidsval checkout beside this repo to compare against")
-
-    proc = subprocess.run(
-        [sys.executable, str(repo / "tools" / "check_vendored_bidsval.py")],
-        capture_output=True, text=True,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-
-
 def test_the_version_is_stated_not_looked_up() -> None:
     """``version("bidsval")`` reported whatever was INSTALLED, so the number
     described a different copy of the code than the one running."""
