@@ -50,6 +50,33 @@ def _install(session: nox.Session, *extras: str) -> None:
         session.install(*extras)
 
 
+def _targets(session: nox.Session, default: str) -> list[str]:
+    """What to run and with which flags, from whatever was passed after ``--``.
+
+    ``session.posargs`` used to be appended after the default directory, which
+    is right for a flag and wrong for a path: ``-- tests/unit/test_remove.py``
+    became ``pytest tests/unit tests/unit/test_remove.py`` and ran the whole
+    directory as well as the file. Naming a file is the most ordinary thing
+    somebody wants from a test runner, so a path REPLACES the default and
+    anything else is added to it.
+
+    A path is recognised by existing on disk, or by carrying ``::``, which is
+    how pytest names a single test inside a file.
+
+        nox -s unit-3.12                                  # the whole tier
+        nox -s unit-3.12 -- -k companions                 # filtered
+        nox -s unit-3.12 -- tests/unit/test_remove.py     # one file
+        nox -s gui-3.10  -- tests/gui/test_converter_panel.py::test_x
+    """
+    paths, flags = [], []
+    for arg in session.posargs:
+        if "::" in arg or (HERE / arg).exists() or Path(arg).exists():
+            paths.append(arg)
+        else:
+            flags.append(arg)
+    return (paths or [default]) + flags
+
+
 @nox.session(python=PYTHONS)
 def unit(session: nox.Session) -> None:
     """Engine and CLI unit tests. No display, no data, no network."""
@@ -60,8 +87,8 @@ def unit(session: nox.Session) -> None:
     # not watching. -ra then repeats every skip and xfail WITH ITS REASON at
     # the end, so "why was that not run" is answerable without scrolling.
     session.run(
-        "pytest", "tests/unit", "-v", "-ra", "--durations=10",
-        *session.posargs,
+        "pytest", *_targets(session, "tests/unit"), "-v", "-ra",
+        "--durations=10",
     )
 
 
@@ -95,8 +122,8 @@ def gui(session: nox.Session) -> None:
         session.env[var] = str(home)
 
     session.run(
-        "pytest", "tests/gui", "-v", "-ra", "--durations=10",
-        "-p", "no:randomly", *session.posargs,
+        "pytest", *_targets(session, "tests/gui"), "-v", "-ra",
+        "--durations=10", "-p", "no:randomly",
     )
 
 
@@ -117,8 +144,8 @@ def integration(session: nox.Session) -> None:
     _install(session, "pytest")
     session.env["QT_QPA_PLATFORM"] = "offscreen"
     session.run(
-        "pytest", "tests/integration", "-v", "-ra", "--durations=10",
-        *session.posargs,
+        "pytest", *_targets(session, "tests/integration"), "-v", "-ra",
+        "--durations=10",
     )
 
 
@@ -171,7 +198,7 @@ def real_data(session: nox.Session) -> None:
         )
     _install(session, "pytest", "pytest-qt")
     session.env["QT_QPA_PLATFORM"] = "offscreen"
-    session.run("pytest", "tests/real_data", "-q", *session.posargs)
+    session.run("pytest", *_targets(session, "tests/real_data"), "-q")
 
 
 @nox.session(python=PYTHONS[-1])
