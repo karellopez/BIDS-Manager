@@ -312,7 +312,10 @@ class BidsTreePane(QWidget):
     # (entity, current value) for a rename the user started from the tree.
     # The pane does not open the dialog itself: the tree knows what was
     # clicked, the panel knows the dataset root and what to refresh after.
-    rename_requested = pyqtSignal(str, str)
+    # (entity, current value, the path that was clicked). The path is what
+    # lets the dialog open on THAT recording rather than on every file in the
+    # dataset carrying the same subject.
+    rename_requested = pyqtSignal(str, str, str)
     # (paths, mode, session_mode) for adding or removing an entity, and for
     # creating or removing a session, on what the user right-clicked. Same
     # division of labour as ``rename_requested``: the tree knows what was
@@ -882,7 +885,7 @@ class BidsTreePane(QWidget):
                 )
                 action.triggered.connect(
                     lambda _checked=False, e=entity, v=value:
-                        self.rename_requested.emit(e, v)
+                        self.rename_requested.emit(e, v, str(path))
                 )
 
         # Restructuring, on whatever the click covers. A right-click inside an

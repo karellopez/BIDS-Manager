@@ -89,10 +89,25 @@ class RenameEntityDialog(QDialog):
         *,
         entity: str = "",
         value: str = "",
+        focus: Optional[Path] = None,
     ) -> None:
         super().__init__(parent)
         self._root = Path(root)
         self._plan: Optional[rn.RenamePlan] = None
+        # What the user right-clicked, if anything. It narrows what starts
+        # TICKED, never what the plan contains: opening on one recording and
+        # offering every file in the dataset that shares its subject is a
+        # dialog answering a question nobody asked.
+        self._focus = Path(focus) if focus else None
+        # The user's own selection, once they have expressed one. Kept so a
+        # re-plan does not discard it: ticking "merge them" re-ran the plan
+        # and silently re-selected everything, undoing whatever had just been
+        # chosen.
+        self._chosen: Optional[set[str]] = None
+        # Which (entity, old, new) the selection belongs to. A different
+        # operation deserves a fresh default; the same one being re-planned
+        # does not.
+        self._chosen_for: tuple[str, str, str] = ("", "", "")
         self.setWindowTitle("Rename an entity")
         self.setModal(True)
         self.resize(760, 560)
@@ -375,14 +390,76 @@ class RenameEntityDialog(QDialog):
             ],
             extras=plan_extras(plan),
             conflicts=plan.conflicts,
+            checked=self._initial_selection(plan),
         )
+
+    def _initial_selection(self, plan: rn.RenamePlan) -> Optional[set[str]]:
+        """Which rows start ticked. ``None`` means all of them.
+
+        Three cases, in order:
+
+        * the user has already chosen, and this is the SAME rename being
+          re-planned (they toggled merge, or retyped the same value). Their
+          choice is kept, intersected with what the new plan still offers;
+        * the dialog was opened on a file the user right-clicked. That file
+          and its companions start ticked and nothing else does, so "rename
+          the subject of this recording" does not silently offer every
+          recording that subject has;
+        * nothing was clicked, so everything.
+        """
+        keys = set(plan.file_keys(self._root))
+        signature = (plan.entity, plan.old, plan.new)
+        if self._chosen is not None and signature == self._chosen_for:
+            return self._chosen & keys
+        self._chosen = None
+        self._chosen_for = signature
+        if self._focus is None:
+            return None
+        narrowed = self._focus_keys() & keys
+        return narrowed or None
+
+    def _focus_keys(self) -> set[str]:
+        """The clicked path expressed as plan keys.
+
+        A folder contributes everything under it. A file contributes itself
+        and its companions, which is the ``.json`` sidecar and any
+        ``_events.tsv`` carrying the same entities: renaming a recording and
+        leaving its sidecar behind is not something anybody wants offered as
+        the default.
+        """
+        from ..editor.restructure import companions
+
+        focus = self._focus
+        if focus is None:
+            return set()
+        try:
+            if focus.is_dir():
+                paths = [p for p in rn.walk_dataset(self._root)
+                         if _inside(focus, p)]
+            else:
+                paths = companions(self._root, focus)
+        except OSError:
+            paths = [focus]
+        out = set()
+        for path in paths:
+            try:
+                out.add(
+                    Path(path).resolve()
+                    .relative_to(self._root.resolve()).as_posix()
+                )
+            except (ValueError, OSError):
+                continue
+        return out
 
     def _set_all(self, state: Qt.CheckState) -> None:
         self._preview.set_all(state)
+        self._chosen = self._preview.selected_keys()
         self._refresh_selection()
 
     def _on_item_checked(self, item: QTreeWidgetItem, column: int) -> None:
         del item, column
+        # Remember it, so the next re-plan does not throw it away.
+        self._chosen = self._preview.selected_keys()
         self._refresh_selection()
 
     def selected_keys(self) -> set[str]:
@@ -457,6 +534,14 @@ class RenameEntityDialog(QDialog):
                 f"{touched} item(s) changed, but:\n\n" + "\n".join(errors[:8]),
             )
         self.accept()
+
+
+def _inside(folder: Path, path: Path) -> bool:
+    try:
+        Path(path).relative_to(folder)
+    except ValueError:
+        return False
+    return True
 
 
 __all__ = ["RenameEntityDialog"]

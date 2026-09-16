@@ -64,12 +64,18 @@ class MovePreviewTree(QTreeWidget):
         *,
         extras: Iterable[tuple[str, str]] = (),
         conflicts: Iterable[str] = (),
+        checked: Optional[set[str]] = None,
     ) -> None:
         """Draw ``moves`` as ``(key, source, destination)``, nested by folder.
 
         ``extras`` are the things that follow and cannot be chosen separately
         (a folder that empties, a table that merges, a reference that travels).
         ``conflicts`` are the reasons the plan cannot go ahead.
+
+        ``checked`` is which keys start ticked; ``None`` ticks everything.
+        Opening on one file the user right-clicked should offer THAT file, not
+        every file in the dataset that happens to share its subject, so the
+        caller decides and this draws what it is told.
         """
         self.blockSignals(True)
         self.clear()
@@ -82,7 +88,7 @@ class MovePreviewTree(QTreeWidget):
             parent = self._folder(folders, parts[:-1])
             leaf = QTreeWidgetItem(parent, [parts[-1], _becomes(root, src, dst)])
             leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            leaf.setCheckState(0, Qt.CheckState.Checked)
+            leaf.setCheckState(0, _state(checked is None or key in checked))
             leaf.setData(0, KEY_ROLE, key)
             leaf.setToolTip(0, rel)
             leaf.setToolTip(1, _rel(root, dst))
@@ -159,7 +165,11 @@ class MovePreviewTree(QTreeWidget):
                     | Qt.ItemFlag.ItemIsUserCheckable
                     | Qt.ItemFlag.ItemIsAutoTristate
                 )
-                item.setCheckState(0, Qt.CheckState.Checked)
+                # Unchecked to start. Qt's auto-tristate raises a parent to
+                # partially-checked or checked as its children are added, so
+                # starting them CHECKED left a folder claiming everything
+                # under it was selected when only one file was.
+                item.setCheckState(0, Qt.CheckState.Unchecked)
                 item.setToolTip(0, walked)
                 folders[walked] = item
             parent = item
@@ -242,6 +252,10 @@ def _set_recursive(item: QTreeWidgetItem, state: Qt.CheckState) -> None:
         _set_recursive(item.child(i), state)
 
 
+def _state(on: bool) -> Qt.CheckState:
+    return Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+
+
 def _rel(root: Path, path: Path) -> str:
     """``path`` within ``root``, spelled with forward slashes.
 
@@ -318,6 +332,11 @@ def plan_extras(plan) -> list[tuple[str, str]]:
         out.append((src.name, f"appended to {dst.name}"))
     for path, column in getattr(plan, "row_folds", ()):
         out.append((path.name, f"two {column} rows folded into one"))
+    for src, dst in getattr(plan, "tool_state_moves", ()):
+        out.append((
+            f"{src.parent.name}/{src.name}",
+            f"kept as {dst.parent.name}/{dst.name}",
+        ))
     for edit in getattr(plan, "content_edits", ()):
         out.append((edit.rel, f"{edit.hits} x {edit.what} updated"))
     return out

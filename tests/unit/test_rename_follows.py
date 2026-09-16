@@ -378,3 +378,221 @@ def test_a_named_dataset_uri_is_understood(tmp_path: Path) -> None:
     assert _json(root / "sub-002/anat/sub-002_T1w.json")["Sources"] == [
         "bids:rawdata:sub-002/anat/sub-002_T1w.nii.gz"
     ]
+
+
+# ---------------------------------------------------------------------------
+# A merge must not leave the source subject standing
+
+
+@pytest.fixture
+def mergeable(tmp_path: Path) -> Path:
+    """Two subjects in different sessions, so a merge is possible at all."""
+    root = tmp_path / "ds"
+    _write(root, "dataset_description.json",
+           json.dumps({"Name": "d", "BIDSVersion": "1.10.0"}))
+    _write(root, "participants.tsv", "participant_id\nsub-001\nsub-002\n")
+    for sub, ses in (("sub-001", "ses-01"), ("sub-002", "ses-02")):
+        _write(root, f"{sub}/{ses}/anat/{sub}_{ses}_T1w.nii.gz")
+        _write(root, f"{sub}/{ses}/{sub}_{ses}_scans.tsv",
+               f"filename\tacq_time\nanat/{sub}_{ses}_T1w.nii.gz\tA\n")
+    return root
+
+
+def test_merging_a_subject_removes_the_folder_it_emptied(
+    mergeable: Path,
+) -> None:
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert not (mergeable / "sub-001").exists()
+
+
+def test_an_inherited_sidecar_travels_with_the_merge(mergeable: Path) -> None:
+    """The reported defect, and the half of it that is a CORRECTNESS bug.
+
+    A fused directory is not renamed, so its contents move one file at a time,
+    and only the ones whose NAME carried the subject moved. An inherited
+    sidecar at ``sub-001/task-rest_bold.json`` carries no ``sub-`` token, so
+    it stayed, the subject folder survived holding it, and the sidecar now
+    described recordings that had moved to another subject.
+
+    An ordinary rename never had this problem: the whole directory is renamed,
+    so everything inside comes along without being enumerated.
+    """
+    _write(mergeable, "sub-001/task-rest_bold.json", json.dumps({"TR": 2.0}))
+
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert not (mergeable / "sub-001").exists()
+    landed = mergeable / "sub-002/task-rest_bold.json"
+    assert landed.is_file(), "the sidecar was left behind in the old subject"
+    assert _json(landed)["TR"] == 2.0
+
+
+def test_a_note_somebody_left_travels_too(mergeable: Path) -> None:
+    """Not everything under a subject is BIDS. It is still that subject's."""
+    _write(mergeable, "sub-001/NOTES.txt", "ran late, subject moved")
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert (mergeable / "sub-002/NOTES.txt").read_text() == (
+        "ran late, subject moved"
+    )
+
+
+def test_os_junk_does_not_keep_the_folder_alive(mergeable: Path) -> None:
+    """``.DS_Store`` is why this looked like it only happened sometimes.
+
+    macOS drops one into any folder Finder has displayed, and ``rmdir``
+    refuses a directory holding it exactly as it refuses one holding data. It
+    carries no information, so it goes with the folder rather than being
+    copied into the target.
+    """
+    _write(mergeable, "sub-001/ses-01/anat/.DS_Store", "junk")
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert not (mergeable / "sub-001").exists()
+    live = [
+        f for f in mergeable.rglob(".DS_Store") if ".bidsmgr" not in f.parts
+    ]
+    assert not live, (
+        "it should go with the folder, not be copied into the target"
+    )
+    # It IS kept in .bidsmgr/, because undo has to be able to put it back.
+    assert list(mergeable.rglob(".DS_Store")), "no backup kept for undo"
+
+
+def test_junk_is_only_removed_from_a_folder_that_is_going(
+    mergeable: Path,
+) -> None:
+    """The guard that keeps this from being a tool tidying your disk.
+
+    A ``.DS_Store`` beside files that are STAYING is none of our business.
+    """
+    keep = mergeable / "sub-002/ses-02/anat/.DS_Store"
+    _write(mergeable, "sub-002/ses-02/anat/.DS_Store", "junk")
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert keep.is_file(), "sub-002 is staying, so its junk is left alone"
+
+
+def test_the_merge_still_undoes_completely(mergeable: Path) -> None:
+    _write(mergeable, "sub-001/task-rest_bold.json", "{}")
+    _write(mergeable, "sub-001/ses-01/anat/.DS_Store", "junk")
+    before = _names(mergeable)
+
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    undo_last(mergeable)
+    assert _names(mergeable) == before
+
+
+def test_a_subjects_own_bidsmgr_folder_does_not_outlive_the_merge(
+    mergeable: Path,
+) -> None:
+    """The last thing keeping an emptied subject folder alive.
+
+    ``walk_dataset`` PRUNES hidden directories, so nothing under
+    ``sub-001/.bidsmgr/`` was ever in the file list, nothing moved it, and
+    ``rmdir`` refuses a directory holding it. The subject survived the merge
+    as an empty shell containing one hidden folder.
+    """
+    _write(mergeable, "sub-001/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-001"}))
+    _write(mergeable, "sub-002/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-002"}))
+
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert not (mergeable / "sub-001").exists()
+
+
+def test_the_merged_subjects_provenance_is_kept(mergeable: Path) -> None:
+    """It records how the recordings that just moved were converted.
+
+    Which DICOMs, which dcm2niix, which fixups ran. Those recordings are
+    still in the dataset, so the record of how they were made should be too.
+    Deleting it to tidy up a folder would lose real provenance.
+    """
+    _write(mergeable, "sub-001/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-001"}))
+    _write(mergeable, "sub-002/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-002"}))
+
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    kept = mergeable / "sub-002/.bidsmgr/merged/sub-001/provenance.json"
+    assert kept.is_file(), "the source's conversion record was thrown away"
+    assert _json(kept)["who"] == "sub-001"
+
+
+def test_the_targets_own_provenance_is_not_overwritten(
+    mergeable: Path,
+) -> None:
+    """Both subjects have a ``provenance.json`` and they describe different
+    conversions. Copying one over the other destroys a record to save a
+    record, which is why the source lands under ``merged/``."""
+    _write(mergeable, "sub-001/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-001"}))
+    _write(mergeable, "sub-002/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-002"}))
+
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert _json(
+        mergeable / "sub-002/.bidsmgr/provenance.json"
+    )["who"] == "sub-002"
+
+
+def test_tool_state_is_not_a_checkable_row(mergeable: Path) -> None:
+    """It is a consequence of the merge, not a choice.
+
+    Offered as a tick, somebody could untick it and be left with the empty
+    folder this exists to remove.
+    """
+    _write(mergeable, "sub-001/.bidsmgr/provenance.json", "{}")
+    plan = rn.plan_rename(mergeable, "sub", "001", "002", fuse=True)
+
+    assert plan.tool_state_moves, "the move should be planned"
+    assert not [
+        src for src, _dst in plan.file_moves if ".bidsmgr" in src.parts
+    ], "it must not appear among the choosable file moves"
+
+
+def test_a_partial_merge_leaves_the_provenance_where_it_is(
+    mergeable: Path,
+) -> None:
+    """The subject is still there, so its record belongs with it."""
+    _write(mergeable, "sub-001/.bidsmgr/provenance.json", "{}")
+    _write(mergeable, "sub-001/ses-01/anat/sub-001_ses-01_extra.nii.gz")
+
+    plan = rn.plan_rename(mergeable, "sub", "001", "002", fuse=True)
+    some = {
+        plan.file_key(mergeable, src) for src, _dst in plan.file_moves
+        if "extra" in src.name
+    }
+    rn.apply_rename(mergeable, plan, only=some)
+
+    assert (mergeable / "sub-001/.bidsmgr/provenance.json").is_file()
+
+
+def test_undoing_the_merge_brings_the_provenance_home(
+    mergeable: Path,
+) -> None:
+    _write(mergeable, "sub-001/.bidsmgr/provenance.json",
+           json.dumps({"who": "sub-001"}))
+    rn.apply_rename(
+        mergeable, rn.plan_rename(mergeable, "sub", "001", "002", fuse=True),
+    )
+    assert not (mergeable / "sub-001").exists()
+
+    undo_last(mergeable)
+    back = mergeable / "sub-001/.bidsmgr/provenance.json"
+    assert back.is_file() and _json(back)["who"] == "sub-001"

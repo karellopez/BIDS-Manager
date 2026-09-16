@@ -525,8 +525,11 @@ def test_the_tree_announces_a_rename_rather_than_doing_one(
     pane.set_root(dataset)
     seen: list[tuple] = []
     pane.rename_requested.connect(lambda *a: seen.append(a))
-    pane.rename_requested.emit("sub", "01")
-    assert seen == [("sub", "01")]
+    pane.rename_requested.emit("sub", "01", str(dataset / "sub-01"))
+    assert seen == [("sub", "01", str(dataset / "sub-01"))], (
+        "the clicked PATH travels too, so the dialog can open on that "
+        "recording rather than on every file sharing its subject"
+    )
 
 
 def test_the_tree_announces_an_entity_edit_the_same_way(

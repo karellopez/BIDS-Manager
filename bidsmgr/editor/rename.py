@@ -58,6 +58,14 @@ log = logging.getLogger(__name__)
 # the schema (see :func:`_skip_top_level`).
 _TOOL_DIRS = (".bidsmgr", ".git")
 
+# Files the operating system drops into any folder a person has looked at.
+# They carry no information, nobody put them there on purpose, and they are
+# the reason an emptied subject folder survived a merge: ``rmdir`` refuses a
+# directory holding a ``.DS_Store`` exactly as it refuses one holding data.
+# Treated as absent when deciding whether a folder is empty, and removed with
+# it, which is the only moment this tool ever deletes one.
+_OS_JUNK = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", ".directory"})
+
 
 def folder_entities() -> tuple[str, ...]:
     """Entities that name a DIRECTORY as well as appearing in filenames.
@@ -171,6 +179,10 @@ class RenamePlan:
     row_folds: list[tuple[Path, str]] = dc_field(default_factory=list)
     # Folders left behind once everything under them has moved out.
     emptied: list[Path] = dc_field(default_factory=list)
+    # The tool's OWN per-subject state under a fused subject, and where it
+    # lands. Not part of ``file_moves``: it is a consequence of the merge
+    # rather than a choice, and unticking it would leave the folder standing.
+    tool_state_moves: list[tuple[Path, Path]] = dc_field(default_factory=list)
 
     # -- the general case ---------------------------------------------------
     #
@@ -198,6 +210,7 @@ class RenamePlan:
         return not (
             self.dir_moves or self.file_moves or self.content_edits
             or self.table_merges or self.row_folds
+            or self.tool_state_moves
         )
 
     @property
@@ -406,11 +419,29 @@ def plan_rename(
     moved_dirs.update({src: dst for src, dst in plan.fused_dirs})
 
     files = sorted(walk_dataset(root))
+    # A FUSED directory is not renamed, so its contents move one at a time,
+    # and for a long time only the ones whose NAME carried the entity moved.
+    # Everything else stayed: an inherited sidecar at ``sub-001/task-rest_bold
+    # .json``, a note somebody left, a ``.DS_Store``. The subject folder then
+    # survived the merge holding them, which looked like a tidiness bug and
+    # was a correctness one, because that inherited sidecar belongs to the
+    # recordings that just moved and now applies to nothing.
+    #
+    # An ordinary rename never had this problem: the whole directory is
+    # renamed, so everything inside comes along without being enumerated.
+    fused_roots = [src for src, _dst in plan.fused_dirs]
+
     for f in files:
-        if entity_value(f.name, entity) != old:
+        carries = entity_value(f.name, entity) == old
+        travels = carries or any(_within(f, r) for r in fused_roots)
+        if not travels:
             continue
+        if not carries and f.name in _OS_JUNK:
+            continue            # goes with the folder, not into the target
         parent = _remap_parent(f.parent, moved_dirs)
-        target = parent / rename_in_name(f.name, entity, old, new)
+        target = parent / (
+            rename_in_name(f.name, entity, old, new) if carries else f.name
+        )
         if target.exists() and target != f:
             # Two tables of the same kind are merged rather than refused: a
             # scans table is a list of what a subject has, and fusing two
@@ -429,6 +460,7 @@ def plan_rename(
             continue
         plan.file_moves.append((f, target))
 
+    plan.tool_state_moves = _plan_tool_state(plan.fused_dirs)
     plan.content_edits = _plan_content_edits(root, entity, old, new, files)
 
     if plan.fusion and entity == "sub":
@@ -443,6 +475,43 @@ def plan_rename(
             if _has_row(participants, "participant_id", old_token):
                 plan.row_folds.append((participants, "participant_id"))
     return plan
+
+
+def _plan_tool_state(
+    fused: list[tuple[Path, Path]],
+) -> list[tuple[Path, Path]]:
+    """Where a fused subject's own ``.bidsmgr/`` goes.
+
+    ``sub-XXX/.bidsmgr/provenance.json`` records how that subject's
+    recordings were converted: which DICOMs, which dcm2niix, which fixups
+    ran. When the subject is merged away, those recordings are still there
+    under the target, so the record of how they were made should be too.
+
+    It cannot simply be copied across, because the target has its own
+    ``provenance.json`` describing its own conversion and overwriting it
+    would destroy one record to save the other. It lands under
+    ``merged/<source subject>/`` instead, so both survive and it is obvious
+    which is which.
+
+    This is also why an empty subject folder outlived a merge even after
+    fused directories learned to carry their contents: ``walk_dataset``
+    PRUNES hidden directories, so nothing in ``.bidsmgr/`` was ever in the
+    file list, and ``rmdir`` refuses a directory holding one.
+    """
+    out: list[tuple[Path, Path]] = []
+    for src_dir, dst_dir in fused:
+        for hidden in sorted(src_dir.iterdir()):
+            if not hidden.is_dir() or not hidden.name.startswith("."):
+                continue
+            for path in sorted(hidden.rglob("*")):
+                if not path.is_file():
+                    continue
+                out.append((
+                    path,
+                    dst_dir / hidden.name / "merged" / src_dir.name
+                    / path.relative_to(hidden),
+                ))
+    return out
 
 
 def _bad_label_message(entity: str, value: str) -> str:
@@ -879,6 +948,22 @@ def apply_rename(
                     touched += 1
                 except OSError as exc:
                     errors.append(f"{_rel(root, path)}: {exc}")
+
+            # The source subject's own .bidsmgr/. Only on a whole merge: a
+            # partial one leaves the subject standing, and its provenance
+            # describes what is still in it.
+            for src, dst in plan.tool_state_moves:
+                try:
+                    if src.exists():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        op.rename(src, dst)
+                        touched += 1
+                except OSError as exc:
+                    errors.append(f"{_rel(root, src)}: {exc}")
+            # The directories they came out of, which rmdir would otherwise
+            # refuse to let the subject folder go for.
+            for src, _dst in plan.tool_state_moves:
+                _remove_if_empty(op, src.parent, root)
 
         # Every row that has to change table, whichever level the table is at.
         try:
@@ -1365,11 +1450,36 @@ def _remove_if_empty(op, directory: Path, root: Path) -> None:
     """
     current = directory
     while current.is_dir() and _within(current, root):
+        _drop_os_junk(op, current)
         try:
             current.rmdir()
         except OSError:
             return              # still holds something; so does everything above
         current = current.parent
+
+
+def _drop_os_junk(op, directory: Path) -> None:
+    """Remove ``.DS_Store`` and friends, but ONLY from a folder that is
+    otherwise empty and therefore about to go.
+
+    The guard is the whole point. Deleting these wherever they are found would
+    be a tool tidying a user's disk uninvited; deleting one that is the sole
+    remaining occupant of a folder being removed is just letting the folder
+    go. They are recorded through the operation, so undo puts them back with
+    everything else.
+    """
+    try:
+        contents = list(directory.iterdir())
+    except OSError:
+        return
+    if not contents or any(p.name not in _OS_JUNK or p.is_dir()
+                           for p in contents):
+        return
+    for junk in contents:
+        try:
+            op.delete(junk)
+        except OSError:
+            return
 
 
 def build_ref_map(root: Path, moves: list[tuple[Path, Path]]) -> dict[str, str]:

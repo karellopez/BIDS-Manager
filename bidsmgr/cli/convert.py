@@ -195,8 +195,10 @@ def run_convert(
     dataset defaults supply EEG/MEG ``line_freq`` / ``montage`` when the
     inventory cell is blank, and its richer fields (reference, ground,
     filters, device, institution, event maps, ...) are folded into the BIDS
-    sidecars after the write. When omitted, a default spec is used
-    (``PowerLineFrequency = 50``), preserving prior behaviour.
+    sidecars after the write. When omitted, an EMPTY default spec is used:
+    no power-line frequency is invented, and mne-bids writes
+    ``PowerLineFrequency: "n/a"`` unless the recording's own header, an
+    inventory cell or a template supplies one.
 
     ``skip_residuals`` (default True) drops the dcm2niix residual/secondary
     outputs -- derived single-volume duplicates split off one input series
@@ -305,7 +307,7 @@ def run_convert(
 
     # Recording-metadata spec for EEG/MEG enrichment. Precedence: an explicit
     # --recording-meta path, else the scaffold the scan wrote next to the TSV
-    # (auto-discovered), else a default spec (keeps PowerLineFrequency=50).
+    # (auto-discovered), else an empty default spec, which supplies nothing.
     if recording_meta is not None:
         spec = load_spec(Path(recording_meta))
         log.info("loaded recording metadata from %s", recording_meta)
@@ -1173,9 +1175,23 @@ def _row_to_task_file_based(
 
     # Resolve EEG/MEG line_freq + montage. Precedence: the inventory cell
     # wins; else the recording-metadata dataset default (resolved per row by
-    # source path); line_freq finally falls back to 50 Hz so
-    # PowerLineFrequency is always populated (preserves prior behaviour now
-    # that the dataset-wide --line-freq flag is gone).
+    # source path); else NOTHING.
+    #
+    # There used to be a final `line_freq = 50.0` here, so PowerLineFrequency
+    # was always populated. It was always populated and sometimes wrong: 50 Hz
+    # is Europe, and a recording made in the US, Canada, Japan or Brazil is 60.
+    # The sidecar said 50 in a BIDS-required field with nothing to distinguish
+    # it from a value somebody measured, and the recordings most likely to
+    # reach this line are exactly the ones nobody had thought about.
+    #
+    # Leaving it None is not a gap. mne-bids writes
+    # PowerLineFrequency: "n/a" when raw.info["line_freq"] is unset, which the
+    # schema allows (the field is anyOf number or the literal "n/a") and which
+    # is the true statement. A guess that validates is worse than an honest
+    # "not stated" that also validates.
+    #
+    # The recording's OWN header still wins over all of this: the mne_bids
+    # backend only writes our value when raw.info carries none.
     # The datatype selects the per-modality block: what a study says about its
     # EEG amplifier must not reach its MEG recordings.
     eff_acq = (
@@ -1190,8 +1206,6 @@ def _row_to_task_file_based(
         line_freq = None
     if line_freq is None and eff_acq is not None:
         line_freq = eff_acq.power_line_freq
-    if line_freq is None:
-        line_freq = 50.0
 
     montage = str(row.get("montage", "")).strip() or None
     if montage is None and eff_acq is not None:
@@ -1487,9 +1501,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
             "dataset defaults supply line_freq / montage for blank inventory "
             "cells, and its richer fields fill sidecar reference / ground / "
             "filters / device / institution, retype auxiliary channels, and "
-            "map event codes to labels. Optional; omitting it leaves "
-            "PowerLineFrequency=50 by default. Set per-row line_freq / montage "
-            "in the inventory TSV columns to override per recording."
+            "map event codes to labels. Optional; omitting it means no "
+            "power-line frequency is invented, so PowerLineFrequency is "
+            "\"n/a\" unless the recording header, an inventory cell or a "
+            "template states one. Set per-row line_freq / montage in the "
+            "inventory TSV columns to override per recording."
         ),
     )
     parser.add_argument(

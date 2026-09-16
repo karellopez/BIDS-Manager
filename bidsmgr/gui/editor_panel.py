@@ -1011,13 +1011,19 @@ class EditorPanel(QWidget):
         self._refresh_adopt_button()
         self._tree_pane.set_root(root)
 
-    def _on_rename(self, entity: str = "", value: str = "") -> None:
+    def _on_rename(
+        self, entity: str = "", value: str = "", focus: str = "",
+    ) -> None:
         """Rename an entity across the dataset, after showing the plan.
 
         Called both from the toolbar with nothing preselected, and from the
         tree's right-click menu with the entity the user clicked, which is
         where the action is actually reached for: you notice a wrong subject
         label while looking at the subject.
+
+        ``focus`` is that clicked path. It decides what starts TICKED, not
+        what the plan contains: the plan is still the whole dataset, so
+        widening the selection is a click rather than a restart.
         """
         from .rename_entity_dialog import RenameEntityDialog
 
@@ -1026,6 +1032,7 @@ class EditorPanel(QWidget):
             return
         dlg = RenameEntityDialog(
             root, parent=self, entity=entity, value=value,
+            focus=Path(focus) if focus else None,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
