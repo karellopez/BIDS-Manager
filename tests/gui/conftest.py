@@ -2,53 +2,16 @@
 
 Defines :func:`isolated_settings` — sandbox ``QSettings`` per-test so
 the GUI's persistence layer doesn't leak the real user's
-preferences into tests (or vice versa) — and :func:`collect_garbage`,
-which keeps Python's cyclic collector out of Qt's paint loop.
+preferences into tests (or vice versa).
 """
 
 from __future__ import annotations
 
-import gc
 from pathlib import Path
 from typing import Iterator
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QSettings
-
-
-@pytest.fixture(autouse=True)
-def collect_garbage() -> Iterator[None]:
-    """Reap each test's widget tree before the next test paints.
-
-    A panel built in a test is a top-level widget owned by Python, and
-    its tree is full of reference cycles (parent <-> child, signal
-    closures, per-widget dicts), so dropping the last name for it does
-    NOT free it. It becomes cyclic garbage, and the cyclic collector
-    then runs at whatever unrelated allocation happens to cross the
-    generation threshold.
-
-    When that allocation falls inside ``qtbot.waitExposed`` — i.e. while
-    Qt is halfway through a paint — the collector deletes the PREVIOUS
-    test's C++ widgets mid-paint, which Qt does not allow, and the
-    process dies with SIGSEGV inside ``QPainter::drawPixmap``. That is
-    what made ``test_converter_panel.py`` segfault only as part of the
-    full run: alone it never allocates enough to trigger a collection at
-    the wrong moment, and the crash lands on whichever test is painting
-    when the threshold happens to be crossed.
-
-    Collecting here forces the reaping to happen at teardown, between
-    tests, where no paint is in flight, which removes the ordering
-    dependence entirely. The added cost did not stand out against the
-    run-to-run variance of the tier.
-
-    Not reproducible on every interpreter: 3.11 and 3.12 run the tier
-    clean without this fixture. That is luck, not safety — they simply
-    do not happen to cross a GC threshold mid-paint. The hazard is the
-    same on all of them, and on every platform, because it is CPython's
-    collector meeting Qt's paint loop and neither is OS-specific.
-    """
-    yield
-    gc.collect()
 
 
 @pytest.fixture(autouse=True)
