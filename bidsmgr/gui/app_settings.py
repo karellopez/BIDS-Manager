@@ -56,6 +56,8 @@ KEYS = {
     "convert_skip_residuals": "convert/skip_residuals",
     "convert_preserve_curation": "convert/preserve_curation",
     "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
+    "convert_deface":     "convert/deface",          # remove faces before commit
+    "convert_deface_engine": "convert/deface_engine",
     # Scan rules (user-extensible classifier hints + series exclusions).
     # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
     "user_hints":         "classifier/user_hints",
@@ -178,6 +180,10 @@ class AppSettings:
     convert_preserve_curation: bool = True
     # Re-encode EEG / iEEG recordings to EDF on convert (mne-bids format="EDF").
     convert_force_edf: bool = False
+    # Off by default. Defacing is destructive and must be chosen, not
+    # discovered after the fact.
+    convert_deface: bool = False
+    convert_deface_engine: str = "allineate"
 
     # Post-convert chain. All steps on by default: run metadata + validation
     # with TODO placeholders, strict validation, and an HTML report.
@@ -371,6 +377,20 @@ class AppSettings:
         out.convert_force_edf = _as_bool(
             s.value(KEYS["convert_force_edf"]), out.convert_force_edf,
         )
+        out.convert_deface = _as_bool(
+            s.value(KEYS["convert_deface"]), out.convert_deface,
+        )
+        out.convert_deface_engine = str(
+            s.value(KEYS["convert_deface_engine"]) or out.convert_deface_engine
+        )
+        # Self-heal a value that is not an engine. Settings written by an
+        # older build can be anything, and an id the converter cannot resolve
+        # used to raise inside the subject commit, which lost the whole
+        # conversion rather than just the defacing.
+        from ..deface.engines import engine_ids as _deface_engine_ids
+
+        if out.convert_deface_engine not in _deface_engine_ids():
+            out.convert_deface_engine = cls.convert_deface_engine
 
         out.post_run_metadata = _as_bool(s.value(KEYS["post_run_metadata"]),
                                          out.post_run_metadata)
@@ -438,6 +458,7 @@ class AppSettings:
             ("convert_skip_residuals",   self.convert_skip_residuals),
             ("convert_preserve_curation", self.convert_preserve_curation),
             ("convert_force_edf",        self.convert_force_edf),
+            ("convert_deface",           self.convert_deface),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
@@ -452,7 +473,13 @@ class AppSettings:
             ("editor_autosave",          self.editor_autosave),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
+        # Strings. Keep them OUT of the loop above: it writes "1" for anything
+        # truthy, so a string setting put there is saved as "1" and read back
+        # as "1". That is not a hypothetical. `convert_deface_engine` was in
+        # that list, every conversion loaded the engine id "1", and the lookup
+        # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
+        s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
         s.setValue(KEYS["validate_show"], self.validate_show)

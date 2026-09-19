@@ -612,3 +612,62 @@ def test_a_partial_selection_recomputes_the_orphans(inherited: Path) -> None:
         "sub-002 still has a magnitude1, so its sidecar is still needed"
     )
     assert (inherited / "task-rest_bold.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# A subject folder must actually disappear, including the hidden directory
+# that conversions before 1.3 wrote inside it.
+
+
+def test_deleting_a_subject_removes_its_legacy_tool_folder_too(
+    dataset: Path,
+) -> None:
+    """The user-reported failure: every recording went, the folder stayed.
+
+    Tool state is excluded from a delete, which is right for the dataset's own
+    ``.bidsmgr/`` at the root (it holds the log that makes the delete
+    reversible) and wrong for a copy inside a subject, which is nothing but
+    that subject's convert provenance.
+    """
+    _write(dataset, "sub-001/.bidsmgr/provenance.json", json.dumps({"tasks": []}))
+
+    plan = rm.plan_delete(dataset, [dataset / "sub-001"])
+    assert any(
+        ".bidsmgr" in p.relative_to(dataset).parts for p in plan.files
+    ), "the legacy provenance was not even in the plan"
+
+    rm.apply_delete(dataset, plan)
+    assert not (dataset / "sub-001").exists(), (
+        "the subject folder survived its own deletion"
+    )
+    assert (dataset / "sub-002").is_dir(), "the other subject was touched"
+
+
+def test_the_datasets_own_tool_folder_is_still_protected(dataset: Path) -> None:
+    """Deleting the root .bidsmgr/ would destroy what makes deleting safe."""
+    _write(dataset, ".bidsmgr/editor/operations.log", "{}\n")
+
+    plan = rm.plan_delete(dataset, [dataset / ".bidsmgr"])
+    assert plan.conflicts and not plan.files
+    assert ".bidsmgr" in plan.conflicts[0]
+    assert (dataset / ".bidsmgr" / "editor" / "operations.log").is_file()
+
+
+def test_a_nested_git_is_left_alone(dataset: Path) -> None:
+    """A .git inside a subject is a DataLad subdataset, not our bookkeeping."""
+    _write(dataset, "sub-001/.git/config", "[core]\n")
+
+    plan = rm.plan_delete(dataset, [dataset / "sub-001"])
+    assert not any(
+        ".git" in p.relative_to(dataset).parts for p in plan.files
+    ), "somebody else's repository was swept into our deletion"
+
+
+def test_undo_puts_the_legacy_tool_folder_back(dataset: Path) -> None:
+    _write(dataset, "sub-001/.bidsmgr/provenance.json", json.dumps({"tasks": []}))
+    plan = rm.plan_delete(dataset, [dataset / "sub-001"])
+    rm.apply_delete(dataset, plan)
+    assert not (dataset / "sub-001").exists()
+
+    undo_last(dataset)
+    assert (dataset / "sub-001" / ".bidsmgr" / "provenance.json").is_file()

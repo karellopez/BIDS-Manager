@@ -47,12 +47,113 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
     assert _labels(panel) == [
         "Dashboard",
         "Fix ups...",
+        "Deface...",
+        "Remove the skull...",
+        # Directly under Deface, although it acts on a SELECTION and the rest
+        # of this group acts on the dataset. Removing faces and checking that
+        # the right ones went are two halves of one action, and a user who has
+        # just defaced looks for the check next to the thing they pressed.
+        "Compare with the original...",
+        "Put the face back...",
         "Rename entity...",
         "Add or remove an entity...",
         "Sessions...",
         "Delete...",
         "Track changes",
     ]
+
+
+def test_deface_sits_with_fix_ups_not_with_the_restructuring_actions(
+    panel: EditorPanel,
+) -> None:
+    """Placement is the claim, so it is pinned.
+
+    Rename, entities, sessions and delete all act on a SELECTION. Fix ups and
+    Deface act on the DATASET: both are repairs applied to the whole thing from
+    a dialog that previews and asks. Grouping by what a thing acts on is what
+    makes a menu readable, so Deface belongs above the separator with Fix ups.
+    """
+    labels = _labels(panel)
+    assert labels.index("Deface...") == labels.index("Fix ups...") + 1
+    assert labels.index("Deface...") < labels.index("Rename entity...")
+
+
+def test_deface_is_disabled_rather_than_hidden_when_it_cannot_run(
+    panel: EditorPanel, monkeypatch,
+) -> None:
+    """A missing item reads as "this tool cannot do that".
+
+    A greyed one whose tooltip names the install command reads as what it is.
+    The difference decides whether somebody installs an extra or ships a
+    dataset with faces in it believing the feature does not exist.
+    """
+    from bidsmgr.gui import editor_panel as ep
+
+    monkeypatch.setattr(
+        ep.deface_run, "unavailable_reason",
+        lambda engine_id=None: "Defacing needs niimath, which is not here.",
+    )
+    panel._refresh_deface_action()
+
+    assert "Deface..." in _labels(panel), "the entry was hidden instead"
+    assert not panel._deface_action.isEnabled()
+    assert "niimath" in panel._deface_action.toolTip()
+
+
+def test_compare_with_nothing_picked_says_what_to_pick(
+    panel: EditorPanel, dataset: Path, monkeypatch,
+) -> None:
+    """Comparing is per image, so an empty selection has to be refused."""
+    said: list[tuple] = []
+    monkeypatch.setattr(
+        "bidsmgr.gui.editor_panel.QMessageBox.information",
+        lambda *a, **k: said.append(a),
+    )
+    panel._set_root(dataset, persist=False)
+    panel._on_deface_compare()
+
+    assert said, "no selection produced no message at all"
+    assert "Pick an image" in said[0][1]
+
+
+def test_compare_opens_on_the_image_the_tree_passed(
+    panel: EditorPanel, dataset: Path, monkeypatch,
+) -> None:
+    """The right-click carries the file; the dialog must get its relative path."""
+    seen: list[tuple] = []
+
+    class _Fake:
+        def __init__(self, root, rel, parent=None):
+            seen.append((Path(root), rel))
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(
+        "bidsmgr.gui.deface_compare.DefaceCompareDialog", _Fake,
+    )
+    panel._set_root(dataset, persist=False)
+    panel._on_deface_compare(dataset / "sub-01" / "anat" / "sub-01_T1w.nii.gz")
+
+    assert seen == [(dataset, "sub-01/anat/sub-01_T1w.nii.gz")], (
+        "the relative path must be POSIX, or it will not match the log"
+    )
+
+
+def test_compare_refuses_a_file_outside_the_dataset(
+    panel: EditorPanel, dataset: Path, tmp_path: Path, monkeypatch,
+) -> None:
+    said: list[tuple] = []
+    monkeypatch.setattr(
+        "bidsmgr.gui.editor_panel.QMessageBox.information",
+        lambda *a, **k: said.append(a),
+    )
+    stray = tmp_path / "elsewhere.nii.gz"
+    stray.write_bytes(b"\0" * 8)
+    panel._set_root(dataset, persist=False)
+    panel._on_deface_compare(stray)
+
+    assert said and "Not in this dataset" in said[0][1]
 
 
 def test_validation_stays_out_of_it(panel: EditorPanel) -> None:

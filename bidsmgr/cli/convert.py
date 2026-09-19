@@ -64,12 +64,15 @@ from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
     convert_blood_files,
+    deface_staged,
     enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
     repair_converter_output,
     update_scans_tsv,
 )
+from ..deface.engines import DEFAULT_ENGINE_ID as DEFACE_DEFAULT_ENGINE
+from ..deface.engines import engine_ids as deface_engine_ids
 from ..recording_meta import (
     RecordingMetaSpec,
     default_spec,
@@ -185,6 +188,8 @@ def run_convert(
     skip_residuals: bool = True,
     force_edf: bool = False,
     preserve_curation: bool = True,
+    deface: bool = False,
+    deface_engine: str = DEFACE_DEFAULT_ENGINE,
     cancel_check=None,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
@@ -398,6 +403,8 @@ def run_convert(
                     cancel_check=cancel_check,
                     spec=spec,
                     preserve_curation=preserve_curation,
+                    deface=deface,
+                    deface_engine=deface_engine,
                 )
                 if existed:
                     n_merged += 1
@@ -447,6 +454,8 @@ def _convert_subject(
     cancel_check=None,
     spec: Optional[RecordingMetaSpec] = None,
     preserve_curation: bool = True,
+    deface: bool = False,
+    deface_engine: str = DEFACE_DEFAULT_ENGINE,
 ) -> None:
     """Run Phases 1–3 for a single (dataset, subject, session) group."""
     subject = tasks[0].subject
@@ -496,6 +505,34 @@ def _convert_subject(
         # What the USER stated is NOT applied here. That is the metadata step's
         # job, so this verb produces a faithful conversion and no opinions.
         n_enriched += repair_converter_output(staging)
+        # Remove faces LAST, and before the commit, which is the whole point of
+        # doing it here: the identifiable image exists only inside the staging
+        # directory, for a few seconds, and what lands in the dataset was never
+        # identifiable. Nothing is backed up because there is nothing to
+        # restore to. A failure is logged and does not fail the conversion.
+        if deface:
+            try:
+                n_defaced = deface_staged(
+                    staging, tasks, engine_id=deface_engine,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A converted subject with a face on it is a problem the user
+                # can fix afterwards. A subject that failed to convert because
+                # the defacer threw is a problem they cannot. This happened for
+                # real: a stale engine id in QSettings raised a KeyError here
+                # and took the whole conversion with it.
+                n_defaced = 0
+                log.warning(
+                    "sub-%s: defacing failed (%s: %s); the subject is being "
+                    "converted WITHOUT it",
+                    subject, type(exc).__name__, exc,
+                )
+            # Said out loud rather than folded into the enrichment count. A
+            # user who asked for defacing needs to see whether it happened,
+            # and how many, because the answer 0 is the one that matters.
+            log.info(
+                "sub-%s: removed faces from %d image(s)", subject, n_defaced,
+            )
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we
@@ -507,7 +544,8 @@ def _convert_subject(
             preserve_curation=preserve_curation,
         )
         _write_provenance(
-            target, results, rename_map, n_intended_for, n_scans_tsv,
+            bids_root, subj_segment, results, rename_map,
+            n_intended_for, n_scans_tsv,
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
         )
         log.info("committed sub-%s to %s", subject, target)
@@ -1279,7 +1317,8 @@ def _load_files_by_uid_sidecar(
 
 
 def _write_provenance(
-    target: Path,
+    bids_root: Path,
+    subject_segment: str,
     results: list[ConvertResult],
     rename_map: dict[Path, Path],
     n_intended_for: int,
@@ -1288,8 +1327,17 @@ def _write_provenance(
     dcm2niix_version: str,
     n_enriched: int = 0,
 ) -> None:
-    """Per-subject provenance at ``<target>/.bidsmgr/provenance.json``."""
-    prov_dir = target / ".bidsmgr"
+    """Convert provenance at ``<root>/.bidsmgr/provenance/<subject>.json``.
+
+    One place, not one per subject. It used to live in the subject folder, and
+    a hidden directory inside every subject caused problems out of all
+    proportion to what it held: deleting a subject left the folder behind
+    because the tool's own state is excluded from a delete, renaming a subject
+    onto another had to invent somewhere for the loser's copy to go, and every
+    walker in the codebase had to know to skip it. The dataset already has
+    exactly one place for tool state, at its root, and this is tool state.
+    """
+    prov_dir = Path(bids_root) / ".bidsmgr" / "provenance"
     prov_dir.mkdir(parents=True, exist_ok=True)
     record = {
         "schema_version": 1,
@@ -1319,7 +1367,9 @@ def _write_provenance(
         "scans_tsv_rewritten": n_scans_tsv,
         "recording_sidecars_enriched": n_enriched,
     }
-    (prov_dir / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
+    record["subject_dir"] = subject_segment
+    name = safe_path_component(subject_segment) or "subject"
+    (prov_dir / f"{name}.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
 def _write_error_log(
@@ -1540,6 +1590,19 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--deface", action="store_true",
+        help=(
+            "Remove the face from anatomical and PET images before the "
+            "subject is committed, so the identifiable image never enters the "
+            "dataset at all."
+        ),
+    )
+    parser.add_argument(
+        "--deface-engine", default=DEFACE_DEFAULT_ENGINE,
+        choices=deface_engine_ids(),
+        help="which defacing engine to use (default: %(default)s)",
+    )
+    parser.add_argument(
         "--force-edf", action="store_true",
         help=(
             "Re-encode EEG / iEEG recordings to EDF on write instead of "
@@ -1627,6 +1690,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
             skip_residuals=not args.keep_residuals,
             preserve_curation=not args.overwrite_curation,
             force_edf=args.force_edf,
+            deface=args.deface,
+            deface_engine=args.deface_engine,
         )
 
     if not args.tsv or not args.bids_parent:
@@ -1647,6 +1712,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
         skip_residuals=not args.keep_residuals,
         preserve_curation=not args.overwrite_curation,
         force_edf=args.force_edf,
+        deface=args.deface,
+        deface_engine=args.deface_engine,
     )
 
 

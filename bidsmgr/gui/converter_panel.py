@@ -1666,6 +1666,8 @@ class ConverterPanel(QWidget):
             skip_residuals=self._app_settings.convert_skip_residuals,
             preserve_curation=self._app_settings.convert_preserve_curation,
             force_edf=self._app_settings.convert_force_edf,
+            deface=self._app_settings.convert_deface,
+            deface_engine=self._app_settings.convert_deface_engine,
             parent=self,
         )
         worker.progress.connect(self._on_progress)

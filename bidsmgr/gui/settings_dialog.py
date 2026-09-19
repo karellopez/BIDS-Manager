@@ -39,6 +39,8 @@ from PyQt6.QtWidgets import (
 
 from .. import schema
 from ..classifier import sequence_dict
+from ..deface import engines as deface_engines
+from ..deface import run as deface_run
 from ..classifier import user_rules
 from ..util.system_info import SystemInfo, get_system_info
 from .app_settings import AppSettings
@@ -608,6 +610,45 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Force EDF:", self._convert_force_edf)
 
+        # Defacing, with its engine beside it. Off by default: it is
+        # destructive, so it has to be chosen rather than discovered.
+        self._convert_deface = QCheckBox(
+            "Remove faces from anatomical and PET images"
+        )
+        self._convert_deface.setToolTip(
+            "Blank the face before the subject is committed, so the "
+            "identifiable image never enters the dataset at all. Off by "
+            "default because it cannot be undone from the conversion: the "
+            "original stays in your raw data, not in the BIDS tree. Needs "
+            "niimath, which ships with BIDS Manager."
+        )
+        form.addRow("Deface:", self._convert_deface)
+
+        self._convert_deface_engine = QComboBox()
+        self._convert_deface_engine.setObjectName("ent-input")
+        for eng in deface_engines.ENGINES:
+            self._convert_deface_engine.addItem(eng.label, eng.id)
+        self._convert_deface_engine.setToolTip(
+            "\n\n".join(f"{e.label}: {e.description}" for e in deface_engines.ENGINES)
+        )
+        form.addRow("Deface engine:", self._convert_deface_engine)
+
+        reason = deface_run.unavailable_reason()
+        if reason:
+            self._convert_deface.setEnabled(False)
+            self._convert_deface.setChecked(False)
+            self._convert_deface_engine.setEnabled(False)
+            # Shown, not hidden: a missing row reads as "this tool cannot do
+            # that", which is how somebody ships a dataset with faces in it.
+            self._convert_deface.setToolTip(reason)
+        else:
+            self._convert_deface.toggled.connect(
+                self._convert_deface_engine.setEnabled
+            )
+            self._convert_deface_engine.setEnabled(
+                self._convert_deface.isChecked()
+            )
+
         v.addWidget(convert)
 
         # Post-convert chain laid out as an indented hierarchy: each step is
@@ -935,6 +976,15 @@ class SettingsDialog(QDialog):
             s.convert_preserve_curation
         )
         self._convert_force_edf.setChecked(s.convert_force_edf)
+        if self._convert_deface.isEnabled():
+            self._convert_deface.setChecked(s.convert_deface)
+        idx = self._convert_deface_engine.findData(s.convert_deface_engine)
+        if idx >= 0:
+            self._convert_deface_engine.setCurrentIndex(idx)
+        self._convert_deface_engine.setEnabled(
+            self._convert_deface.isChecked()
+            and self._convert_deface.isEnabled()
+        )
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
         self._post_metadata_fill_todos.setChecked(s.post_metadata_fill_todos)
@@ -1019,6 +1069,11 @@ class SettingsDialog(QDialog):
             self._convert_preserve_curation.isChecked()
         )
         s.convert_force_edf = self._convert_force_edf.isChecked()
+        s.convert_deface = self._convert_deface.isChecked()
+        s.convert_deface_engine = (
+            self._convert_deface_engine.currentData()
+            or s.convert_deface_engine
+        )
 
         s.post_run_metadata = self._post_run_metadata.isChecked()
         s.post_metadata_fill_todos = self._post_metadata_fill_todos.isChecked()

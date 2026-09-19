@@ -112,6 +112,24 @@ dependencies = [
     # toolbar / tab / chip glyphs render identically on macOS, Linux,
     # and Windows instead of falling back to per-OS emoji fonts.
     "qtawesome>=1.3,<=1.4.2",
+
+    # Defacing and skull stripping. NOT optional: these are reached from the
+    # GUI, and somebody who installed BIDS Manager by double-clicking an
+    # installer has no terminal in which to add an extra, so an optional
+    # extra is a feature they cannot switch on.
+    #
+    # Neither adds a system dependency. niimath ships its binary inside the
+    # wheel the way dcm2niix does (no FSL, no FreeSurfer, no ANTs), and
+    # brainchop runs the mindgrab network on tinygrad, which is pure Python
+    # (no torch, no onnxruntime).
+    #
+    # The marker is load-bearing. niimath tags its wheels per Python version
+    # rather than abi3, and there is no 3.14 wheel yet, so an unconditional
+    # pin would make BIDS Manager itself UNINSTALLABLE on a Python we claim
+    # to support. On 3.14 the app installs, the menu entry greys out, and the
+    # tooltip says why. Drop the marker once the wheel exists.
+    "niimath>=1.0.20250526; python_version < '3.14'",
+    "brainchop>=0.2.5",
 ]
 
 [project.optional-dependencies]
@@ -143,6 +161,7 @@ bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
 bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
+bidsmgr-deface    = "bidsmgr.cli.deface:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -163,6 +182,9 @@ include = ["bidsmgr*"]
 # NOTE: no "bidsmgr.schema" entry. That package is a pure adapter over
 # bidsval and ships no data; it used to carry a "bundled/**/*" glob pointing
 # at a directory that does not exist, which quietly matched nothing.
+# The defacing atlas: a matched template and mask that must travel together.
+# See bidsmgr/deface/atlas/PROVENANCE.md.
+"bidsmgr.deface"            = ["atlas/*.nii.gz", "atlas/PROVENANCE.md"]
 "bidsmgr.vendor"            = ["README.md"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
 "bidsmgr.vendor.bidsval"    = ["LICENSE"]

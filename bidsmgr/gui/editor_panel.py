@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..deface import run as deface_run
 from ..editor.types import FileVerdict, Severity, ValidationReport
 from ..workers import FileReportWorker, FolderReportWorker, ReportWorker
 from . import icons
@@ -101,6 +102,12 @@ class EditorPanel(QWidget):
         self._tree_pane.rename_requested.connect(self._on_rename)
         self._tree_pane.entities_requested.connect(self._on_edit_entities)
         self._tree_pane.delete_requested.connect(self._on_delete)
+        self._tree_pane.deface_requested.connect(self._on_deface)
+        self._tree_pane.deface_compare_requested.connect(
+            self._on_deface_compare
+        )
+        self._tree_pane.deface_revert_requested.connect(self._on_deface_revert)
+        self._tree_pane.strip_requested.connect(self._on_strip)
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -408,6 +415,43 @@ class EditorPanel(QWidget):
         )
         self._fixups_action.triggered.connect(self._on_fixups)
 
+        self._deface_action = self._tools_menu.addAction("Deface...")
+        self._deface_action.setToolTip(
+            "Remove the face from anatomical images, so the dataset can be "
+            "shared without the participants being identifiable. One "
+            "undoable step; you see exactly which images, and which were "
+            "skipped, before anything is written."
+        )
+        self._deface_action.triggered.connect(self._on_deface)
+
+        self._strip_action = self._tools_menu.addAction("Remove the skull...")
+        self._strip_action.setToolTip(
+            "Keep only the brain. Removes the face and everything else "
+            "outside it, so the result is a derivative rather than raw data "
+            "and is written to derivatives/. One undoable step."
+        )
+        self._strip_action.triggered.connect(self._on_strip)
+
+        self._deface_compare_action = self._tools_menu.addAction(
+            "Compare with the original..."
+        )
+        self._deface_compare_action.setToolTip(
+            "Show a selected image before defacing and after it, side by "
+            "side, with one crosshair between them. Every defacing tool tells "
+            "you to check the result; this is how you do it."
+        )
+        self._deface_compare_action.triggered.connect(self._on_deface_compare)
+
+        self._deface_revert_action = self._tools_menu.addAction(
+            "Put the face back..."
+        )
+        self._deface_revert_action.setToolTip(
+            "Restore defaced images from the undefaced copies kept in "
+            "sourcedata/ or in the edit history. Undo only reaches the last "
+            "operation; this works however many edits came afterwards."
+        )
+        self._deface_revert_action.triggered.connect(self._on_deface_revert)
+
         self._rename_action = self._tools_menu.addAction("Rename entity...")
         self._rename_action.setToolTip(
             "Rename a subject, session, task or any other entity across "
@@ -567,6 +611,7 @@ class EditorPanel(QWidget):
         # Enable dataset-level validation now that we have a root.
         self._validate_dataset_btn.setEnabled(True)
         self._tools_btn.setEnabled(True)
+        self._refresh_deface_action()
         self._refresh_adopt_button()
         if persist:
             from .app_settings import AppSettings
@@ -1113,6 +1158,141 @@ class EditorPanel(QWidget):
             return
         # Deliberately clears the centre pane before refreshing: the file it
         # was showing is one of the things that may have just been deleted.
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _refresh_deface_action(self) -> None:
+        """Grey the Deface entry out when it cannot run, and say why.
+
+        Disabled rather than hidden on purpose. A missing menu item reads as
+        "this tool cannot do that"; a greyed one whose tooltip names the
+        install command reads as what it is, which is the difference between a
+        user installing an extra and a user shipping a dataset with faces in
+        it because they assumed the feature did not exist.
+        """
+        reason = deface_run.unavailable_reason()
+        self._deface_action.setEnabled(reason is None)
+        if reason:
+            self._deface_action.setToolTip(reason)
+
+    def _on_deface(self, targets: Optional[list] = None) -> None:
+        """Remove faces from anatomical images, after showing which ones.
+
+        Reached from the Tools menu, where it acts on the whole dataset unless
+        the tree has a selection, and from the tree's right-click, which passes
+        what was clicked.
+
+        The images are rewritten in place, so the panes are cleared before the
+        refresh: whatever the viewer is holding may be one of the files that
+        just changed underneath it.
+        """
+        from .deface_dialog import DefaceDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+
+        reason = deface_run.unavailable_reason()
+        if reason:
+            QMessageBox.information(self, "Defacing is not available", reason)
+            return
+
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = DefaceDialog(root, chosen or None, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_strip(self, targets: Optional[list] = None) -> None:
+        """Keep only the brain, writing a derivative rather than editing raw.
+
+        The same dialog as Deface, in its other mode: the two operations have
+        the same shape (preview, pick an engine, one undoable run) and differ
+        in what they keep and where the output goes.
+        """
+        from ..deface import engines as deface_engines
+        from .deface_dialog import DefaceDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = DefaceDialog(
+            root, chosen or None, parent=self,
+            kind=deface_engines.KIND_STRIP,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # A strip writes new files under derivatives/; an in-place one changes
+        # what the viewer is holding. Refresh either way.
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_deface_compare(self, target=None) -> None:
+        """Show one image before and after defacing.
+
+        Reached from the Tools menu, where it takes whatever image the tree has
+        selected, and from the tree's right-click on a ``.nii``, which passes
+        the file. It deliberately opens even when there is no undefaced copy:
+        the dialog explains WHY there is none, and "defaced during conversion,
+        so one never existed" is the answer a user most needs to hear.
+        """
+        from .deface_compare import DefaceCompareDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+
+        picked = [Path(target)] if target else self._tree_pane.selected_paths()
+        images = [
+            Path(p) for p in picked
+            if Path(p).is_file() and Path(p).name.endswith((".nii", ".nii.gz"))
+        ]
+        if not images:
+            QMessageBox.information(
+                self, "Pick an image",
+                "Select a .nii or .nii.gz file in the tree first. Comparing "
+                "is per image, because defacing is.",
+            )
+            return
+
+        try:
+            rel = images[0].resolve().relative_to(Path(root).resolve()).as_posix()
+        except ValueError:
+            QMessageBox.information(
+                self, "Not in this dataset",
+                f"{images[0]} is outside {root}.",
+            )
+            return
+        DefaceCompareDialog(root, rel, parent=self).exec()
+
+    def _on_deface_revert(self, targets: Optional[list] = None) -> None:
+        """Restore defaced images from the copies that still have a face.
+
+        Acts on the tree selection when there is one, the whole dataset
+        otherwise, which is the same rule Deface uses. The dialog opens even
+        when nothing can be restored, because "these were defaced during
+        conversion, so no undefaced copy ever existed" is the answer the user
+        needs and an absent menu item does not give it.
+        """
+        from .deface_revert_dialog import DefaceRevertDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = DefaceRevertDialog(root, chosen or None, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # The images changed under whatever the viewer is holding.
         self._sidecar_form.set_file(None, None, None)
         self._tree_pane.set_root(root)
         if self._report is not None:

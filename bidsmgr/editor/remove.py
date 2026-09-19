@@ -50,6 +50,17 @@ _DATASET_CRITICAL = ("dataset_description.json",)
 # Ours, not the standard's. The log inside it is what makes this reversible.
 _TOOL_DIRS = (".bidsmgr", ".git", ".datalad")
 
+# The one tool directory that belongs to whatever folder it sits INSIDE rather
+# than to the dataset. Conversions before 1.3 wrote each subject's provenance
+# to ``sub-XXX/.bidsmgr/``, and because tool state is excluded from a delete,
+# deleting such a subject removed every recording and then left the folder
+# standing with a hidden file in it. New conversions write to the dataset
+# root instead, but datasets built by an older version are still out there.
+#
+# ``.git`` and ``.datalad`` are deliberately NOT in here: nested ones mean a
+# DataLad subdataset, which is somebody else's repository, not our bookkeeping.
+_OWN_STATE_DIR = ".bidsmgr"
+
 
 @dataclass
 class ScansDrop:
@@ -193,6 +204,15 @@ def _files_under(root: Path, targets: Iterable[Path]) -> list[Path]:
             # a table living directly in the folder is picked up explicitly.
             picked.extend(
                 p for p in sorted(target.rglob("*_scans.tsv")) if p.is_file()
+            )
+            # A .bidsmgr/ INSIDE the folder is that folder's own provenance,
+            # written there by conversions before 1.3. Leaving it behind is
+            # what made "delete this subject" remove every recording and then
+            # leave the subject folder standing.
+            picked.extend(
+                p for p in sorted(target.rglob("*"))
+                if p.is_file()
+                and _OWN_STATE_DIR in p.relative_to(target).parts
             )
         elif target.is_file():
             picked.extend(companions(root, target))

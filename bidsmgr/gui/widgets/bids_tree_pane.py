@@ -324,6 +324,14 @@ class BidsTreePane(QWidget):
     # The paths to delete. Same division of labour again: the tree knows what
     # was clicked, the panel owns the root, the dialog and the refresh.
     delete_requested = pyqtSignal(list)
+    #: Remove faces from the clicked anatomical images. ``list[Path]``.
+    deface_requested = pyqtSignal(list)
+    #: Show one image before and after defacing. ``Path``, always a file.
+    deface_compare_requested = pyqtSignal(object)
+    #: Put the face back on the clicked images. ``list[Path]``.
+    deface_revert_requested = pyqtSignal(list)
+    #: Keep only the brain in the clicked images. ``list[Path]``.
+    strip_requested = pyqtSignal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -932,6 +940,48 @@ class BidsTreePane(QWidget):
             session.triggered.connect(
                 lambda _c=False, s=scope, m=mode:
                     self.entities_requested.emit(s, m, True)
+            )
+
+            menu.addSeparator()
+
+            deface = menu.addAction("Remove faces...")
+            deface.setToolTip(
+                "Blank the face on the anatomical images here, leaving the "
+                "brain alone. Shows which images, and which cannot be done, "
+                "before anything is written. One undoable step."
+            )
+            deface.triggered.connect(
+                lambda _c=False, s=scope: self.deface_requested.emit(s)
+            )
+
+            if clicked.is_file() and clicked.name.endswith((".nii", ".nii.gz")):
+                compare = menu.addAction("Compare with the original...")
+                compare.setToolTip(
+                    "Show the image before defacing beside the one in the "
+                    "dataset, with one crosshair between them, so you can "
+                    "check that the face went and the brain did not."
+                )
+                compare.triggered.connect(
+                    lambda _c=False, p=clicked:
+                        self.deface_compare_requested.emit(p)
+                )
+
+            strip = menu.addAction("Remove the skull...")
+            strip.setToolTip(
+                "Keep only the brain. The result is a derivative, so it goes "
+                "to derivatives/ and the original scan is left alone."
+            )
+            strip.triggered.connect(
+                lambda _c=False, s=scope: self.strip_requested.emit(s)
+            )
+
+            revert = menu.addAction("Put the face back...")
+            revert.setToolTip(
+                "Restore these images from the undefaced copies kept in "
+                "sourcedata/ or in the edit history."
+            )
+            revert.triggered.connect(
+                lambda _c=False, s=scope: self.deface_revert_requested.emit(s)
             )
 
             menu.addSeparator()

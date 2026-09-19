@@ -87,7 +87,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .image_label import ImageLabel
-from .primitives import PaneHeader
+from .primitives import ElidedLabel, PaneHeader
 from .spinner import BusySpinner
 
 log = logging.getLogger(__name__)
@@ -328,6 +328,15 @@ class NiftiViewerPane(QWidget):
     loaded = pyqtSignal(Path)
     # Emitted when on-disk load fails. Args: (path, error_msg).
     load_failed = pyqtSignal(Path, str)
+    # Emitted when the USER moves the crosshair, so a second pane showing a
+    # different version of the same image can follow it. Carries the voxel as
+    # a plain list, or None. :meth:`set_crosshair_voxel` deliberately does not
+    # emit, or two linked panes would drive each other in a loop.
+    crosshair_moved = pyqtSignal(object)
+    # Emitted when the USER changes HOW the image is shown (view mode,
+    # orientation, RAS / radiological, labels, graph, volume). Carries the
+    # dict from `view_state`. `apply_view_state` deliberately does not emit.
+    view_changed = pyqtSignal(dict)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -450,8 +459,36 @@ class NiftiViewerPane(QWidget):
         v.addWidget(PaneHeader("NIfTI"))
 
         # --- Toolbar: orientation pills + tri-view + graph + sliders --
+        #
+        # Inside a scroll area, because otherwise the toolbar's own minimum
+        # width becomes the PANE's minimum width, and it is 874 px. One pane
+        # in a window is fine; two side by side in the comparison view meant
+        # a dialog that could not be made narrower than ~1750 px and that
+        # grew itself the moment the images finished loading. Scrolling
+        # sideways keeps every control reachable without the window being
+        # held hostage by the widest row of buttons.
         self._toolbar = self._build_toolbar()
-        v.addWidget(self._toolbar)
+        self._toolbar_scroll = QScrollArea()
+        self._toolbar_scroll.setObjectName("nifti-toolbar-scroll")
+        self._toolbar_scroll.setWidget(self._toolbar)
+        self._toolbar_scroll.setWidgetResizable(True)
+        self._toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._toolbar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._toolbar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._toolbar_scroll.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed,
+        )
+        # The scroll area has no useful height of its own; give it the
+        # toolbar's, plus room for a scrollbar when one is needed.
+        self._toolbar_scroll.setFixedHeight(
+            self._toolbar.sizeHint().height()
+            + self._toolbar_scroll.horizontalScrollBar().sizeHint().height()
+        )
+        v.addWidget(self._toolbar_scroll)
 
         # --- Stacked content: hint vs. canvas -------------------------
         self._stack = QStackedLayout()
@@ -484,7 +521,11 @@ class NiftiViewerPane(QWidget):
         fl = QHBoxLayout(self._footer)
         fl.setContentsMargins(14, 6, 14, 6)
         fl.setSpacing(10)
-        self._footer_path = QLabel("")
+        # Elided, not plain. A footer showing a dataset path used to set the
+        # PANE's minimum width to the length of that path, so a deep session
+        # folder made the window wider than the screen and nothing could
+        # shrink it back.
+        self._footer_path = ElidedLabel("")
         self._footer_path.setObjectName("sidecar-footer-path")
         self._footer_summary = QLabel("")
         self._footer_summary.setObjectName("sidecar-footer-summary")
@@ -495,7 +536,7 @@ class NiftiViewerPane(QWidget):
         fl.addWidget(self._footer_summary)
         v.addWidget(self._footer)
 
-        self._toolbar.setVisible(False)
+        self._toolbar_scroll.setVisible(False)
         self._footer.setVisible(False)
 
         # Track the H key application-wide so "H + scroll" works over the
@@ -550,6 +591,169 @@ class NiftiViewerPane(QWidget):
     def current_file(self) -> Optional[Path]:
         return self._current_file
 
+    def stop_loading(self, timeout_ms: int = 5_000) -> None:
+        """Abandon any in-flight read and wait for its thread to finish.
+
+        Call before the pane is destroyed. The loader is a ``QThread``
+        parented to the pane, so destroying the pane mid-read destroys a
+        RUNNING QThread, and Qt answers that by aborting the process.
+
+        It never came up while the only panes were the Editor's, which live as
+        long as the window and are still there when the read lands. A pane
+        inside a dialog can be closed a moment after it opens, which is the
+        normal way to use a comparison window.
+        """
+        worker, self._loader = self._loader, None
+        if worker is None:
+            return
+        try:
+            worker.cancel()
+            if worker.isRunning():
+                worker.wait(timeout_ms)
+        except RuntimeError:
+            # Qt already deleted it; there is nothing left to wait for.
+            pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        self.stop_loading()
+        super().closeEvent(event)
+
+    def crosshair_voxel(self) -> Optional[list[int]]:
+        """Where the crosshair is, in image space. ``None`` before a load."""
+        if self._cross_voxel is None:
+            return None
+        return list(self._cross_voxel)
+
+    def set_crosshair_voxel(self, voxel) -> None:
+        """Move the crosshair to *voxel*, without telling anyone.
+
+        For a second pane following this one, which is what the defacing
+        before-and-after view does. Silent on purpose: if this emitted
+        :sig:`crosshair_moved` the two panes would drive each other.
+
+        Only meaningful when both images have the same shape, which the caller
+        is responsible for checking; a voxel index means a different place in
+        a cropped image.
+        """
+        if self._data is None or self._cross_voxel is None or voxel is None:
+            return
+        clamped = list(self._cross_voxel)
+        for axis, dim in enumerate(self._data.shape[:3]):
+            if axis < len(voxel):
+                clamped[axis] = max(0, min(int(voxel[axis]), dim - 1))
+        if clamped == self._cross_voxel:
+            return
+        self._cross_voxel = clamped
+        if not self._tri_view:
+            self._slice_slider.blockSignals(True)
+            try:
+                self._slice_slider.setValue(clamped[self._orientation])
+                self._slice_val.setText(str(clamped[self._orientation]))
+            finally:
+                self._slice_slider.blockSignals(False)
+        self._refresh()
+        if self._graph_visible:
+            self._update_graph()
+
+    def _broadcast_crosshair(self) -> None:
+        """Tell a linked pane where the user just put the crosshair."""
+        self.crosshair_moved.emit(
+            None if self._cross_voxel is None else list(self._cross_voxel)
+        )
+        self.view_changed.emit(self.view_state())
+
+    # -- sharing a view between two panes ---------------------------------
+
+    def current_mode(self) -> str:
+        """Which page is showing: ``single`` / ``multi`` / ``3d`` / ``combo``."""
+        if self._three_d:
+            return "3d"
+        if self._combo_view:
+            return "combo"
+        if self._tri_view:
+            return "multi"
+        return "single"
+
+    def view_state(self) -> dict:
+        """Everything about HOW the image is being shown, not which image.
+
+        The point of the dictionary rather than a dozen getters is the
+        comparison view: it takes this from one pane and hands it to the other,
+        and a state it does not know about is one the two panes silently
+        disagree on. Deliberately excludes the file, the data and the loader.
+        """
+        return {
+            "mode": self.current_mode(),
+            "orientation": self._orientation,
+            "graph": self._graph_visible,
+            "labels": self._show_orient_labels,
+            "ras": self._ras_on,
+            "radiological": self._radio_on,
+            "volume": self._vol_slider.value(),
+            "crosshair": self.crosshair_voxel(),
+            # Only present once the 3-D view has been built. Sharing the
+            # camera and the effect parameters is what makes two renders a
+            # comparison rather than two unrelated pictures of a head.
+            "camera": self._gl.camera_state() if self._gl is not None else None,
+            "gl_controls": (
+                self._gl_controls.controls_state()
+                if self._gl_controls is not None else None
+            ),
+        }
+
+    def apply_view_state(self, state: dict, *, with_crosshair: bool = True) -> None:
+        """Make this pane show things the way ``state`` describes.
+
+        Silent: no :sig:`view_changed`, or two linked panes drive each other in
+        a loop. ``with_crosshair`` is off when the two images have different
+        shapes, where a voxel index means a different place in each.
+        """
+        if not state:
+            return
+        mode = state.get("mode")
+        if mode and mode != self.current_mode():
+            self._set_view_mode(mode)
+
+        orientation = state.get("orientation")
+        if orientation is not None and orientation != self._orientation:
+            self._set_orientation(int(orientation))
+
+        for key, button in (
+            ("graph", getattr(self, "_graph_btn", None)),
+            ("labels", getattr(self, "_labels_btn", None)),
+            ("ras", getattr(self, "_ras_btn", None)),
+            ("radiological", getattr(self, "_radio_btn", None)),
+        ):
+            want = state.get(key)
+            if want is None or button is None or not button.isEnabled():
+                continue
+            if button.isChecked() != bool(want):
+                button.setChecked(bool(want))
+
+        volume = state.get("volume")
+        if volume is not None and self._vol_slider.maximum() >= int(volume):
+            if self._vol_slider.value() != int(volume):
+                self._vol_slider.setValue(int(volume))
+
+        # The 3-D half. Applied AFTER the mode switch above, so the render
+        # exists by the time its camera is set.
+        if self._gl is not None and state.get("camera"):
+            self._gl.apply_camera_state(state["camera"])
+        if self._gl_controls is not None and state.get("gl_controls"):
+            self._gl_controls.apply_controls_state(state["gl_controls"])
+
+        if with_crosshair:
+            self.set_crosshair_voxel(state.get("crosshair"))
+
+    def set_toolbar_visible(self, visible: bool) -> None:
+        """Show or hide this pane's own controls.
+
+        The comparison view hides one of them while the panes are linked: two
+        identical toolbars driving one shared state is not a choice, it is the
+        same control drawn twice.
+        """
+        self._toolbar_scroll.setVisible(bool(visible))
+
     def set_file(
         self,
         path: Optional[Path],
@@ -596,7 +800,7 @@ class NiftiViewerPane(QWidget):
         """Switch to the loading page + start the spinner."""
         self._loading_label.setText(f"Loading {path.name}…")
         self._loading_spinner.set_busy(True, message="")
-        self._toolbar.setVisible(False)
+        self._toolbar_scroll.setVisible(False)
         self._footer.setVisible(False)
         self._stack.setCurrentWidget(self._loading_panel)
 
@@ -666,7 +870,7 @@ class NiftiViewerPane(QWidget):
         # file's storage orientation; the fixed-plane panels bake theirs once).
         self._refresh_all_orient_labels()
         self._compute_display_window()
-        self._toolbar.setVisible(True)
+        self._toolbar_scroll.setVisible(True)
         self._footer.setVisible(True)
         self._stack.setCurrentWidget(self._canvas)
         self._update_footer()
@@ -1339,8 +1543,10 @@ class NiftiViewerPane(QWidget):
 
     def _on_tri_toggled(self, checked: bool) -> None:
         self._set_view_mode("multi" if checked else "single")
+        self._broadcast_view()
 
     def _on_graph_toggled(self, checked: bool) -> None:
+        self._broadcast_view()
         self._graph_visible = checked
         self._graph_panel.setVisible(checked)
         if checked:
@@ -1368,9 +1574,11 @@ class NiftiViewerPane(QWidget):
 
     def _on_3d_toggled(self, checked: bool) -> None:
         self._set_view_mode("3d" if checked else "single")
+        self._broadcast_view()
 
     def _on_combo_toggled(self, checked: bool) -> None:
         self._set_view_mode("combo" if checked else "single")
+        self._broadcast_view()
 
     def _set_view_mode(self, mode: str) -> None:
         # Build the shared GL render/controls on demand; if that fails (no GL
@@ -1515,6 +1723,11 @@ class NiftiViewerPane(QWidget):
         self._gl.set_show_cube(self._show_orient_labels)
         self._gl.set_flip(*self._gl_flip())
         self._gl_controls = Nifti3DControls(self._gl, vertical=True)
+        # Rotating, panning, zooming or changing an effect is a view change
+        # like any other, so a linked pane hears about it through the same
+        # signal as a slice or an orientation.
+        self._gl.camera_changed.connect(self._broadcast_view)
+        self._gl_controls.controls_changed.connect(self._broadcast_view)
         self._gl_controls_scroll = QScrollArea()
         # Name the scroll area AND its viewport so both paint the panel colour.
         # Without this the black image canvas behind shows through the
@@ -1668,16 +1881,19 @@ class NiftiViewerPane(QWidget):
     def _on_labels_toggled(self, checked: bool) -> None:
         self._show_orient_labels = checked
         self._apply_orient_label_visibility()
+        self._broadcast_view()
 
     def _on_ras_toggled(self, checked: bool) -> None:
         """RAS on = canonical orientation; off = the file's raw storage order."""
         self._ras_on = checked
         self._apply_display_flip()
+        self._broadcast_view()
 
     def _on_radio_toggled(self, checked: bool) -> None:
         """Radiological (mirror L/R) vs. neurological convention."""
         self._radio_on = checked
         self._apply_display_flip()
+        self._broadcast_view()
 
     def _apply_display_flip(self) -> None:
         """Re-render 2-D + labels and re-orient the 3-D render after a toggle."""
@@ -1910,9 +2126,11 @@ class NiftiViewerPane(QWidget):
             return
         self._cross_voxel[self._orientation] = value
         self._refresh()
+        self._broadcast_crosshair()
 
     def _on_vol_slider_changed(self, value: int) -> None:
         self._vol_val.setText(str(value))
+        self._broadcast_view()
         # Different 4-D volumes can differ in intensity range — re-window.
         self._compute_display_window()
         self._refresh()
@@ -1927,6 +2145,10 @@ class NiftiViewerPane(QWidget):
     # ------------------------------------------------------------------
     # Slice rendering
     # ------------------------------------------------------------------
+
+    def _broadcast_view(self) -> None:
+        """Tell a linked pane how this one is now showing things."""
+        self.view_changed.emit(self.view_state())
 
     def _set_orientation(self, axis: int, *, refresh: bool = True) -> None:
         self._orientation = axis
@@ -2172,6 +2394,7 @@ class NiftiViewerPane(QWidget):
         self._refresh()
         if self._graph_visible:
             self._update_graph()
+        self._broadcast_crosshair()
 
     def _label_pos_to_img_coords(
         self, pos, axis: int, label: ImageLabel,
@@ -2331,6 +2554,7 @@ class NiftiViewerPane(QWidget):
             # voxel directly and repaint all panels.
             self._cross_voxel[axis] = new
             self._refresh()
+            self._broadcast_crosshair()
 
     def _step_volume(self, delta: int) -> None:
         if not delta or self._data is None:
@@ -2603,7 +2827,7 @@ class NiftiViewerPane(QWidget):
         self._image_stack.setCurrentIndex(0)
         if self._gl is not None:
             self._gl.clear()
-        self._toolbar.setVisible(False)
+        self._toolbar_scroll.setVisible(False)
         self._footer.setVisible(False)
         self._footer_path.setText("")
         self._footer_summary.setText("")

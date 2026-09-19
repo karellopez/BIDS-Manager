@@ -129,6 +129,52 @@ class Operation:
             tmp.unlink(missing_ok=True)
             raise
 
+    def write_bytes(self, path: Path, data: bytes) -> None:
+        """Replace ``path`` with ``data``, atomically, after backing it up.
+
+        The binary twin of :meth:`write_text`. Not every file the Editor writes
+        is text: defacing replaces a ``.nii.gz`` with new image bytes, and
+        routing that through ``write_text`` would corrupt it.
+        """
+        path = Path(path)
+        self._backup(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{self.op_id}.tmp")
+        try:
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def replace_from(self, path: Path, source: Path) -> None:
+        """Replace ``path`` with the contents of ``source``, reversibly.
+
+        For a file another program just produced. ``write_bytes`` would hold
+        the whole thing in memory first, and a 3-D anatomical image is tens of
+        megabytes; this streams it instead.
+
+        ``source`` is expected to be a temporary the caller owns, outside the
+        dataset. It is left alone, so a failed replace does not destroy the one
+        copy of the new bytes.
+        """
+        path = Path(path)
+        source = Path(source)
+        if not source.is_file():
+            raise OperationError(f"{source} is not a file")
+        self._backup(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # The temp lands beside the target so the replace is a rename within
+        # one filesystem. A temp directory can be on another device, where
+        # os.replace fails with EXDEV.
+        tmp = path.with_name(f".{path.name}.{self.op_id}.tmp")
+        try:
+            shutil.copyfile(source, tmp)
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
     def write_json(self, path: Path, data: Any, *, indent: int = 4) -> None:
         """Write ``data`` as JSON. Trailing newline, so the file is diffable."""
         self.write_text(
