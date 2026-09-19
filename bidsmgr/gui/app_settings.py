@@ -42,6 +42,10 @@ KEYS = {
     "validate_max_rows": "validate/max_rows",              # TSV rows scanned per table
     "validate_show": "validate/show",                      # which severities the Editor lists
     "validate_flag_todos": "validate/flag_todos",          # flag literal TODO placeholders
+    # Which of the four viewer layouts to open a scan in. "" means the user
+    # has never chosen, so the GPU-dependent default applies.
+    "nifti_view_mode": "editor/nifti_view_mode",                # single|multi|3d|combo
+    "nifti_orientation": "editor/nifti_orientation",           # 0 sag | 1 cor | 2 ax
     "nifti_crosshair_color": "editor/nifti_crosshair_color",   # hex string e.g. "#4FC3F7"
     "nifti_crosshair_thickness": "editor/nifti_crosshair_thickness",  # px, 1..5
     # Scan defaults
@@ -136,6 +140,13 @@ class AppSettings:
     validate_flag_todos: bool = True
     # NIfTI viewer crosshair style. Persisted so the user's chosen
     # colour + thickness survives across sessions.
+    # Empty on purpose: "no choice made yet" is a different thing from any
+    # particular layout, and it is what lets the first run pick the best
+    # default this machine can show rather than a stored one.
+    nifti_view_mode: str = ""
+    # Which plane a single-pane view opens on. Axial by convention when the
+    # user has never chosen.
+    nifti_orientation: int = 2
     nifti_crosshair_color: str = "#4FC3F7"
     nifti_crosshair_thickness: int = 1
     # Colour the requirement-level marks in the metadata template. Off, the
@@ -323,6 +334,19 @@ class AppSettings:
         out.validate_flag_todos = _as_bool(
             s.value(KEYS["validate_flag_todos"]), out.validate_flag_todos,
         )
+        out.nifti_view_mode = _as_str(
+            s.value(KEYS["nifti_view_mode"]), out.nifti_view_mode,
+        )
+        if out.nifti_view_mode not in ("", "single", "multi", "3d", "combo"):
+            out.nifti_view_mode = ""
+        try:
+            out.nifti_orientation = int(
+                s.value(KEYS["nifti_orientation"], out.nifti_orientation)
+            )
+        except (TypeError, ValueError):
+            pass
+        if out.nifti_orientation not in (0, 1, 2):
+            out.nifti_orientation = 2
         out.nifti_crosshair_color = _as_str(
             s.value(KEYS["nifti_crosshair_color"]),
             out.nifti_crosshair_color,
@@ -480,6 +504,8 @@ class AppSettings:
         # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
+        s.setValue(KEYS["nifti_view_mode"], self.nifti_view_mode)
+        s.setValue(KEYS["nifti_orientation"], int(self.nifti_orientation))
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
         s.setValue(KEYS["validate_show"], self.validate_show)
@@ -583,6 +609,25 @@ class AppSettings:
         from ..classifier import user_rules
         _, excl = user_rules.from_json({"scan_exclusions": self.scan_exclusions})
         return excl
+
+    @classmethod
+    def remember_nifti_view_mode(cls, mode: str) -> None:
+        """Store the layout the user is in, so the next scan opens in it.
+
+        Written as the user switches rather than at shut-down: the Editor is
+        not always closed cleanly, and a preference that only survives a
+        graceful exit is one that mostly does not survive.
+        """
+        if mode not in ("single", "multi", "3d", "combo"):
+            return
+        cls._settings().setValue(KEYS["nifti_view_mode"], str(mode))
+
+    @classmethod
+    def remember_nifti_orientation(cls, axis: int) -> None:
+        """Store the plane, so a single-pane view opens on the same one."""
+        if int(axis) not in (0, 1, 2):
+            return
+        cls._settings().setValue(KEYS["nifti_orientation"], int(axis))
 
     @classmethod
     def remember_nifti_crosshair(cls, color: str, thickness: int) -> None:

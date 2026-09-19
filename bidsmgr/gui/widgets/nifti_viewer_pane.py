@@ -407,7 +407,6 @@ class NiftiViewerPane(QWidget):
         # 3-D when a GPU is available, plain Multi-Planar otherwise. Applied
         # once; after that whichever view the user is in persists as they move
         # between scans.
-        self._initial_view_applied: bool = False
         self._combo_labels: dict[int, ImageLabel] = {}
         self._combo_edge: dict = {}
         # Global display window (intensity low/high) for 2-D slices, computed
@@ -628,6 +627,40 @@ class NiftiViewerPane(QWidget):
             return None
         return list(self._cross_voxel)
 
+    def crosshair_world(self):
+        """Where the crosshair is in scanner coordinates, or ``None``.
+
+        The voxel index is meaningless between two images unless they happen
+        to share a grid. Millimetres in the scanner are the thing two images
+        of the same head genuinely have in common, whatever their shape,
+        resolution or storage order.
+        """
+        if self._cross_voxel is None or self._img is None:
+            return None
+        try:
+            affine = np.asarray(self._img.affine, dtype=float)
+            voxel = np.array([*self._cross_voxel[:3], 1.0], dtype=float)
+            return [float(v) for v in (affine @ voxel)[:3]]
+        except Exception:  # noqa: BLE001 - a missing affine is not fatal
+            return None
+
+    def set_crosshair_world(self, world) -> None:
+        """Put the crosshair at a scanner coordinate. Silent, like its twin.
+
+        Out-of-bounds positions are clamped by `set_crosshair_voxel` rather
+        than refused: two images can overlap only partly, and stopping at the
+        edge of this one is more useful than not moving at all.
+        """
+        if world is None or self._img is None or self._data is None:
+            return
+        try:
+            inverse = np.linalg.inv(np.asarray(self._img.affine, dtype=float))
+            point = np.array([*list(world)[:3], 1.0], dtype=float)
+            voxel = (inverse @ point)[:3]
+        except Exception:  # noqa: BLE001 - a singular affine is not fatal
+            return
+        self.set_crosshair_voxel([int(round(float(v))) for v in voxel])
+
     def set_crosshair_voxel(self, voxel) -> None:
         """Move the crosshair to *voxel*, without telling anyone.
 
@@ -694,7 +727,14 @@ class NiftiViewerPane(QWidget):
             "ras": self._ras_on,
             "radiological": self._radio_on,
             "volume": self._vol_slider.value(),
+            "graph_scope": self._scope_spin.value(),
+            "graph_dot": self._dot_size_spin.value(),
+            "graph_marks": self._mark_neighbors_box.isChecked(),
             "crosshair": self.crosshair_voxel(),
+            # Where the crosshair is in the SCANNER, not in this array. Two
+            # images of different shapes have no voxel index in common, and
+            # this is what lets them still point at the same anatomy.
+            "crosshair_world": self.crosshair_world(),
             # Only present once the 3-D view has been built. Sharing the
             # camera and the effect parameters is what makes two renders a
             # comparison rather than two unrelated pictures of a head.
@@ -742,6 +782,17 @@ class NiftiViewerPane(QWidget):
             if button.isChecked() != bool(want):
                 button.setChecked(bool(want))
 
+        for key, widget in (
+            ("graph_scope", self._scope_spin),
+            ("graph_dot", self._dot_size_spin),
+        ):
+            want = state.get(key)
+            if want is not None and widget.value() != int(want):
+                widget.setValue(int(want))
+        marks = state.get("graph_marks")
+        if marks is not None and self._mark_neighbors_box.isChecked() != bool(marks):
+            self._mark_neighbors_box.setChecked(bool(marks))
+
         volume = state.get("volume")
         if volume is not None and self._vol_slider.maximum() >= int(volume):
             if self._vol_slider.value() != int(volume):
@@ -756,7 +807,14 @@ class NiftiViewerPane(QWidget):
         if self._gl_controls is not None and state.get("gl_controls"):
             self._gl_controls.apply_controls_state(state["gl_controls"])
 
-        if with_crosshair:
+        if not with_crosshair:
+            return
+        # World first: it is the only one that means anything between two
+        # images that are not the same shape, and for two that are it lands
+        # on the same voxel anyway.
+        if state.get("crosshair_world") is not None:
+            self.set_crosshair_world(state["crosshair_world"])
+        else:
             self.set_crosshair_voxel(state.get("crosshair"))
 
     def set_toolbar_visible(self, visible: bool) -> None:
@@ -891,13 +949,18 @@ class NiftiViewerPane(QWidget):
         self._refresh()
         if self._graph_visible:
             self._update_graph()
-        # First real volume of the session opens in the default view; every
-        # later scan keeps whatever view the user is currently in.
-        if not self._initial_view_applied and data.ndim >= 3:
-            self._initial_view_applied = True
-            self._set_view_mode(
-                "combo" if (self._is_3d_capable and self._gpu_ok) else "multi"
-            )
+        # EVERY volume opens in the layout the user last chose, not just the
+        # first of the session. `_clear` drops the pane back to a single
+        # plane to free the GPU textures, and it runs whenever the selection
+        # moves to anything that is not a NIfTI: click a .json and back, and
+        # the layout was gone. Restoring it only once meant the preference
+        # held until the first time you looked at a sidecar.
+        #
+        # This is not "override what the user is doing": their current
+        # layout IS the stored one, because switching writes it immediately.
+        if data.ndim >= 3:
+            self._set_orientation(self._preferred_orientation(), refresh=False)
+            self._set_view_mode(self._preferred_view_mode())
 
         # If a 3-D mode is open, feed it the new volume; if the new file
         # can't be rendered in 3-D (e.g. RGB), drop back to plain 2-D.
@@ -1478,6 +1541,9 @@ class NiftiViewerPane(QWidget):
             "the current orientation."
         )
         self._scope_spin.valueChanged.connect(self._update_graph)
+        # The graph's own controls are part of the view. Two time courses
+        # drawn over different neighbourhoods are not comparable.
+        self._scope_spin.valueChanged.connect(self._broadcast_view)
         controls.addWidget(self._scope_spin)
 
         controls.addSpacing(10)
@@ -1491,6 +1557,7 @@ class NiftiViewerPane(QWidget):
             "Diameter of the volume-index marker drawn on each plot."
         )
         self._dot_size_spin.valueChanged.connect(self._update_graph_marker)
+        self._dot_size_spin.valueChanged.connect(self._broadcast_view)
         controls.addWidget(self._dot_size_spin)
 
         controls.addSpacing(12)
@@ -1501,6 +1568,7 @@ class NiftiViewerPane(QWidget):
             "current-volume marker."
         )
         self._mark_neighbors_box.stateChanged.connect(self._update_graph)
+        self._mark_neighbors_box.stateChanged.connect(self._broadcast_view)
         controls.addWidget(self._mark_neighbors_box)
 
         controls.addStretch(1)
@@ -1557,10 +1625,10 @@ class NiftiViewerPane(QWidget):
 
     def _on_tri_toggled(self, checked: bool) -> None:
         self._set_view_mode("multi" if checked else "single")
+        self._remember_view_mode()
         self._broadcast_view()
 
     def _on_graph_toggled(self, checked: bool) -> None:
-        self._broadcast_view()
         self._graph_visible = checked
         self._graph_panel.setVisible(checked)
         if checked:
@@ -1571,6 +1639,10 @@ class NiftiViewerPane(QWidget):
             self._vsplit.setSizes([int(total * 0.7), int(total * 0.3)])
             if self._data is not None:
                 self._update_graph()
+        # AFTER the flag and the panel, not before. Announcing first reported
+        # the state the pane was leaving, so the other pane was told "graph
+        # off" at the moment the user switched it on.
+        self._broadcast_view()
 
     # ------------------------------------------------------------------
     # 3-D GPU raycast view + view-mode switching
@@ -1588,24 +1660,36 @@ class NiftiViewerPane(QWidget):
 
     def _on_3d_toggled(self, checked: bool) -> None:
         self._set_view_mode("3d" if checked else "single")
+        self._remember_view_mode()
         self._broadcast_view()
 
     def _on_combo_toggled(self, checked: bool) -> None:
         self._set_view_mode("combo" if checked else "single")
+        self._remember_view_mode()
         self._broadcast_view()
 
     def _set_view_mode(self, mode: str) -> None:
-        # Build the shared GL render/controls on demand; if that fails (no GL
-        # driver / headless), fall back to plain single-pane 2-D. Then mount
-        # the shared render into the active 3-D page so both 3-D modes show the
-        # very same view.
+        # A 3-D layout this host cannot render is refused BEFORE anything is
+        # built, not after it fails. The comparison view applies one pane's
+        # state to the other, and the same dataset gets opened on a
+        # workstation and on a laptop, so a state naming a 3-D layout arrives
+        # on machines that have no GPU as a matter of course. Left
+        # unchecked, the pane ended up claiming a mode it was not showing.
+        if mode in ("3d", "combo") and not (self._gpu_ok and self._is_3d_capable):
+            mode = "multi"
+
+        # Build the shared GL render/controls on demand; if that fails anyway,
+        # fall back to the three planes, which show the same anatomy without
+        # the render. Falling back to a single slice is the thing users
+        # reported as "it forgot my view". Then mount the shared render into
+        # the active 3-D page so both 3-D modes show the very same view.
         if mode in ("3d", "combo"):
             try:
                 self._ensure_gl()
                 self._mount_gl(mode)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Could not open the 3-D view: %s", exc)
-                mode = "single"
+                mode = "multi"
 
         self._tri_view = mode == "multi"
         self._three_d = mode == "3d"
@@ -2074,6 +2158,61 @@ class NiftiViewerPane(QWidget):
     # Crosshair config
     # ------------------------------------------------------------------
 
+    def _preferred_view_mode(self) -> str:
+        """Which layout to open a scan in.
+
+        The user's last choice, when they have made one, because a viewer
+        that forgets is a viewer you have to re-configure every time you open
+        it. Failing that the best this machine can show: the three planes
+        plus the render when there is a GPU, the three planes when there is
+        not. A single axial slice is nobody's preferred first look at a
+        volume, and it used to be what you got whenever the remembered mode
+        could not be honoured.
+        """
+        remembered = ""
+        try:
+            from ..app_settings import AppSettings
+
+            remembered = AppSettings.load().nifti_view_mode
+        except Exception:  # noqa: BLE001 - a viewer must open regardless
+            log.debug("could not read the remembered view mode")
+
+        capable = self._is_3d_capable and self._gpu_ok
+        if remembered in ("3d", "combo") and not capable:
+            # Asked for a 3-D layout on a machine or a file that cannot do
+            # one. Fall back to the nearest thing that shows the same planes
+            # rather than all the way to a single slice.
+            return "multi"
+        if remembered in ("single", "multi", "3d", "combo"):
+            return remembered
+        return "combo" if capable else "multi"
+
+    def _remember_view_mode(self) -> None:
+        """Store the layout, as the user switches rather than at shut-down."""
+        try:
+            from ..app_settings import AppSettings
+
+            AppSettings.remember_nifti_view_mode(self.current_mode())
+        except Exception:  # noqa: BLE001 - a preference is not worth a crash
+            log.debug("could not store the view mode")
+
+    def _remember_orientation(self) -> None:
+        """Store the plane, for the same reason as the layout."""
+        try:
+            from ..app_settings import AppSettings
+
+            AppSettings.remember_nifti_orientation(self._orientation)
+        except Exception:  # noqa: BLE001
+            log.debug("could not store the orientation")
+
+    def _preferred_orientation(self) -> int:
+        try:
+            from ..app_settings import AppSettings
+
+            return int(AppSettings.load().nifti_orientation)
+        except Exception:  # noqa: BLE001
+            return _AXIS_AXIAL
+
     def _load_persisted_crosshair(self) -> None:
         """Pull crosshair color + thickness from AppSettings."""
         try:
@@ -2180,6 +2319,7 @@ class NiftiViewerPane(QWidget):
         exist yet or no longer do, which segfaults rather than raising.
         """
         self._set_orientation(axis)
+        self._remember_orientation()
         self._broadcast_view()
 
     def _set_orientation(self, axis: int, *, refresh: bool = True) -> None:

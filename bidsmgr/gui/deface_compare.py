@@ -170,8 +170,8 @@ class DefaceCompareDialog(QDialog):
         return self._panes.note
 
     @property
-    def _linkable(self) -> bool:
-        return self._panes._linkable
+    def _same_grid(self) -> bool:
+        return self._panes._same_grid
 
 
 def size_to_screen(widget, want_w: int, want_h: int) -> None:

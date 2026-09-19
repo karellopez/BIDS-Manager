@@ -1092,6 +1092,7 @@ class EditorPanel(QWidget):
             return
         # Paths the panes are holding may no longer exist.
         self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
@@ -1136,6 +1137,7 @@ class EditorPanel(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
@@ -1168,6 +1170,7 @@ class EditorPanel(QWidget):
         # Deliberately clears the centre pane before refreshing: the file it
         # was showing is one of the things that may have just been deleted.
         self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
@@ -1213,9 +1216,30 @@ class EditorPanel(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _reload_open_image(self) -> None:
+        """Re-read whatever the viewer is showing, if it changed underneath.
+
+        Defacing, stripping and restoring all rewrite files in place. The
+        viewer holds a decoded array, not the file, so it went on showing the
+        face until the user clicked away and back. Clearing first is what
+        forces the re-read: `set_file` with the path it already has is a
+        no-op as far as the pane is concerned.
+        """
+        current = self._nifti_viewer.current_file()
+        if current is None:
+            return
+        root = self.current_root()
+        if not Path(current).is_file():
+            # It was deleted or moved out from under the viewer.
+            self._nifti_viewer.set_file(None, None)
+            return
+        self._nifti_viewer.set_file(None, None)
+        self._nifti_viewer.set_file(Path(current), root)
 
     def _on_compare_images(self, targets: Optional[list] = None) -> None:
         """Two images side by side, whatever they are.
@@ -1256,6 +1280,7 @@ class EditorPanel(QWidget):
         # A strip writes new files under derivatives/; an in-place one changes
         # what the viewer is holding. Refresh either way.
         self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
@@ -1318,6 +1343,7 @@ class EditorPanel(QWidget):
             return
         # The images changed under whatever the viewer is holding.
         self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()

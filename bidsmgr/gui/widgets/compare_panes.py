@@ -15,10 +15,17 @@ opposite sides look like a difference in the data.
 
 Two things it deliberately does not do.
 
-**It does not link the crosshair between images of different shapes.** A
-crosshair is a voxel index, and the same index is a different place in a
-cropped or resampled image. Everything else still follows, and the reason is
-on screen rather than left to be discovered.
+**Images that do not match are still linked, through the scanner.** A voxel
+index is meaningless between two images unless they share a grid, so the
+crosshair travels as MILLIMETRES: out through one image's affine, in through
+the other's. A cropped image, a different resolution, a different storage
+order and a different modality all follow to the same anatomy. The note still
+says the shapes differ, because it changes what a reader should expect of
+the two pictures, but it is no longer a reason to stop syncing.
+
+The one thing this cannot do is put the crosshair somewhere the other image
+does not reach. Two images that only partly overlap clamp at the edge, which
+is more useful than refusing to move.
 
 **It shows ONE toolbar while synced.** Two identical toolbars driving one
 shared state is not a choice the user has, it is the same control drawn twice.
@@ -61,7 +68,10 @@ class ComparePanes(QWidget):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._linkable = False
+        # Whether the two share a voxel grid. NOT whether they can be
+        # linked: they always can, through world coordinates. This only
+        # decides what the note says.
+        self._same_grid = False
         self._syncing = False
 
         outer = QVBoxLayout(self)
@@ -148,7 +158,7 @@ class ComparePanes(QWidget):
             self._left_caption.setText(left_title)
         if right_title:
             self._right_caption.setText(right_title)
-        self._linkable = False
+        self._same_grid = False
         self.link.setEnabled(False)
         self.note.setText("Loading…")
 
@@ -169,21 +179,15 @@ class ComparePanes(QWidget):
             return
 
         self.link.setEnabled(True)
-        self._linkable = left[:3] == right[:3]
-        if self._linkable:
-            self.note.setText("")
-            # Start both at the same place, so the first thing on screen is a
-            # comparison rather than two unrelated slices.
-            self._mirror_crosshair(self.right, self.left.crosshair_voxel())
-        else:
-            # Sync stays ON. The plane, the 3-D camera and the effects are
-            # still worth sharing; only the crosshair is meaningless across
-            # shapes, so only the crosshair is dropped.
-            self.note.setText(
-                f"The images are different sizes ({left[:3]} and {right[:3]}), "
-                "so the crosshair is not linked: the same voxel is not the "
-                "same place. Everything else still follows."
-            )
+        self._same_grid = left[:3] == right[:3]
+        self.note.setText("" if self._same_grid else (
+            f"Different sizes ({left[:3]} and {right[:3]}). The crosshair is "
+            "matched by position in the scanner rather than by voxel, so it "
+            "still points at the same place in both."
+        ))
+        # Start both at the same place, so the first thing on screen is a
+        # comparison rather than two unrelated slices.
+        self._mirror_crosshair(self.right, self.left.crosshair_voxel())
         self.both_loaded.emit()
 
     @staticmethod
@@ -194,11 +198,20 @@ class ComparePanes(QWidget):
     # -- linking ----------------------------------------------------------
 
     def _mirror_crosshair(self, target: NiftiViewerPane, voxel) -> None:
-        if self._syncing or not self._linkable or not self.link.isChecked():
+        """Move the other crosshair to the same PLACE, not the same index."""
+        if self._syncing or not self.link.isChecked():
             return
+        source = self.left if target is self.right else self.right
+        world = source.crosshair_world()
         self._syncing = True
         try:
-            target.set_crosshair_voxel(voxel)
+            if world is not None:
+                target.set_crosshair_world(world)
+            else:
+                # No affine to go through: fall back to the index, which is
+                # right whenever the two share a grid and is all there is
+                # when one of them has no usable header.
+                target.set_crosshair_voxel(voxel)
         finally:
             self._syncing = False
 
@@ -207,7 +220,7 @@ class ComparePanes(QWidget):
             return
         self._syncing = True
         try:
-            target.apply_view_state(state, with_crosshair=self._linkable)
+            target.apply_view_state(state, with_crosshair=True)
         finally:
             self._syncing = False
 

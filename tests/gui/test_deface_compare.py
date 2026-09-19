@@ -45,6 +45,26 @@ def _defaced(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    """Do not read the developer's own remembered view mode.
+
+    The pane opens a scan in the layout the user was last in, which is a real
+    preference stored in QSettings. A test that reads it passes or fails
+    depending on what the person running it last clicked.
+    """
+    from PyQt6.QtCore import QSettings
+
+    from bidsmgr.gui.app_settings import AppSettings
+
+    path = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        AppSettings, "_settings",
+        staticmethod(lambda: QSettings(str(path), QSettings.Format.IniFormat)),
+    )
+    yield
+
+
 @pytest.fixture
 def opened(qtbot):
     """Build the dialog and CLOSE it afterwards, however the test ends.
@@ -117,7 +137,7 @@ def test_unlinking_stops_the_mirroring(qtbot, opened, tmp_path):
     assert dlg._after.crosshair_voxel() == before_other
 
 
-def test_different_shapes_refuse_to_link_and_say_why(qtbot, opened, tmp_path):
+def test_different_shapes_still_link_and_say_how(qtbot, opened, tmp_path):
     """The neck-cropping engine legitimately produces a smaller image."""
     nib = pytest.importorskip("nibabel")
     root = _defaced(tmp_path)
@@ -129,21 +149,25 @@ def test_different_shapes_refuse_to_link_and_say_why(qtbot, opened, tmp_path):
     _wait_for_both(qtbot, dlg)
     qtbot.waitUntil(lambda: dlg._link_note.text() != "Loading…", timeout=20_000)
 
-    # Sync stays ON: the view mode, orientation and 3-D controls are still
-    # worth sharing between two versions of the same scan. Only the crosshair
-    # is dropped, because a voxel index is a different place in a cropped
-    # image, and mirroring it would show two unrelated slices.
-    assert dlg._link.isChecked()
-    assert not dlg._linkable
-    assert "different sizes" in dlg._link_note.text()
-    assert "Everything else still follows" in dlg._link_note.text()
+    # Sync stays ON, crosshair included: it travels as millimetres, so a
+    # cropped result still points at the same anatomy as its source.
+    import numpy as np
 
-    other = list(dlg._after.crosshair_voxel())
+    assert dlg._link.isChecked()
+    assert not dlg._same_grid
+    assert "Different sizes" in dlg._link_note.text()
+    assert "scanner" in dlg._link_note.text()
+
     moved = list(dlg._before.crosshair_voxel())
-    moved[0] = max(0, moved[0] - 4)
+    moved[2] = max(0, moved[2] - 4)
     dlg._before.set_crosshair_voxel(moved)
     dlg._before._broadcast_crosshair()
-    assert dlg._after.crosshair_voxel() == other, "linked two different shapes"
+
+    assert np.allclose(
+        np.asarray(dlg._before.crosshair_world()),
+        np.asarray(dlg._after.crosshair_world()),
+        atol=1.01,
+    ), "the cropped image did not follow to the same place"
 
 
 def test_closing_mid_load_stops_both_reads(qtbot, opened, tmp_path):
@@ -220,7 +244,10 @@ def test_changing_the_view_in_one_changes_the_other(qtbot, opened, tmp_path):
     _wait_for_both(qtbot, dlg)
     # A loaded pane lands in multi-planar, so "single" is the mode that
     # actually proves something moved.
-    assert dlg._after.current_mode() == "multi"
+    # A loaded pane lands in the multi-planar layout, or the multi-planar
+    # 3-D one where there is a GPU. Either way "single" is a mode it is NOT
+    # in, which is what makes the assertion mean something.
+    assert dlg._after.current_mode() in ("multi", "combo")
 
     dlg._before._set_view_mode("single")
     dlg._before._broadcast_view()
@@ -235,11 +262,12 @@ def test_unsyncing_lets_them_differ(qtbot, opened, tmp_path):
     root = _defaced(tmp_path)
     dlg = opened(root, REL)
     _wait_for_both(qtbot, dlg)
+    started = dlg._after.current_mode()
     dlg._link.setChecked(False)
 
-    dlg._before._set_view_mode("single")
+    dlg._before._set_view_mode("single" if started != "single" else "multi")
     dlg._before._broadcast_view()
-    assert dlg._after.current_mode() == "multi", (
+    assert dlg._after.current_mode() == started, (
         "the right pane followed even though sync is off"
     )
 
@@ -250,13 +278,15 @@ def test_re_syncing_adopts_the_left_view(qtbot, opened, tmp_path):
     dlg = opened(root, REL)
     _wait_for_both(qtbot, dlg)
 
+    started = dlg._after.current_mode()
+    wanted = "single" if started != "single" else "multi"
     dlg._link.setChecked(False)
-    dlg._before._set_view_mode("single")
+    dlg._before._set_view_mode(wanted)
     dlg._before._broadcast_view()
-    assert dlg._after.current_mode() == "multi"
+    assert dlg._after.current_mode() == started
 
     dlg._link.setChecked(True)
-    assert dlg._after.current_mode() == "single"
+    assert dlg._after.current_mode() == wanted
 
 
 def test_the_view_follows_even_when_the_shapes_differ(qtbot, opened, tmp_path):
@@ -269,9 +299,11 @@ def test_the_view_follows_even_when_the_shapes_differ(qtbot, opened, tmp_path):
     _wait_for_both(qtbot, dlg)
     qtbot.waitUntil(lambda: dlg._link_note.text() != "Loading…", timeout=20_000)
 
-    dlg._before._set_view_mode("single")
+    started = dlg._after.current_mode()
+    wanted = "single" if started != "single" else "multi"
+    dlg._before._set_view_mode(wanted)
     dlg._before._broadcast_view()
-    assert dlg._after.current_mode() == "single"
+    assert dlg._after.current_mode() == wanted
 
 
 def test_the_restore_button_is_offered_when_there_is_an_original(
@@ -403,9 +435,9 @@ def test_pressing_an_orientation_pill_switches_both(qtbot, opened, tmp_path):
     dlg = opened(root, REL)
     _wait_for_both(qtbot, dlg)
     # The pills only apply to a single plane, so they are disabled in the
-    # multi-planar view a loaded pane lands in. This is the state a user is
-    # in when they press one.
-    dlg._before._tri_btn.setChecked(False)
+    # multi-planar (or multi-planar 3-D) view a loaded pane lands in. This is
+    # the state a user is in when they press one.
+    dlg._before._set_view_mode("single")
     assert dlg._before._sa_btn.isEnabled()
 
     dlg._before._sa_btn.click()

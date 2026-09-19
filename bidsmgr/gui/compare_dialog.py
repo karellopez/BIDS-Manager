@@ -10,10 +10,11 @@ preprocessed, two echoes, a derivative against the scan it came from, this
 week's run against last week's, one subject against another. Nothing here
 knows or cares which.
 
-It does not require the images to match. Different shapes, different
-resolutions and different orientations all open; the crosshair link is the
-only thing that switches off, because a voxel index is a different place in a
-differently shaped image, and the reason says so on screen.
+It does not require the images to match. Different shapes, resolutions and
+orientations all open and all stay linked: the crosshair travels as
+millimetres in the scanner rather than as a voxel index, so it points at the
+same anatomy in both. The note says when the shapes differ, because that
+changes what a reader should expect of the two pictures.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from typing import Optional, Sequence
 
 from PyQt6.QtWidgets import (
     QDialog,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -34,16 +34,10 @@ from PyQt6.QtWidgets import (
 
 from .deface_compare import size_to_screen
 from .widgets.compare_panes import ComparePanes
+from .widgets.nifti_picker import ask_for_image, is_nifti
 from .widgets.primitives import ElidedLabel
 
 log = logging.getLogger(__name__)
-
-NIFTI_FILTER = "NIfTI images (*.nii *.nii.gz);;All files (*)"
-
-
-def is_nifti(path) -> bool:
-    name = Path(path).name.lower()
-    return name.endswith(".nii") or name.endswith(".nii.gz")
 
 
 class CompareDialog(QDialog):
@@ -76,9 +70,9 @@ class CompareDialog(QDialog):
 
         subtitle = QLabel(
             "One set of controls drives both: crosshair, slice, plane, "
-            "volume, 3-D camera, effects and the cut plane. Images of "
-            "different sizes still open; only the crosshair stops being "
-            "linked, because the same voxel is then a different place."
+            "volume, 4-D graph, 3-D camera, effects and the cut plane. "
+            "Images of different sizes work too: the crosshair is matched by "
+            "position in the scanner, not by voxel."
         )
         subtitle.setObjectName("dialog-subtitle")
         subtitle.setWordWrap(True)
@@ -117,16 +111,18 @@ class CompareDialog(QDialog):
         return label, button
 
     def _ask(self, side: str) -> Optional[Path]:
-        start = ""
-        for candidate in (self._left, self._right, self._root):
-            if candidate:
-                start = str(Path(candidate).parent if Path(candidate).is_file()
-                            else candidate)
-                break
-        chosen, _ = QFileDialog.getOpenFileName(
-            self, f"Choose the {side} image", start, NIFTI_FILTER,
+        """The dataset's own images, in a tree, with a filter box.
+
+        Not the OS file dialog. Finding ``sub-014/ses-post/anat`` by
+        navigating folders is slower than the comparison it stands in the way
+        of, and the dialog shows every file when only a handful are images.
+        The picker still offers Browse… for an image from outside.
+        """
+        return ask_for_image(
+            self, self._root,
+            title=f"Choose the {side} image",
+            start=self._left if side == "left" else self._right,
         )
-        return Path(chosen) if chosen else None
 
     def _pick_left(self) -> None:
         picked = self._ask("left")

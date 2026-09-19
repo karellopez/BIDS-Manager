@@ -41,6 +41,26 @@ def images(tmp_path: Path):
     return root, a, b
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    """Do not read the developer's own remembered view mode.
+
+    The pane opens a scan in the layout the user was last in, which is a real
+    preference stored in QSettings. A test that reads it passes or fails
+    depending on what the person running it last clicked.
+    """
+    from PyQt6.QtCore import QSettings
+
+    from bidsmgr.gui.app_settings import AppSettings
+
+    path = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        AppSettings, "_settings",
+        staticmethod(lambda: QSettings(str(path), QSettings.Format.IniFormat)),
+    )
+    yield
+
+
 @pytest.fixture
 def opened(qtbot):
     made = []
@@ -118,22 +138,51 @@ def test_captions_fall_back_to_the_name_outside_a_dataset(
     assert dlg._right_label.text() == "elsewhere.nii.gz"
 
 
-def test_images_of_different_shapes_still_open(qtbot, opened, images, tmp_path):
-    """Only the crosshair link is meaningless across shapes, not the view."""
+def test_images_of_different_shapes_are_still_linked(qtbot, opened, images,
+                                                     tmp_path):
+    """Matched by position in the scanner, not by voxel index.
+
+    A cropped image shares no voxel index with its source, and the two are
+    still pictures of the same head. Following the crosshair through world
+    coordinates is what makes them comparable; refusing to follow it at all
+    was giving up on the case the feature is most useful for.
+    """
     nib = pytest.importorskip("nibabel")
+    import numpy as np
+
     root, a, _b = images
+    # Cropped from the START of the third axis, so the same anatomy sits at
+    # a different index in each.
     cropped = root / "sub-01" / "anat" / "sub-01_desc-crop_T1w.nii.gz"
-    nib.save(nib.load(str(TEMPLATE)).slicer[:, :, 5:], str(cropped))
+    nib.save(nib.load(str(TEMPLATE)).slicer[:, :, 8:], str(cropped))
 
     dlg = opened(a, cropped, root=root)
     _wait(qtbot, dlg)
     qtbot.waitUntil(lambda: dlg._panes.note.text() != "Loading…", timeout=20_000)
 
-    assert dlg._panes.link.isChecked(), "sync was switched off entirely"
-    assert not dlg._panes._linkable
-    assert "different sizes" in dlg._panes.note.text()
+    assert dlg._panes.link.isChecked()
+    assert not dlg._panes._same_grid
+    assert "Different sizes" in dlg._panes.note.text()
+    assert "scanner" in dlg._panes.note.text(), (
+        "the note does not say HOW they are matched"
+    )
 
-    # The plane still follows.
+    moved = list(dlg._panes.left.crosshair_voxel())
+    moved[2] = max(0, moved[2] - 6)
+    dlg._panes.left.set_crosshair_voxel(moved)
+    dlg._panes.left._broadcast_crosshair()
+
+    # The indices differ by the crop; the WORLD position is the same.
+    left_world = np.asarray(dlg._panes.left.crosshair_world())
+    right_world = np.asarray(dlg._panes.right.crosshair_world())
+    assert np.allclose(left_world, right_world, atol=1.01), (
+        f"the crosshair landed somewhere else: {left_world} vs {right_world}"
+    )
+    assert dlg._panes.right.crosshair_voxel() != dlg._panes.left.crosshair_voxel(), (
+        "the indices happen to match, so this no longer tests world mapping"
+    )
+
+    # And the plane still follows too.
     dlg._panes.left._shortcut_orientation(0)
     assert dlg._panes.right.view_state()["orientation"] == 0
 
@@ -199,3 +248,42 @@ def test_the_window_fits_the_screen(qtbot, opened, images):
     if screen is None:
         pytest.skip("no screen")
     assert dlg.width() <= screen.availableGeometry().width()
+
+
+def test_the_4d_graph_follows(qtbot, opened, images, tmp_path):
+    """The toggle announced the state it was LEAVING.
+
+    `_on_graph_toggled` broadcast before it updated the flag it reports, so
+    the other pane was told "graph off" at the moment the user turned it on
+    and only caught up at the next interaction. Its controls are shared too:
+    two time courses drawn over different neighbourhoods are not comparable.
+    """
+    nib = pytest.importorskip("nibabel")
+    import numpy as np
+
+    root, _a, _b = images
+    four_d = root / "sub-01" / "func" / "sub-01_task-x_bold.nii.gz"
+    four_d.parent.mkdir(parents=True, exist_ok=True)
+    data = np.random.default_rng(0).random((12, 12, 8, 6)).astype("float32")
+    other = root / "sub-01" / "func" / "sub-01_task-y_bold.nii.gz"
+    for path in (four_d, other):
+        nib.save(nib.Nifti1Image(data, np.eye(4)), str(path))
+
+    dlg = opened(four_d, other, root=root)
+    _wait(qtbot, dlg)
+    qtbot.waitUntil(lambda: dlg._panes.left._graph_btn.isEnabled(), timeout=20_000)
+
+    dlg._panes.left._graph_btn.setChecked(True)
+    assert dlg._panes.left.view_state()["graph"] is True
+    assert dlg._panes.right.view_state()["graph"] is True, (
+        "the other pane was told the state the first one was leaving"
+    )
+
+    dlg._panes.left._scope_spin.setValue(3)
+    assert dlg._panes.right.view_state()["graph_scope"] == 3
+
+    dlg._panes.left._mark_neighbors_box.setChecked(False)
+    assert dlg._panes.right.view_state()["graph_marks"] is False
+
+    dlg._panes.left._vol_slider.setValue(3)
+    assert dlg._panes.right.view_state()["volume"] == 3
