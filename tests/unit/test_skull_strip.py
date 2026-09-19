@@ -330,3 +330,73 @@ def test_the_parent_process_never_loads_tinygrad(tmp_path):
         f"{leaked} was imported into the parent process; the crash this "
         "guards against comes back the moment it is"
     )
+
+
+# ---------------------------------------------------------------------------
+# Orientation independence.
+#
+# The rotation bug was found on one image, so "it works now" could have meant
+# "it happens to work on that one". Nothing in either engine is allowed to
+# assume a storage order: niimath registers through the affine, and the
+# mindgrab mask is mapped back through world coordinates. This checks that
+# claim instead of trusting it.
+
+
+def _reoriented(image: Path, axcodes: tuple, out: Path) -> Path:
+    """The SAME image, written in a different axis order.
+
+    World content is untouched: only how the voxels are stored changes, which
+    is exactly the thing an engine must not care about.
+    """
+    nib = pytest.importorskip("nibabel")
+
+    img = nib.load(str(image))
+    transform = nib.orientations.ornt_transform(
+        nib.orientations.io_orientation(img.affine),
+        nib.orientations.axcodes2ornt(axcodes),
+    )
+    nib.save(img.as_reoriented(transform), str(out))
+    return out
+
+
+def _lr_axis(affine) -> int:
+    nib = pytest.importorskip("nibabel")
+
+    codes = nib.orientations.aff2axcodes(affine)
+    return next(i for i, c in enumerate(codes) if c in "LR")
+
+
+@pytest.mark.parametrize("axcodes", [
+    ("L", "A", "S"),   # the other handedness
+    ("P", "I", "R"),   # every axis somewhere else
+])
+@pytest.mark.parametrize("engine_id", ["strip-atlas", "mindgrab"])
+def test_the_strip_does_not_care_how_the_image_is_stored(
+    tmp_path, engine_id, axcodes,
+):
+    if not run.available(engine_id):
+        pytest.skip(f"{engine_id} is not available here")
+    nib = pytest.importorskip("nibabel")
+    import numpy as np
+
+    root = _dataset(tmp_path)
+    source = _reoriented(
+        root / REL, axcodes, root / "sub-01" / "anat" / "sub-01_T1w.nii.gz",
+    )
+
+    out = deface_dataset(root, engine_id=engine_id)
+    assert out.ok, out.failed
+
+    got = nib.load(str(root / out.produced[0]))
+    src = nib.load(str(source))
+    assert got.shape == src.shape
+    assert np.allclose(got.affine, src.affine)
+
+    data = np.asanyarray(got.dataobj)
+    kept = data > data.min()
+    axis = _lr_axis(src.affine)
+    dice = 2 * (kept & np.flip(kept, axis=axis)).sum() / (2 * max(kept.sum(), 1))
+    assert dice > 0.85, (
+        f"{engine_id} on {''.join(axcodes)} kept an asymmetric region "
+        f"(Dice {dice:.3f}), so the mask did not follow the storage order"
+    )

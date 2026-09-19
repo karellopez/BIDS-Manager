@@ -381,3 +381,89 @@ def test_an_effect_change_reaches_the_other_render(qtbot, opened, tmp_path):
         dlg._after._gl_controls.controls_state()[key]
         == controls.controls_state()[key]
     ), "the second render kept the old effect"
+
+
+# ---------------------------------------------------------------------------
+# Sync has to happen WHEN it happens, not at the next interaction.
+#
+# Both of these worked in the sense that the state was shared, and were
+# useless in practice: the second pane caught up only when something else
+# touched it, so switching to coronal showed one coronal image beside one
+# axial image until you clicked.
+
+
+def test_pressing_an_orientation_pill_switches_both(qtbot, opened, tmp_path):
+    """Through the BUTTON, not the setter underneath it.
+
+    The setter also runs while the pane is being built and while a file is
+    being bound, so the announcement lives on the user's entry point. A test
+    that called the setter directly would pass against the broken version.
+    """
+    root = _defaced(tmp_path)
+    dlg = opened(root, REL)
+    _wait_for_both(qtbot, dlg)
+    # The pills only apply to a single plane, so they are disabled in the
+    # multi-planar view a loaded pane lands in. This is the state a user is
+    # in when they press one.
+    dlg._before._tri_btn.setChecked(False)
+    assert dlg._before._sa_btn.isEnabled()
+
+    dlg._before._sa_btn.click()
+    assert dlg._before.view_state()["orientation"] == 0
+    assert dlg._after.view_state()["orientation"] == 0, (
+        "the right image kept the old plane until the next interaction"
+    )
+
+    dlg._before._co_btn.click()
+    assert dlg._after.view_state()["orientation"] == 1
+
+
+def test_the_keyboard_shortcut_switches_both(qtbot, opened, tmp_path):
+    root = _defaced(tmp_path)
+    dlg = opened(root, REL)
+    _wait_for_both(qtbot, dlg)
+
+    dlg._before._shortcut_orientation(0)
+    assert dlg._after.view_state()["orientation"] == 0
+
+
+def test_moving_the_clip_plane_reaches_the_other_render(qtbot, opened, tmp_path):
+    """Slicing in 3-D is driven from inside the GL widget.
+
+    It mirrors itself into the control sliders silently, so without listening
+    for `clip_changed` the second render only caught up on the next click.
+    """
+    root = _defaced(tmp_path)
+    dlg = opened(root, REL)
+    _wait_for_both(qtbot, dlg)
+    if dlg._before.view_state()["gl_controls"] is None:
+        pytest.skip("no 3-D view on this host")
+
+    seen: list = []
+    dlg._before.view_changed.connect(seen.append)
+    dlg._before._gl.clip_changed.emit()
+    assert seen, "a clip-plane change never reached the pane's view_changed"
+
+
+def test_inverting_the_cut_inverts_it_in_both(qtbot, opened, tmp_path):
+    """Shift+X flips which side of the plane is kept.
+
+    It has no slider, so a sync built from the control widgets alone shared
+    the plane's angle and depth and left the two renders cut from OPPOSITE
+    sides, which is the one difference that makes a comparison actively
+    misleading rather than merely unsynchronised.
+    """
+    root = _defaced(tmp_path)
+    dlg = opened(root, REL)
+    _wait_for_both(qtbot, dlg)
+    if dlg._before.view_state()["clip"] is None:
+        pytest.skip("no 3-D view on this host")
+
+    before = dlg._before._gl.clip_state()["flip"]
+    dlg._before._gl_controls.kbd_invert()          # Shift+X
+
+    assert dlg._before._gl.clip_state()["flip"] is not before
+    assert dlg._after._gl.clip_state()["flip"] == (
+        dlg._before._gl.clip_state()["flip"]
+    ), "the second render is cut from the other side"
+    assert dlg._after._gl.clip_state()["active"] == 1

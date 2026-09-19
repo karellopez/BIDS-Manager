@@ -46,6 +46,9 @@ def _labels(panel: EditorPanel) -> list[str]:
 def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
     assert _labels(panel) == [
         "Dashboard",
+        # A viewer action, not a repair: it sits with Dashboard, above the
+        # separator that starts the things which CHANGE the dataset.
+        "Compare images...",
         "Fix ups...",
         "Deface...",
         "Remove the skull...",

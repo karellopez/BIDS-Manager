@@ -962,6 +962,39 @@ class RaycastGLWidget(QOpenGLWidget):
             "target": [float(v) for v in self._target],
         }
 
+    def clip_state(self) -> dict:
+        """The cut plane, as the GL widget holds it.
+
+        Separate from the control panel's sliders because not all of it has a
+        slider. ``clip_flip`` in particular is only ever set by Shift+X, so a
+        sync built from the widgets alone shared the plane's angle and depth
+        and quietly left the two renders cut from OPPOSITE sides.
+        """
+        return {
+            "active": int(self.clip_active),
+            "flip": bool(self.clip_flip),
+            "pos": float(self.clip_pos),
+            "az": float(self.clip_az),
+            "el": float(self.clip_el),
+            "thick": float(self.clip_thick_frac),
+        }
+
+    def apply_clip_state(self, state: dict) -> None:
+        """Adopt another render's cut plane. Silent: no ``clip_changed``."""
+        if not state:
+            return
+        try:
+            self.clip_active = int(state["active"])
+            self.clip_flip = bool(state["flip"])
+            self.clip_pos = float(state["pos"])
+            self.clip_az = float(state["az"])
+            self.clip_el = float(state["el"])
+            self.clip_thick_frac = float(state["thick"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self._recompute_clip()
+        self.update()
+
     def apply_camera_state(self, state: dict) -> None:
         """Put the camera where ``state`` says. Silent: no `camera_changed`."""
         if not state:

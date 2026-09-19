@@ -8,39 +8,28 @@ is still identifiable, which is the failure the user was trying to avoid. Too
 much removed and the cerebellum or the front of the brain is gone, which
 quietly ruins the analysis and survives every validator.
 
-So this is two :class:`NiftiViewerPane` s, the undefaced copy on the left and
-what is in the dataset on the right, with one crosshair between them. Moving it
-in one pane moves it in the other, because comparing two images at different
-slices tells you nothing.
-
-The crosshair is a VOXEL INDEX, so linking is only honest when the two images
-have the same shape. ``allineate-robust`` crops the neck, so its output does
-not, and the link is switched off and said so rather than silently showing two
-different places.
+The side-by-side viewer itself is :class:`~bidsmgr.gui.widgets.compare_panes
+.ComparePanes`, shared with the general "compare any two images" dialog. What
+is here is the part that is about DEFACING: finding the undefaced copy,
+explaining when there is not one, and offering to restore from it.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
-    QWidget,
 )
 
 from ..deface import compare, status
-from .widgets.nifti_viewer_pane import NiftiViewerPane
-from .widgets.primitives import ElidedLabel
+from .widgets.compare_panes import ComparePanes
 
 log = logging.getLogger(__name__)
 
@@ -53,13 +42,11 @@ class DefaceCompareDialog(QDialog):
         self._root = Path(root)
         self._rel = str(rel).replace("\\", "/")
         self._original = compare.original_for(self._root, self._rel)
-        # Set once both panes have loaded and their shapes are known.
-        self._linkable = False
-        self._syncing = False
+        self._panes = None
 
         self.setWindowTitle(f"Before and after: {Path(self._rel).name}")
         self.setSizeGripEnabled(True)
-        self._size_to_screen(1180, 720)
+        size_to_screen(self, 1180, 720)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 14, 14, 14)
@@ -94,30 +81,10 @@ class DefaceCompareDialog(QDialog):
             + (f", defaced with {eng.label}." if eng else ".")
         )
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        self._before = self._titled(split, "Before", self._original.path)
-        self._after = self._titled(split, "After", self._root / self._rel)
-        split.setSizes([560, 560])
-        outer.addWidget(split, 1)
+        self._panes = ComparePanes()
+        outer.addWidget(self._panes, 1)
+        self._panes.both_loaded.connect(self._on_both_loaded)
 
-        row = QHBoxLayout()
-        self._link = QCheckBox("Sync the two views")
-        self._link.setChecked(True)
-        self._link.setEnabled(False)
-        self._link.setToolTip(
-            "On: one set of controls drives both images, and the crosshair, "
-            "slice, orientation, 3-D mode and volume stay together, which is "
-            "the only way a comparison means anything.\n\n"
-            "Off: each image gets its own controls, for when you want to look "
-            "at one of them on its own."
-        )
-        self._link.toggled.connect(self._on_link_toggled)
-        row.addWidget(self._link)
-        self._link_note = QLabel("Loading…")
-        self._link_note.setObjectName("muted-note")
-        self._link_note.setWordWrap(True)
-        row.addWidget(self._link_note, 1)
         self._restore = QPushButton("Put the face back")
         self._restore.setObjectName("tb-btn")
         self._restore.setEnabled(False)
@@ -126,153 +93,19 @@ class DefaceCompareDialog(QDialog):
             "is kept, so this can be defaced again afterwards."
         )
         self._restore.clicked.connect(self._on_restore)
-        row.addWidget(self._restore)
+        self._panes.footer.addWidget(self._restore)
         close = QPushButton("Close")
         close.clicked.connect(self.reject)
-        row.addWidget(close)
-        outer.addLayout(row)
+        self._panes.footer.addWidget(close)
 
-        self._before.crosshair_moved.connect(self._from_before)
-        self._after.crosshair_moved.connect(self._from_after)
-        self._before.view_changed.connect(self._view_from_before)
-        self._after.view_changed.connect(self._view_from_after)
-        self._before.loaded.connect(self._on_one_loaded)
-        self._after.loaded.connect(self._on_one_loaded)
-        # Linked to start with, so only ONE toolbar is on screen. Two identical
-        # toolbars driving one shared state is not a choice, it is the same
-        # control drawn twice.
-        self._after.set_toolbar_visible(False)
-
-        # Warm nibabel on THIS thread before starting either load. Both panes
-        # read on their own QThread, and `_load_nifti` imports nibabel lazily,
-        # so this is the only place in the app where two worker threads race
-        # the same cold import. Python's import lock does not survive that:
-        # one thread blocks in `importlib._bootstrap.acquire` while the other
-        # is still executing the module, and the process aborts. Nothing is
-        # lost by importing it here, since a dialog that exists to show two
-        # NIfTIs is going to need it either way.
-        import nibabel  # noqa: F401
-
-        self._before.set_file(self._original.path, self._root)
-        self._after.set_file(self._root / self._rel, self._root)
-
-    def _size_to_screen(self, want_w: int, want_h: int) -> None:
-        """Open at the requested size, or at what the screen actually has.
-
-        A fixed 1180x720 is bigger than the work area on a 13-inch laptop
-        once the dock and menu bar are taken out, and a dialog that opens
-        larger than the screen cannot be resized back by dragging an edge
-        that is off the display.
-        """
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is None:
-            self.resize(want_w, want_h)
-            return
-        available = screen.availableGeometry()
-        self.resize(
-            min(want_w, int(available.width() * 0.92)),
-            min(want_h, int(available.height() * 0.92)),
+        self._panes.show_images(
+            self._original.path, self._root / self._rel, root=self._root,
+            left_title=f"Before: {self._original.path.name}",
+            right_title=f"After: {Path(self._rel).name}",
         )
 
-    def _titled(self, split: QSplitter, title: str, path: Path) -> NiftiViewerPane:
-        """One labelled column of the splitter, returning its viewer."""
-        box = QWidget()
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        cap = ElidedLabel(f"{title}: {path.name}")
-        cap.setObjectName("section-caption")
-        lay.addWidget(cap)
-        pane = NiftiViewerPane()
-        # Explicitly shrinkable. A viewer pane's natural minimum is its
-        # widest control row, which is fine for the one pane in the Editor
-        # and not fine for two of them side by side: the dialog could not be
-        # made narrower than the sum, and it grew itself to that width as
-        # soon as the images loaded. Setting a real minimum overrides the
-        # hint, and the toolbar scrolls sideways instead.
-        pane.setMinimumWidth(260)
-        lay.addWidget(pane, 1)
-        split.addWidget(box)
-        return pane
-
-    # -- linking ----------------------------------------------------------
-
-    def _on_one_loaded(self, _path: Path) -> None:
-        """Decide whether linking is meaningful, once both shapes are known."""
-        before, after = self._shape(self._before), self._shape(self._after)
-        if before is None or after is None:
-            return
+    def _on_both_loaded(self) -> None:
         self._restore.setEnabled(True)
-        self._link.setEnabled(True)
-        self._linkable = before[:3] == after[:3]
-        if self._linkable:
-            self._link_note.setText("")
-            # Start both at the same place, so the first thing on screen is a
-            # comparison rather than two unrelated slices.
-            self._from_before(self._before.crosshair_voxel())
-            return
-        # Sync stays ON: the view mode, orientation and 3-D controls are still
-        # worth sharing. Only the crosshair is dropped, because a voxel index
-        # is a different place in a cropped image.
-        self._link_note.setText(
-            f"The images are different sizes ({before[:3]} and {after[:3]}), "
-            "so the crosshair is not linked: the same voxel is not the same "
-            "place. The neck-cropping engine does this by design. Everything "
-            "else still follows."
-        )
-
-    @staticmethod
-    def _shape(pane: NiftiViewerPane) -> Optional[tuple]:
-        data = getattr(pane, "_data", None)
-        return None if data is None else tuple(data.shape)
-
-    def _from_before(self, voxel) -> None:
-        self._mirror(self._after, voxel)
-
-    def _from_after(self, voxel) -> None:
-        self._mirror(self._before, voxel)
-
-    def _mirror(self, target: NiftiViewerPane, voxel) -> None:
-        # ``set_crosshair_voxel`` does not emit, but the repaint it triggers
-        # can still re-enter through a queued signal, so the guard stays.
-        if self._syncing or not self._linkable or not self._link.isChecked():
-            return
-        self._syncing = True
-        try:
-            target.set_crosshair_voxel(voxel)
-        finally:
-            self._syncing = False
-
-    def _view_from_before(self, state: dict) -> None:
-        self._mirror_view(self._after, state)
-
-    def _view_from_after(self, state: dict) -> None:
-        self._mirror_view(self._before, state)
-
-    def _mirror_view(self, target: NiftiViewerPane, state: dict) -> None:
-        """Make the other pane show things the same way.
-
-        Sync covers HOW, not WHERE, when the images are different sizes: the
-        view mode and the orientation are meaningful for a cropped image, a
-        voxel index is not. So the crosshair is dropped from the state and
-        everything else still follows.
-        """
-        if self._syncing or not self._link.isChecked():
-            return
-        self._syncing = True
-        try:
-            target.apply_view_state(state, with_crosshair=self._linkable)
-        finally:
-            self._syncing = False
-
-    def _on_link_toggled(self, on: bool) -> None:
-        """One toolbar when linked, one per image when not."""
-        self._after.set_toolbar_visible(not on)
-        if not on:
-            return
-        # Re-linking adopts the left pane's view, so the two are immediately
-        # comparable again rather than staying however they drifted apart.
-        self._mirror_view(self._after, self._before.view_state())
 
     # -- restoring --------------------------------------------------------
 
@@ -285,36 +118,13 @@ class DefaceCompareDialog(QDialog):
             return
         # The image on the right is now the one on the left. Re-read it rather
         # than leaving the pane showing bytes that are no longer on disk.
-        self._after.set_file(None, None)
-        self._after.set_file(self._root / self._rel, self._root)
+        self._panes.right.set_file(None, None)
+        self._panes.right.set_file(self._root / self._rel, self._root)
         self._restore.setEnabled(False)
         self._subhead.setText(
             f"{self._rel} has been restored. Both sides now show the same "
             "image."
         )
-
-    # -- closing -----------------------------------------------------------
-
-    def done(self, result: int) -> None:  # noqa: D102 - Qt signature
-        # Both panes may still be reading. Their loader threads are parented
-        # to them, so letting the dialog be destroyed first destroys a running
-        # QThread, which aborts the process. A comparison window is closed
-        # quickly by definition, so this is the normal path, not the edge.
-        self._stop_panes()
-        super().done(result)
-
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt signature
-        self._stop_panes()
-        super().closeEvent(event)
-
-    def _stop_panes(self) -> None:
-        for name in ("_before", "_after"):
-            pane = getattr(self, name, None)
-            if pane is not None:
-                try:
-                    pane.stop_loading()
-                except RuntimeError:
-                    pass
 
     # -- the case with nothing to compare ---------------------------------
 
@@ -329,5 +139,58 @@ class DefaceCompareDialog(QDialog):
         row.addWidget(close)
         outer.addLayout(row)
 
+    # -- closing ----------------------------------------------------------
 
-__all__ = ["DefaceCompareDialog"]
+    def done(self, result: int) -> None:  # noqa: D102 - Qt signature
+        if self._panes is not None:
+            self._panes.stop()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if self._panes is not None:
+            self._panes.stop()
+        super().closeEvent(event)
+
+    # -- what the tests reach for -----------------------------------------
+
+    @property
+    def _before(self):
+        return self._panes.left
+
+    @property
+    def _after(self):
+        return self._panes.right
+
+    @property
+    def _link(self):
+        return self._panes.link
+
+    @property
+    def _link_note(self):
+        return self._panes.note
+
+    @property
+    def _linkable(self) -> bool:
+        return self._panes._linkable
+
+
+def size_to_screen(widget, want_w: int, want_h: int) -> None:
+    """Open at the requested size, or at what the screen actually has.
+
+    A fixed 1180x720 is bigger than the work area on a 13-inch laptop once the
+    dock and the menu bar are taken out, and a window that opens larger than
+    the screen cannot be resized back by dragging an edge that is off the
+    display.
+    """
+    screen = widget.screen() or QApplication.primaryScreen()
+    if screen is None:
+        widget.resize(want_w, want_h)
+        return
+    available = screen.availableGeometry()
+    widget.resize(
+        min(want_w, int(available.width() * 0.92)),
+        min(want_h, int(available.height() * 0.92)),
+    )
+
+
+__all__ = ["DefaceCompareDialog", "size_to_screen"]

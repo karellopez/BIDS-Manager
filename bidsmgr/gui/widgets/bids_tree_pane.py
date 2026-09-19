@@ -332,6 +332,8 @@ class BidsTreePane(QWidget):
     deface_revert_requested = pyqtSignal(list)
     #: Keep only the brain in the clicked images. ``list[Path]``.
     strip_requested = pyqtSignal(list)
+    #: Put the clicked images side by side. ``list[Path]``, one or two.
+    compare_requested = pyqtSignal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -877,6 +879,33 @@ class BidsTreePane(QWidget):
         copy_rel_path_action.triggered.connect(
             lambda: self._copy_relative_path(path)
         )
+
+        # Comparing is offered on ANY NIfTI, including one under
+        # derivatives/, because putting a derivative beside the scan it came
+        # from is the most common reason to want this. It sits above the
+        # restructuring block deliberately: it changes nothing.
+        selected_now = self.selected_paths()
+        clicked_path = Path(path)
+        images = [
+            p for p in (selected_now if clicked_path in selected_now
+                        and len(selected_now) > 1 else [clicked_path])
+            if p.is_file() and p.name.lower().endswith((".nii", ".nii.gz"))
+        ]
+        if images:
+            pair = len(images) > 1
+            compare_images = menu.addAction(
+                "Compare these two images..." if pair
+                else "Compare with another image..."
+            )
+            compare_images.setToolTip(
+                "Side by side with one set of controls: crosshair, slice, "
+                "plane, 3-D camera, effects and cut plane stay together."
+                + ("" if pair else " You pick the second image.")
+            )
+            compare_images.triggered.connect(
+                lambda _c=False, s=images[:2]: self.compare_requested.emit(s)
+            )
+            menu.addSeparator()
 
         # Every entity the clicked row actually carries, so the menu offers
         # renaming exactly what is in front of the user. A folder named

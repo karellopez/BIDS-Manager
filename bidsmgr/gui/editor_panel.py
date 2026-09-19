@@ -108,6 +108,7 @@ class EditorPanel(QWidget):
         )
         self._tree_pane.deface_revert_requested.connect(self._on_deface_revert)
         self._tree_pane.strip_requested.connect(self._on_strip)
+        self._tree_pane.compare_requested.connect(self._on_compare_images)
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -404,6 +405,14 @@ class EditorPanel(QWidget):
             "the findings are."
         )
         self._dashboard_action.triggered.connect(self._on_dashboard)
+
+        self._compare_action = self._tools_menu.addAction("Compare images...")
+        self._compare_action.setToolTip(
+            "Put two NIfTI images side by side with one set of controls: "
+            "crosshair, slice, plane, 3-D camera, effects and cut plane all "
+            "stay together. Any two images, not just a defacing pair."
+        )
+        self._compare_action.triggered.connect(self._on_compare_images)
 
         self._tools_menu.addSeparator()
 
@@ -1207,6 +1216,21 @@ class EditorPanel(QWidget):
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _on_compare_images(self, targets: Optional[list] = None) -> None:
+        """Two images side by side, whatever they are.
+
+        Takes the tree selection when there is one: two picked images open
+        straight away, one opens on the left with the right still to choose.
+        Needs no dataset, because comparing two files is not a dataset
+        operation, but passes the root when there is one so the captions can
+        show dataset-relative paths instead of bare names.
+        """
+        from .compare_dialog import open_compare
+
+        picked = targets or self._tree_pane.selected_paths()
+        dlg = open_compare(self, picked, root=self.current_root())
+        dlg.exec()
 
     def _on_strip(self, targets: Optional[list] = None) -> None:
         """Keep only the brain, writing a derivative rather than editing raw.

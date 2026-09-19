@@ -364,6 +364,10 @@ class NiftiViewerPane(QWidget):
         # Current orientation (default Axial) — also the axis the
         # slice slider controls in single-pane mode.
         self._orientation = _AXIS_AXIAL
+        # True while adopting another pane's view. `_broadcast_view` checks
+        # it, so "apply_view_state does not emit" holds however deep the call
+        # goes, instead of depending on every caller remembering.
+        self._applying_view = False
         # Layout mode flags.
         self._tri_view: bool = False
         self._graph_visible: bool = False
@@ -695,6 +699,7 @@ class NiftiViewerPane(QWidget):
             # camera and the effect parameters is what makes two renders a
             # comparison rather than two unrelated pictures of a head.
             "camera": self._gl.camera_state() if self._gl is not None else None,
+            "clip": self._gl.clip_state() if self._gl is not None else None,
             "gl_controls": (
                 self._gl_controls.controls_state()
                 if self._gl_controls is not None else None
@@ -710,6 +715,13 @@ class NiftiViewerPane(QWidget):
         """
         if not state:
             return
+        self._applying_view = True
+        try:
+            self._apply_view_state(state, with_crosshair=with_crosshair)
+        finally:
+            self._applying_view = False
+
+    def _apply_view_state(self, state: dict, *, with_crosshair: bool) -> None:
         mode = state.get("mode")
         if mode and mode != self.current_mode():
             self._set_view_mode(mode)
@@ -739,6 +751,8 @@ class NiftiViewerPane(QWidget):
         # exists by the time its camera is set.
         if self._gl is not None and state.get("camera"):
             self._gl.apply_camera_state(state["camera"])
+        if self._gl is not None and state.get("clip"):
+            self._gl.apply_clip_state(state["clip"])
         if self._gl_controls is not None and state.get("gl_controls"):
             self._gl_controls.apply_controls_state(state["gl_controls"])
 
@@ -956,13 +970,13 @@ class NiftiViewerPane(QWidget):
         self._co_btn.setToolTip("Coronal view.  Shortcut: C")
         self._ax_btn.setToolTip("Axial view.  Shortcut: A")
         self._sa_btn.clicked.connect(
-            lambda: self._set_orientation(_AXIS_SAGITTAL)
+            lambda: self._user_set_orientation(_AXIS_SAGITTAL)
         )
         self._co_btn.clicked.connect(
-            lambda: self._set_orientation(_AXIS_CORONAL)
+            lambda: self._user_set_orientation(_AXIS_CORONAL)
         )
         self._ax_btn.clicked.connect(
-            lambda: self._set_orientation(_AXIS_AXIAL)
+            lambda: self._user_set_orientation(_AXIS_AXIAL)
         )
 
         row1.addSpacing(8)
@@ -1728,6 +1742,11 @@ class NiftiViewerPane(QWidget):
         # signal as a slice or an orientation.
         self._gl.camera_changed.connect(self._broadcast_view)
         self._gl_controls.controls_changed.connect(self._broadcast_view)
+        # Dragging the clip plane, or wheeling through slices with it active,
+        # changes the render from INSIDE the GL widget. The controls panel
+        # mirrors it into its sliders silently, so without this the second
+        # render only caught up the next time something else happened.
+        self._gl.clip_changed.connect(self._broadcast_view)
         self._gl_controls_scroll = QScrollArea()
         # Name the scroll area AND its viewport so both paint the panel colour.
         # Without this the black image canvas behind shows through the
@@ -1941,7 +1960,7 @@ class NiftiViewerPane(QWidget):
         """
         if self._tri_view or self._three_d or self._combo_view:
             self._set_view_mode("single")
-        self._set_orientation(axis)
+        self._user_set_orientation(axis)
 
     def _install_shortcuts(self) -> None:
         """Wire the single-key shortcuts, scoped to the viewer's focus.
@@ -2146,9 +2165,22 @@ class NiftiViewerPane(QWidget):
     # Slice rendering
     # ------------------------------------------------------------------
 
-    def _broadcast_view(self) -> None:
+    def _broadcast_view(self, *_a) -> None:
         """Tell a linked pane how this one is now showing things."""
+        if self._applying_view:
+            return
         self.view_changed.emit(self.view_state())
+
+    def _user_set_orientation(self, axis: int) -> None:
+        """The plane changed because somebody asked for it.
+
+        Separate from :meth:`_set_orientation`, which also runs while the pane
+        is being built and while a file is being bound. Announcing from inside
+        that reads the WHOLE view state at a moment when parts of it do not
+        exist yet or no longer do, which segfaults rather than raising.
+        """
+        self._set_orientation(axis)
+        self._broadcast_view()
 
     def _set_orientation(self, axis: int, *, refresh: bool = True) -> None:
         self._orientation = axis

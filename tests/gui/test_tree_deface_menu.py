@@ -162,3 +162,40 @@ def test_stripping_emits_the_clicked_scope(
     pane._on_show_context_menu(QPoint(1, 1))
 
     assert seen == [[dataset / "sub-01" / "anat" / "sub-01_T1w.nii.gz"]]
+
+
+# ---------------------------------------------------------------------------
+# Comparing any two images, not just a defacing pair.
+
+
+def test_any_nifti_offers_a_comparison(pane: BidsTreePane, monkeypatch) -> None:
+    labels = _menu_labels(pane, monkeypatch, "sub-01_T1w.nii.gz")
+    assert "Compare with another image..." in labels
+
+
+def test_a_sidecar_does_not_offer_a_comparison(
+    pane: BidsTreePane, monkeypatch,
+) -> None:
+    """Comparing is per IMAGE. There is nothing to show for a .json."""
+    labels = _menu_labels(pane, monkeypatch, "sub-01_T1w.json")
+    assert not [label for label in labels if label.startswith("Compare with")]
+
+
+def test_comparing_emits_the_clicked_image(
+    pane: BidsTreePane, monkeypatch, dataset: Path,
+) -> None:
+    item = _item_for(pane, "sub-01_T1w.nii.gz")
+    monkeypatch.setattr(pane._tree, "itemAt", lambda _pos: item)
+    seen: list[list] = []
+    pane.compare_requested.connect(seen.append)
+
+    def _exec(self, *args, **kwargs):
+        for action in self.actions():
+            if action.text().startswith("Compare with"):
+                action.trigger()
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", _exec)
+    pane._on_show_context_menu(QPoint(1, 1))
+
+    assert seen == [[dataset / "sub-01" / "anat" / "sub-01_T1w.nii.gz"]]
