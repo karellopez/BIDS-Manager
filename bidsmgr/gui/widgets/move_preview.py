@@ -45,7 +45,7 @@ class MovePreviewTree(QTreeWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setObjectName("rename-preview")
+        self.setObjectName("check-tree")
         self.setColumnCount(2)
         self.setHeaderLabels(["In the dataset", "Becomes"])
         self.setRootIsDecorated(True)

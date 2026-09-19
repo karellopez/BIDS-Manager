@@ -73,6 +73,45 @@ QToolTip {
     font-size: 11px;
 }
 
+/* ---------- Checkboxes and radio buttons (global) ----------
+ * Unstyled, these fall back to the platform control, which does not follow
+ * the palette: on macOS a plain unchecked QCheckBox paints a light grey
+ * block that reads as disabled, or as already ticked, against the dark
+ * background. The two checkable TREES were already styled by object name,
+ * so the ones that were missed stood out beside them.
+ *
+ * Filled accent for checked, matching the trees, rather than a tick glyph:
+ * QSS cannot draw one without shipping an image, and the flat filled square
+ * is the convention the rest of this stylesheet already uses. */
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 13px; height: 13px;
+    border: 1px solid $border;
+    background: $bg;
+    border-radius: 3px;
+}
+QRadioButton::indicator { border-radius: 7px; }
+
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover { border: 1px solid $accent; }
+
+QCheckBox::indicator:checked,
+QRadioButton::indicator:checked {
+    background: $accent;
+    border: 1px solid $accent;
+}
+QCheckBox::indicator:indeterminate {
+    background: $accent_bg;
+    border: 1px solid $accent;
+}
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    background: $surface2;
+    border: 1px solid $surface2;
+}
+QCheckBox:disabled,
+QRadioButton:disabled { color: $muted; }
+
 /* ---------- Dropdowns (global, rounded + stylish) ----------
  * Every plain QComboBox gets a rounded, themed box + a rounded popup list
  * with rounded item selection (mirroring the project dropdown look).
@@ -1320,7 +1359,7 @@ QLabel#cff-source          { color: $muted; }
    lining "sub-02_ses-post_T2w" up under "sub-01_ses-post_T2w" is what makes
    the difference visible at a glance. The checkbox styling matches the filter
    tree's so the two read as the same control. */
-QTreeWidget#rename-preview {
+QTreeWidget#check-tree {
     background: $bg;
     color: $text;
     border: 1px solid $input_border;
@@ -1328,18 +1367,18 @@ QTreeWidget#rename-preview {
     font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
     font-size: 11px;
 }
-QTreeWidget#rename-preview::item { padding: 2px 0; }
-QTreeWidget#rename-preview::indicator {
+QTreeWidget#check-tree::item { padding: 2px 0; }
+QTreeWidget#check-tree::indicator {
     width: 13px; height: 13px;
     border: 1px solid $border;
     background: $bg;
     border-radius: 3px;
 }
-QTreeWidget#rename-preview::indicator:checked {
+QTreeWidget#check-tree::indicator:checked {
     background: $accent;
     border: 1px solid $accent;
 }
-QTreeWidget#rename-preview::indicator:indeterminate {
+QTreeWidget#check-tree::indicator:indeterminate {
     background: $accent_bg;
     border: 1px solid $accent;
 }

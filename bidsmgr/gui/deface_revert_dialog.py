@@ -88,6 +88,10 @@ class DefaceRevertDialog(QDialog):
             "safer than defacing afterwards."
         ))
         self._preview = QTreeWidget()
+        # Same flat, themed tick as every other checkable
+        # preview; without it Qt paints the platform control,
+        # which does not follow the palette.
+        self._preview.setObjectName("check-tree")
         self._preview.setColumnCount(2)
         self._preview.setHeaderLabels(["In the dataset", "Restored from"])
         self._preview.setRootIsDecorated(False)
