@@ -600,10 +600,10 @@ class SettingsDialog(QDialog):
         form.addRow("Residuals:", self._convert_skip_residuals)
 
         self._convert_force_edf = QCheckBox(
-            "Force EDF for EEG / iEEG (re-encode recordings to EDF on convert)"
+            "Force EDF for EEG (re-encode recordings to EDF on convert)"
         )
         self._convert_force_edf.setToolTip(
-            "Re-encode EEG / iEEG recordings to EDF instead of keeping the "
+            "Re-encode EEG recordings to EDF instead of keeping the "
             "source format. Harmonises a study to one BIDS-native format, and "
             "makes a non-BIDS-native but mne-readable source (GDF, EGI, ...) "
             "convertible. MEG / NIRS are unaffected."

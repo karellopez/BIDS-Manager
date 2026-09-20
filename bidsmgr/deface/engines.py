@@ -183,9 +183,9 @@ MINDGRAB = Engine(
     label="mindgrab",
     description=(
         "A small neural network that finds the brain directly in the image. "
-        "Much better than fitting an atlas, and the method BIDSvue uses. "
-        "About ten seconds an image on a laptop CPU, plus a one-off download "
-        "of the model the first time it runs."
+        "Much better than fitting an atlas to it. About ten seconds an image "
+        "on a laptop CPU, plus a one-off download of the model the first time "
+        "it runs."
     ),
     kind=KIND_STRIP,
     backend=BACKEND_BRAINCHOP,
