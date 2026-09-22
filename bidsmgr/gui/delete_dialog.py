@@ -39,6 +39,7 @@ from ..editor.rename import RenameError
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.move_preview import MovePreviewTree, delete_extras
+from .widgets.scope_bar import ScopeBar
 
 
 def _human(size: int) -> str:
@@ -91,6 +92,16 @@ class DeleteDialog(QDialog):
         bl.setSpacing(10)
 
         scope_card, sl = card()
+        # No dataset-wide entry: ``remove.plan_delete`` refuses the dataset
+        # root, so offering it would only produce a refusal. Deleting
+        # everything is not a tool, it is a decision for the file manager.
+        self._scope_bar = ScopeBar(
+            self._root, self._targets, allow_dataset=False, parent=self,
+        )
+        self._targets = self._scope_bar.targets()
+        self._scope_bar.changed.connect(self._on_scope_changed)
+        sl.addWidget(self._scope_bar)
+
         self._scope = QLabel("")
         self._scope.setObjectName("dlg-hint")
         self._scope.setWordWrap(True)
@@ -146,6 +157,10 @@ class DeleteDialog(QDialog):
         self._refresh_plan()
 
     # -- planning --------------------------------------------------------
+
+    def _on_scope_changed(self) -> None:
+        self._targets = self._scope_bar.targets()
+        self._refresh_plan()
 
     def _refresh_plan(self) -> None:
         shown = [_rel(self._root, t) for t in self._targets[:3]]

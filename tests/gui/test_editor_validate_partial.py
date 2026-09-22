@@ -20,6 +20,7 @@ import pytest
 
 from bidsmgr.editor.types import FileVerdict, Severity, ValidationReport
 from bidsmgr.editor.validator import validate_file, validate_folder
+from .conftest import open_every_folder
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.bids_tree_pane import PATH_ROLE
 from bidsmgr.workers import FileReportWorker, FolderReportWorker
@@ -140,6 +141,8 @@ def test_folder_report_worker_emits_all_verdicts(
 
 
 def _find_tree_item(tree, path_str: str):
+    open_every_folder(tree)
+
     def visit(item):
         if item.data(0, PATH_ROLE) == path_str:
             return item

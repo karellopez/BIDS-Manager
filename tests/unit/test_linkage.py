@@ -171,3 +171,124 @@ class TestBrokenLinks:
 
     def test_a_healthy_dataset_has_none(self, dataset):
         assert linkage.broken_links(dataset) == []
+
+
+class TestWhatCarriesAField:
+    """``sources`` is what the two-list dialog draws its left side from.
+
+    It has to answer a question a per-file read cannot: which files COULD
+    carry this field and do not, because the fieldmap nobody set an
+    ``IntendedFor`` on is the one worth finding.
+    """
+
+    def test_it_finds_the_files_that_may_carry_the_field(self, dataset):
+        rows = linkage.sources(dataset, "IntendedFor")
+        assert {r.path.name for r in rows} == {
+            "sub-001_run-1_magnitude1.nii.gz",
+            "sub-001_run-1_phasediff.nii.gz",
+            "sub-001_run-2_magnitude1.nii.gz",
+            "sub-001_run-2_phasediff.nii.gz",
+        }
+
+    def test_a_bold_is_not_among_them(self, dataset):
+        rows = linkage.sources(dataset, "IntendedFor")
+        assert not any("_bold" in r.path.name for r in rows)
+
+    def test_a_file_with_nothing_set_is_still_listed(self, dataset):
+        """Which is the point: an empty IntendedFor is invisible otherwise."""
+        rows = linkage.sources(dataset, "IntendedFor")
+        assert all(not r.targets for r in rows)
+        assert all(r.status == linkage.IMPLIED for r in rows)
+
+    def test_only_set_drops_them(self, dataset):
+        assert linkage.sources(dataset, "IntendedFor", only_set=True) == []
+
+    def test_a_scope_confines_it(self, dataset):
+        assert linkage.sources(dataset, "IntendedFor", prefix="sub-999") == []
+        assert linkage.sources(dataset, "IntendedFor", prefix="sub-001")
+
+    def test_a_written_link_reads_as_ok(self, dataset):
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor",
+            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
+        )])
+        row = next(
+            r for r in linkage.sources(dataset, "IntendedFor")
+            if r.path.name == "sub-001_run-1_phasediff.nii.gz"
+        )
+        assert row.status == linkage.OK
+
+    def test_a_link_at_a_deleted_file_reads_as_broken(self, dataset):
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor", ["bids::sub-001/func/gone.nii.gz"],
+        )])
+        row = next(
+            r for r in linkage.sources(dataset, "IntendedFor")
+            if r.path.name == "sub-001_run-1_phasediff.nii.gz"
+        )
+        assert row.status == linkage.BROKEN
+
+    def test_a_link_that_contradicts_the_times_says_so(self, dataset):
+        """Written, resolving, and disagreeing with the rule: the state the
+        validator has no way to report."""
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor",
+            ["bids::sub-001/func/sub-001_task-x_run-3_bold.nii.gz"],
+        )])
+        row = next(
+            r for r in linkage.sources(dataset, "IntendedFor")
+            if r.path.name == "sub-001_run-1_phasediff.nii.gz"
+        )
+        assert row.status == linkage.DIFFERS
+
+    def test_a_field_with_no_rule_never_differs(self, dataset):
+        bold = dataset / "sub-001/func/sub-001_task-x_run-1_bold.nii.gz"
+        linkage.apply_links(dataset, [(
+            linkage.sidecar_for(bold), "Sources",
+            ["bids::sub-001/fmap/sub-001_run-1_phasediff.nii.gz"],
+        )])
+        row = next(
+            r for r in linkage.sources(dataset, "Sources", only_set=True)
+            if r.path == bold
+        )
+        assert row.proposed is None
+        assert row.status == linkage.OK
+
+
+class TestTheReverseDirection:
+    def test_it_says_what_points_at_a_run(self, dataset):
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor",
+            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
+        )])
+        bold = dataset / "sub-001/func/sub-001_task-x_run-1_bold.nii.gz"
+        holders = linkage.incoming(dataset)[bold]
+        assert [f for _src, f in holders] == ["IntendedFor"]
+
+    def test_it_names_the_recording_not_its_sidecar(self, dataset):
+        """A link belongs to sub-001_phasediff.nii.gz; saying so is clearer
+        than naming the .json that happens to store it."""
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor",
+            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
+        )])
+        bold = dataset / "sub-001/func/sub-001_task-x_run-1_bold.nii.gz"
+        src, _field = linkage.incoming(dataset)[bold][0]
+        assert src.name == "sub-001_run-1_phasediff.nii.gz"
+
+    def test_a_run_nothing_points_at_is_absent(self, dataset):
+        bold = dataset / "sub-001/func/sub-001_task-x_run-1_bold.nii.gz"
+        assert bold not in linkage.incoming(dataset)
+
+
+class TestDataFileFor:
+    def test_it_is_the_inverse_of_sidecar_for(self, dataset):
+        bold = dataset / "sub-001/func/sub-001_task-x_run-1_bold.nii.gz"
+        assert linkage.data_file_for(linkage.sidecar_for(bold)) == bold
+
+    def test_a_sidecar_describing_no_one_file_stays_itself(self, tmp_path):
+        """An inherited sidecar at the subject level names no recording, and
+        naming a file that is not there would be worse."""
+        orphan = tmp_path / "sub-001_task-x_bold.json"
+        orphan.write_text("{}")
+        assert linkage.data_file_for(orphan) == orphan

@@ -238,6 +238,204 @@ def to_uri(root: Path, target: Path) -> str:
     return "bids::" + rel.as_posix()
 
 
+def data_file_for(sidecar: Path) -> Path:
+    """The recording a ``.json`` describes, or the sidecar if there is none.
+
+    The reverse of :func:`sidecar_for`, and the one a person wants to SEE: a
+    link belongs to ``sub-001_phasediff.nii.gz``, and saying so is clearer
+    than naming the ``.json`` that happens to store it. Falls back to the
+    sidecar for a JSON that describes no single file (an inherited one at the
+    subject level, say), because naming a file that is not there would be
+    worse than naming the sidecar.
+    """
+    sidecar = Path(sidecar)
+    if not sidecar.name.endswith(".json"):
+        return sidecar
+    stem = sidecar.name[: -len(".json")]
+    for ext in _RECORDING_EXTS:
+        candidate = sidecar.with_name(stem + ext)
+        if candidate.exists():
+            return candidate
+    return sidecar
+
+
+# --------------------------------------------------------------------------
+# What carries a field, and how it is doing
+
+# The states a link can be in. Short on purpose: they are read in a column,
+# and a sentence in a column is a sentence nobody reads.
+OK = "ok"
+BROKEN = "points at a missing file"
+UNSET = "not set"
+DIFFERS = "differs from the times"
+IMPLIED = "the times imply one"
+
+
+@dataclass(frozen=True)
+class SourceRow:
+    """One file, one field, and how that field is currently doing."""
+
+    path: Path                  # the recording, for display
+    sidecar: Path               # where the field is actually written
+    field: str
+    targets: tuple[str, ...]            # as written
+    resolved: tuple[Optional[Path], ...]
+    proposed: Optional[tuple[Path, ...]]   # what the acquisition times imply
+    reason: str = ""
+
+    @property
+    def status(self) -> str:
+        if any(r is None for r in self.resolved):
+            return BROKEN
+        if not self.targets:
+            return IMPLIED if self.proposed else UNSET
+        if self.proposed is not None:
+            written = {str(r) for r in self.resolved if r is not None}
+            if written != {str(p) for p in self.proposed}:
+                return DIFFERS
+        return OK
+
+    @property
+    def live(self) -> tuple[Path, ...]:
+        """The targets that are actually there."""
+        return tuple(r for r in self.resolved if r is not None)
+
+
+def restricted_to(field: str) -> Optional[frozenset[str]]:
+    """The datatypes ``field`` is worth offering on, or ``None`` for any.
+
+    ``None`` is the interesting answer: it means the standard allows the
+    field almost anywhere, so a dialog listing every file that COULD carry
+    it would list the whole dataset.
+    """
+    return _FIELD_DATATYPES.get(field)
+
+
+def may_carry(root: Path, path: Path, field: str) -> bool:
+    """Whether ``field`` is worth offering on ``path``."""
+    allowed = _FIELD_DATATYPES.get(field)
+    if allowed is None:
+        return True
+    return _datatype_of(Path(root), Path(path)) in allowed
+
+
+def sources(
+    root: Path, field: str, *, prefix: str = "", only_set: bool = False,
+) -> list[SourceRow]:
+    """Every file in ``prefix`` that may carry ``field``, with its state.
+
+    ``prefix`` is a dataset-relative path (``sub-001``, ``sub-001/ses-pre``)
+    or empty for the whole dataset, matching ``values.Scope``.
+
+    ``only_set`` restricts the answer to files that already carry the field.
+    That is the right default for ``Sources``, which the standard allows
+    almost anywhere: a list of every recording in the dataset is true and
+    unusable. For a field the standard confines to one datatype, the full
+    list is short and showing the files with NOTHING set is the point.
+    """
+    root = Path(root)
+    out: list[SourceRow] = []
+    # One proposal pass per (subject, session), not per file: the rule is
+    # computed for a whole folder at a time, so asking it once per fieldmap
+    # walked the same directory forty times.
+    cache: dict[tuple, list] = {}
+    for path in walk_dataset(root):
+        if not path.name.endswith(_RECORDING_EXTS):
+            continue
+        try:
+            key = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if prefix and not key.startswith(prefix + "/"):
+            continue
+        if not may_carry(root, path, field):
+            continue
+
+        sidecar = sidecar_for(path)
+        written: tuple[str, ...] = ()
+        for link in read_links(root, sidecar):
+            if link.field == field:
+                written = link.targets
+                break
+        if only_set and not written:
+            continue
+
+        proposal = _cached_proposal(root, path, field, cache)
+        out.append(SourceRow(
+            path=path,
+            sidecar=sidecar,
+            field=field,
+            targets=written,
+            resolved=tuple(resolve(root, t) for t in written),
+            proposed=tuple(proposal.targets) if proposal else None,
+            reason=proposal.reason if proposal else "",
+        ))
+    return sorted(out, key=lambda r: r.path)
+
+
+def _cached_proposal(
+    root: Path, path: Path, field: str, cache: dict,
+) -> Optional["Proposal"]:
+    """:func:`propose`, with the per-folder sweep done once.
+
+    The rule is evaluated for a whole (subject, session) at a time and
+    returns a pair per fieldmap acquisition, so the answer for every
+    fieldmap in a folder comes out of one call.
+    """
+    if field != "IntendedFor":
+        return None
+    from ..fixups.intended_for import suggest_intended_for
+
+    sidecar = sidecar_for(Path(path))
+    subject = _subject_of(root, sidecar)
+    session = _session_of(root, sidecar)
+    if not subject:
+        return None
+
+    key = (subject, session)
+    if key not in cache:
+        scope = root / subject
+        if session:
+            scope = scope / session
+        pairs, why = suggest_intended_for(
+            scope, subject[len("sub-"):],
+            session[len("ses-"):] if session else None,
+        )
+        cache[key] = [(pairs, why)]
+    pairs, why = cache[key][0]
+
+    for members, uris in pairs:
+        if sidecar in members:
+            resolved = [resolve(root, u) for u in uris]
+            return Proposal(
+                targets=tuple(p for p in resolved if p is not None),
+                reason=why or "",
+            )
+    return None
+
+
+def incoming(root: Path) -> dict[Path, list[tuple[Path, str]]]:
+    """For every file, what points AT it, and through which field.
+
+    The reverse direction, and the half of the question nothing else here
+    answers: not "what does this fieldmap correct" but "is this run
+    corrected by anything at all". Built in one sweep because it cannot be
+    answered from a single file.
+    """
+    root = Path(root)
+    out: dict[Path, list[tuple[Path, str]]] = {}
+    for path in walk_dataset(root):
+        if not path.name.endswith(".json"):
+            continue
+        for link in read_links(root, path):
+            for target in link.resolved:
+                if target is not None:
+                    out.setdefault(target, []).append(
+                        (data_file_for(path), link.field)
+                    )
+    return out
+
+
 # --------------------------------------------------------------------------
 # Candidates and proposals
 
@@ -422,21 +620,58 @@ def broken_links(root: Path) -> list[BrokenLink]:
     return out
 
 
+#: How each field reads as a rule, for a dialog that has to state one.
+FIELD_RULE: dict[str, str] = {
+    "IntendedFor": (
+        "Written on a fieldmap, pointing at the functional or diffusion runs "
+        "in the SAME subject and session that it can correct."
+    ),
+    "AssociatedEmptyRoom": (
+        "Written on an MEG recording, pointing at the empty-room measurement "
+        "from the same session."
+    ),
+    "Sources": (
+        "Written on a derivative, pointing back at the files it was made "
+        "from."
+    ),
+    "RawSources": (
+        "The deprecated spelling of Sources. Read and repaired here; new "
+        "links should use Sources."
+    ),
+    "AnatomicalImage": (
+        "Written on a spectroscopy recording, pointing at the anatomical "
+        "image its voxel was placed on."
+    ),
+}
+
+
 __all__ = [
+    "BROKEN",
     "BrokenLink",
+    "DIFFERS",
     "FIELD_HELP",
+    "FIELD_RULE",
+    "IMPLIED",
     "LINK_FIELDS",
     "Link",
+    "OK",
     "PATH_FIELDS",
     "Proposal",
+    "SourceRow",
+    "UNSET",
     "apply_links",
     "broken_links",
     "candidates",
+    "data_file_for",
     "fields_for",
+    "incoming",
+    "may_carry",
     "plan_write",
     "propose",
     "read_links",
     "resolve",
+    "restricted_to",
     "sidecar_for",
+    "sources",
     "to_uri",
 ]

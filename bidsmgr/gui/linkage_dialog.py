@@ -1,31 +1,39 @@
-"""Which files point at which, shown as the tree the dataset actually is.
+"""Which files point at which, made by picking a file on each side.
 
-Two rewrites got this wrong in the same way: they showed a FLAT list of
-sidecars and a field name, and left the reader to work out what pointed at
-what. "sub-001_run-2_phasediff.json | IntendedFor | 2 file(s)" tells you a
-relationship exists and nothing about what it relates.
+A reference has two ends, so the dialog has two lists: the files that carry
+the field on the LEFT, the files it may point at on the RIGHT, and the verbs
+between them. That is the shape every tool which maps one set onto another
+uses, from a mail-merge field mapper to a mixer's routing matrix, and it is
+the shape this always should have been. The previous versions drew one
+vertical tree and asked the reader to hold the relationship in their head.
 
-A reference is a relationship between two files, so it is drawn as one:
+What each side is showing is decided by the standard, not by us:
 
-    sub-001 / ses-pre
-      fmap  sub-001_acq-fm2_run-1_phasediff.nii.gz
-            IntendedFor -> func/sub-001_task-x_run-1_bold.nii.gz      ok
-            IntendedFor -> func/sub-001_task-x_run-2_bold.nii.gz      missing
-      func  sub-001_task-x_run-1_bold.nii.gz
-            used by <- fmap/sub-001_acq-fm2_run-1_phasediff.nii.gz
+* the **field** list holds only fields the selected files may carry
+  (``IntendedFor`` is not offered on an anatomical);
+* the **right** list holds only files the field may point AT, in the same
+  subject and session, because a fieldmap does not correct another
+  participant's run;
+* the rule is printed above both lists in a sentence, so the reason a file is
+  absent from a list is readable rather than guessable.
 
-Both directions, because half the questions people have are the reverse one:
-not "what does this fieldmap correct" but "is this run corrected by anything".
-Nothing else in the tool can answer that.
+Three things the left list says that a JSON editor cannot:
 
-Editing is where you are looking. Select any row and the panel underneath
-holds that file's targets as a ticked list; there is no separate mode and no
-second dialog. The suggestion button fills in what the acquisition times
-imply, and says so in a sentence.
+**Status.** ``ok``, ``points at a missing file``, ``not set``, and
+``differs from the times``, which is the interesting one: the link is
+written, resolves, and disagrees with what the acquisition times imply.
 
-Opens on the whole dataset. A file may be passed in to start with it
-selected, which is what the tree's right-click does, but nothing requires
-one.
+**The reverse direction.** The right list's second column says what already
+points at each candidate, so "is this run corrected by anything at all" is
+answerable, which is half of what people actually come here to ask.
+
+**Several at once.** Select four fieldmaps and tick a run: all four take it.
+The tick is tri-state when the selected files disagree, so nothing is
+silently flattened.
+
+Nothing is written until Save, and Save writes every pending change as ONE
+operation, so a linkage pass over a session is one entry in the history and
+one undo.
 """
 
 from __future__ import annotations
@@ -52,28 +60,28 @@ from PyQt6.QtWidgets import (
 )
 
 from ..editor import linkage
+from ..editor import values as ev
 from .dialog_chrome import build_footer_with, build_header, card, hint
 
 log = logging.getLogger(__name__)
 
-# What a row's status says, and how it is coloured. Kept short: the column
-# is read at a glance and a sentence there is a sentence nobody reads.
-_OK = "ok"
-_MISSING = "missing"
-_EXTRA = "not implied by the times"
-_ABSENT = "implied, not set"
-_NONE_YET = "nothing set"
-
 _COLOURS = {
-    _MISSING: "#f85149",
-    _EXTRA: "#d29922",
-    _ABSENT: "#d29922",
-    _NONE_YET: "#8b949e",
+    linkage.BROKEN: "#f85149",
+    linkage.DIFFERS: "#d29922",
+    linkage.IMPLIED: "#d29922",
+    linkage.UNSET: "#8b949e",
 }
+
+# What the left list is filtered to.
+_ALL = "all"
+_PROBLEMS = "problems"
+_SET = "set"
+
+_PATH_ROLE = Qt.ItemDataRole.UserRole
 
 
 class LinkageDialog(QDialog):
-    """Every reference in the dataset, both ways round, and an editor."""
+    """Sources on the left, targets on the right, the verbs in between."""
 
     def __init__(
         self,
@@ -83,12 +91,18 @@ class LinkageDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._root = Path(root)
-        self._current: Optional[Path] = None
+        self._rows: list[linkage.SourceRow] = []
+        self._incoming: dict[Path, list[tuple[Path, str]]] = {}
+        # sidecar -> the targets it should end up pointing at. Only the
+        # files actually edited appear, so Save writes nothing it was not
+        # asked to.
+        self._pending: dict[Path, list[Path]] = {}
         self._changed = 0
+        self._loading = False
 
         self.setWindowTitle("References between files")
         self.setModal(True)
-        self.resize(1120, 800)
+        self.resize(1280, 820)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -96,10 +110,10 @@ class LinkageDialog(QDialog):
         outer.addWidget(build_header(
             "Which files point at which",
             "A few BIDS fields hold a pointer at another file rather than a "
-            "value. A fieldmap's <b>IntendedFor</b> names the runs it can "
-            "correct; a derivative's <b>Sources</b> names what it was made "
-            "from. Every one in this dataset is below, drawn as the "
-            "relationship it is, in both directions.",
+            "value: a fieldmap's <b>IntendedFor</b> names the runs it can "
+            "correct, a derivative's <b>Sources</b> names what it was made "
+            "from. Pick a file on the left, tick what it should point at on "
+            "the right. Only what the standard allows appears in either list.",
         ))
 
         body = QWidget()
@@ -109,89 +123,16 @@ class LinkageDialog(QDialog):
         bl.setContentsMargins(18, 14, 18, 12)
         bl.setSpacing(10)
 
-        split = QSplitter(Qt.Orientation.Vertical)
+        bl.addWidget(self._build_controls())
 
-        tree_card, tl = card("The dataset, and what points at what")
-        tl.addWidget(hint(
-            "An arrow out (→) is what this file points at. An arrow in "
-            "(←) is what points at this file, which is the question "
-            "nothing else here answers: whether a run has a fieldmap at all. "
-            "Select any file to edit its references below."
-        ))
-        self._tree = QTreeWidget()
-        self._tree.setObjectName("check-tree")
-        self._tree.setColumnCount(3)
-        self._tree.setHeaderLabels(["File and its references", "Field", "Status"])
-        self._tree.setUniformRowHeights(True)
-        self._tree.currentItemChanged.connect(self._on_row_selected)
-        tl.addWidget(self._tree, 1)
-
-        tools = QHBoxLayout()
-        tools.setSpacing(8)
-        for text, fn in (
-            ("Expand all", self._tree.expandAll),
-            ("Collapse all", self._tree.collapseAll),
-        ):
-            btn = QPushButton(text)
-            btn.setObjectName("tb-btn")
-            btn.clicked.connect(fn)
-            tools.addWidget(btn)
-        tools.addStretch(1)
-        self._summary = QLabel("")
-        self._summary.setObjectName("dlg-hint")
-        tools.addWidget(self._summary)
-        tl.addLayout(tools)
-        split.addWidget(tree_card)
-
-        edit_card, el = card("Edit the selected file's references")
-        self._what = QLabel("Select a file above.")
-        self._what.setObjectName("dlg-hint")
-        self._what.setWordWrap(True)
-        el.addWidget(self._what)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(QLabel("Field:"))
-        self._field = QComboBox()
-        self._field.setObjectName("ent-input")
-        self._field.currentIndexChanged.connect(lambda _i: self._fill_targets())
-        row.addWidget(self._field)
-        row.addStretch(1)
-        self._propose_btn = QPushButton("Use what the times imply")
-        self._propose_btn.setObjectName("tb-btn")
-        self._propose_btn.clicked.connect(self._on_propose)
-        row.addWidget(self._propose_btn)
-        self._clear_btn = QPushButton("Point at nothing")
-        self._clear_btn.setObjectName("tb-btn")
-        self._clear_btn.setToolTip(
-            "Untick everything and save, which removes the field rather "
-            "than writing an empty list. An empty list claims the file "
-            "points at nothing, which is a different and wronger statement "
-            "than not saying."
-        )
-        self._clear_btn.clicked.connect(lambda: self._set_all(False))
-        row.addWidget(self._clear_btn)
-        self._save_btn = QPushButton("Save")
-        self._save_btn.setObjectName("tb-btn-primary")
-        self._save_btn.clicked.connect(self._on_save)
-        row.addWidget(self._save_btn)
-        el.addLayout(row)
-
-        self._targets = QTreeWidget()
-        self._targets.setObjectName("check-tree")
-        self._targets.setColumnCount(2)
-        self._targets.setHeaderLabels(["Tick what this file should point at", "State"])
-        self._targets.setRootIsDecorated(False)
-        self._targets.setUniformRowHeights(True)
-        self._targets.itemChanged.connect(lambda *_a: self._update_status())
-        el.addWidget(self._targets, 1)
-
-        self._reason = hint("")
-        el.addWidget(self._reason)
-        split.addWidget(edit_card)
-
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self._build_left())
+        split.addWidget(self._build_middle())
+        split.addWidget(self._build_right())
+        split.setStretchFactor(0, 5)
+        split.setStretchFactor(1, 0)
+        split.setStretchFactor(2, 5)
+        split.setCollapsible(1, False)
         bl.addWidget(split, 1)
         outer.addWidget(body, 1)
 
@@ -199,13 +140,144 @@ class LinkageDialog(QDialog):
         self._status.setObjectName("dlg-hint")
         self._status.setWordWrap(True)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(self._on_close)
+        self._save_btn = QPushButton("Save")
+        self._save_btn.setObjectName("tb-btn-primary")
+        self._save_btn.setEnabled(False)
+        self._save_btn.clicked.connect(self._on_save)
+        buttons.addButton(
+            self._save_btn, QDialogButtonBox.ButtonRole.AcceptRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
-        self._set_editor_enabled(False)
-        self._reload()
         if target is not None:
-            self._select(linkage.sidecar_for(Path(target)))
+            self._preselect = linkage.data_file_for(
+                linkage.sidecar_for(Path(target))
+            )
+            self._aim_field_at(Path(target))
+        else:
+            self._preselect = None
+        self._reload()
+
+    # -- construction ------------------------------------------------------
+
+    def _build_controls(self) -> QWidget:
+        box, cl = card()
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        row.addWidget(QLabel("Field:"))
+        self._field = QComboBox()
+        self._field.setObjectName("ent-input")
+        for name in linkage.LINK_FIELDS:
+            self._field.addItem(name, name)
+        self._field.currentIndexChanged.connect(lambda _i: self._reload())
+        row.addWidget(self._field, 1)
+
+        row.addWidget(QLabel("In:"))
+        self._scope = QComboBox()
+        self._scope.setObjectName("ent-input")
+        for scope in ev.scopes(self._root):
+            self._scope.addItem(scope.label, scope.prefix)
+        self._scope.currentIndexChanged.connect(lambda _i: self._reload())
+        row.addWidget(self._scope, 1)
+
+        row.addWidget(QLabel("Show:"))
+        self._show = QComboBox()
+        self._show.setObjectName("ent-input")
+        self._show.addItem("Everything that can carry it", _ALL)
+        self._show.addItem("Only what is set", _SET)
+        self._show.addItem("Only problems", _PROBLEMS)
+        self._show.currentIndexChanged.connect(lambda _i: self._reload())
+        row.addWidget(self._show, 1)
+        cl.addLayout(row)
+
+        self._rule = hint("")
+        cl.addWidget(self._rule)
+        return box
+
+    def _build_left(self) -> QWidget:
+        box, ll = card("Files that carry the field")
+        self._left = QTreeWidget()
+        self._left.setObjectName("check-tree")
+        self._left.setColumnCount(3)
+        self._left.setHeaderLabels(["File", "Points at", "Status"])
+        self._left.setRootIsDecorated(False)
+        self._left.setUniformRowHeights(True)
+        self._left.setSelectionMode(
+            QTreeWidget.SelectionMode.ExtendedSelection
+        )
+        self._left.itemSelectionChanged.connect(self._on_source_changed)
+        ll.addWidget(self._left, 1)
+        self._left_note = hint("")
+        ll.addWidget(self._left_note)
+        return box
+
+    def _build_middle(self) -> QWidget:
+        holder = QWidget()
+        holder.setFixedWidth(196)
+        ml = QVBoxLayout(holder)
+        ml.setContentsMargins(6, 28, 6, 6)
+        ml.setSpacing(6)
+
+        self._link_btn = QPushButton("Link  →")
+        self._link_btn.setObjectName("tb-btn-primary")
+        self._link_btn.setToolTip(
+            "Point the files selected on the left at the files selected on "
+            "the right. Ticking a box on the right does the same thing."
+        )
+        self._link_btn.clicked.connect(lambda: self._set_selected_targets(True))
+        ml.addWidget(self._link_btn)
+
+        self._unlink_btn = QPushButton("←  Unlink")
+        self._unlink_btn.setObjectName("tb-btn")
+        self._unlink_btn.clicked.connect(
+            lambda: self._set_selected_targets(False)
+        )
+        ml.addWidget(self._unlink_btn)
+
+        ml.addSpacing(12)
+
+        self._propose_btn = QPushButton("Use what the\ntimes imply")
+        self._propose_btn.setObjectName("tb-btn")
+        self._propose_btn.setToolTip(
+            "Apply the same rule the conversion applies: a fieldmap covers "
+            "the runs acquired after it and before the next one."
+        )
+        self._propose_btn.clicked.connect(self._on_propose)
+        ml.addWidget(self._propose_btn)
+
+        self._clear_btn = QPushButton("Point at nothing")
+        self._clear_btn.setObjectName("tb-btn")
+        self._clear_btn.setToolTip(
+            "Remove the field rather than writing an empty list. An empty "
+            "list claims the file points at nothing, which is a different "
+            "and wronger statement than not saying."
+        )
+        self._clear_btn.clicked.connect(self._on_clear)
+        ml.addWidget(self._clear_btn)
+
+        ml.addStretch(1)
+        self._middle_note = hint("")
+        ml.addWidget(self._middle_note)
+        return holder
+
+    def _build_right(self) -> QWidget:
+        box, rl = card("Files it may point at")
+        self._right = QTreeWidget()
+        self._right.setObjectName("check-tree")
+        self._right.setColumnCount(2)
+        self._right.setHeaderLabels(["File", "Already pointed at by"])
+        self._right.setRootIsDecorated(False)
+        self._right.setUniformRowHeights(True)
+        self._right.setSelectionMode(
+            QTreeWidget.SelectionMode.ExtendedSelection
+        )
+        self._right.itemChanged.connect(self._on_target_toggled)
+        rl.addWidget(self._right, 1)
+        self._right_note = hint("")
+        rl.addWidget(self._right_note)
+        return box
 
     # -- helpers -----------------------------------------------------------
 
@@ -215,306 +287,331 @@ class LinkageDialog(QDialog):
         except ValueError:
             return path.name
 
-    def _set_editor_enabled(self, on: bool) -> None:
-        for widget in (self._field, self._propose_btn, self._clear_btn,
-                       self._save_btn, self._targets):
-            widget.setEnabled(on)
+    def _field_name(self) -> str:
+        return self._field.currentData() or linkage.LINK_FIELDS[0]
 
-    # -- building the tree -------------------------------------------------
+    def _aim_field_at(self, path: Path) -> None:
+        """Start on a field the passed-in file can actually carry."""
+        offered = linkage.fields_for(self._root, Path(path))
+        if not offered:
+            return
+        at = self._field.findData(offered[0])
+        if at >= 0:
+            self._field.blockSignals(True)
+            self._field.setCurrentIndex(at)
+            self._field.blockSignals(False)
+
+    def _targets_now(self, row: linkage.SourceRow) -> list[Path]:
+        """What ``row`` points at, counting unsaved edits."""
+        if row.sidecar in self._pending:
+            return list(self._pending[row.sidecar])
+        return list(row.live)
+
+    def _selected_rows(self) -> list[linkage.SourceRow]:
+        chosen = {
+            item.data(0, _PATH_ROLE) for item in self._left.selectedItems()
+        }
+        return [r for r in self._rows if str(r.path) in chosen]
+
+    # -- loading -----------------------------------------------------------
 
     def _reload(self) -> None:
-        """One branch per subject and session, one row per file that takes
-        part in a reference, and one child per relationship."""
-        from ..editor.rename import walk_dataset
-
-        self._tree.clear()
-        counts: dict[str, int] = {}
-
-        # Collect first, so the reverse direction can be drawn: a file has
-        # to know what points AT it, which only the whole sweep can say.
-        outgoing: dict[Path, list[tuple[str, str, Optional[Path]]]] = {}
-        incoming: dict[Path, list[tuple[Path, str]]] = {}
-        proposals: dict[Path, set[str]] = {}
-
-        for path in walk_dataset(self._root):
-            if not path.name.endswith(".json"):
-                continue
-            for link in linkage.read_links(self._root, path):
-                for written, resolved in zip(link.targets, link.resolved):
-                    outgoing.setdefault(path, []).append(
-                        (link.field, written, resolved)
-                    )
-                    if resolved is not None:
-                        incoming.setdefault(resolved, []).append(
-                            (path, link.field)
-                        )
-            if "IntendedFor" in linkage.fields_for(self._root, path):
-                proposal = linkage.propose(self._root, path, "IntendedFor")
-                if proposal:
-                    proposals[path] = {
-                        linkage.to_uri(self._root, p) for p in proposal.targets
-                    }
-                    outgoing.setdefault(path, [])
-
-        groups: dict[str, QTreeWidgetItem] = {}
-
-        def group_for(path: Path) -> QTreeWidgetItem:
-            rel = Path(self._rel(path))
-            # DIRECTORIES only. A filename starts with ``sub-`` too, so
-            # including it gave every file a group of its own and the tree
-            # read as a flat list with extra indentation.
-            parts = [
-                p for p in rel.parts[:-1] if p.startswith(("sub-", "ses-"))
-            ]
-            key = "/".join(parts) or "the dataset"
-            node = groups.get(key)
-            if node is None:
-                node = QTreeWidgetItem(self._tree, [key, "", ""])
-                node.setFirstColumnSpanned(True)
-                node.setExpanded(True)
-                groups[key] = node
-            return node
-
-        for path in sorted(set(outgoing) | set(incoming)):
-            parent = QTreeWidgetItem(group_for(path), [
-                self._rel(path).rsplit("/", 1)[-1], "", "",
-            ])
-            parent.setData(0, Qt.ItemDataRole.UserRole, str(path))
-            parent.setExpanded(True)
-            parent.setToolTip(0, self._rel(path))
-
-            wanted = proposals.get(path, set())
-            written = {w for _f, w, _r in outgoing.get(path, [])}
-
-            for field, target, resolved in outgoing.get(path, []):
-                if resolved is None:
-                    state = _MISSING
-                elif wanted and target not in wanted:
-                    state = _EXTRA
-                else:
-                    state = _OK
-                self._child(parent, f"→ {self._short(target)}", field, state)
-                counts[state] = counts.get(state, 0) + 1
-
-            for missing in sorted(wanted - written):
-                self._child(
-                    parent, f"→ {self._short(missing)}",
-                    "IntendedFor", _ABSENT,
-                )
-                counts[_ABSENT] = counts.get(_ABSENT, 0) + 1
-
-            if not outgoing.get(path) and not wanted and path not in incoming:
-                self._child(parent, "→ nothing", "", _NONE_YET)
-
-            for source, field in sorted(incoming.get(path, [])):
-                self._child(
-                    parent, f"← {self._rel(source).rsplit('/', 1)[-1]}",
-                    f"{field} (incoming)", "",
-                )
-
-        for column in range(3):
-            self._tree.resizeColumnToContents(column)
-
-        if not groups:
-            self._summary.setText(
-                "No file in this dataset points at another. That is normal "
-                "with no fieldmaps and no derivatives."
-            )
-            self._status.setText("")
-            return
-        self._summary.setText(
-            ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
-            or "nothing to report"
+        field = self._field_name()
+        self._rule.setText(
+            f"<b>{field}</b>. {linkage.FIELD_RULE.get(field, '')}"
         )
-        self._status.setText("Select a file to edit what it points at.")
 
-    def _short(self, target: str) -> str:
-        """A written target as ``datatype/filename``, which is what reads."""
-        body = target.split(":", 2)[-1] if target.startswith("bids:") else target
-        parts = [p for p in body.split("/") if p]
-        return "/".join(parts[-2:]) if len(parts) >= 2 else body
+        # A field the standard allows almost anywhere would otherwise list
+        # every recording in the dataset, which is true and unusable, so it
+        # defaults to what is already set.
+        unrestricted = linkage.restricted_to(field) is None
+        mode = self._show.currentData()
+        only_set = mode == _SET or (mode == _ALL and unrestricted)
 
-    def _child(
-        self, parent: QTreeWidgetItem, text: str, field: str, state: str,
-    ) -> QTreeWidgetItem:
-        item = QTreeWidgetItem(parent, [text, field, state])
-        colour = _COLOURS.get(state)
-        if colour:
-            item.setForeground(2, QBrush(QColor(colour)))
-        return item
+        self._rows = linkage.sources(
+            self._root, field,
+            prefix=self._scope.currentData() or "",
+            only_set=only_set,
+        )
+        if mode == _PROBLEMS:
+            self._rows = [r for r in self._rows if r.status != linkage.OK]
+        self._incoming = linkage.incoming(self._root)
+
+        self._fill_left()
+        note = (
+            f"{len(self._rows)} file(s) can carry {field} here."
+            if self._rows else
+            f"No file here carries {field}. "
+            + linkage.FIELD_RULE.get(field, "")
+        )
+        if unrestricted and mode == _ALL:
+            self._left_note.setText(
+                note + " The standard allows this field almost anywhere, so "
+                "only files that already have it are listed."
+            )
+        else:
+            self._left_note.setText(note)
+
+    def _fill_left(self) -> None:
+        self._loading = True
+        self._left.clear()
+        for row in self._rows:
+            targets = self._targets_now(row)
+            pending = row.sidecar in self._pending
+            status = row.status if not pending else "edited, not saved"
+            item = QTreeWidgetItem(self._left, [
+                self._rel(row.path),
+                self._describe(targets, row),
+                status,
+            ])
+            item.setData(0, _PATH_ROLE, str(row.path))
+            item.setToolTip(0, self._rel(row.path))
+            colour = _COLOURS.get(status)
+            if colour:
+                item.setForeground(2, QBrush(QColor(colour)))
+        for column in range(3):
+            self._left.resizeColumnToContents(column)
+        self._loading = False
+
+        if self._preselect is not None:
+            self._select(self._preselect)
+            self._preselect = None
+        elif self._left.topLevelItemCount():
+            self._left.setCurrentItem(self._left.topLevelItem(0))
+        else:
+            self._on_source_changed()
+
+    def _describe(self, targets: list[Path], row: linkage.SourceRow) -> str:
+        """The "Points at" column: names when few, a count when many.
+
+        Shortened to the last two entity tokens (``run-01_bold.nii.gz``)
+        rather than the suffix alone: every target of one fieldmap is a
+        ``_bold``, so the suffix on its own printed the same word twice and
+        said nothing about WHICH runs.
+        """
+        broken = sum(1 for r in row.resolved if r is None)
+        if not targets and not broken:
+            return "nothing"
+        names = ["_".join(Path(t).name.split("_")[-2:]) for t in targets[:2]]
+        text = ", ".join(names)
+        if len(targets) > 2:
+            text += f" and {len(targets) - 2} more"
+        if broken:
+            text += f" ({broken} missing)" if text else f"{broken} missing"
+        return text or f"{len(targets)} file(s)"
 
     def _select(self, path: Path) -> None:
         wanted = str(path)
-        stack = [self._tree.topLevelItem(i)
-                 for i in range(self._tree.topLevelItemCount())]
-        while stack:
-            item = stack.pop()
-            if item is None:
-                continue
-            if item.data(0, Qt.ItemDataRole.UserRole) == wanted:
-                self._tree.setCurrentItem(item)
-                self._tree.scrollToItem(item)
+        for i in range(self._left.topLevelItemCount()):
+            item = self._left.topLevelItem(i)
+            if item.data(0, _PATH_ROLE) == wanted:
+                self._left.setCurrentItem(item)
+                self._left.scrollToItem(item)
                 return
-            stack.extend(item.child(i) for i in range(item.childCount()))
+        if self._left.topLevelItemCount():
+            self._left.setCurrentItem(self._left.topLevelItem(0))
 
-    # -- the editor --------------------------------------------------------
+    # -- the right list ----------------------------------------------------
 
-    def _on_row_selected(self, current, _previous) -> None:
-        # A child row is a relationship; editing it means editing its parent.
-        while current is not None and not current.data(0, Qt.ItemDataRole.UserRole):
-            current = current.parent()
-        if current is None:
-            self._current = None
-            self._what.setText("Select a file above.")
-            self._targets.clear()
-            self._field.clear()
-            self._set_editor_enabled(False)
-            return
+    def _on_source_changed(self) -> None:
+        rows = self._selected_rows()
+        self._loading = True
+        self._right.clear()
 
-        self._current = Path(current.data(0, Qt.ItemDataRole.UserRole))
-        self._set_editor_enabled(True)
-        self._field.blockSignals(True)
-        self._field.clear()
-        for name in linkage.fields_for(self._root, self._current):
-            self._field.addItem(name, userData=name)
-        self._field.blockSignals(False)
-        self._fill_targets()
-
-    def _current_field(self) -> str:
-        return self._field.currentData() or ""
-
-    def _fill_targets(self) -> None:
-        self._targets.clear()
-        if self._current is None:
-            return
-        field = self._current_field()
-        if not field:
-            self._what.setText(
-                f"<b>{self._rel(self._current)}</b><br>"
-                "This file carries no field that points at another."
-            )
-            return
-
-        self._what.setText(
-            f"<b>{self._rel(self._current)}</b><br>"
-            f"<b>{field}</b>: {linkage.FIELD_HELP.get(field, '')}"
+        for widget in (self._link_btn, self._unlink_btn, self._clear_btn):
+            widget.setEnabled(bool(rows))
+        self._propose_btn.setEnabled(
+            any(r.proposed is not None for r in rows)
         )
 
-        current = {
-            t for link in linkage.read_links(self._root, self._current)
-            if link.field == field for t in link.targets
-        }
-        resolved_now = {linkage.resolve(self._root, t) for t in current}
+        if not rows:
+            self._right_note.setText("Select a file on the left.")
+            self._middle_note.setText("")
+            self._loading = False
+            self._refresh_status()
+            return
 
-        self._targets.blockSignals(True)
-        for candidate in linkage.candidates(self._root, self._current, field):
-            item = QTreeWidgetItem([self._rel(candidate), ""])
+        field = self._field_name()
+        # The INTERSECTION across the selected files, because a target has to
+        # be legal for every file that would take it. Selecting two subjects'
+        # fieldmaps therefore offers nothing rather than offering a link that
+        # would cross subjects.
+        shared: Optional[set[Path]] = None
+        for row in rows:
+            here = set(linkage.candidates(self._root, row.path, field))
+            shared = here if shared is None else (shared & here)
+        options = sorted(shared or set())
+
+        ticked = [set(self._targets_now(r)) for r in rows]
+        for candidate in options:
+            holders = self._incoming.get(candidate, [])
+            others = ", ".join(
+                sorted({Path(src).name for src, _f in holders})
+            ) or "nothing"
+            item = QTreeWidgetItem(self._right, [self._rel(candidate), others])
+            item.setData(0, _PATH_ROLE, str(candidate))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(
-                0,
-                Qt.CheckState.Checked if candidate in resolved_now
-                else Qt.CheckState.Unchecked,
-            )
-            item.setData(0, Qt.ItemDataRole.UserRole, str(candidate))
-            self._targets.addTopLevelItem(item)
-
-        for target in sorted(current):
-            if linkage.resolve(self._root, target) is None:
-                item = QTreeWidgetItem([target, _MISSING])
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            on = sum(1 for t in ticked if candidate in t)
+            if on == 0:
                 item.setCheckState(0, Qt.CheckState.Unchecked)
-                item.setForeground(1, QBrush(QColor(_COLOURS[_MISSING])))
-                self._targets.addTopLevelItem(item)
+            elif on == len(rows):
+                item.setCheckState(0, Qt.CheckState.Checked)
+            else:
+                # Tri-state rather than a guess: the selected files disagree
+                # and flattening that silently would lose an edit.
+                item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+            self._right.addTopLevelItem(item)
 
-        self._targets.resizeColumnToContents(0)
-        self._targets.blockSignals(False)
+        # Targets that are written and are not there. They cannot be ticked,
+        # because ticking means "point at this" and there is nothing to point
+        # at; unticking them is done by Save, which drops what is gone.
+        for row in rows:
+            for written, resolved in zip(row.targets, row.resolved):
+                if resolved is not None:
+                    continue
+                item = QTreeWidgetItem(self._right, [written, "missing"])
+                item.setForeground(
+                    1, QBrush(QColor(_COLOURS[linkage.BROKEN]))
+                )
+                item.setForeground(
+                    0, QBrush(QColor(_COLOURS[linkage.BROKEN]))
+                )
+                self._right.addTopLevelItem(item)
 
-        proposal = linkage.propose(self._root, self._current, field)
-        self._propose_btn.setEnabled(proposal is not None)
-        self._reason.setText(
-            f"What the acquisition times imply: {proposal.reason}"
-            if proposal else
-            "No rule proposes this field, so tick what it should point at."
+        self._right.resizeColumnToContents(0)
+        self._loading = False
+
+        if not options:
+            self._right_note.setText(
+                "Nothing in this dataset is a legal target for that field "
+                "here. " + linkage.FIELD_RULE.get(field, "")
+            )
+        else:
+            self._right_note.setText(
+                f"{len(options)} candidate(s). The second column is the "
+                "reverse question: what already points at each of them."
+            )
+        self._middle_note.setText(
+            rows[0].reason if len(rows) == 1 and rows[0].reason else ""
         )
-        self._update_status()
+        self._refresh_status()
 
-    def _rows(self) -> list[QTreeWidgetItem]:
-        return [
-            self._targets.topLevelItem(i)
-            for i in range(self._targets.topLevelItemCount())
+    # -- editing -----------------------------------------------------------
+
+    def _on_target_toggled(self, item: QTreeWidgetItem, column: int) -> None:
+        if self._loading or column != 0:
+            return
+        path = item.data(0, _PATH_ROLE)
+        if not path:
+            return
+        self._apply_target(
+            Path(path), item.checkState(0) == Qt.CheckState.Checked
+        )
+
+    def _set_selected_targets(self, on: bool) -> None:
+        chosen = [
+            item for item in self._right.selectedItems()
+            if item.data(0, _PATH_ROLE)
         ]
+        if not chosen:
+            self._status.setText(
+                "Select one or more files on the right first, or tick them."
+            )
+            return
+        for item in chosen:
+            self._apply_target(Path(item.data(0, _PATH_ROLE)), on)
 
-    def _checked(self) -> list[Path]:
-        return [
-            Path(r.data(0, Qt.ItemDataRole.UserRole)) for r in self._rows()
-            if r.checkState(0) == Qt.CheckState.Checked
-            and r.data(0, Qt.ItemDataRole.UserRole)
-        ]
-
-    def _set_all(self, on: bool) -> None:
-        state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
-        self._targets.blockSignals(True)
-        for row in self._rows():
-            if row.data(0, Qt.ItemDataRole.UserRole):
-                row.setCheckState(0, state)
-        self._targets.blockSignals(False)
-        self._update_status()
+    def _apply_target(self, target: Path, on: bool) -> None:
+        """Add or remove ``target`` on every file selected on the left."""
+        for row in self._selected_rows():
+            current = self._targets_now(row)
+            if on and target not in current:
+                current.append(target)
+            elif not on and target in current:
+                current.remove(target)
+            self._pending[row.sidecar] = sorted(set(current))
+        self._after_edit()
 
     def _on_propose(self) -> None:
-        proposal = linkage.propose(
-            self._root, self._current, self._current_field()
-        )
-        if proposal is None:
-            return
-        wanted = {str(p) for p in proposal.targets}
-        self._targets.blockSignals(True)
-        for row in self._rows():
-            key = row.data(0, Qt.ItemDataRole.UserRole)
-            if key:
-                row.setCheckState(
-                    0,
-                    Qt.CheckState.Checked if key in wanted
-                    else Qt.CheckState.Unchecked,
-                )
-        self._targets.blockSignals(False)
-        self._update_status()
+        for row in self._selected_rows():
+            if row.proposed is None:
+                continue
+            self._pending[row.sidecar] = sorted(set(row.proposed))
+        self._after_edit()
 
-    def _update_status(self) -> None:
-        if self._current is None:
-            return
-        n = len(self._checked())
-        missing = sum(1 for r in self._rows() if r.text(1) == _MISSING)
-        parts = [f"{n} file(s) ticked."]
-        if missing:
-            parts.append(
-                f"{missing} current target(s) point at nothing and go on save."
+    def _on_clear(self) -> None:
+        for row in self._selected_rows():
+            self._pending[row.sidecar] = []
+        self._after_edit()
+
+    def _after_edit(self) -> None:
+        keep = [str(r.path) for r in self._selected_rows()]
+        self._fill_left()
+        self._restore_selection(keep)
+        self._on_source_changed()
+
+    def _restore_selection(self, keys: list[str]) -> None:
+        self._left.blockSignals(True)
+        self._left.clearSelection()
+        for i in range(self._left.topLevelItemCount()):
+            item = self._left.topLevelItem(i)
+            if item.data(0, _PATH_ROLE) in keys:
+                item.setSelected(True)
+                if self._left.currentItem() is None:
+                    self._left.setCurrentItem(item)
+        self._left.blockSignals(False)
+
+    def _refresh_status(self) -> None:
+        pending = len(self._pending)
+        self._save_btn.setEnabled(bool(pending))
+        if not pending:
+            self._status.setText(
+                "Nothing to save. Tick a file on the right to point at it."
             )
-        parts.append("Nothing is written until you press Save.")
-        self._status.setText(" ".join(parts))
+            return
+        self._status.setText(
+            f"{pending} file(s) edited and not yet saved. Saving writes them "
+            "as one step, so one undo puts them all back."
+        )
+
+    # -- saving ------------------------------------------------------------
 
     def _on_save(self) -> None:
-        if self._current is None:
+        if not self._pending:
             return
-        field = self._current_field()
-        if not field:
-            return
-        sidecar, uris = linkage.plan_write(
-            self._root, self._current, field, self._checked()
-        )
+        field = self._field_name()
+        edits = [
+            (sidecar, field, [linkage.to_uri(self._root, t) for t in targets])
+            for sidecar, targets in sorted(self._pending.items())
+        ]
         try:
             self._changed += linkage.apply_links(
-                self._root, [(sidecar, field, uris)],
-                label=f"Set {field} on {sidecar.name}",
+                self._root, edits,
+                label=f"Set {field} on {len(edits)} file(s)",
             )
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             QMessageBox.warning(
                 self, "Could not save",
-                f"{sidecar.name} was not changed.\n\n{exc}",
+                f"Nothing was changed.\n\n{exc}",
             )
             return
-        keep = self._current
+        self._pending.clear()
         self._reload()
-        self._select(keep)
+        self._status.setText(f"Saved. {self._changed} file(s) changed so far.")
+
+    def _on_close(self) -> None:
+        if self._pending:
+            answer = QMessageBox.question(
+                self, "Unsaved references",
+                f"{len(self._pending)} file(s) have edits that are not "
+                "written. Close and lose them?",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Discard,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Discard:
+                return
+        self.reject()
 
     def changed_count(self) -> int:
         return self._changed

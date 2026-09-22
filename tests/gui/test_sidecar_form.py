@@ -28,6 +28,7 @@ from bidsmgr.editor.types import (
 )
 from PyQt6.QtWidgets import QFrame
 
+from .conftest import open_every_folder
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.bids_tree_pane import PATH_ROLE
 from bidsmgr.gui.widgets.sidecar_form_pane import (
@@ -368,6 +369,7 @@ def test_tree_click_loads_form_without_validation(
     json_path_str = str(
         bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     )
+    open_every_folder(tree)
     target = None
 
     def visit(item) -> None:

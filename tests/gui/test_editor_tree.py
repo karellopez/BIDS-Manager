@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import open_every_folder
 from bidsmgr.gui.app_settings import AppSettings
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.bids_tree_pane import (
@@ -64,8 +65,11 @@ def bids_root(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+
+
 def _collect_items(tree) -> list[tuple[int, str, str | None]]:
-    """Return (depth, label, color_token) for every visible row."""
+    """Return (depth, label, color_token) for every row, folders opened."""
+    open_every_folder(tree)
     out: list[tuple[int, str, str | None]] = []
 
     def visit(item, depth: int) -> None:
@@ -127,6 +131,7 @@ def test_hidden_and_junk_dirs_skipped(qapp, bids_root: Path) -> None:
 def test_folder_recording_collapses_to_leaf(qapp, bids_root: Path) -> None:
     pane = BidsTreePane()
     pane.set_root(bids_root)
+    open_every_folder(pane._tree)
 
     # Find the ``.ds`` directory in the tree.
     ds_items = []
@@ -166,6 +171,7 @@ def test_color_tokens_match_kinds(qapp, bids_root: Path) -> None:
 def test_file_selected_signal_emits_path(qapp, bids_root: Path, qtbot) -> None:
     pane = BidsTreePane()
     pane.set_root(bids_root)
+    open_every_folder(pane._tree)
 
     # Locate the T1w.json item to click.
     target = None
@@ -207,6 +213,7 @@ def test_set_root_none_clears(qapp, bids_root: Path) -> None:
 
 
 def _find_item(tree, label: str):
+    open_every_folder(tree)
     found = []
 
     def visit(item) -> None:

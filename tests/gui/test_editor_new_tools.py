@@ -62,68 +62,68 @@ def _fmap(root: Path, n: int) -> Path:
 
 
 class TestReferencesDialog:
-    """It draws the RELATIONSHIP, in both directions.
+    """Sources on the left, targets on the right, the verbs in between.
 
-    Two earlier versions showed a flat list of sidecars and a field name,
-    which says a relationship exists and nothing about what it relates.
+    Three earlier versions drew one vertical tree and asked the reader to
+    hold the relationship in their head. What is checked here is that both
+    lists hold what the STANDARD allows, that ticking reaches the engine,
+    and that a selection of several files is edited as one.
     """
 
-    def _tree_rows(self, dlg):
-        rows = []
+    def _left_rows(self, dlg):
+        return [
+            (dlg._left.topLevelItem(i).text(0),
+             dlg._left.topLevelItem(i).text(1),
+             dlg._left.topLevelItem(i).text(2))
+            for i in range(dlg._left.topLevelItemCount())
+        ]
 
-        def walk(item, depth):
-            for i in range(item.childCount()):
-                child = item.child(i)
-                rows.append((depth, child.text(0), child.text(1), child.text(2)))
-                walk(child, depth + 1)
+    def _right_rows(self, dlg):
+        return [
+            (dlg._right.topLevelItem(i).text(0),
+             dlg._right.topLevelItem(i).text(1))
+            for i in range(dlg._right.topLevelItemCount())
+        ]
 
-        for i in range(dlg._tree.topLevelItemCount()):
-            top = dlg._tree.topLevelItem(i)
-            rows.append((0, top.text(0), top.text(1), top.text(2)))
-            walk(top, 1)
-        return rows
+    def _tick(self, dlg, needle: str, on: bool = True) -> None:
+        for i in range(dlg._right.topLevelItemCount()):
+            item = dlg._right.topLevelItem(i)
+            if needle in item.text(0):
+                item.setCheckState(
+                    0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+                )
+                return
+        raise AssertionError(f"{needle} is not a candidate: {self._right_rows(dlg)}")
 
     def test_it_opens_on_the_whole_dataset(self, qtbot, dataset):
         """No file has to be selected first."""
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
-        assert dlg._tree.topLevelItemCount() >= 1
+        assert dlg._left.topLevelItemCount() == 2       # the two fieldmaps
 
-    def test_files_are_grouped_by_subject(self, qtbot, dataset):
-        """The group key is DIRECTORIES only: a filename starts with
-        ``sub-`` too, and including it gave every file its own group."""
+    def test_the_left_list_holds_only_files_that_may_carry_the_field(
+        self, qtbot, dataset,
+    ):
+        """IntendedFor belongs on a fieldmap, so no bold run is offered."""
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
-        tops = [dlg._tree.topLevelItem(i).text(0)
-                for i in range(dlg._tree.topLevelItemCount())]
-        assert tops == ["sub-001"]
+        names = [r[0] for r in self._left_rows(dlg)]
+        assert all("fmap/" in n for n in names)
+        assert not any("_bold" in n for n in names)
 
-    def test_an_outgoing_reference_names_its_target(self, qtbot, dataset):
-        from bidsmgr.editor import linkage
-
-        linkage.apply_links(dataset, [(
-            _fmap(dataset, 1), "IntendedFor",
-            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
-        )])
+    def test_the_right_list_holds_only_legal_targets(self, qtbot, dataset):
+        """And it is the runs, in the same subject, not the other fieldmap."""
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
-        arrows = [r for r in self._tree_rows(dlg) if r[1].startswith("\u2192 ")]
-        assert any("run-1_bold" in r[1] for r in arrows)
-        assert any(r[3] == "ok" for r in arrows)
+        names = [r[0] for r in self._right_rows(dlg)]
+        assert names and all("func/" in n for n in names)
+        assert not any("phasediff" in n for n in names)
 
-    def test_the_reverse_direction_is_shown(self, qtbot, dataset):
-        """The question nothing else answers: has this run got a fieldmap?"""
-        from bidsmgr.editor import linkage
-
-        linkage.apply_links(dataset, [(
-            _fmap(dataset, 1), "IntendedFor",
-            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
-        )])
+    def test_a_file_with_nothing_set_says_so(self, qtbot, dataset):
+        """The fixture's fieldmaps carry no IntendedFor at all."""
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
-        incoming = [r for r in self._tree_rows(dlg) if r[1].startswith("\u2190 ")]
-        assert incoming
-        assert "incoming" in incoming[0][2]
+        assert any(r[2] == "the times imply one" for r in self._left_rows(dlg))
 
     def test_a_missing_target_is_flagged(self, qtbot, dataset):
         from bidsmgr.editor import linkage
@@ -133,35 +133,41 @@ class TestReferencesDialog:
         )])
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
-        assert any(r[3] == "missing" for r in self._tree_rows(dlg))
+        assert any(
+            r[2] == "points at a missing file" for r in self._left_rows(dlg)
+        )
 
-    def test_what_the_times_imply_but_nothing_says(self, qtbot, dataset):
-        """The fixture's fieldmaps carry no IntendedFor at all."""
+    def test_the_right_list_answers_the_reverse_question(self, qtbot, dataset):
+        """What already points at each candidate: is this run corrected?"""
+        from bidsmgr.editor import linkage
+
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor",
+            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
+        )])
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
-        assert any(r[3] == "implied, not set" for r in self._tree_rows(dlg))
+        by = {r[0]: r[1] for r in self._right_rows(dlg)}
+        assert any("phasediff" in v for v in by.values())
+        assert "nothing" in by.values()
 
-    def test_the_summary_counts_the_states(self, qtbot, dataset):
-        dlg = LinkageDialog(dataset)
-        qtbot.addWidget(dlg)
-        assert "implied, not set" in dlg._summary.text()
-
-    def test_the_editor_is_off_until_a_file_is_selected(self, qtbot, dataset):
+    def test_nothing_is_saveable_until_something_is_edited(self, qtbot, dataset):
         dlg = LinkageDialog(dataset)
         qtbot.addWidget(dlg)
         assert not dlg._save_btn.isEnabled()
 
-    def test_selecting_a_child_row_edits_its_parent_file(self, qtbot, dataset):
-        """A child row is a relationship, not a file."""
-        dlg = LinkageDialog(dataset)
+    def test_ticking_a_target_then_saving_writes_a_bids_uri(
+        self, qtbot, dataset,
+    ):
+        dlg = LinkageDialog(dataset, _fmap(dataset, 1))
         qtbot.addWidget(dlg)
-        top = dlg._tree.topLevelItem(0)
-        parent = top.child(0)
-        dlg._tree.setCurrentItem(parent.child(0))
-        assert dlg._current is not None
+        self._tick(dlg, "run-2_bold")
         assert dlg._save_btn.isEnabled()
+        dlg._on_save()
+        assert json.loads(_fmap(dataset, 1).read_text())["IntendedFor"] == [
+            "bids::sub-001/func/sub-001_task-x_run-2_bold.nii.gz"]
 
-    def test_saving_writes_a_bids_uri(self, qtbot, dataset):
+    def test_what_the_times_imply_fills_it_in(self, qtbot, dataset):
         dlg = LinkageDialog(dataset, _fmap(dataset, 1))
         qtbot.addWidget(dlg)
         dlg._on_propose()
@@ -179,10 +185,54 @@ class TestReferencesDialog:
         )])
         dlg = LinkageDialog(dataset, _fmap(dataset, 1))
         qtbot.addWidget(dlg)
-        dlg._set_all(False)
+        dlg._on_clear()
         dlg._on_save()
         assert "IntendedFor" not in json.loads(_fmap(dataset, 1).read_text())
 
+    def test_several_files_take_the_same_target_at_once(self, qtbot, dataset):
+        """Select both fieldmaps, tick one run, both get it."""
+        dlg = LinkageDialog(dataset)
+        qtbot.addWidget(dlg)
+        for i in range(dlg._left.topLevelItemCount()):
+            dlg._left.topLevelItem(i).setSelected(True)
+        dlg._on_source_changed()
+        self._tick(dlg, "run-3_bold")
+        dlg._on_save()
+        for n in (1, 2):
+            assert json.loads(_fmap(dataset, n).read_text())["IntendedFor"] == [
+                "bids::sub-001/func/sub-001_task-x_run-3_bold.nii.gz"]
+
+    def test_disagreeing_files_show_a_partial_tick(self, qtbot, dataset):
+        """Nothing is silently flattened when the selection disagrees."""
+        from bidsmgr.editor import linkage
+
+        linkage.apply_links(dataset, [(
+            _fmap(dataset, 1), "IntendedFor",
+            ["bids::sub-001/func/sub-001_task-x_run-1_bold.nii.gz"],
+        )])
+        dlg = LinkageDialog(dataset)
+        qtbot.addWidget(dlg)
+        for i in range(dlg._left.topLevelItemCount()):
+            dlg._left.topLevelItem(i).setSelected(True)
+        dlg._on_source_changed()
+        states = [
+            dlg._right.topLevelItem(i).checkState(0)
+            for i in range(dlg._right.topLevelItemCount())
+        ]
+        assert Qt.CheckState.PartiallyChecked in states
+
+    def test_everything_saves_as_one_operation(self, qtbot, dataset):
+        """A linkage pass over a session is one entry in the history."""
+        dlg = LinkageDialog(dataset)
+        qtbot.addWidget(dlg)
+        for i in range(dlg._left.topLevelItemCount()):
+            dlg._left.topLevelItem(i).setSelected(True)
+        dlg._on_source_changed()
+        dlg._on_propose()
+        assert len(dlg._pending) == 2
+        dlg._on_save()
+        assert dlg.changed_count() == 2
+        assert not dlg._pending
 
 class TestIndexWidthsDialog:
     def test_every_index_the_schema_defines_gets_a_row(self, qtbot, dataset):
