@@ -34,7 +34,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    Qt,
+    QThreadPool,
+    pyqtSignal,
+)
 
 from ... import schema as schema_mod
 from ...inventory.rebuild import rebuild_from_columns, rebuild_from_entities
@@ -510,24 +516,46 @@ class InventoryTableModel(QAbstractTableModel):
         """Decide the modality-scoped columns up front, once per row TYPE.
 
         Answering costs a full walk of the schema's rules, and the answer is
-        the same for every row of a given datatype and suffix. Left to the
-        paint path, the first scroll that reveals these columns pays for one
-        walk per distinct type, which reads as a stall part-way across the
-        table. Doing it at bind time costs the same work where a wait is
-        already expected, and is bounded by the number of distinct types in
-        the scan rather than the number of rows.
+        the same for every row of a given datatype and suffix. Left entirely
+        to the paint path, the first scroll that reveals these columns pays
+        for one walk per distinct type, which reads as a stall part-way
+        across the table.
+
+        **On a worker thread**, because it was measured at 790 ms of an
+        830 ms freeze right after a scan finished: 425 walks of the schema
+        rules, in the model's constructor, on the GUI thread, with the
+        spinner already stopped. A frozen window is not "a wait where a wait
+        is expected", it is an application that looks hung.
+
+        The paint path still answers lazily for anything not yet warm, so
+        the table is correct from the first frame and merely gets faster.
+        The cache underneath is a ``functools.lru_cache``, which is safe to
+        fill from another thread.
         """
         if not len(self._df):
             return
-        scoped = set(_COLUMN_BIDS_FIELDS) | set(_COLUMN_DATATYPES)
-        seen: set[tuple[str, str]] = set()
-        for row in range(len(self._df)):
-            pair = self.effective_datatype_suffix(row)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            for df_col in scoped:
-                self.column_applies(row, df_col)
+
+        pairs = {
+            self.effective_datatype_suffix(row) for row in range(len(self._df))
+        }
+        scoped = tuple(set(_COLUMN_BIDS_FIELDS) | set(_COLUMN_DATATYPES))
+
+        def warm() -> None:
+            for datatype, suffix in pairs:
+                for df_col in scoped:
+                    key = (df_col, datatype, suffix)
+                    if key in self._applies_cache:
+                        continue
+                    try:
+                        self._applies_cache[key] = self._compute_applies(
+                            df_col, datatype, suffix,
+                            _COLUMN_DATATYPES.get(df_col),
+                            _COLUMN_BIDS_FIELDS.get(df_col),
+                        )
+                    except Exception:  # noqa: BLE001 - warming is advisory
+                        return
+
+        QThreadPool.globalInstance().start(warm)
 
     def column_applies(self, row: int, df_col: str) -> bool:
         """True when ``df_col`` means anything for this row's datatype.
@@ -1344,9 +1372,27 @@ class InventoryTableModel(QAbstractTableModel):
     # Bulk edit
     # ------------------------------------------------------------------
 
+    # Bulk-editable ENTITIES are prefixed with this, so an entity name can
+    # never be mistaken for one of the column keys below. ``acquisition``
+    # has no column; ``task`` has one.
+    ENTITY_KEY_PREFIX = "entity:"
+
+    # The entities that already have a dedicated column key in the list
+    # below. Offering them twice would be two controls writing one value.
+    _ENTITY_COLUMN_KEYS: dict[str, str] = {
+        "subject": "id",
+        "session": "ses",
+        "task": "task",
+        "run": "run",
+    }
+
     # Keys the bulk-edit dialog can target. The order is intentional —
     # the dropdown shows these in this sequence so the most common
     # targets (subject, dataset, task) come first.
+    #
+    # This list covers COLUMNS. Entities without a column are offered too,
+    # and are read from the schema rather than listed here: see
+    # :meth:`bulk_editable_entities`.
     BULK_EDITABLE_KEYS: tuple[str, ...] = (
         "id",        # → subject entity + BIDS_name
         # "dataset" is intentionally excluded: it is owned by the project /
@@ -1365,6 +1411,71 @@ class InventoryTableModel(QAbstractTableModel):
         "Handedness",
         "companion_files",
     )
+
+    def bulk_editable_entities(self, rows: list[int]) -> list[str]:
+        """Entity long names the schema permits for EVERY row in ``rows``.
+
+        The per-row Properties panel has always built its entity list from
+        ``schema.allowed_entities(datatype, suffix)``, so ``acq`` is
+        editable there. The bulk dialog read a hand-written tuple whose
+        only entities were subject, session, task and run, so the one
+        operation that exists to set the same value on many rows could not
+        set the entity people most often need: the one that tells two
+        otherwise identical acquisitions apart.
+
+        The INTERSECTION, because a bulk edit writes to every selected row
+        and an entity the schema forbids on one of them is not a legal
+        thing to offer. Same rule as ``editor.restructure.addable_entities``.
+
+        A row whose datatype or suffix is not resolved yet constrains
+        nothing rather than emptying the list: the schema cannot answer for
+        a file it cannot identify, and one unclassified row in a selection
+        of twenty should not disable the control. This matches what the
+        Properties panel does with the same unknown.
+
+        Returned in the schema's canonical filename order, and without the
+        four that have their own column.
+        """
+        allowed: Optional[set[str]] = None
+        for row in rows:
+            if not (0 <= row < len(self._df)):
+                continue
+            datatype = str(self._df.at[row, "proposed_datatype"] or "") \
+                if "proposed_datatype" in self._df.columns else ""
+            suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+                if "bids_guess_suffix" in self._df.columns else ""
+            if not datatype or not suffix:
+                continue
+            try:
+                here = set(schema_mod.allowed_entities(datatype, suffix))
+            except Exception:  # noqa: BLE001 - an unknown pair constrains nothing
+                continue
+            allowed = here if allowed is None else (allowed & here)
+
+        if allowed is None:
+            # Nothing in the selection could be identified. Offer what the
+            # schema knows rather than nothing at all.
+            allowed = set(schema_mod.entity_order())
+
+        return [
+            e for e in schema_mod.entity_order()
+            if e in allowed and e not in self._ENTITY_COLUMN_KEYS
+        ]
+
+    def entity_values_in_use(self, rows: list[int], entity: str) -> list[str]:
+        """The values ``entity`` already carries across ``rows``, sorted.
+
+        Offered as suggestions in the bulk dialog. A selection where half
+        the rows already say ``acq-fm2`` is the common case, and retyping a
+        value that is on screen is how a typo gets in.
+        """
+        seen = {
+            value for row in rows
+            if 0 <= row < len(self._df)
+            for value in (self.entities(row).get(entity, ""),)
+            if value
+        }
+        return sorted(seen)
 
     def bulk_set(
         self,
@@ -1385,6 +1496,17 @@ class InventoryTableModel(QAbstractTableModel):
         * Everything else      → :meth:`setData` on the column index
           (mirror-cell rebuilds happen inside ``setData``).
         """
+        # An entity with no column of its own goes straight to
+        # ``set_entity``, which records the edit, rewrites the entities
+        # JSON and rebuilds the basename, exactly as the per-row panel does.
+        if column_key.startswith(self.ENTITY_KEY_PREFIX):
+            entity = column_key[len(self.ENTITY_KEY_PREFIX):]
+            return sum(
+                1 for row in rows
+                if 0 <= row < self.rowCount()
+                and self.set_entity(row, entity, value)
+            )
+
         if column_key not in self.BULK_EDITABLE_KEYS:
             return 0
 

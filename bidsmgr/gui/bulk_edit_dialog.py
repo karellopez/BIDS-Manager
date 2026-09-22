@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -124,6 +125,23 @@ class BulkEditDialog(QDialog):
             spec = next((c for c in COLUMNS if c.key == key), None)
             label = spec.header if (spec and spec.header) else key
             self._col_combo.addItem(label, userData=key)
+        # Then every entity the schema allows on all the selected rows and
+        # that has no column of its own. Without these the dialog could not
+        # set ``acq``, which is the entity that tells two otherwise
+        # identical acquisitions apart and therefore the one most often
+        # wanted on a multi-row selection.
+        self._entity_descriptions: dict[str, str] = {}
+        for entity in self._model.bulk_editable_entities(self._rows):
+            try:
+                info = schema_mod.entity_info(entity)
+            except KeyError:
+                continue
+            key = f"{InventoryTableModel.ENTITY_KEY_PREFIX}{entity}"
+            self._col_combo.addItem(f"{info.name} ({entity})", userData=key)
+            self._entity_descriptions[key] = (
+                f"{info.description.strip()} "
+                f"Written as ``{info.name}-<{info.format.name}>``."
+            ).strip()
         self._col_combo.currentIndexChanged.connect(self._on_column_changed)
         form.addRow("Column:", self._col_combo)
 
@@ -138,6 +156,19 @@ class BulkEditDialog(QDialog):
         form.addRow("New value:", self._value_edit)
         form.addRow("", self._value_combo)
         self._value_combo.setVisible(False)
+
+        # Clearing an entity is a different instruction from setting it to
+        # nothing, and there is no way to type the difference, so it is a
+        # tick rather than an empty box. Only entities can be removed: a
+        # column is part of the table's shape and an empty one is a blank
+        # cell, not an absent field.
+        self._remove_check = QCheckBox("Remove this entity from every selected row")
+        self._remove_check.setToolTip(
+            "Takes the entity off the selected rows entirely, so it stops "
+            "appearing in their BIDS names. The value box is ignored."
+        )
+        self._remove_check.toggled.connect(self._on_remove_toggled)
+        form.addRow("", self._remove_check)
         self._value_row_index = 1  # the row we toggle (line edit vs combo)
         # Which editor is active. Tracked explicitly rather than via
         # ``isVisible()`` (unreliable before the dialog is shown / in tests).
@@ -194,10 +225,29 @@ class BulkEditDialog(QDialog):
         key = self._col_combo.currentData()
         if key is None:
             return
-        self._description.setText(_COLUMN_DESCRIPTION.get(key, ""))
+        self._description.setText(
+            self._entity_descriptions.get(key)
+            or _COLUMN_DESCRIPTION.get(key, "")
+        )
+
+        is_entity = key.startswith(InventoryTableModel.ENTITY_KEY_PREFIX)
+        self._remove_check.setVisible(is_entity)
+        if not is_entity:
+            self._remove_check.setChecked(False)
 
         # Decide which editor to show.
-        if key == "datatype":
+        if key.startswith(InventoryTableModel.ENTITY_KEY_PREFIX):
+            # An entity value is free text bounded by the entity's own
+            # format, which ``set_entity`` and the basename rebuild check.
+            # Offering the values already in use saves retyping one that
+            # some rows carry and others do not.
+            entity = key[len(InventoryTableModel.ENTITY_KEY_PREFIX):]
+            in_use = self._model.entity_values_in_use(self._rows, entity)
+            if in_use:
+                self._show_value_combo(in_use, editable=True)
+            else:
+                self._show_value_lineedit()
+        elif key == "datatype":
             # Schema-bounded but editable (large set, lets the user type).
             self._show_value_combo(sorted(schema_mod.list_datatypes()), editable=True)
         elif key == "suffix":
@@ -217,6 +267,11 @@ class BulkEditDialog(QDialog):
             self._show_value_combo(_FIXED_CHOICES[key], editable=False)
         else:
             self._show_value_lineedit()
+
+    def _on_remove_toggled(self, removing: bool) -> None:
+        """Grey the value editor out: with Remove ticked it is not read."""
+        self._value_edit.setEnabled(not removing)
+        self._value_combo.setEnabled(not removing)
 
     def _show_value_combo(self, options: list[str], *, editable: bool = False) -> None:
         self._value_combo.blockSignals(True)
@@ -240,11 +295,23 @@ class BulkEditDialog(QDialog):
 
     def _on_apply(self) -> None:
         key = self._col_combo.currentData()
-        value = self._read_value()
-        if key is None or not value:
-            # Nothing to do — keep the dialog open so the user can fix
-            # the input rather than closing on empty.
+        if key is None:
             return
+        value = self._read_value()
+
+        if not value:
+            # An ENTITY can be cleared, and clearing it is the only way to
+            # take one off a group of files: an entity the scan proposed
+            # but the dataset should not carry. Every other column keeps
+            # the old rule, because an empty value there is a user who has
+            # not finished typing rather than an instruction.
+            if not self._remove_check.isChecked():
+                return
+        elif self._remove_check.isChecked():
+            # Removing wins over a value left in the box, but say so rather
+            # than silently discarding what was typed.
+            value = ""
+
         self._changed = self._model.bulk_set(self._rows, key, value)
         self.accept()
 

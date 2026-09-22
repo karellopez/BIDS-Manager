@@ -681,6 +681,7 @@ class ConverterPanel(QWidget):
         skip_bids_guess: bool = False,
         user_hints=None,
         exclusions=None,
+        index_widths=None,
     ) -> ScanWorker:
         """Kick off a background scan.
 
@@ -721,6 +722,7 @@ class ConverterPanel(QWidget):
             skip_bids_guess=skip_bids_guess,
             user_hints=user_hints,
             exclusions=exclusions,
+            index_widths=index_widths,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -1572,6 +1574,7 @@ class ConverterPanel(QWidget):
             skip_bids_guess=s.scan_skip_bids_guess,
             user_hints=s.to_user_hints(),
             exclusions=s.to_exclusions(),
+            index_widths=s.scan_index_widths,
         )
 
     def _on_tsv_filename_edited(self) -> None:

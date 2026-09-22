@@ -53,6 +53,7 @@ KEYS = {
     "scan_probe_convert": "scan/probe_convert",
     "scan_converter_preview": "scan/converter_preview",
     "scan_skip_bids_guess": "scan/skip_bids_guess",
+    "scan_index_widths":  "scan/index_widths",       # JSON: entity -> width
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
@@ -169,6 +170,12 @@ class AppSettings:
     # Default on: probe-convert runs dcm2niix per series at scan time to
     # enrich the BIDS guess with sidecar-derived hints.
     scan_probe_convert: bool = True
+    # How wide to write each index entity in the names a scan proposes, as
+    # ``{"run": 2}``. Empty means whatever the source says, which is what
+    # the standard allows and what every earlier version did. Stored as JSON
+    # because QSettings has no dict type and a flat key per entity would need
+    # editing here every time BIDS adds one.
+    scan_index_widths: dict = field(default_factory=dict)
     # Record what the conversion answers by itself, so the metadata form
     # shows it instead of an empty box for a field nobody has to fill in.
     scan_converter_preview: bool = True
@@ -374,6 +381,15 @@ class AppSettings:
         out.scan_n_jobs = _as_int(s.value(KEYS["scan_n_jobs"]), out.scan_n_jobs)
         out.scan_probe_convert = _as_bool(s.value(KEYS["scan_probe_convert"]),
                                           out.scan_probe_convert)
+        try:
+            raw = s.value(KEYS["scan_index_widths"], "")
+            parsed = json.loads(raw) if raw else {}
+            out.scan_index_widths = {
+                str(k): int(v) for k, v in parsed.items()
+                if str(v).isdigit() and 1 <= int(v) <= 6
+            } if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            out.scan_index_widths = {}
         out.scan_converter_preview = _as_bool(
             s.value(KEYS["scan_converter_preview"]), out.scan_converter_preview,
         )
@@ -505,6 +521,7 @@ class AppSettings:
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
         s.setValue(KEYS["nifti_view_mode"], self.nifti_view_mode)
+        s.setValue(KEYS["scan_index_widths"], json.dumps(self.scan_index_widths))
         s.setValue(KEYS["nifti_orientation"], int(self.nifti_orientation))
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))

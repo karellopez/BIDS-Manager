@@ -416,6 +416,15 @@ class EditorPanel(QWidget):
 
         self._tools_menu.addSeparator()
 
+        self._coherence_action = self._tools_menu.addAction("Check coherence...")
+        self._coherence_action.setToolTip(
+            "Find where the dataset's files stop agreeing with each other: "
+            "a scans row naming a file that is gone, a participants row for "
+            "a deleted subject, a link pointing at nothing, a sidecar with "
+            "no recording. Read-only until you choose a repair."
+        )
+        self._coherence_action.triggered.connect(self._on_coherence)
+
         self._fixups_action = self._tools_menu.addAction("Fix ups...")
         self._fixups_action.setToolTip(
             "Generate the companion files recordings are missing, write "
@@ -470,6 +479,26 @@ class EditorPanel(QWidget):
         )
         self._rename_action.triggered.connect(self._on_rename)
 
+        self._replace_action = self._tools_menu.addAction(
+            "Find and replace a value..."
+        )
+        self._replace_action.setToolTip(
+            "Find every file where an entity has one value and give it "
+            "another, inside the whole dataset, one subject or one session. "
+            "The values are listed with how many files carry each, so there "
+            "is nothing to guess."
+        )
+        self._replace_action.triggered.connect(self._on_replace_value)
+
+        self._pad_action = self._tools_menu.addAction("Index widths...")
+        self._pad_action.setToolTip(
+            "Give every index entity a consistent width, so run-1 reads as "
+            "run-01 throughout. Says where the widths already disagree, "
+            "which is the case worth acting on. Both spellings are valid "
+            "BIDS, so this is a house style."
+        )
+        self._pad_action.triggered.connect(self._on_pad_values)
+
         self._entities_action = self._tools_menu.addAction(
             "Add or remove an entity..."
         )
@@ -493,6 +522,19 @@ class EditorPanel(QWidget):
         self._sessions_action.triggered.connect(
             lambda: self._on_edit_entities(session_mode=True)
         )
+
+        self._links_action = self._tools_menu.addAction(
+            "References (IntendedFor, Sources...)..."
+        )
+        self._links_action.setToolTip(
+            "Which files each file points at, and whether that is right. "
+            "Lists every IntendedFor, AssociatedEmptyRoom, Sources and "
+            "AnatomicalImage in the dataset with its status: correct, "
+            "pointing at a missing file, or disagreeing with the "
+            "acquisition times. Change one by ticking candidates rather "
+            "than typing paths."
+        )
+        self._links_action.triggered.connect(self._on_links)
 
         self._delete_action = self._tools_menu.addAction("Delete...")
         self._delete_action.setToolTip(
@@ -1174,6 +1216,84 @@ class EditorPanel(QWidget):
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _on_links(self, targets: Optional[list] = None) -> None:
+        """Edit the fields that point from one file to another.
+
+        Acts on ONE file: a link belongs to a specific sidecar, and there is
+        no sensible meaning to setting the same IntendedFor on a selection
+        of unrelated files. The first of a multi-selection is used and the
+        dialog says which.
+        """
+        from .linkage_dialog import LinkageDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        chosen = [p for p in chosen if p.is_file()]
+        if not chosen:
+            QMessageBox.information(
+                self, "Nothing selected",
+                "Select a file in the tree first. Links belong to one "
+                "file's sidecar, so this acts on what you pick.",
+            )
+            return
+        dlg = LinkageDialog(root, chosen[0], parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_replace_value(self) -> None:
+        """Find one entity value and replace it, inside a chosen scope."""
+        from .replace_value_dialog import ReplaceValueDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = ReplaceValueDialog(root, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_pad_values(self) -> None:
+        """Give every value of an index entity the same width."""
+        from .pad_values_dialog import PadValuesDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = PadValuesDialog(root, parent=self)
+        dlg.exec()
+        if dlg.applied_count():
+            # Files moved, so whatever the panes are holding may be gone.
+            self._sidecar_form.set_file(None, None, None)
+            self._reload_open_image()
+            self._tree_pane.set_root(root)
+            if self._report is not None:
+                self.start_dataset_validation()
+
+    def _on_coherence(self) -> None:
+        """Find where the dataset's files stop agreeing with each other."""
+        from .coherence_dialog import CoherenceDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = CoherenceDialog(root, parent=self)
+        dlg.exec()
+        if dlg.applied_count():
+            self._sidecar_form.set_file(None, None, None)
+            self._tree_pane.set_root(root)
+            if self._report is not None:
+                self.start_dataset_validation()
 
     def _refresh_deface_action(self) -> None:
         """Grey the Deface entry out when it cannot run, and say why.

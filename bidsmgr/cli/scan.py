@@ -53,7 +53,7 @@ from ..classifier.user_rules import (
 )
 from ..classifier import user_rules as user_rules_module
 from ..inventory import probe_convert as probe_convert_module
-from ..inventory._time import parse_dicom_time_seconds as _parse_dicom_time_seconds
+from ..inventory._time import parse_time_seconds as _parse_time_seconds
 from ..inventory.eeg_meg import EEG_MEG_COLUMNS, scan_eeg_meg
 from ..inventory.mri_dicom import (
     BIDS_ENTITIES_COLUMNS,
@@ -567,8 +567,8 @@ def _detect_aborts(
             sorted_members = sorted(
                 name_members,
                 key=lambda k: (
-                    _parse_dicom_time_seconds(rows_by_id[k].acq_time)
-                    if _parse_dicom_time_seconds(rows_by_id[k].acq_time) is not None
+                    _parse_time_seconds(rows_by_id[k].acq_time)
+                    if _parse_time_seconds(rows_by_id[k].acq_time) is not None
                     else float("inf"),
                     rows_by_id[k].series_uid or "",
                 ),
@@ -584,8 +584,8 @@ def _detect_aborts(
                     continue
                 if (row_l.n_files or 0) < abort_min_files:
                     continue
-                t_e = _parse_dicom_time_seconds(row_e.acq_time)
-                t_l = _parse_dicom_time_seconds(row_l.acq_time)
+                t_e = _parse_time_seconds(row_e.acq_time)
+                t_l = _parse_time_seconds(row_l.acq_time)
                 if t_e is None or t_l is None:
                     # No timing information: be conservative — only flag if
                     # there are 3+ same-name same-image_type acquisitions.
@@ -825,7 +825,7 @@ def _is_real_answer(value) -> bool:
     return True
 
 
-def _finish_unified_frame(merged, exclusions) -> None:
+def _finish_unified_frame(merged, exclusions, index_widths=None) -> None:
     """The last passes over the finished inventory, whatever it holds.
 
     Extracted because there are two write paths, one for a tree with MRI in it
@@ -840,6 +840,16 @@ def _finish_unified_frame(merged, exclusions) -> None:
     state.
     """
     _apply_user_exclusions(merged, exclusions)
+
+    # Index widths, before collisions are counted: two rows that differ only
+    # by padding are the same name once padded, and the collision pass is
+    # what has to see that.
+    if index_widths and _apply_index_widths(merged, index_widths):
+        from ..inventory.rebuild import rebuild_from_entities
+
+        # ``in_place``: the default returns a NEW frame and leaves this one
+        # alone, so the padded entity dict never reached the basename.
+        rebuild_from_entities(merged, in_place=True)
 
     # Two recordings resolving to one name means one silently overwrites the
     # other. Where BIDS has an answer (a run) it is applied; where it does not,
@@ -992,10 +1002,22 @@ def _augment_dataframe(
                     "files that will be written into fmap/"
                 )
 
-        df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
-
         if best.skip:
+            # Say WHY. Every other exclusion annotates itself and this one
+            # did not, so a third of the excluded rows in the test data sat
+            # in the table unticked with an empty issues cell. A row the
+            # user can see but not account for is the same problem as a row
+            # that was dropped: they cannot tell a deliberate exclusion from
+            # a classifier that failed.
+            annotated_issues.append(
+                f"not convertible to BIDS: {best.classifier} identified this "
+                f"as {best.datatype}/{best.suffix}, which the standard has no "
+                "place for (scanner localizers, scouts and reformats of them "
+                "are not raw data). Tick include to convert it anyway."
+            )
             df.at[df_idx, "include"] = 0
+
+        df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
 
         if basename:
             ext = ".tsv" if basename.endswith("_physio") else ".nii.gz"
@@ -1077,6 +1099,22 @@ def _augment_dataframe(
 # The GUI inventory model keys on the leading ``NONIMAGE_ISSUE_TOKEN``
 # substring to paint the row's "not an image" highlight, so keep the two
 # in sync (mirrors how the abort highlight keys on ``suspected_abort``).
+# Short key to the schema's long name, so the pad pass can reach an entity
+# dict whichever spelling it holds. Built once from the schema rather than
+# listed, so a new entity needs no edit here.
+def _entity_long_names() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for long_name in schema.entity_order():
+        try:
+            out[schema.entity_info(long_name).name] = long_name
+        except KeyError:
+            continue
+    return out
+
+
+_ENTITY_LONG = _entity_long_names()
+
+
 NONIMAGE_ISSUE_TOKEN = "non-image series"
 NONIMAGE_ISSUE = (
     "non-image series: the DICOM headers carry no pixel data "
@@ -1651,6 +1689,46 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
                 )
 
 
+def _apply_index_widths(df: "pd.DataFrame", widths: dict[str, int]) -> int:
+    """Write every index entity at the width the user asked for.
+
+    Done HERE rather than in the Editor afterwards because the inspection
+    table is where a user first sees the names, and a table that already
+    reads ``run-01`` is one they do not have to go and fix. The standard
+    accepts either width, so this is a preference and it is off unless set.
+
+    Only NUMERIC values are touched: an index whose value is not a number
+    is a different problem and padding it would hide that.
+    """
+    if not widths or df.empty or "entities" not in df.columns:
+        return 0
+
+    from ..editor.values import pad
+
+    changed = 0
+    for idx in df.index:
+        try:
+            ents = json.loads(df.at[idx, "entities"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(ents, dict):
+            continue
+        touched = False
+        for entity, width in widths.items():
+            long_name = _ENTITY_LONG.get(entity, entity)
+            for key in (entity, long_name):
+                value = str(ents.get(key, ""))
+                if value and value.isdigit():
+                    padded = pad(value, int(width))
+                    if padded != value:
+                        ents[key] = padded
+                        touched = True
+        if touched:
+            df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
+            changed += 1
+    return changed
+
+
 def run_scan(
     dicom_root: Path,
     output_tsv: Path,
@@ -1665,6 +1743,7 @@ def run_scan(
     cancel_check=None,
     user_hints: Optional[list[UserHint]] = None,
     exclusions: Optional[list[ExclusionRule]] = None,
+    index_widths: Optional[dict[str, int]] = None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -1749,7 +1828,7 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
-        _finish_unified_frame(merged, exclusions)
+        _finish_unified_frame(merged, exclusions, index_widths)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
         scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
@@ -1830,7 +1909,7 @@ def run_scan(
     # Exclusions, name collisions and the mixed-study heads-up, on the unified
     # frame so they cover MRI and EEG/MEG alike. Shared with the EEG-only path
     # above, which is what stopped them drifting apart again.
-    _finish_unified_frame(merged, exclusions)
+    _finish_unified_frame(merged, exclusions, index_widths)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,

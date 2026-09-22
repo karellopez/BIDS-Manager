@@ -49,6 +49,11 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         # A viewer action, not a repair: it sits with Dashboard, above the
         # separator that starts the things which CHANGE the dataset.
         "Compare images...",
+        # Beside Fix ups because they are the same idea: find what is wrong
+        # with the dataset and offer to repair it. This one settles what
+        # disagrees, Fix ups fills what is missing. Above rather than below,
+        # so the Fix ups / Deface adjacency below stays true.
+        "Check coherence...",
         "Fix ups...",
         "Deface...",
         "Remove the skull...",
@@ -59,8 +64,16 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "Compare with the original...",
         "Put the face back...",
         "Rename entity...",
+        # Beside Rename because both change an entity VALUE: this one
+        # finds every file with a value inside a chosen scope, and the
+        # next is the special case of changing them all by width.
+        "Find and replace a value...",
+        "Index widths...",
         "Add or remove an entity...",
         "Sessions...",
+        # Named for the fields it edits, because "Links" said nothing to
+        # anyone who had not already read the code.
+        "References (IntendedFor, Sources...)...",
         "Delete...",
         "Track changes",
     ]

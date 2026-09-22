@@ -168,6 +168,41 @@ def classify_fieldmap_type(img_list: list[str]) -> str:
     return ""
 
 
+def acquisition_time(ds) -> str:
+    """When this image was acquired, as ``HHMMSS[.FFFFFF]``.
+
+    ``AcquisitionTime`` is the obvious tag and it used to be the only one
+    read here. Siemens XA, and every other enhanced-DICOM writer, records
+    the same fact in ``AcquisitionDateTime`` and omits ``AcquisitionTime``
+    entirely, so on those datasets this column came back EMPTY for every
+    image series.
+
+    That is not cosmetic. Four things key on it: the fieldmap collapse
+    below, the chronological ``rep``, the row ordering, and the
+    name-collision tie-breaker. An empty value made the first of those
+    merge every fieldmap in a session into one row.
+
+    The fallbacks are ordered by how close each tag is to the acquisition
+    itself. ``SeriesTime`` and ``ContentTime`` are written when the series
+    is stored rather than when it was acquired, which on the datasets here
+    runs about fifty seconds late, so they are a last resort and not an
+    equal choice.
+    """
+    raw = str(getattr(ds, "AcquisitionTime", "") or "").strip()
+    if raw:
+        return raw
+    # DT form: YYYYMMDDHHMMSS[.FFFFFF]. Take the time half, so the value in
+    # this column means the same thing whichever tag it came from.
+    dt = str(getattr(ds, "AcquisitionDateTime", "") or "").strip()
+    if len(dt) >= 14 and dt[:14].isdigit():
+        return dt[8:]
+    for tag in ("SeriesTime", "ContentTime"):
+        raw = str(getattr(ds, tag, "") or "").strip()
+        if raw:
+            return raw
+    return ""
+
+
 def read_pet_tags(ds) -> dict:
     """Extract the PET-relevant DICOM tags from an open dataset.
 
@@ -275,7 +310,7 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
     img3 = classify_fieldmap_type(img_list)
     if not img3:
         img3 = img_list[2] if len(img_list) >= 3 else ""
-    acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
+    acq_time = acquisition_time(ds)
 
     # Study-level identifiers — used for longitudinal session inference
     # (architecture.md §4.1). Distinct StudyInstanceUID + StudyDate per
@@ -633,12 +668,62 @@ def _assign_chronological_rep(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Merge magnitude/phase fieldmap rows the way v0.2.5 did.
+def _fieldmap_acquisition_index(
+    fmap_df: pd.DataFrame, base_cols: list[str]
+) -> list[int]:
+    """Number each fieldmap ACQUISITION within its ``base_cols`` group.
 
-    Same ``(BIDS_name, session, source_folder, sequence)`` grouped by
-    acquisition-time minute → joined ``series_uid`` (``|``-separated) and
-    summed ``n_files``. Run-numbering happens via the ``rep`` column.
+    One gradient-echo fieldmap is one magnitude series plus one phase
+    series, so a repeat of an image type is where the next acquisition
+    starts. That is the whole rule, and it needs no clock and no threshold:
+    ``M P M P`` is two acquisitions however far apart they were taken, and
+    a magnitude and phase pair recorded either side of a minute boundary is
+    still one.
+
+    The previous rule bucketed on the first four characters of
+    ``acq_time``, the clock minute. It had two failure modes. A dataset
+    whose DICOM carries no ``AcquisitionTime`` (see :func:`acquisition_time`)
+    gave every row the same empty bucket, so all four series above merged
+    into a single row and the second fieldmap was written out under
+    dcm2niix's own collision suffixes, which are not valid BIDS names. And
+    a pair straddling a minute boundary was split when it should not have
+    been.
+
+    ``acq_time`` still decides the ORDER rows are walked in, so a dataset
+    that does carry it gets the acquisitions numbered chronologically. When
+    it is absent the sort falls back to ``series_uid``, and the rule still
+    holds because it never asks how far apart two rows are.
+
+    An empty ``image_type`` is never treated as a repeat: if the vendor did
+    not say what the image is, we cannot claim to have seen it before, and
+    merging is the behaviour that was there already.
+    """
+    index: list[int] = []
+    prev_key: Optional[tuple] = None
+    seen: set[str] = set()
+    current = 0
+
+    # Tuples rather than a joined string: any separator we picked could
+    # occur inside a folder name.
+    keys = list(map(tuple, fmap_df[base_cols].astype(str).to_numpy()))
+    for key, img in zip(keys, fmap_df["image_type"].astype(str)):
+        if key != prev_key:
+            prev_key, seen, current = key, set(), 0
+        elif img and img in seen:
+            seen, current = set(), current + 1
+        if img:
+            seen.add(img)
+        index.append(current)
+    return index
+
+
+def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge the magnitude and phase rows of one fieldmap into one row.
+
+    Same ``(BIDS_name, session, source_folder, sequence)``, split into
+    acquisitions by :func:`_fieldmap_acquisition_index` → joined
+    ``series_uid`` (``|``-separated) and summed ``n_files``. Run-numbering
+    happens via the ``rep`` column.
     """
 
     fmap_mask = df["modality"] == "fmap"
@@ -647,7 +732,11 @@ def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     base_cols = ["BIDS_name", "session", "source_folder", "sequence"]
     fmap_df = df[fmap_mask].copy()
-    fmap_df["acq_group"] = fmap_df["acq_time"].apply(lambda t: str(t)[:4])
+    # Sorted before the walk, because the acquisition index is positional.
+    fmap_df.sort_values(
+        base_cols + ["acq_time", "series_uid"], inplace=True, kind="stable",
+    )
+    fmap_df["acq_group"] = _fieldmap_acquisition_index(fmap_df, base_cols)
 
     group_cols = base_cols + ["acq_group"]
     fmap_df["uid_list"] = fmap_df["series_uid"]

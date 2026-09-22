@@ -304,3 +304,81 @@ def test_filter_pane_unchecking_one_sequence_only_toggles_that_row(qtbot) -> Non
     # Row 0 now excluded; row 1 still included.
     assert model._read_include(0) is False
     assert model._read_include(1) is True
+
+
+class TestTheRawTreeDoesNotFreezeTheWindow:
+    """It used to build one item and one icon lookup per file, recursively,
+    the moment a raw root was set. On a flat DICOM study of 3,673 files that
+    was 266 ms of frozen GUI thread, growing with the dataset.
+    """
+
+    def _flat(self, tmp_path, n: int):
+        root = tmp_path / "study"
+        root.mkdir()
+        for i in range(n):
+            (root / f"{i:06d}.dcm").write_bytes(b"x")
+        return root
+
+    def test_a_flat_folder_is_capped(self, qtbot, tmp_path):
+        from bidsmgr.gui.raw_fs_pane import _MAX_PER_FOLDER, RawFsPane
+
+        pane = RawFsPane()
+        qtbot.addWidget(pane)
+        pane.set_root(self._flat(tmp_path, _MAX_PER_FOLDER + 50))
+        root = pane._tree.topLevelItem(0)
+        assert root.childCount() == _MAX_PER_FOLDER + 1, "the cap plus a summary"
+
+    def test_the_summary_says_how_many_are_hidden(self, qtbot, tmp_path):
+        from bidsmgr.gui.raw_fs_pane import _MAX_PER_FOLDER, RawFsPane
+
+        pane = RawFsPane()
+        qtbot.addWidget(pane)
+        pane.set_root(self._flat(tmp_path, _MAX_PER_FOLDER + 50))
+        root = pane._tree.topLevelItem(0)
+        last = root.child(root.childCount() - 1).text(0)
+        assert "50 more" in last and "not listed" in last
+
+    def test_a_small_folder_is_not_capped(self, qtbot, tmp_path):
+        from bidsmgr.gui.raw_fs_pane import RawFsPane
+
+        pane = RawFsPane()
+        qtbot.addWidget(pane)
+        pane.set_root(self._flat(tmp_path, 5))
+        assert pane._tree.topLevelItem(0).childCount() == 5
+
+    def test_a_subfolder_is_not_built_until_it_is_opened(self, qtbot, tmp_path):
+        """Each directory carries one placeholder so the arrow is there."""
+        from bidsmgr.gui.raw_fs_pane import _PLACEHOLDER_ROLE, RawFsPane
+        from PyQt6.QtCore import Qt
+
+        root = tmp_path / "study"
+        (root / "sub-001" / "anat").mkdir(parents=True)
+        for i in range(20):
+            (root / "sub-001" / "anat" / f"{i}.dcm").write_bytes(b"x")
+
+        pane = RawFsPane()
+        qtbot.addWidget(pane)
+        pane.set_root(root)
+        top = pane._tree.topLevelItem(0)
+        subject = top.child(0)
+        assert subject.text(0) == "sub-001"
+        # Expanded by the auto-expand of the first level, so its own child
+        # is real; that child's contents are still a placeholder.
+        anat = subject.child(0)
+        assert anat.childCount() == 1
+        assert anat.child(0).data(0, _PLACEHOLDER_ROLE) is True
+
+    def test_opening_it_fills_it(self, qtbot, tmp_path):
+        from bidsmgr.gui.raw_fs_pane import RawFsPane
+
+        root = tmp_path / "study"
+        (root / "sub-001" / "anat").mkdir(parents=True)
+        for i in range(7):
+            (root / "sub-001" / "anat" / f"{i}.dcm").write_bytes(b"x")
+
+        pane = RawFsPane()
+        qtbot.addWidget(pane)
+        pane.set_root(root)
+        anat = pane._tree.topLevelItem(0).child(0).child(0)
+        anat.setExpanded(True)
+        assert anat.childCount() == 7
