@@ -46,6 +46,11 @@ from .. import schema as schema_mod
 from ..editor import rename as rn, values as ev
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
+from .widgets.preview_split import (
+    PreviewSplit,
+    controls_panel,
+    preview_toggle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +90,6 @@ class PadValuesDialog(QDialog):
         self._warning = QLabel("")
         self._warning.setObjectName("dlg-hint")
         self._warning.setWordWrap(True)
-        bl.addWidget(self._warning)
 
         chooser, cl = card("Width per entity")
         cl.addWidget(hint(
@@ -101,8 +105,6 @@ class PadValuesDialog(QDialog):
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(6)
         cl.addWidget(self._rows)
-        bl.addWidget(chooser)
-
         preview, pl = card("What would change")
         self._tree = QTreeWidget()
         self._tree.setObjectName("check-tree")
@@ -110,7 +112,13 @@ class PadValuesDialog(QDialog):
         self._tree.setHeaderLabels(["Now", "Becomes", "Files"])
         self._tree.setUniformRowHeights(True)
         pl.addWidget(self._tree, 1)
-        bl.addWidget(preview, 1)
+        # Controls and preview in a splitter the user can flip between
+        # stacked and side by side. See preview_split.py.
+        self._split = PreviewSplit(
+            controls_panel(self._warning, chooser), preview,
+            name="index_widths",
+        )
+        bl.addWidget(self._split, 1)
 
         outer.addWidget(body, 1)
 
@@ -126,6 +134,9 @@ class PadValuesDialog(QDialog):
         self._ok.setText("Apply")
         buttons.accepted.connect(self._on_apply)
         buttons.rejected.connect(self.reject)
+        buttons.addButton(
+            preview_toggle(self._split), QDialogButtonBox.ButtonRole.ResetRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
         self._build_rows()

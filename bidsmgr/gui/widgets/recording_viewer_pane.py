@@ -73,7 +73,8 @@ from PyQt6.QtWidgets import (
 
 from .. import icons
 from ..theme_manager import CUR
-from .primitives import PaneHeader
+from .flow_layout import flow
+from .primitives import ElidedLabel, PaneHeader
 from .spinner import BusySpinner
 
 log = logging.getLogger(__name__)
@@ -653,11 +654,14 @@ class _TimeSeriesView(QWidget):
         return btn
 
     def _build_toolbar(self) -> QWidget:
-        """Two rows of controls inside a horizontal scroll area.
+        """Two rows of controls that WRAP as the pane narrows.
 
-        The scroll area means the toolbar never forces a wide minimum on the
-        pane: when the Editor splitter narrows it, the toolbar scrolls
-        horizontally instead of refusing to shrink.
+        They used to scroll sideways instead. That kept the pane shrinkable,
+        which was the point, but it put every control past the first
+        screenful behind a horizontal scrollbar nobody looks for. Wrapping
+        does the same job better: nothing goes out of reach, the bar grows
+        taller instead, and the minimum width becomes the widest single
+        control rather than the widest row.
         """
         container = QWidget()
         cl = QVBoxLayout(container)
@@ -667,9 +671,8 @@ class _TimeSeriesView(QWidget):
         # Row 1 - display
         row1 = QFrame()
         row1.setObjectName("toolbar")
-        l1 = QHBoxLayout(row1)
+        l1 = flow(row1, h_spacing=6, v_spacing=4)
         l1.setContentsMargins(10, 4, 10, 4)
-        l1.setSpacing(6)
 
         l1.addWidget(QLabel("Type:"))
         self.cmb_ch_type = QComboBox()
@@ -739,9 +742,8 @@ class _TimeSeriesView(QWidget):
         # Row 2 - processing
         row2 = QFrame()
         row2.setObjectName("toolbar")
-        l2 = QHBoxLayout(row2)
+        l2 = flow(row2, h_spacing=6, v_spacing=4)
         l2.setContentsMargins(10, 4, 10, 4)
-        l2.setSpacing(6)
 
         l2.addWidget(QLabel("HP (Hz):"))
         self.spn_hp = QDoubleSpinBox()
@@ -798,16 +800,14 @@ class _TimeSeriesView(QWidget):
         l2.addStretch(1)
         cl.addWidget(row2)
 
-        scroll = QScrollArea()
-        scroll.setWidget(container)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setObjectName("viewer-toolbar-scroll")
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        scroll.setMaximumHeight(container.sizeHint().height() + 16)
-        return scroll
+        # No scroll area, and no maximum height. Both existed to stop the
+        # toolbar forcing a wide minimum on the pane, which the wrapping
+        # rows now do properly; a height cap on a bar whose rows reflow
+        # would clip the rows it grows.
+        container.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum,
+        )
+        return container
 
     def _build_navigation(self) -> QWidget:
         nav = QFrame()
@@ -835,8 +835,14 @@ class _TimeSeriesView(QWidget):
 
         self.sld_time = QSlider(Qt.Orientation.Horizontal)
         self.sld_time.setRange(0, 1000)
+        # A QSlider asks for a comfortable length; on a narrow pane there is
+        # no comfortable length and asking for one is what stops the pane
+        # narrowing at all.
+        self.sld_time.setMinimumWidth(40)
         self.sld_time.valueChanged.connect(self._on_time_slider)
-        self.lbl_time = QLabel("0.0 / 0.0 s")
+        # Elided: it carries a running "12.3 / 600.0 s", and a plain QLabel
+        # reports its longest text as its minimum.
+        self.lbl_time = ElidedLabel("0.0 / 0.0 s")
         self.lbl_time.setObjectName("sidecar-footer-summary")
 
         lay.addWidget(self.btn_start)
@@ -850,9 +856,8 @@ class _TimeSeriesView(QWidget):
     def _build_events_row(self) -> QWidget:
         box = QFrame()
         box.setObjectName("toolbar")
-        lay = QHBoxLayout(box)
+        lay = flow(box, h_spacing=6, v_spacing=4)
         lay.setContentsMargins(10, 4, 10, 4)
-        lay.setSpacing(6)
 
         self.chk_events = QCheckBox("Show events")
         self.chk_events.setEnabled(False)
@@ -1780,7 +1785,12 @@ class RecordingViewerPane(QWidget):
         row.addWidget(self._spinner)
         row.addStretch(1)
         lay.addLayout(row)
-        self._loading_label = QLabel("")
+        # ELIDED: it carries the file's path, and a QStackedWidget sizes
+        # itself to its LARGEST page whichever one is showing, so a plain
+        # QLabel here is a floor under the whole pane even while hidden.
+        self._loading_label = ElidedLabel(
+            "", mode=Qt.TextElideMode.ElideMiddle,
+        )
         self._loading_label.setObjectName("pane-hint")
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._loading_label)

@@ -40,6 +40,11 @@ from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.move_preview import MovePreviewTree, delete_extras
 from .widgets.scope_bar import ScopeBar
+from .widgets.preview_split import (
+    PreviewSplit,
+    controls_panel,
+    preview_toggle,
+)
 
 
 def _human(size: int) -> str:
@@ -137,7 +142,12 @@ class DeleteDialog(QDialog):
             tools.addWidget(btn)
         tools.addStretch(1)
         pl.addLayout(tools)
-        bl.addWidget(preview_card, 1)
+        # Controls and preview in a splitter the user can flip
+        # between stacked and side by side. See preview_split.py.
+        self._split = PreviewSplit(
+            controls_panel(scope_card, self._summary), preview_card, name="delete",
+        )
+        bl.addWidget(self._split, 1)
         outer.addWidget(body, 1)
 
         self._status = QLabel("")
@@ -153,6 +163,9 @@ class DeleteDialog(QDialog):
         self._ok.setEnabled(False)
         buttons.accepted.connect(self._on_apply)
         buttons.rejected.connect(self.reject)
+        buttons.addButton(
+            preview_toggle(self._split), QDialogButtonBox.ButtonRole.ResetRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
         self._refresh_plan()

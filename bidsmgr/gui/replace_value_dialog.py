@@ -45,6 +45,11 @@ from ..editor import rename as rn, values as ev
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.move_preview import MovePreviewTree, plan_extras
+from .widgets.preview_split import (
+    PreviewSplit,
+    controls_panel,
+    preview_toggle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -128,8 +133,6 @@ class ReplaceValueDialog(QDialog):
 
         self._rule = hint("")
         findl.addWidget(self._rule)
-        bl.addWidget(find)
-
         # -- what would happen --------------------------------------------
         preview, pl = card("What would change")
         pl.addWidget(hint(
@@ -141,7 +144,12 @@ class ReplaceValueDialog(QDialog):
         self._preview = MovePreviewTree()
         self._preview.itemChanged.connect(lambda *_a: self._update_status())
         pl.addWidget(self._preview, 1)
-        bl.addWidget(preview, 1)
+        # Controls and preview in a splitter the user can flip between
+        # stacked and side by side. See preview_split.py.
+        self._split = PreviewSplit(
+            controls_panel(find), preview, name="replace_value",
+        )
+        bl.addWidget(self._split, 1)
 
         outer.addWidget(body, 1)
 
@@ -157,6 +165,9 @@ class ReplaceValueDialog(QDialog):
         self._ok.setText("Replace")
         buttons.accepted.connect(self._on_apply)
         buttons.rejected.connect(self.reject)
+        buttons.addButton(
+            preview_toggle(self._split), QDialogButtonBox.ButtonRole.ResetRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
         self._fill_entities(entity)

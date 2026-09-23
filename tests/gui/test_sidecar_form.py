@@ -459,10 +459,17 @@ class TestTheToolbarFitsInThePane:
         return pane
 
     def test_the_field_verbs_are_on_their_own_row(self, qtbot, bids_root):
+        """Ancestry, not direct parenthood: the wrapping bar sits between
+        them, which is an implementation detail of how the row reflows."""
         pane = self._pane(qtbot, bids_root)
         for name in ("_add_field_btn", "_add_subfield_btn", "_del_field_btn"):
             button = getattr(pane, name)
-            assert button.parentWidget() is pane._field_tools, name
+            ancestors = []
+            node = button.parentWidget()
+            while node is not None:
+                ancestors.append(node)
+                node = node.parentWidget()
+            assert pane._field_tools in ancestors, name
 
     def test_that_row_is_absent_in_bids_view(self, qtbot, bids_root):
         pane = self._pane(qtbot, bids_root)

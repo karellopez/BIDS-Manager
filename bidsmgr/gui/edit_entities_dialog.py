@@ -48,6 +48,11 @@ from ..editor import restructure as rs
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.move_preview import MovePreviewTree, plan_extras
+from .widgets.preview_split import (
+    PreviewSplit,
+    controls_panel,
+    preview_toggle,
+)
 from .widgets.scope_bar import ScopeBar
 
 # Matches the rename dialog: planning walks the dataset, so doing it on every
@@ -188,7 +193,15 @@ class EditEntitiesDialog(QDialog):
             tools.addWidget(btn)
         tools.addStretch(1)
         pl.addLayout(tools)
-        bl.addWidget(preview_card, 1)
+        # Controls and preview in a splitter the user can flip between
+        # stacked and side by side. Stacked is the default and the right
+        # one to read; beside is what a wide window and a fifty-file
+        # preview want.
+        self._split = PreviewSplit(
+            controls_panel(chooser, self._summary), preview_card,
+            name="entities",
+        )
+        bl.addWidget(self._split, 1)
         outer.addWidget(body, 1)
 
         self._status = QLabel("")
@@ -204,6 +217,9 @@ class EditEntitiesDialog(QDialog):
         self._ok.setEnabled(False)
         buttons.accepted.connect(self._on_apply)
         buttons.rejected.connect(self.reject)
+        buttons.addButton(
+            preview_toggle(self._split), QDialogButtonBox.ButtonRole.ResetRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
         self._describe_scope()

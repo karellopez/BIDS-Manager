@@ -47,7 +47,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .primitives import PaneHeader
+from .flow_layout import flow
+from .primitives import ElidedLabel, PaneHeader
 
 log = logging.getLogger(__name__)
 
@@ -355,11 +356,13 @@ class TsvViewerPane(QWidget):
         v.addWidget(PaneHeader("Table"))
 
         # --- Edit toolbar ----------------------------------------------
+        # A WRAPPING bar. A QHBoxLayout's minimum width is the sum of its
+        # children, so six buttons put a 627-pixel floor under a pane the
+        # user is meant to be able to drag narrow. See flow_layout.py.
         self._edit_toolbar = QFrame()
         self._edit_toolbar.setObjectName("sidecar-toolbar")
-        et = QHBoxLayout(self._edit_toolbar)
+        et = flow(self._edit_toolbar, h_spacing=8, v_spacing=6)
         et.setContentsMargins(14, 6, 14, 6)
-        et.setSpacing(8)
 
         self._add_row_btn = QPushButton("+ Add row")
         self._add_row_btn.setObjectName("tb-btn")
@@ -386,9 +389,26 @@ class TsvViewerPane(QWidget):
         self._dirty_chip = QLabel("")
         self._dirty_chip.setObjectName("sidecar-dirty-chip")
         self._dirty_chip.setVisible(False)
-        et.addWidget(self._dirty_chip)
-        et.addStretch(1)
+        # A continuous recording is a vector, and a grid of six-decimal
+        # numbers cannot answer any question about its shape. Offered only
+        # when the sidecar says there IS a sampling frequency, which is how
+        # BIDS distinguishes a recording from a table of onsets.
+        self._plot_btn = QPushButton("  Plot")
+        self._plot_btn.setObjectName("tb-btn")
+        self._plot_btn.setCheckable(True)
+        self._plot_btn.setVisible(False)
+        self._plot_btn.setToolTip(
+            "Draw the columns against time, from the sampling frequency "
+            "and start time in the sidecar. Triggers, cardiac and "
+            "respiratory traces read as shapes, not as numbers."
+        )
+        self._plot_btn.toggled.connect(self._on_plot_toggled)
+        et.addWidget(self._plot_btn)
 
+        et.addWidget(self._dirty_chip)
+        # No stretch: a wrapping row has no fixed right-hand edge to push
+        # against, because where the edge is depends on how many rows there
+        # turn out to be.
         self._revert_btn = QPushButton("Revert")
         self._revert_btn.setObjectName("tb-btn")
         self._revert_btn.setEnabled(False)
@@ -459,16 +479,25 @@ class TsvViewerPane(QWidget):
         srow.addWidget(self._loading_spinner)
         srow.addStretch(1)
         lp.addLayout(srow)
-        self._loading_label = QLabel("")
+        # ELIDED: it carries the file's path, and a QStackedWidget sizes
+        # itself to its LARGEST page whichever one is showing, so a plain
+        # QLabel here is a floor under the whole pane even while hidden.
+        self._loading_label = ElidedLabel(
+            "", mode=Qt.TextElideMode.ElideMiddle,
+        )
         self._loading_label.setObjectName("pane-hint")
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lp.addWidget(self._loading_label)
         lp.addStretch(1)
 
-        # Index 0 = empty hint, 1 = table, 2 = loading.
+        # Index 0 = empty hint, 1 = table, 2 = loading, 3 = the plot (built
+        # lazily, so a session that only reads tables never imports
+        # pyqtgraph).
         self._stack.addWidget(self._empty_hint)
         self._stack.addWidget(self._table)
         self._stack.addWidget(self._loading_page)
+        self._plot_page: Optional[QWidget] = None
+        self._timing: Optional[dict] = None
         self._stack.setCurrentIndex(0)
 
         # Footer (path + summary), QSS-driven so theme follows.
@@ -477,9 +506,11 @@ class TsvViewerPane(QWidget):
         fl = QHBoxLayout(self._footer)
         fl.setContentsMargins(14, 6, 14, 6)
         fl.setSpacing(10)
-        self._footer_path = QLabel("")
+        # ELIDED: a plain QLabel reports its full text width as its
+        # MINIMUM, so a dataset-relative path was a floor of its own.
+        self._footer_path = ElidedLabel("", mode=Qt.TextElideMode.ElideLeft)
         self._footer_path.setObjectName("sidecar-footer-path")
-        self._footer_summary = QLabel("")
+        self._footer_summary = ElidedLabel("")
         self._footer_summary.setObjectName("sidecar-footer-summary")
         fl.addWidget(self._footer_path, 1)
         fl.addWidget(self._footer_summary)
@@ -627,12 +658,72 @@ class TsvViewerPane(QWidget):
             self._populate_model(header, rows)
             self._stack.setCurrentIndex(1)
         self._update_footer(path, self._current_root, len(rows), len(header), total)
+        self._offer_plot(path, header, rows)
         self._edit_toolbar.setVisible(True)
         self._refresh_dirty_ui()
         self._pre_edit = self._snapshot()
         self.history_changed.emit()
         self.loading_changed.emit(False, "")
         self.loaded.emit(path)
+
+    # ------------------------------------------------------------------
+    # The plot
+    # ------------------------------------------------------------------
+
+    def _offer_plot(
+        self, path: Path, header: list, rows: list,
+    ) -> None:
+        """Show the Plot toggle when this file is a continuous recording.
+
+        Decided by the SIDECAR, not by the filename: BIDS puts the sampling
+        frequency there, and a table of onsets (``_events.tsv``) has none.
+        That also means a ``_stim.tsv.gz`` or any future continuous suffix
+        is offered a plot without this knowing the suffix exists.
+        """
+        from .physio_plot import read_timing
+
+        timing = read_timing(path)
+        # The header row counts as a sample. A physio TSV has no column
+        # names in the file (they are in the sidecar), so pandas reads the
+        # first SAMPLE as the header and it belongs back in the data.
+        if timing is not None and len(timing["columns"]) == len(header):
+            rows = [list(header)] + [list(r) for r in rows]
+        self._timing = timing
+        self._plot_rows = rows if timing is not None else []
+        self._plot_btn.setVisible(timing is not None)
+        if timing is None:
+            self._plot_btn.setChecked(False)
+        elif self._plot_btn.isChecked():
+            self._show_plot()
+
+    def _on_plot_toggled(self, plotting: bool) -> None:
+        if plotting:
+            self._show_plot()
+        else:
+            self._stack.setCurrentIndex(1)
+
+    def _show_plot(self) -> None:
+        if self._timing is None:
+            self._plot_btn.setChecked(False)
+            return
+        if self._plot_page is None:
+            try:
+                from .physio_plot import PhysioPlot
+
+                self._plot_page = PhysioPlot()
+            except Exception as exc:  # noqa: BLE001 - reported, not hidden
+                log.warning("could not build the physio plot: %s", exc)
+                self._plot_btn.setChecked(False)
+                self._plot_btn.setEnabled(False)
+                self._plot_btn.setToolTip(
+                    f"Plotting is unavailable: {exc}"
+                )
+                return
+            self._stack.addWidget(self._plot_page)
+        self._plot_page.set_recording(
+            self._current_file, self._timing, self._plot_rows,
+        )
+        self._stack.setCurrentWidget(self._plot_page)
 
     def _on_load_failed(self, path: Path, error: str) -> None:
         if path != self._current_file:
