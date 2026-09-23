@@ -64,6 +64,7 @@ from ..delegates.bids_tree import (
 )
 from ..theme_manager import CUR
 from .panel_frame import HEADER_EXTRAS
+from .tree_click import toggle_on_click
 from .primitives import PaneHeader
 
 # Severity ordering for folder rollup — pick the worst of any descendant.
@@ -219,15 +220,22 @@ def _sweep(
     *,
     depth: int,
     dirs: list[str],
-    counts: dict[str, tuple[int, int]],
+    counts: dict[str, tuple[int, int, int]],
     show_hidden: bool,
 ) -> tuple[int, int]:
     """One scandir pass: every directory, and what is inside each.
 
-    Returns ``(sessions, files)`` for ``folder`` and records the same pair in
-    ``counts`` for every directory it meets. Creates no Qt objects at all,
-    which is the point: the structure of the dataset is worth knowing in
-    full, and the ROWS are not, because nobody reads eight thousand of them.
+    Returns ``(sessions, files)`` for ``folder`` and records
+    ``(sessions, files, entries)`` in ``counts`` for every directory it
+    meets. Creates no Qt objects at all, which is the point: the structure
+    of the dataset is worth knowing in full, and the ROWS are not, because
+    nobody reads eight thousand of them.
+
+    ``entries`` is how many rows the folder would DRAW, which is not the
+    same as how many files are under it: it decides whether the folder gets
+    an expander arrow at all. Without it a folder holding nothing but
+    dotfiles offered an arrow that opened onto an empty folder, which looks
+    exactly like the bug where an open folder came back blank.
 
     A directory with nothing visible inside counts as one file, and a
     folder-recording (a CTF ``.ds``, an EGI ``.mff``) counts as one file
@@ -262,7 +270,7 @@ def _sweep(
             files += 1
     if not seen:
         files = 1
-    counts[str(folder)] = (sessions, files)
+    counts[str(folder)] = (sessions, files, seen)
     return (sessions, files)
 
 
@@ -304,7 +312,7 @@ def _rollup(
 
 
 def _annotate_folder(
-    item: QTreeWidgetItem, name: str, counts: dict[str, tuple[int, int]],
+    item: QTreeWidgetItem, name: str, counts: dict[str, tuple[int, int, int]],
 ) -> None:
     """Put what is inside a folder on the folder's own row.
 
@@ -318,7 +326,7 @@ def _annotate_folder(
     opened.
     """
     path = item.data(0, PATH_ROLE)
-    sessions, files = counts.get(str(path), (0, 0))
+    sessions, files, _entries = counts.get(str(path), (0, 0, 0))
     if not files:
         return
     bits = []
@@ -386,8 +394,9 @@ class BidsTreePane(QWidget):
         # its badge without another pass over the tree.
         self._dir_badges: dict[str, str] = {}
         self._dir_counts: dict[str, tuple[int, int]] = {}
-        # (sessions, files) per directory, from the sweep, for the row counts.
-        self._counts: dict[str, tuple[int, int]] = {}
+        # (sessions, files, entries) per directory, from the sweep: the
+        # first two are the row label, the third decides the expander arrow.
+        self._counts: dict[str, tuple[int, int, int]] = {}
         self._show_hidden = False
 
         # Live refresh: every visible directory is registered with a
@@ -494,6 +503,7 @@ class BidsTreePane(QWidget):
         )
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemExpanded.connect(self._on_item_expanded)
+        toggle_on_click(self._tree)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
 
@@ -689,7 +699,7 @@ class BidsTreePane(QWidget):
         self._tree.addTopLevelItem(top)
 
         dirs: list[str] = [str(path)]
-        counts: dict[str, tuple[int, int]] = {}
+        counts: dict[str, tuple[int, int, int]] = {}
         # Read the preference at build time rather than caching it, so a
         # change in Settings shows on the next refresh without extra wiring.
         from ..app_settings import AppSettings
@@ -741,9 +751,14 @@ class BidsTreePane(QWidget):
             parent_item.addChild(item)
             if is_dir and not _is_folder_recording(entry.name):
                 _annotate_folder(item, entry.name, self._counts)
-                placeholder = QTreeWidgetItem([""])
-                placeholder.setData(0, PLACEHOLDER_ROLE, True)
-                item.addChild(placeholder)
+                # No arrow on a folder with nothing to draw. Defaults to
+                # offering one when the sweep has no answer (past its depth
+                # cap, or unreadable), because hiding real content would be
+                # worse than an arrow that opens onto nothing.
+                if self._counts.get(entry.path, (0, 0, 1))[2]:
+                    placeholder = QTreeWidgetItem([""])
+                    placeholder.setData(0, PLACEHOLDER_ROLE, True)
+                    item.addChild(placeholder)
             self._stamp_badge(item)
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
@@ -783,6 +798,13 @@ class BidsTreePane(QWidget):
             return None
         while True:
             if str(item.data(0, PATH_ROLE) or "") == target:
+                # The TARGET is drawn too, not only the folders on the way to
+                # it. Stopping one short left a folder that was open before a
+                # refresh expanded over its placeholder, which is a blank row,
+                # and the only way to see the contents again was to close it
+                # and open it. A file has nothing to draw, so this is a no-op
+                # for the ``reveal`` case.
+                self._ensure_children(item)
                 return item
             self._ensure_children(item)
             nxt = None

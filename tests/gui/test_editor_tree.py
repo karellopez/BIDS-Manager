@@ -331,3 +331,95 @@ def test_editor_panel_open_button_exists_and_enabled(qapp) -> None:
     assert not panel._validate_file_btn.isEnabled()
     assert not panel._validate_folder_btn.isEnabled()
     assert not panel._validate_dataset_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# A folder that is open must SHOW what is in it
+#
+# Drawing a folder when it is opened means a refresh has to rebuild the ones
+# that were already open. Restoring only the fold FLAG left the folder
+# expanded over its placeholder, which is one blank row, and the only way out
+# was to close it and open it again.
+
+
+def _child(item, name: str):
+    """A child by name, without expanding anything."""
+    for i in range(item.childCount()):
+        if item.child(i).text(0) == name:
+            return item.child(i)
+    return None
+
+
+def _drill(pane: BidsTreePane, *names: str):
+    """Walk down by name through the rows that already exist."""
+    item = pane._tree.topLevelItem(0)
+    for name in names:
+        item = _child(item, name)
+        assert item is not None, f"{name} is not drawn"
+    return item
+
+
+def test_an_open_folder_keeps_its_contents_across_a_refresh(
+    qapp, bids_root: Path,
+) -> None:
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+    anat = pane.reveal(bids_root / "sub-01" / "ses-01" / "anat")
+    assert anat is not None
+    anat.setExpanded(True)
+    before = {anat.child(i).text(0) for i in range(anat.childCount())}
+    assert "sub-01_ses-01_T1w.json" in before
+
+    pane.refresh()
+
+    again = _drill(pane, "sub-01", "ses-01", "anat")
+    assert again.isExpanded(), "the fold state was dropped"
+    after = {again.child(i).text(0) for i in range(again.childCount())}
+    assert after == before, "an open folder came back empty"
+
+
+def test_a_refresh_leaves_no_blank_row_on_screen(
+    qapp, bids_root: Path,
+) -> None:
+    """The placeholder exists to keep the expander arrow; it must never be
+    what an opened folder shows."""
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+    pane.reveal(bids_root / "sub-01" / "ses-01" / "anat").setExpanded(True)
+    pane.refresh()
+
+    blank: list[str] = []
+
+    def visit(item, parent_open: bool) -> None:
+        if parent_open and not item.text(0):
+            blank.append(str(item.parent().text(0)))
+        for i in range(item.childCount()):
+            visit(item.child(i), item.isExpanded())
+
+    for i in range(pane._tree.topLevelItemCount()):
+        visit(pane._tree.topLevelItem(i), True)
+    assert not blank, f"blank rows visible under {blank}"
+
+
+def test_a_folder_with_nothing_to_draw_offers_no_arrow(
+    qapp, bids_root: Path,
+) -> None:
+    """Otherwise it looks exactly like the bug where an open folder came
+    back blank: an arrow that opens onto nothing."""
+    (bids_root / "sub-01" / "empty").mkdir()
+    (bids_root / "sub-01" / "dotted").mkdir()
+    (bids_root / "sub-01" / "dotted" / ".hidden").write_text("x")
+    pane = BidsTreePane()
+    pane.set_root(bids_root)
+
+    subject = _drill(pane, "sub-01")
+    subject.setExpanded(True)
+    by_name = {
+        subject.child(i).text(0): subject.child(i)
+        for i in range(subject.childCount())
+    }
+    assert by_name["empty"].childCount() == 0
+    assert by_name["dotted"].childCount() == 0, (
+        "a folder holding only hidden files has nothing to draw"
+    )
+    assert by_name["ses-01"].childCount() == 1, "a real folder keeps its arrow"

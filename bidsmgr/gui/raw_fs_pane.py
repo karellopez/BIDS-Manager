@@ -34,6 +34,7 @@ from . import icons
 from .models import InventoryTableModel
 from .theme_manager import CUR
 from .widgets import PaneHeader
+from .widgets.tree_click import toggle_on_click
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class RawFsPane(QWidget):
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
         self._tree.itemExpanded.connect(self._on_item_expanded)
+        toggle_on_click(self._tree)
         from .theme_manager import scaled_px
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))

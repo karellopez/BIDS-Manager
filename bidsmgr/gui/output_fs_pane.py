@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
 from . import icons
 from .theme_manager import CUR
 from .widgets import PaneHeader
+from .widgets.tree_click import toggle_on_click
 
 log = logging.getLogger(__name__)
 
@@ -292,6 +293,7 @@ class OutputFsPane(QWidget):
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
         self._tree.itemExpanded.connect(self._on_item_expanded)
+        toggle_on_click(self._tree)
         from .theme_manager import scaled_px
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
@@ -536,6 +538,12 @@ class OutputFsPane(QWidget):
 
     def _row_at(self, path: tuple) -> Optional[QTreeWidgetItem]:
         """The row named by a snapshot path, drawing the folders on the way.
+
+        The target itself is NOT drawn here, and does not need to be: this
+        pane does not block the tree's signals while it rebuilds, so the
+        ``setExpanded`` that follows emits ``itemExpanded`` and the folder
+        draws itself. The Editor's tree blocks them, which is why the same
+        omission showed up there as a folder that came back empty.
 
         Fold state is left alone, so this can restore a view without
         changing one.
