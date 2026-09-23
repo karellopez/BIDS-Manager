@@ -6,15 +6,15 @@ SeriesDescription, SeriesInstanceUID).
 
 Preserves the v0.2.5 22-column TSV contract (improvement_plan.md §4):
 
-    subject, BIDS_name, session, source_folder,
+    subject, participant_id, session, source_folder,
     include, sequence, series_uid, rep, acq_time,
-    image_type, modality, modality_bids, n_files,
+    image_type, modality, sequence_kind, n_files,
     GivenName, FamilyName, PatientID,
     PatientSex, PatientAge, StudyDescription,
-    proposed_datatype, proposed_basename, Proposed BIDS name
+    datatype, bids_name, bids_path
 
-The ``modality`` and ``modality_bids`` columns are filled by the legacy
-regex-dictionary classifier (``classifier.sequence_dict.guess_modality``).
+The ``modality`` and ``sequence_kind`` columns are filled by the legacy
+regex-dictionary classifier (``classifier.sequence_dict.guess_sequence_kind``).
 ``proposed_*`` columns are populated downstream by the CLI orchestrator
 after running the BidsGuess classifier (improvement_plan.md M1).
 
@@ -38,9 +38,8 @@ from joblib import delayed  # pools are built by bidsmgr.util.parallel
 from pydicom.multival import MultiValue
 
 from ..classifier.sequence_dict import (
-    SKIP_MODALITIES,
-    guess_modality,
-    modality_to_container,
+    SKIP_SEQUENCE_KINDS,
+    guess_sequence_kind,
     normalize_study_name,
 )
 from .subject_identity import IdentityTuple, cluster_subjects, normalize_tuple
@@ -81,12 +80,12 @@ SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
 # JSON list of already-curated sidecar companions - events / beh / stim - to
 # copy into the BIDS tree on convert).
 TSV_COLUMNS: tuple[str, ...] = (
-    "subject", "BIDS_name", "session", "source_folder",
+    "subject", "participant_id", "session", "source_folder",
     "include", "sequence", "series_uid", "rep", "acq_time",
-    "image_type", "modality", "modality_bids", "n_files",
+    "image_type", "modality", "sequence_kind", "n_files",
     "GivenName", "FamilyName", "PatientID",
     "PatientSex", "PatientAge", "Handedness", "StudyDescription",
-    "proposed_datatype", "proposed_basename", "Proposed BIDS name",
+    "datatype", "bids_name", "bids_path",
     "companion_files",
 )
 
@@ -107,7 +106,7 @@ DATASET_COLUMNS: tuple[str, ...] = ("dataset",)
 
 # The canonical BIDS entity dict per row, JSON-encoded. **Source of
 # truth** for the BIDS basename: scanners populate it; ``bidsmgr-rebuild``
-# regenerates ``proposed_basename`` and mirror cells from it (or, in
+# regenerates ``bids_name`` and mirror cells from it (or, in
 # ``--from columns`` mode, the reverse). The converter reads from this
 # column directly, so the row's BIDS name always reflects whatever the
 # user last edited here. Format: a JSON object with BIDS entity keys —
@@ -334,7 +333,7 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         "file_path": fpath,
         "series": series,
         "uid": uid,
-        "modality": guess_modality(series),
+        "sequence_kind": guess_sequence_kind(series),
         "img3": img3,
         "acq_time": acq_time,
         "sess_tag": sess_tag,
@@ -450,7 +449,7 @@ def scan_dicoms_long(
         folder = res["folder"]
         key = (res["series"], res["uid"])
         counts[subj_key][folder][key] += 1
-        mods[subj_key][folder][key] = res["modality"]
+        mods[subj_key][folder][key] = res["sequence_kind"]
         if key not in imgtypes[subj_key][folder]:
             imgtypes[subj_key][folder][key] = res["img3"]
         if key not in acq_times[subj_key][folder] and res["acq_time"]:
@@ -516,16 +515,16 @@ def scan_dicoms_long(
         root: f"sub-{i + 1:03d}" for i, root in enumerate(cluster_roots)
     }
 
-    bids_map: dict[str, str] = {}
+    participant_map: dict[str, str] = {}
     for k, t in identity_to_tuple.items():
-        bids_map[k] = cluster_to_id[cluster_root_for_tuple[t]]
+        participant_map[k] = cluster_to_id[cluster_root_for_tuple[t]]
 
     # Session inference operates per *cluster* (one physical subject), not
     # per identity_key. Two visits with different anonymised PatientIDs
     # that the union-find merged still need to produce ses-1 / ses-2.
     studies_per_cluster: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
     for k, study_set in subject_studies.items():
-        bids_id = bids_map.get(k)
+        bids_id = participant_map.get(k)
         if not bids_id:
             continue
         studies_per_cluster[bids_id].update(study_set)
@@ -548,10 +547,10 @@ def scan_dicoms_long(
             session = ses_labels[0] if len(ses_labels) == 1 else ""
             rep_counter: dict = defaultdict(int)
             for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
-                fine_mod = mods[subj_key][folder][(series, uid)]
+                kind = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
-                include = 0 if fine_mod in SKIP_MODALITIES else 1
-                rep_key = series if fine_mod == "scout" else (series, img3)
+                include = 0 if kind in SKIP_SEQUENCE_KINDS else 1
+                rep_key = series if kind == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
                 study_tuple = study_uids[subj_key][folder].get((series, uid), ("", "", ""))
 
@@ -559,14 +558,14 @@ def scan_dicoms_long(
                 # otherwise fall back to inferred longitudinal label.
                 row_session = session
                 if not row_session:
-                    bids_id = bids_map[subj_key]
+                    bids_id = participant_map[subj_key]
                     inferred = inferred_session.get(bids_id, {}).get(study_tuple)
                     if inferred:
                         row_session = inferred
 
                 rows.append({
                     "subject": given_name,
-                    "BIDS_name": bids_map[subj_key],
+                    "participant_id": participant_map[subj_key],
                     "session": row_session,
                     "source_folder": folder,
                     "include": include,
@@ -575,8 +574,12 @@ def scan_dicoms_long(
                     "rep": rep_counter[rep_key] if rep_counter[rep_key] > 1 else "",
                     "image_type": img3,
                     "acq_time": acq_times[subj_key][folder].get((series, uid), ""),
-                    "modality": fine_mod,
-                    "modality_bids": modality_to_container(fine_mod),
+                    # The MODALITY is how it was acquired, and every row
+                    # this scanner produces came off an MRI scanner. What
+                    # used to sit here was the classifier's sequence kind,
+                    # which is why a T1 reported its modality as "T1w".
+                    "modality": "mri",
+                    "sequence_kind": kind,
                     "n_files": n_files,
                     "study_instance_uid": study_tuple[0],
                     "study_date": study_tuple[1],
@@ -606,7 +609,7 @@ def scan_dicoms_long(
         df = _assign_chronological_rep(df)
 
     # Add proposed_* columns as empty (filled by CLI orchestrator after BidsGuess).
-    for col in ("proposed_datatype", "proposed_basename", "Proposed BIDS name"):
+    for col in ("datatype", "bids_name", "bids_path"):
         if col not in df.columns:
             df[col] = ""
 
@@ -621,7 +624,7 @@ def scan_dicoms_long(
     df["format"] = "DICOM"
 
     if not df.empty:
-        df.sort_values(["BIDS_name", "subject", "session", "acq_time"], inplace=True)
+        df.sort_values(["participant_id", "subject", "session", "acq_time"], inplace=True)
 
     # Stash the per-UID file map on the DataFrame so callers (the CLI's
     # probe_convert pass) can find the source DICOMs of each detected
@@ -644,7 +647,7 @@ def scan_dicoms_long(
 
 def _assign_chronological_rep(df: pd.DataFrame) -> pd.DataFrame:
     """Populate ``rep`` with the chronological position within each
-    ``(BIDS_name, session, sequence, image_type)`` group.
+    ``(participant_id, session, sequence, image_type)`` group.
 
     Within a group (same subject, same session, same SeriesDescription,
     same image_type), rows are ordered by ``acq_time`` (then ``series_uid``
@@ -657,7 +660,7 @@ def _assign_chronological_rep(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
-    keys = ["BIDS_name", "session", "sequence", "image_type"]
+    keys = ["participant_id", "session", "sequence", "image_type"]
     sort_keys = keys + ["acq_time", "series_uid"]
     # Stable sort by acquisition time inside each group.
     df.sort_values(sort_keys, inplace=True, kind="stable")
@@ -720,17 +723,17 @@ def _fieldmap_acquisition_index(
 def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
     """Merge the magnitude and phase rows of one fieldmap into one row.
 
-    Same ``(BIDS_name, session, source_folder, sequence)``, split into
+    Same ``(participant_id, session, source_folder, sequence)``, split into
     acquisitions by :func:`_fieldmap_acquisition_index` → joined
     ``series_uid`` (``|``-separated) and summed ``n_files``. Run-numbering
     happens via the ``rep`` column.
     """
 
-    fmap_mask = df["modality"] == "fmap"
+    fmap_mask = df["sequence_kind"] == "fmap"
     if not fmap_mask.any():
         return df
 
-    base_cols = ["BIDS_name", "session", "source_folder", "sequence"]
+    base_cols = ["participant_id", "session", "source_folder", "sequence"]
     fmap_df = df[fmap_mask].copy()
     # Sorted before the walk, because the acquisition index is positional.
     fmap_df.sort_values(
@@ -743,7 +746,7 @@ def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
     fmap_df["img_set"] = fmap_df["image_type"]
     agg_spec = {
         "subject": "first",
-        "BIDS_name": "first",
+        "participant_id": "first",
         "session": "first",
         "source_folder": "first",
         "include": "max",
@@ -752,7 +755,7 @@ def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
         "img_set": lambda x: "".join(sorted({str(v) for v in x})),
         "acq_time": "first",
         "modality": "first",
-        "modality_bids": "first",
+        "sequence_kind": "first",
         "n_files": "sum",
         "study_instance_uid": "first",
         "study_date": "first",

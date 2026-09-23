@@ -20,9 +20,9 @@ Pipeline:
    within each subject+session; assign ``run-1, run-2, …`` only to groups
    with more than one row, ordered by acquisition time. Singletons get no
    run entity.
-6. Emit ``proposed_datatype`` / ``proposed_basename`` / ``Proposed BIDS name``
+6. Emit ``datatype`` / ``bids_name`` / ``bids_path``
    for every classified row (best effort — even when the schema would
-   reject it). ``proposed_issues`` records any required-entity / format
+   reject it). ``issues`` records any required-entity / format
    violations so the GUI / planner can prompt the user.
 7. Write the TSV.
 """
@@ -84,7 +84,7 @@ BIDS_GUESS_COLUMNS: tuple[str, ...] = (
     "bids_guess_entities",
     "bids_guess_confidence",
     "bids_guess_skip",
-    "proposed_issues",
+    "issues",
     "repetition_type",
 )
 
@@ -194,7 +194,7 @@ def _reroute_b0_references_to_fmap_epi(
 
     The user can re-route back to ``dwi/_dwi`` via the GUI if the b0
     series is meant as a real b=0-only DWI acquisition. We surface the
-    decision in ``proposed_issues`` (added downstream by
+    decision in ``issues`` (added downstream by
     ``_augment_dataframe``).
     """
 
@@ -290,7 +290,7 @@ def _rows_from_dataframe(df: pd.DataFrame) -> list[InventoryRow]:
         if not source_dir:
             continue
         uids_field = str(r.get("series_uid") or "")
-        bids_name = str(r.get("BIDS_name") or "").replace("sub-", "") or None
+        participant = str(r.get("participant_id") or "").replace("sub-", "") or None
         session = str(r.get("session") or "").replace("ses-", "") or None
         for uid in (u for u in uids_field.split("|") if u):
             rows.append(
@@ -299,11 +299,11 @@ def _rows_from_dataframe(df: pd.DataFrame) -> list[InventoryRow]:
                     source=Path(source_dir),
                     series_uid=uid,
                     series_description=str(r.get("sequence") or ""),
-                    subject_hint=bids_name,
+                    subject_hint=participant,
                     session_hint=session,
                     n_files=int(r.get("n_files") or 0),
                     acq_time=str(r.get("acq_time") or "") or None,
-                    fine_modality=str(r.get("modality") or "") or None,
+                    sequence_kind=str(r.get("sequence_kind") or "") or None,
                     image_type=str(r.get("image_type") or "") or None,
                     raw_metadata={
                         "source_folder": str(r.get("source_folder") or ""),
@@ -685,7 +685,7 @@ _DERIVATIVES_PIPELINE = "dcm2niix"
 
 
 def _propose_basename(
-    bids_name: str,
+    participant: str,
     session: str,
     classification: Classification,
 ) -> tuple[str, str, list[str], dict[str, str]]:
@@ -707,12 +707,12 @@ def _propose_basename(
     if classification.skip or classification.datatype == "discard":
         return ("", "", [], {})
 
-    if not bids_name:
-        return ("", "", ["BIDS_name missing"], {})
+    if not participant:
+        return ("", "", ["participant_id missing"], {})
 
     entities = dict(classification.candidate_entities)
     entities.pop("subject", None)
-    entities = {"subject": bids_name, **entities}
+    entities = {"subject": participant, **entities}
     if session:
         entities["session"] = session
 
@@ -760,12 +760,12 @@ def _propose_derivatives_basename(
     ``trace`` — are handled by the regular path above.
     """
 
-    bids_name = entities.get("subject", "")
+    participant = entities.get("subject", "")
     session = entities.get("session", "")
-    if not bids_name:
-        return ("", "", ["BIDS_name missing"])
+    if not participant:
+        return ("", "", ["participant_id missing"])
 
-    parts = [f"derivatives/{_DERIVATIVES_PIPELINE}", f"sub-{bids_name}"]
+    parts = [f"derivatives/{_DERIVATIVES_PIPELINE}", f"sub-{participant}"]
     if session:
         parts.append(f"ses-{session}")
     parts.append("dwi")
@@ -836,7 +836,7 @@ def _finish_unified_frame(merged, exclusions, index_widths=None) -> None:
 
     Order matters. Exclusions first, because an excluded row is never written
     and so cannot collide. Names next. The mixed-study heads-up last, so it only
-    ever appends to ``proposed_issues`` and never downgrades a more severe row
+    ever appends to ``issues`` and never downgrades a more severe row
     state.
     """
     _apply_user_exclusions(merged, exclusions)
@@ -926,10 +926,10 @@ def _augment_dataframe(
             continue
         best = max(candidates, key=lambda c: c.confidence)
 
-        bids_name = str(df.at[df_idx, "BIDS_name"] or "").replace("sub-", "")
+        participant = str(df.at[df_idx, "participant_id"] or "").replace("sub-", "")
         session = str(df.at[df_idx, "session"] or "").replace("ses-", "")
         datatype, basename, issues, entities_used = _propose_basename(
-            bids_name, session, best,
+            participant, session, best,
         )
 
         # Repetition verdict: "isolated" (singleton group), "trivial"
@@ -1017,13 +1017,13 @@ def _augment_dataframe(
             )
             df.at[df_idx, "include"] = 0
 
-        df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
+        df.at[df_idx, "issues"] = " | ".join(annotated_issues)
 
         if basename:
             ext = ".tsv" if basename.endswith("_physio") else ".nii.gz"
-            df.at[df_idx, "proposed_datatype"] = datatype
-            df.at[df_idx, "proposed_basename"] = basename
-            df.at[df_idx, "Proposed BIDS name"] = f"{datatype}/{basename}{ext}"
+            df.at[df_idx, "datatype"] = datatype
+            df.at[df_idx, "bids_name"] = basename
+            df.at[df_idx, "bids_path"] = f"{datatype}/{basename}{ext}"
 
         # Record the canonical entities dict used to build the basename
         # in JSON so ``bidsmgr-rebuild`` can regenerate the basename
@@ -1082,7 +1082,7 @@ def _augment_dataframe(
                 )
                 if anomaly:
                     annotated_issues.append(anomaly)
-                    df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
+                    df.at[df_idx, "issues"] = " | ".join(annotated_issues)
 
     # PET, from the DICOM Modality tag: classify anything the probe missed,
     # derive the suggestion columns, then exclude the CT companion of a
@@ -1095,7 +1095,7 @@ def _augment_dataframe(
     return df
 
 
-# Marker prepended to ``proposed_issues`` for a DERIVED non-image series.
+# Marker prepended to ``issues`` for a DERIVED non-image series.
 # The GUI inventory model keys on the leading ``NONIMAGE_ISSUE_TOKEN``
 # substring to paint the row's "not an image" highlight, so keep the two
 # in sync (mirrors how the abort highlight keys on ``suspected_abort``).
@@ -1147,8 +1147,8 @@ def _is_physio_row(df: pd.DataFrame, idx: object) -> bool:
 
     return (
         _cell("bids_guess_suffix") == "physio"
-        or _cell("modality") == "physio"
-        or _cell("proposed_basename").endswith("_physio")
+        or _cell("sequence_kind") == "physio"
+        or _cell("bids_name").endswith("_physio")
     )
 
 
@@ -1161,7 +1161,7 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
     a NIfTI, so instead of letting the converter attempt it and fail with a
     cryptic ``rc=2`` we flag the row here: force ``bids_guess_skip`` /
     ``include=0`` so it is never converted, and prepend a clear reason to
-    ``proposed_issues`` so it surfaces in the inventory table highlighted as
+    ``issues`` so it surfaces in the inventory table highlighted as
     "not an actual image". Operates on the internal ``_has_pixel_data``
     column (stamped by ``inventory.mri_dicom``, dropped from the final TSV).
     """
@@ -1175,8 +1175,8 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
             continue
         df.at[df_idx, "bids_guess_skip"] = True
         df.at[df_idx, "include"] = 0
-        existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
-        df.at[df_idx, "proposed_issues"] = (
+        existing = str(df.at[df_idx, "issues"] or "").strip()
+        df.at[df_idx, "issues"] = (
             f"{NONIMAGE_ISSUE} | {existing}" if existing else NONIMAGE_ISSUE
         )
 
@@ -1210,8 +1210,8 @@ def _flag_ct_companion_rows(df: pd.DataFrame) -> None:
             continue
         df.at[idx, "bids_guess_skip"] = True
         df.at[idx, "include"] = 0
-        existing = str(df.at[idx, "proposed_issues"] or "").strip()
-        df.at[idx, "proposed_issues"] = (
+        existing = str(df.at[idx, "issues"] or "").strip()
+        df.at[idx, "issues"] = (
             f"{CT_COMPANION_ISSUE} | {existing}" if existing else CT_COMPANION_ISSUE
         )
 
@@ -1229,17 +1229,17 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
     and a separate feature), simply give the incoming block a disjoint range;
     the user renames rows in the inventory to merge them deliberately.
 
-    Rewrites ``BIDS_name`` plus the ``entities`` / basename columns derived
+    Rewrites ``participant_id`` plus the ``entities`` / basename columns derived
     from it, so the row stays internally consistent.
     """
-    if df.empty or "BIDS_name" not in df.columns:
+    if df.empty or "participant_id" not in df.columns:
         return
 
     used: set[int] = set()
     for other in others:
-        if other is None or other.empty or "BIDS_name" not in other.columns:
+        if other is None or other.empty or "participant_id" not in other.columns:
             continue
-        for label in other["BIDS_name"].astype(str):
+        for label in other["participant_id"].astype(str):
             m = _SUB_LABEL_RE.match(label.strip())
             if m:
                 used.add(int(m.group(1)))
@@ -1248,7 +1248,7 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
 
     offset = max(used)
     remap: dict[str, str] = {}
-    for label in df["BIDS_name"].astype(str):
+    for label in df["participant_id"].astype(str):
         m = _SUB_LABEL_RE.match(label.strip())
         if m and label not in remap:
             remap[label] = f"sub-{int(m.group(1)) + offset:03d}"
@@ -1256,11 +1256,11 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
         return
 
     for idx in df.index:
-        old = str(df.at[idx, "BIDS_name"]).strip()
+        old = str(df.at[idx, "participant_id"]).strip()
         new = remap.get(old)
         if not new:
             continue
-        df.at[idx, "BIDS_name"] = new
+        df.at[idx, "participant_id"] = new
         token = new[len("sub-"):]
         if "entities" in df.columns:
             try:
@@ -1270,7 +1270,7 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
             if ents.get("subject"):
                 ents["subject"] = token
                 df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
-        for col in ("proposed_basename", "Proposed BIDS name"):
+        for col in ("bids_name", "bids_path"):
             if col in df.columns:
                 df.at[idx, col] = str(df.at[idx, col]).replace(old, new, 1)
 
@@ -1324,7 +1324,7 @@ def _fill_pet_suggestions(df: pd.DataFrame) -> None:
                 df.at[idx, col] = value
 
 
-# Marker prepended to ``proposed_issues`` for a user-excluded series. Mirrors
+# Marker prepended to ``issues`` for a user-excluded series. Mirrors
 # the non-image precedent: row stays visible (include=0) so the user can
 # re-enable it; the GUI surfaces the reason via the issues column / tooltip.
 USER_EXCLUDED_ISSUE_TOKEN = "user-excluded"
@@ -1336,7 +1336,7 @@ def _apply_user_exclusions(
 ) -> None:
     """Flag rows matching a user exclusion rule: ``include=0`` +
     ``bids_guess_skip`` + a ``user-excluded`` note prepended to
-    ``proposed_issues``. Reversible (the row stays in the inventory; the user
+    ``issues``. Reversible (the row stays in the inventory; the user
     can re-tick ``include``). Matches the rule against the series description
     (``sequence``) or the relative path (``source_folder`` / ``source_file``).
     """
@@ -1365,9 +1365,9 @@ def _apply_user_exclusions(
             f"'{matched.pattern}' ({matched.target}/{matched.match_mode}); "
             "excluded from conversion. Re-tick 'include' to convert it anyway."
         )
-        existing = str(df.at[idx, "proposed_issues"] or "").strip() if "proposed_issues" in df.columns else ""
-        if "proposed_issues" in df.columns:
-            df.at[idx, "proposed_issues"] = f"{note} | {existing}" if existing else note
+        existing = str(df.at[idx, "issues"] or "").strip() if "issues" in df.columns else ""
+        if "issues" in df.columns:
+            df.at[idx, "issues"] = f"{note} | {existing}" if existing else note
 
 
 def _probe_anomaly(
@@ -1556,7 +1556,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
-    source of truth. Display columns (``proposed_basename``, ``task``,
+    source of truth. Display columns (``bids_name``, ``task``,
     ``run`` …) are derived from it.
 
     Columns absent from ``df`` are skipped (so an MRI-only or EEG/MEG-only
@@ -1611,10 +1611,10 @@ def _write_files_by_uid_sidecar(output_tsv: Path, files_by_uid: dict[str, list[s
     return sidecar
 
 
-# Marker prepended to ``proposed_issues`` for a row whose scan pooled multiple
+# Marker prepended to ``issues`` for a row whose scan pooled multiple
 # distinct DICOM StudyDescriptions. This routes the heads-up through the
 # existing severity system: the GUI inventory model classifies any non-error
-# ``proposed_issues`` note as a ``warn`` row, so these rows count toward the
+# ``issues`` note as a ``warn`` row, so these rows count toward the
 # "warnings" chip and appear in the Issues dialog. Awareness-only: the row is
 # NOT excluded or altered, and it still converts. The wording deliberately
 # avoids the error-token substrings the model treats as fatal
@@ -1630,7 +1630,7 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
     StudyDescription is not a BIDS entity and is deliberately not shown as a GUI
     column, so the heads-up is surfaced two ways instead: a one-line summary on
     the ``bidsmgr.cli.scan`` logger (the CLI surface, also the GUI Log dock), and
-    a non-fatal note appended to each affected row's ``proposed_issues`` so the
+    a non-fatal note appended to each affected row's ``issues`` so the
     rows read as ``warn`` in the inventory table, count toward the warnings chip,
     and list in the Issues dialog (the GUI surface the user already knows).
     Nothing is excluded or rewritten. EEG/MEG rows have no StudyDescription and
@@ -1658,7 +1658,7 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
 
     # GUI severity-system surface: append a per-row warning note so each affected
     # row shows up in the warnings chip + Issues dialog.
-    if "proposed_issues" in df.columns:
+    if "issues" in df.columns:
         for df_idx in df.index[present]:
             this_study = studies.at[df_idx]
             others = ", ".join(f"'{s}'" for s in distinct if s != this_study)
@@ -1666,17 +1666,17 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
                 f"{MIXED_STUDY_ISSUE_TOKEN}: this series is '{this_study}'; "
                 f"scan also contains {others}"
             )
-            existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
-            df.at[df_idx, "proposed_issues"] = (
+            existing = str(df.at[df_idx, "issues"] or "").strip()
+            df.at[df_idx, "issues"] = (
                 f"{existing} | {note}" if existing else note
             )
 
     # The strongest signal is a single subject spanning more than one study.
-    if "BIDS_name" in df.columns:
-        sub = df.loc[present, ["BIDS_name", "StudyDescription"]].copy()
-        sub["BIDS_name"] = sub["BIDS_name"].astype(str).str.strip()
-        sub = sub[sub["BIDS_name"] != ""]
-        for name, grp in sub.groupby("BIDS_name"):
+    if "participant_id" in df.columns:
+        sub = df.loc[present, ["participant_id", "StudyDescription"]].copy()
+        sub["participant_id"] = sub["participant_id"].astype(str).str.strip()
+        sub = sub[sub["participant_id"] != ""]
+        for name, grp in sub.groupby("participant_id"):
             subj_studies = sorted(
                 grp["StudyDescription"].astype(str).str.strip().unique()
             )
@@ -1774,7 +1774,7 @@ def run_scan(
         ``<output_tsv_parent>/.tmp/``. The probe pass produces
         per-series NIfTI / sidecar / bvec / bval; anomalies (e.g. a
         bold series that produced 2 NIfTI files because of an
-        operator-aborted volume) surface in ``proposed_issues``. The
+        operator-aborted volume) surface in ``issues``. The
         ``.tmp/`` scratch tree is **always wiped** when ``run_scan``
         returns — including on error — so the user is left with the
         inventory TSV and nothing else. MRI rows only.
@@ -1986,7 +1986,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "probe_n_files / probe_n_nifti / probe_n_volumes / "
             "probe_extensions columns to the TSV and surfaces conversion "
             "anomalies (e.g. a bold series that split into two NIfTIs "
-            "because of an operator-aborted volume) in proposed_issues. "
+            "because of an operator-aborted volume) in issues. "
             "The .tmp/ directory is always removed when this command "
             "returns — including on error."
         ),

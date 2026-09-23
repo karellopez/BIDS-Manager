@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QLabel, QMessageBox
 
 from bidsmgr.gui.coherence_dialog import CoherenceDialog
 from bidsmgr.gui.linkage_dialog import LinkageDialog
@@ -55,6 +56,17 @@ def dataset(tmp_path: Path) -> Path:
         )
     )
     return root
+
+
+def _tree_rows(tree) -> list[tuple[str, str]]:
+    """(now, becomes) for every leaf row of a two-column preview."""
+    out = []
+    for i in range(tree.topLevelItemCount()):
+        head = tree.topLevelItem(i)
+        for j in range(head.childCount()):
+            child = head.child(j)
+            out.append((child.text(0), child.text(1)))
+    return out
 
 
 def _fmap(root: Path, n: int) -> Path:
@@ -220,6 +232,64 @@ class TestReferencesDialog:
             for i in range(dlg._right.topLevelItemCount())
         ]
         assert Qt.CheckState.PartiallyChecked in states
+
+    def test_ticking_and_unticking_does_not_take_the_process_down(
+        self, qtbot, dataset,
+    ):
+        """It used to, and not as a Python exception.
+
+        Ticking a box emits ``itemChanged``; the handler refilled both lists,
+        and clearing a tree from inside that handler destroys the very item
+        whose signal is still running. Qt goes on using it and the process
+        dies with a segmentation fault, which no ``except`` clause catches.
+        Five ticks were enough.
+        """
+        dlg = LinkageDialog(dataset, _fmap(dataset, 1))
+        qtbot.addWidget(dlg)
+        rows = [dlg._right.topLevelItem(i)
+                for i in range(dlg._right.topLevelItemCount())]
+        assert len(rows) >= 3
+        for item, state in (
+            (rows[0], Qt.CheckState.Checked),
+            (rows[1], Qt.CheckState.Checked),
+            (rows[0], Qt.CheckState.Unchecked),
+            (rows[2], Qt.CheckState.Checked),
+            (rows[1], Qt.CheckState.Unchecked),
+        ):
+            item.setCheckState(0, state)
+        assert dlg._pending
+        ticked = {
+            Path(r.data(0, Qt.ItemDataRole.UserRole)).name for r in rows
+            if r.checkState(0) == Qt.CheckState.Checked
+        }
+        assert ticked == {"sub-001_task-x_run-3_bold.nii.gz"}
+
+    def test_a_tick_does_not_rebuild_the_lists_under_the_cursor(
+        self, qtbot, dataset,
+    ):
+        """The lists are what the user is pointing at. Rebuilding them on
+        every tick lost the scroll position and the row identities."""
+        dlg = LinkageDialog(dataset, _fmap(dataset, 1))
+        qtbot.addWidget(dlg)
+        before = [dlg._right.topLevelItem(i)
+                  for i in range(dlg._right.topLevelItemCount())]
+        before[0].setCheckState(0, Qt.CheckState.Checked)
+        after = [dlg._right.topLevelItem(i)
+                 for i in range(dlg._right.topLevelItemCount())]
+        assert all(a is b for a, b in zip(before, after)), (
+            "the rows were replaced, so the list was rebuilt"
+        )
+
+    def test_an_edited_row_says_so_before_it_is_saved(self, qtbot, dataset):
+        dlg = LinkageDialog(dataset, _fmap(dataset, 1))
+        qtbot.addWidget(dlg)
+        self._tick(dlg, "run-2_bold")
+        edited = [
+            dlg._left.topLevelItem(i).text(2)
+            for i in range(dlg._left.topLevelItemCount())
+            if dlg._left.topLevelItem(i).text(2) == "edited, not saved"
+        ]
+        assert edited
 
     def test_everything_saves_as_one_operation(self, qtbot, dataset):
         """A linkage pass over a session is one entry in the history."""
@@ -430,3 +500,61 @@ class TestTheToolsMenu:
                        "Find and replace a value...",
                        "Index widths...", "Check coherence..."):
             assert wanted in labels, labels
+
+
+class TestIndexWidthsBothWays:
+    """It has to work on a dataset that is ALREADY padded.
+
+    The reported bug: with values written ``run-001``, ticking two digits
+    found nothing to change. ``pad`` was ``zfill`` alone, so it could only
+    ever add zeros, and half of what the tool claims to do was missing.
+    """
+
+    @pytest.fixture()
+    def padded(self, tmp_path: Path) -> Path:
+        root = tmp_path / "ds"
+        (root / "sub-001" / "func").mkdir(parents=True)
+        (root / "dataset_description.json").write_text(
+            json.dumps({"Name": "t", "BIDSVersion": "1.10.0"})
+        )
+        for value in ("001", "002", "003"):
+            (root / "sub-001" / "func"
+             / f"sub-001_task-x_run-{value}_bold.nii.gz").write_bytes(b"x")
+        return root
+
+    def test_it_offers_to_trim(self, qtbot, padded):
+        dlg = PadValuesDialog(padded)
+        qtbot.addWidget(dlg)
+        dlg._widths["run"].setValue(2)
+        rows = _tree_rows(dlg._tree)
+        assert ("run-001", "run-01") in rows
+        assert ("run-003", "run-03") in rows
+
+    def test_it_says_the_width_that_would_fit(self, qtbot, padded):
+        """Otherwise a dataset written at three digits looks settled, and
+        trimming is something you would have to guess at."""
+        dlg = PadValuesDialog(padded)
+        qtbot.addWidget(dlg)
+        notes = [
+            w.text() for w in dlg._rows.findChildren(QLabel)
+            if "would fit" in w.text()
+        ]
+        assert notes and "1 would fit" in notes[0]
+
+    def test_applying_it_renames_the_files(self, qtbot, padded, monkeypatch):
+        monkeypatch.setattr(
+            "bidsmgr.gui.pad_values_dialog.QMessageBox.question",
+            lambda *a, **k: QMessageBox.StandardButton.Ok,
+        )
+        dlg = PadValuesDialog(padded)
+        qtbot.addWidget(dlg)
+        dlg._widths["run"].setValue(2)
+        dlg._on_apply()
+        names = sorted(
+            p.name for p in (padded / "sub-001" / "func").iterdir()
+        )
+        assert names == [
+            "sub-001_task-x_run-01_bold.nii.gz",
+            "sub-001_task-x_run-02_bold.nii.gz",
+            "sub-001_task-x_run-03_bold.nii.gz",
+        ]

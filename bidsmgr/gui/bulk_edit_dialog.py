@@ -1,19 +1,37 @@
-"""Modal dialog: apply one value to one column across every selected row.
+"""Write one value into one column, across the rows you choose.
 
-Reached from the **✎ Bulk edit…** toolbar button (enabled when ≥ 2
+Reached from the **Bulk edit...** toolbar button (enabled when two or more
 rows are selected in the inspection table). Dispatches through
-:meth:`InventoryTableModel.bulk_set` so entity rebuilds, mirror cells
-and the basename column all stay in sync.
+:meth:`InventoryTableModel.bulk_set` so entity rebuilds, mirror cells and
+the BIDS-name column all stay in sync.
 
-For columns that have a schema-bounded set of values (``datatype``,
-``suffix``), the dialog offers a combo box populated from the schema
-engine; everything else uses a free-form ``QLineEdit``.
+For columns with a schema-bounded set of values (``datatype``, ``suffix``)
+the value box is a combo populated from the schema; everything else is free
+text bounded by the entity's own format.
+
+**The selection is where it starts, not what it does.** It used to write
+into every selected row, full stop, so "change task-rest to task-restingstate
+but leave the two localizers alone" meant going back to the table and
+re-selecting. The Editor's rename tool had the better model: find the rows
+that say a particular thing, and change those. This has it too, in two
+layers that answer different questions:
+
+* **Which rows** the change applies to: all of the selection, or only the
+  ones whose current value is a particular one, listed with how many rows
+  carry each, so there is nothing to guess.
+* **Then** a preview, one row per file, saying what it says now and what it
+  would say, every one of them untickable. That is the layer that handles
+  the case no filter can express: "these four, but not that one".
+
+Nothing is written until Apply, and the count on the button is the number of
+rows that would actually change.
 """
 
 from __future__ import annotations
 
 from typing import Iterable, Optional
 
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,6 +42,9 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -32,11 +53,22 @@ from .. import schema as schema_mod
 from .delegates import builtin_montages
 from .models import COLUMNS, InventoryTableModel
 
+#: Sentinel for the "every selected row" entry of the target combo.
+_ALL_ROWS = "\x00all"
+
+#: Sentinel for "the rows where this column is empty". Distinct from a real
+#: value of "" so the combo can offer it as its own line with a count.
+_BLANK = "\x00blank"
+
+#: Replanning walks the selection, so it is debounced exactly as the rename
+#: dialog debounces its own: doing it per keystroke froze the window.
+_REPLAN_DELAY_MS = 200
+
 
 # Human-readable header per column key. Keeps the dropdown clear about
 # what each option actually does.
 _COLUMN_DESCRIPTION: dict[str, str] = {
-    "id":        "Subject identifier — updates BIDS_name AND the subject entity.",
+    "id":        "Subject identifier — updates participant_id AND the subject entity.",
     "dataset":   "Dataset slug — the convert verb groups rows by this column.",
     "ses":       "Session label (no ``ses-`` prefix; the converter adds it).",
     "task":      "Task entity.",
@@ -80,10 +112,17 @@ class BulkEditDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Bulk edit")
         self.setModal(True)
-        self.resize(440, 280)
+        self.resize(760, 620)
         self._model = model
         self._rows: list[int] = list(rows)
         self._changed: int = 0
+        # Created first, because widgets wired below fire into them while
+        # the dialog is still being built.
+        self._loading = False
+        self._replan_timer = QTimer(self)
+        self._replan_timer.setSingleShot(True)
+        self._replan_timer.setInterval(_REPLAN_DELAY_MS)
+        self._replan_timer.timeout.connect(self._replan)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -99,8 +138,9 @@ class BulkEditDialog(QDialog):
                        f"{'s' if len(self._rows) != 1 else ''} selected")
         title.setObjectName("issue-dialog-title")
         sub = QLabel(
-            "Pick a column and the new value to write into every "
-            "selected row. Entity rebuilds + basenames update "
+            "Pick a column and the new value, then narrow it: to the rows "
+            "that currently say one particular thing, and then row by row "
+            "in the preview. Entity rebuilds and BIDS names update "
             "automatically."
         )
         sub.setObjectName("issue-dialog-subtitle")
@@ -145,14 +185,37 @@ class BulkEditDialog(QDialog):
         self._col_combo.currentIndexChanged.connect(self._on_column_changed)
         form.addRow("Column:", self._col_combo)
 
+        # WHICH of the selected rows. Populated per column from the values
+        # actually in use, with counts, so "only the ones that say rest" is
+        # a thing you pick rather than a selection you have to rebuild in
+        # the table.
+        self._target_combo = QComboBox()
+        self._target_combo.setObjectName("ent-input")
+        self._target_combo.setToolTip(
+            "Narrow the change to the rows that currently hold one "
+            "particular value. The selection decides what is on offer; "
+            "this decides which of it is written to."
+        )
+        self._target_combo.currentIndexChanged.connect(
+            lambda _i: self._schedule_replan()
+        )
+        form.addRow("Change:", self._target_combo)
+
+
         # Value editor — swapped in/out depending on the column kind.
         # For ``datatype`` / ``suffix`` we offer a schema-bounded combo;
         # everything else uses a free-form line edit.
         self._value_edit = QLineEdit()
         self._value_edit.setObjectName("tb-input")
+        self._value_edit.textChanged.connect(
+            lambda _t: self._schedule_replan()
+        )
         self._value_combo = QComboBox()
         self._value_combo.setObjectName("ent-input")
         self._value_combo.setEditable(True)  # users can still free-type
+        self._value_combo.currentTextChanged.connect(
+            lambda _t: self._schedule_replan()
+        )
         form.addRow("New value:", self._value_edit)
         form.addRow("", self._value_combo)
         self._value_combo.setVisible(False)
@@ -169,7 +232,7 @@ class BulkEditDialog(QDialog):
         )
         self._remove_check.toggled.connect(self._on_remove_toggled)
         form.addRow("", self._remove_check)
-        self._value_row_index = 1  # the row we toggle (line edit vs combo)
+
         # Which editor is active. Tracked explicitly rather than via
         # ``isVisible()`` (unreliable before the dialog is shown / in tests).
         self._value_is_combo = False
@@ -185,7 +248,35 @@ class BulkEditDialog(QDialog):
 
         bl.addLayout(form)
         bl.addWidget(self._description)
-        bl.addStretch(1)
+
+        preview_label = QLabel("What would change")
+        preview_label.setObjectName("card-title")
+        bl.addWidget(preview_label)
+
+        self._preview = QTreeWidget()
+        self._preview.setObjectName("check-tree")
+        self._preview.setColumnCount(3)
+        self._preview.setHeaderLabels(["Row", "Now", "Becomes"])
+        self._preview.setRootIsDecorated(False)
+        self._preview.setUniformRowHeights(True)
+        self._preview.itemChanged.connect(self._on_row_ticked)
+        bl.addWidget(self._preview, 1)
+
+        picks = QHBoxLayout()
+        picks.setSpacing(8)
+        for text, state in (
+            ("Select all", Qt.CheckState.Checked),
+            ("Select none", Qt.CheckState.Unchecked),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("tb-btn")
+            btn.clicked.connect(lambda _c=False, s=state: self._set_all(s))
+            picks.addWidget(btn)
+        picks.addStretch(1)
+        self._summary = QLabel("")
+        self._summary.setObjectName("pane-hint")
+        picks.addWidget(self._summary)
+        bl.addLayout(picks)
 
         outer.addWidget(body, 1)
 
@@ -234,6 +325,7 @@ class BulkEditDialog(QDialog):
         self._remove_check.setVisible(is_entity)
         if not is_entity:
             self._remove_check.setChecked(False)
+        self._refill_targets(key)
 
         # Decide which editor to show.
         if key.startswith(InventoryTableModel.ENTITY_KEY_PREFIX):
@@ -272,6 +364,115 @@ class BulkEditDialog(QDialog):
         """Grey the value editor out: with Remove ticked it is not read."""
         self._value_edit.setEnabled(not removing)
         self._value_combo.setEnabled(not removing)
+        self._schedule_replan()
+
+    # ------------------------------------------------------------------
+    # Which rows
+    # ------------------------------------------------------------------
+
+    def _refill_targets(self, key: str) -> None:
+        """Offer the values this column actually holds, with row counts."""
+        counts: dict[str, int] = {}
+        for row in self._rows:
+            counts[self._model.bulk_value(row, key)] = (
+                counts.get(self._model.bulk_value(row, key), 0) + 1
+            )
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        self._target_combo.addItem(
+            f"every selected row ({len(self._rows)})", _ALL_ROWS,
+        )
+        for value, n in sorted(counts.items(), key=lambda kv: (not kv[0], kv[0])):
+            if value:
+                self._target_combo.addItem(
+                    f"only the rows that say {value} ({n})", value,
+                )
+            else:
+                self._target_combo.addItem(
+                    f"only the rows that say nothing ({n})", _BLANK,
+                )
+        self._target_combo.blockSignals(False)
+        self._replan()
+
+    def _matching_rows(self) -> list[int]:
+        """The selected rows the target filter keeps."""
+        key = self._col_combo.currentData()
+        wanted = self._target_combo.currentData()
+        if key is None or wanted in (None, _ALL_ROWS):
+            return list(self._rows)
+        if wanted == _BLANK:
+            return [r for r in self._rows if not self._model.bulk_value(r, key)]
+        return [
+            r for r in self._rows if self._model.bulk_value(r, key) == wanted
+        ]
+
+    # ------------------------------------------------------------------
+    # The preview
+    # ------------------------------------------------------------------
+
+    def _schedule_replan(self) -> None:
+        if not self._loading:
+            self._replan_timer.start()
+
+    def _replan(self) -> None:
+        """Redraw the per-row preview from the current column and value."""
+        key = self._col_combo.currentData()
+        if key is None:
+            return
+        removing = self._remove_check.isChecked()
+        new_value = "" if removing else self._read_value()
+
+        self._loading = True
+        self._preview.clear()
+        for row in self._matching_rows():
+            now = self._model.bulk_value(row, key)
+            if now == new_value:
+                continue                    # already says it; nothing to do
+            item = QTreeWidgetItem(self._preview, [
+                self._model.row_label(row),
+                now or "(nothing)",
+                "(removed)" if removing else (new_value or "(nothing)"),
+            ])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setData(0, Qt.ItemDataRole.UserRole, int(row))
+        for column in range(3):
+            self._preview.resizeColumnToContents(column)
+        self._loading = False
+        self._refresh_summary()
+
+    def _on_row_ticked(self, _item, _column: int) -> None:
+        if not self._loading:
+            self._refresh_summary()
+
+    def _set_all(self, state) -> None:
+        self._loading = True
+        for i in range(self._preview.topLevelItemCount()):
+            self._preview.topLevelItem(i).setCheckState(0, state)
+        self._loading = False
+        self._refresh_summary()
+
+    def _ticked_rows(self) -> list[int]:
+        return [
+            int(self._preview.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole))
+            for i in range(self._preview.topLevelItemCount())
+            if self._preview.topLevelItem(i).checkState(0)
+            == Qt.CheckState.Checked
+        ]
+
+    def _refresh_summary(self) -> None:
+        ticked = len(self._ticked_rows())
+        total = self._preview.topLevelItemCount()
+        if not total:
+            self._summary.setText(
+                "Nothing would change: every row in scope already says that."
+            )
+        else:
+            self._summary.setText(f"{ticked} of {total} row(s) selected")
+        self._apply_btn.setEnabled(bool(ticked))
+        self._apply_btn.setText(
+            f"Apply to {ticked} row(s)" if ticked else "Apply"
+        )
 
     def _show_value_combo(self, options: list[str], *, editable: bool = False) -> None:
         self._value_combo.blockSignals(True)
@@ -294,6 +495,13 @@ class BulkEditDialog(QDialog):
         return self._value_edit.text().strip()
 
     def _on_apply(self) -> None:
+        # Flush a replan the debounce is still holding. Typing a value and
+        # pressing Apply inside the delay would otherwise write the plan
+        # from BEFORE the value was typed.
+        if self._replan_timer.isActive():
+            self._replan_timer.stop()
+            self._replan()
+
         key = self._col_combo.currentData()
         if key is None:
             return
@@ -312,7 +520,10 @@ class BulkEditDialog(QDialog):
             # than silently discarding what was typed.
             value = ""
 
-        self._changed = self._model.bulk_set(self._rows, key, value)
+        rows = self._ticked_rows()
+        if not rows:
+            return
+        self._changed = self._model.bulk_set(rows, key, value)
         self.accept()
 
 

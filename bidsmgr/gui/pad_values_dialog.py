@@ -68,10 +68,11 @@ class PadValuesDialog(QDialog):
         outer.setSpacing(0)
         outer.addWidget(build_header(
             "Give every index the same width",
-            "Turns <b>run-1</b> into <b>run-01</b>, for each index entity "
-            "separately. Both spellings are valid BIDS, so this is a house "
-            "style rather than a correction. Every reference follows: the "
-            "scans tables, the links and the entity columns.",
+            "Turns <b>run-1</b> into <b>run-01</b>, and <b>run-001</b> back "
+            "into <b>run-01</b>, for each index entity separately. Both "
+            "spellings are valid BIDS, so this is a house style rather than "
+            "a correction. Every reference follows: the scans tables, the "
+            "links and the entity columns.",
         ))
 
         body = QWidget()
@@ -91,7 +92,9 @@ class PadValuesDialog(QDialog):
             "One row per index entity this dataset uses. The width starts at "
             "the widest value already in use, so pressing Apply with nothing "
             "changed settles a dataset that disagrees with itself and leaves "
-            "a consistent one alone."
+            "a consistent one alone. Each row says the narrowest width its "
+            "values would still fit in, so trimming is a choice you can see "
+            "rather than one you have to guess at."
         ))
         self._rows = QWidget()
         self._rows_layout = QVBoxLayout(self._rows)
@@ -149,6 +152,13 @@ class PadValuesDialog(QDialog):
         for entity in self._index_entities():
             values = [v for v, _ in ev.counts(self._root, entity) if v.isdigit()]
             widest = max((len(v) for v in values), default=1)
+            # What the values actually need, ignoring the zeros somebody put
+            # in front of them. This is what makes trimming discoverable:
+            # a dataset written run-001 to run-012 says so, instead of
+            # looking settled at three digits.
+            needed = max(
+                (len(v.lstrip("0") or "0") for v in values), default=1
+            )
             used = bool(values)
 
             row = QHBoxLayout()
@@ -185,6 +195,8 @@ class PadValuesDialog(QDialog):
                     + ", ".join(f"{entity}-{v}" for v in values[:3])
                     + (", ..." if len(values) > 3 else "")
                 )
+                if needed < widest:
+                    text += f" ({needed} would fit)"
             else:
                 text = "not used in this dataset"
             note = QLabel(text)

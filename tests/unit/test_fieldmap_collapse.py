@@ -32,7 +32,7 @@ def _row(uid: str, image_type: str, acq_time: str = "", **over):
     """One pre-collapse fieldmap row, with only the columns the merge reads."""
     row = {
         "subject": "OL_4925",
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "",
         "source_folder": "OL_4925",
         "include": 1,
@@ -41,7 +41,7 @@ def _row(uid: str, image_type: str, acq_time: str = "", **over):
         "image_type": image_type,
         "acq_time": acq_time,
         "modality": "fmap",
-        "modality_bids": "fmap",
+        "sequence_kind": "fmap",
         "n_files": 1,
         "study_instance_uid": "1.2.3",
         "study_date": "20260917",
@@ -141,13 +141,13 @@ def test_different_sequences_never_merge():
 
 def test_different_subjects_never_merge():
     out = _collapse([
-        _row("uid.6", "M", BIDS_name="sub-001"),
-        _row("uid.7", "P", BIDS_name="sub-001"),
-        _row("uid.6b", "M", BIDS_name="sub-002"),
-        _row("uid.7b", "P", BIDS_name="sub-002"),
+        _row("uid.6", "M", participant_id="sub-001"),
+        _row("uid.7", "P", participant_id="sub-001"),
+        _row("uid.6b", "M", participant_id="sub-002"),
+        _row("uid.7b", "P", participant_id="sub-002"),
     ])
     assert len(out) == 2
-    assert set(out["BIDS_name"]) == {"sub-001", "sub-002"}
+    assert set(out["participant_id"]) == {"sub-001", "sub-002"}
 
 
 def test_non_fieldmap_rows_are_untouched():

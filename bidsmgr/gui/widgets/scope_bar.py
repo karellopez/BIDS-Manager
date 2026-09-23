@@ -33,10 +33,12 @@ from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
-    QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
+
+from .primitives import ElidedLabel
 
 from ... import schema as schema_mod
 
@@ -93,11 +95,21 @@ class ScopeBar(QWidget):
         picked: Optional[Sequence[Path]] = None,
         *,
         allow_dataset: bool = True,
+        show_summary: bool = True,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._root = Path(root)
         self._picked = [Path(p) for p in (picked or [])]
+
+        # Never squeezed below what its rows need. A widget nested inside a
+        # QFormLayout is laid out from its ``sizeHint``, and a form row that
+        # wants more room than the dialog has will compress the rest: this
+        # bar came out with its summary drawn nine pixels INSIDE its own
+        # combo boxes at a 1.6 font scale.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum,
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -145,9 +157,15 @@ class ScopeBar(QWidget):
 
         outer.addLayout(row)
 
-        self._summary = QLabel("")
+        # ELIDED, not word-wrapped. A word-wrapped QLabel answers with a
+        # height that depends on its width, and Qt does not carry that
+        # answer out through a nested widget into a QFormLayout: the row is
+        # sized for one line, the label asks for two, and the second one
+        # lands on top of the combo above it. One elided line cannot do
+        # that, and the full text is on the tooltip.
+        self._summary = ElidedLabel("")
         self._summary.setObjectName("dlg-hint")
-        self._summary.setWordWrap(True)
+        self._summary.setVisible(show_summary)
         outer.addWidget(self._summary)
 
         self._refresh_summary()
@@ -246,15 +264,26 @@ class ScopeBar(QWidget):
             self._summary.setText(
                 "Nothing in the dataset matches that. Widen the scope."
             )
+            self._summary.setToolTip("")
             return
-        files = _count_files(targets)
         folders = sum(1 for p in targets if p.is_dir())
-        what = (
-            f"{len(targets)} item(s)" if folders
-            else f"{len(targets)} file(s)"
-        )
+        files = _count_files(targets)
         more = "+" if files >= _COUNT_CAP else ""
-        self._summary.setText(f"{what}, {files}{more} file(s) in all.")
+        if folders:
+            text = (
+                f"{folders} folder(s), {files}{more} file(s) in all"
+                if folders == len(targets) else
+                f"{len(targets)} item(s), {files}{more} file(s) in all"
+            )
+        else:
+            # Files only, so the two counts are the same number and saying
+            # it twice ("1 file(s), 1 file(s) in all") reads as a bug.
+            text = f"{len(targets)} file(s)"
+        self._summary.setText(text)
+        self._summary.setToolTip(
+            "\n".join(str(p) for p in targets[:20])
+            + ("\n..." if len(targets) > 20 else "")
+        )
 
 
 __all__ = ["ANY_DATATYPE", "PICKED", "WHOLE", "ScopeBar"]

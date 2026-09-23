@@ -272,7 +272,7 @@ class TestPathBudget:
         monkeypatch.setattr(probe_convert, "find_dcm2niix", lambda: Path("dcm2niix"))
 
         row = SimpleNamespace(
-            modality="mri", series_uid=self.UID, fine_modality="bold",
+            modality="mri", series_uid=self.UID, sequence_kind="bold",
             subject_hint="001",
         )
         probe_convert.probe_rows(

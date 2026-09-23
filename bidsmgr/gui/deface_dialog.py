@@ -174,7 +174,7 @@ class DefaceDialog(QDialog):
 
         # --- scope -------------------------------------------------------
         scope_card, sl = card()
-        self._scope_bar = ScopeBar(self._root, self._targets, parent=self)
+        self._scope_bar = ScopeBar(self._root, self._targets, show_summary=False, parent=self)
         self._targets = self._scope_bar.targets()
         self._scope_bar.changed.connect(self._on_scope_changed)
         sl.addWidget(self._scope_bar)

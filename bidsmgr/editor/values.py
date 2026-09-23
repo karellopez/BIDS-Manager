@@ -179,12 +179,34 @@ class Repad:
 
 
 def pad(value: str, width: int) -> str:
-    """``("2", 3)`` to ``"002"``. A value already wider is left alone.
+    """Write ``value`` at ``width`` digits: ``("2", 3)`` to ``"002"``.
 
-    Never truncates. Somebody asking for two digits on a dataset that has
-    ``run-100`` means "at least two", not "throw away the hundreds".
+    It works in BOTH directions, which is the whole point of a tool called
+    "index widths": ``("001", 2)`` is ``"01"``. It used to be ``zfill``
+    alone, so it could only ever add zeros, and asking a dataset written as
+    ``run-001`` for two digits changed nothing and said nothing. The tool
+    looked broken because half of what it claims to do was missing.
+
+    Narrowing is not a loss. An index is a nonnegative integer, so the
+    leading zeros are how wide somebody chose to write it and not part of
+    the value: ``run-001`` and ``run-01`` are the same run, and the standard
+    accepts either.
+
+    **Significant digits are never dropped.** The width is a minimum, so
+    ``("100", 2)`` is ``"100"`` and not ``"00"``. Somebody asking for two
+    digits on a dataset that reaches a hundred runs means "two digits where
+    two will do".
+
+    Two values that would land on the same name (a dataset holding both
+    ``run-1`` and ``run-01``) are refused by :func:`plan_padding`, not
+    silently fused.
     """
-    return value.zfill(width) if value.isdigit() else value
+    if not value.isdigit():
+        return value
+    # Strip the chosen width off first, then write the width that was asked
+    # for. ``or "0"`` because ``"000".lstrip("0")`` is empty and zero is a
+    # legitimate index.
+    return (value.lstrip("0") or "0").zfill(width)
 
 
 def plan_padding(root: Path, entity: str, width: int) -> list[Repad]:

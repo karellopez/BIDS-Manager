@@ -307,9 +307,9 @@ def _should_probe_row(row: InventoryRow) -> bool:
 
     if row.modality != "mri" or not row.series_uid:
         return False
-    fine = (row.fine_modality or "").lower()
-    skip_modalities = {"scout", "report", "physio"}
-    if fine in skip_modalities:
+    fine = (row.sequence_kind or "").lower()
+    skip_kinds = {"scout", "report", "physio"}
+    if fine in skip_kinds:
         return False
     return True
 

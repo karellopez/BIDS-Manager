@@ -96,7 +96,8 @@ class DeleteDialog(QDialog):
         # root, so offering it would only produce a refusal. Deleting
         # everything is not a tool, it is a decision for the file manager.
         self._scope_bar = ScopeBar(
-            self._root, self._targets, allow_dataset=False, parent=self,
+            self._root, self._targets, allow_dataset=False,
+            show_summary=False, parent=self,
         )
         self._targets = self._scope_bar.targets()
         self._scope_bar.changed.connect(self._on_scope_changed)

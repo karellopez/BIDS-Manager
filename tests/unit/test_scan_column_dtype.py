@@ -123,11 +123,11 @@ class TestIndexWidthsAtScanTime:
 
         return pd.DataFrame([
             {"entities": json.dumps({"subject": "001", "run": "1"}),
-             "proposed_basename": "sub-001_run-1_bold"},
+             "bids_name": "sub-001_run-1_bold"},
             {"entities": json.dumps({"subject": "001", "run": "10"}),
-             "proposed_basename": "sub-001_run-10_bold"},
+             "bids_name": "sub-001_run-10_bold"},
             {"entities": json.dumps({"subject": "001", "task": "rest"}),
-             "proposed_basename": "sub-001_task-rest_bold"},
+             "bids_name": "sub-001_task-rest_bold"},
         ])
 
     def test_it_pads_the_numbers(self):

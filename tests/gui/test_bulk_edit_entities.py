@@ -25,25 +25,25 @@ def _df() -> pd.DataFrame:
     """Two fieldmap rows and one anatomical, as a scan would leave them."""
     return pd.DataFrame([
         {
-            "subject": "OL_4925", "BIDS_name": "sub-001", "session": "",
+            "subject": "OL_4925", "participant_id": "sub-001", "session": "",
             "include": 1, "sequence": "fmap", "series_uid": "uid.6|uid.7",
-            "proposed_datatype": "fmap", "bids_guess_suffix": "magnitude1",
+            "datatype": "fmap", "bids_guess_suffix": "magnitude1",
             "entities": '{"subject": "001", "acquisition": "fm2", "run": "1"}',
-            "task": "", "run": "1", "proposed_basename": "", "dataset": "ds",
+            "task": "", "run": "1", "bids_name": "", "dataset": "ds",
         },
         {
-            "subject": "OL_4925", "BIDS_name": "sub-001", "session": "",
+            "subject": "OL_4925", "participant_id": "sub-001", "session": "",
             "include": 1, "sequence": "fmap", "series_uid": "uid.12|uid.13",
-            "proposed_datatype": "fmap", "bids_guess_suffix": "magnitude1",
+            "datatype": "fmap", "bids_guess_suffix": "magnitude1",
             "entities": '{"subject": "001", "acquisition": "fm2", "run": "2"}',
-            "task": "", "run": "2", "proposed_basename": "", "dataset": "ds",
+            "task": "", "run": "2", "bids_name": "", "dataset": "ds",
         },
         {
-            "subject": "OL_4925", "BIDS_name": "sub-001", "session": "",
+            "subject": "OL_4925", "participant_id": "sub-001", "session": "",
             "include": 1, "sequence": "T1w", "series_uid": "uid.5",
-            "proposed_datatype": "anat", "bids_guess_suffix": "T1w",
+            "datatype": "anat", "bids_guess_suffix": "T1w",
             "entities": '{"subject": "001"}',
-            "task": "", "run": "", "proposed_basename": "", "dataset": "ds",
+            "task": "", "run": "", "bids_name": "", "dataset": "ds",
         },
     ])
 
@@ -96,7 +96,7 @@ def test_the_list_is_in_bids_filename_order(model):
 def test_an_unclassified_row_does_not_empty_the_list(model):
     """The schema cannot answer for a file it cannot identify. One such row
     in a selection of twenty must not disable the control."""
-    model._df.at[1, "proposed_datatype"] = ""
+    model._df.at[1, "datatype"] = ""
     model._df.at[1, "bids_guess_suffix"] = ""
     assert "acquisition" in model.bulk_editable_entities([0, 1])
 
@@ -116,7 +116,7 @@ def test_setting_an_entity_rebuilds_the_basename(model):
     key = InventoryTableModel.ENTITY_KEY_PREFIX + "acquisition"
     model.bulk_set([0, 1], key, "gre")
     for row in (0, 1):
-        assert "acq-gre" in model._df.at[row, "proposed_basename"]
+        assert "acq-gre" in model._df.at[row, "bids_name"]
 
 
 def test_rows_that_already_say_it_are_not_counted_as_changed(model):
@@ -198,8 +198,8 @@ def test_removing_an_entity_rebuilds_the_basename(model):
     key = InventoryTableModel.ENTITY_KEY_PREFIX + "acquisition"
     model.bulk_set([0, 1], key, "")
     for row in (0, 1):
-        assert "acq-" not in model._df.at[row, "proposed_basename"]
-        assert "run-" in model._df.at[row, "proposed_basename"], "the rest stays"
+        assert "acq-" not in model._df.at[row, "bids_name"]
+        assert "run-" in model._df.at[row, "bids_name"], "the rest stays"
 
 
 def test_the_remove_tick_is_only_offered_for_entities(qtbot, model):

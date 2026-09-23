@@ -122,7 +122,7 @@ def preview_from_inventory(df) -> dict[str, dict[str, Any]]:
     for _, row in df.iterrows():
         if str(row.get("include", "1")).strip() in ("0", "False", "false"):
             continue
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if not datatype or not suffix:
             continue
@@ -161,7 +161,7 @@ def preview_from_probe(df, probe_stats: Optional[dict] = None) -> dict[str, dict
     kind_of: dict[str, tuple[str, str]] = {}
     for _, row in df.iterrows():
         uid = str(row.get("series_uid", "") or "").strip()
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         if not datatype:
             datatype = str(row.get("bids_guess_datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
@@ -229,7 +229,7 @@ def preview_by_row(df) -> dict[str, dict[str, Any]]:
         if not isinstance(derived, dict):
             continue
 
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         kept = {
             name: value

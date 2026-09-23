@@ -700,7 +700,7 @@ def _write_participants(
 def _load_demographics_from_inventory(
     inventory_tsv: Optional[Path], report: MetadataReport,
 ) -> dict[str, dict[str, str]]:
-    """Read the inventory TSV and group demographics by ``BIDS_name``.
+    """Read the inventory TSV and group demographics by ``participant_id``.
 
     bidsmgr-scan writes ``GivenName`` / ``FamilyName`` / ``PatientID`` /
     ``PatientAge`` / ``PatientSex`` columns (PascalCase) — see
@@ -723,15 +723,15 @@ def _load_demographics_from_inventory(
         report.warnings.append(f"could not read inventory TSV {inventory_tsv}: {exc}")
         return {}
 
-    if df.empty or "BIDS_name" not in df.columns:
+    if df.empty or "participant_id" not in df.columns:
         return {}
 
     lookup: dict[str, dict[str, str]] = {}
-    for bids_name, sub_df in df.groupby("BIDS_name"):
-        bids_name = str(bids_name).strip()
-        if not bids_name:
+    for participant, sub_df in df.groupby("participant_id"):
+        participant = str(participant).strip()
+        if not participant:
             continue
-        pid = bids_name if bids_name.startswith("sub-") else f"sub-{bids_name}"
+        pid = participant if participant.startswith("sub-") else f"sub-{participant}"
         head = sub_df.iloc[0]
         lookup[pid] = {
             "given_name": str(head.get("GivenName", "") or ""),

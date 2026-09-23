@@ -439,7 +439,7 @@ def _rows_from_inventory(inventory) -> tuple[dict[str, str], dict[str, dict]]:
     by_basename: dict[str, str] = {}
     cells: dict[str, dict] = {}
     for _, row in inventory.iterrows():
-        basename = str(row.get("proposed_basename", "") or "").strip()
+        basename = str(row.get("bids_name", "") or "").strip()
         row_id = str(
             row.get("source_file", "") or row.get("series_uid", "") or ""
         ).strip()

@@ -56,11 +56,27 @@ class TestIsIndex:
 
 
 class TestPad:
+    """It writes a value AT a width, in both directions.
+
+    It used to be ``zfill`` alone, so it could only add zeros, and a dataset
+    already written as ``run-001`` could not be asked for two digits. Half of
+    what a tool called "index widths" claims to do was missing.
+    """
+
     @pytest.mark.parametrize("value,width,expected", [
         ("1", 2, "01"),
         ("1", 3, "001"),
         ("01", 2, "01"),
-        ("100", 2, "100"),          # never truncates
+        # Narrowing. The leading zeros are how wide somebody chose to write
+        # the index, not part of it: run-001 and run-01 are the same run.
+        ("001", 2, "01"),
+        ("0001", 1, "1"),
+        ("010", 2, "10"),
+        # Significant digits are never dropped: the width is a minimum.
+        ("100", 2, "100"),
+        # Zero is a legitimate index, and "000".lstrip("0") is empty.
+        ("000", 2, "00"),
+        ("0", 1, "0"),
         ("rest", 2, "rest"),        # not a number
     ])
     def test_pad(self, value, width, expected):
@@ -98,6 +114,38 @@ class TestPlanPadding:
 
     def test_nothing_to_do_is_an_empty_plan(self, dataset):
         assert ev.plan_padding(dataset, "run", 1) == []
+
+    def test_it_narrows_a_dataset_that_is_already_padded(self, tmp_path):
+        """The reported bug: ticking 2 digits on a dataset written with 3
+        found nothing to change, so the tool only ever worked forwards."""
+        root = tmp_path / "ds"
+        (root / "sub-001/func").mkdir(parents=True)
+        for value in ("001", "002", "010"):
+            (root / f"sub-001/func/sub-001_task-x_run-{value}_bold.nii.gz"
+             ).write_bytes(b"x")
+        plan = ev.plan_padding(root, "run", 2)
+        assert [(r.old, r.new) for r in plan] == [
+            ("001", "01"), ("002", "02"), ("010", "10"),
+        ]
+
+    def test_narrowing_keeps_a_value_that_does_not_fit(self, tmp_path):
+        root = tmp_path / "ds"
+        (root / "sub-001/func").mkdir(parents=True)
+        for value in ("001", "100"):
+            (root / f"sub-001/func/sub-001_task-x_run-{value}_bold.nii.gz"
+             ).write_bytes(b"x")
+        plan = ev.plan_padding(root, "run", 2)
+        assert [(r.old, r.new) for r in plan] == [("001", "01")]
+
+    def test_narrowing_onto_an_existing_value_is_refused(self, tmp_path):
+        """Two spellings of one run must not be fused by a width change."""
+        root = tmp_path / "ds"
+        (root / "sub-001/func").mkdir(parents=True)
+        for value in ("01", "001"):
+            (root / f"sub-001/func/sub-001_task-x_run-{value}_bold.nii.gz"
+             ).write_bytes(b"x")
+        with pytest.raises(RenameError, match="would both become"):
+            ev.plan_padding(root, "run", 2)
 
 
 class TestEndToEnd:

@@ -164,7 +164,38 @@ entirely.
    it additionally fixes an upstream `np.argmax` edge bug that left a
    gap in the very first sampling interval unfilled. Covered by
    `tests/unit/test_bidsphysio_plug_missing_data.py`.
-4. Otherwise no behavioural changes. Every other function and class
+4. One correctness fix in `base/bidsphysio.py`, with a matching change
+   to the `bids_label` call in `base/utils.py`: the recording label is
+   now sanitised into a valid BIDS entity label before it goes into a
+   filename. Upstream puts the SIGNAL'S OWN NAME straight in, and a
+   source calls a channel whatever it likes: a Siemens PMU dump yields
+   `external_trigger`, producing
+
+       sub-001_task-x_recording-external_trigger_physio.tsv.gz
+
+   which is not a BIDS name. `recording` is an entity whose value must
+   match the standard's `label` format, and the underscore is not in it.
+   Worse, the underscore is the entity SEPARATOR, so the name does not
+   merely fail validation: every tool that parses BIDS names reads an
+   entity `recording-external` followed by a stray token and sees a
+   different file from the one that was written.
+
+   New `bids_label` and `unique_bids_labels` produce
+   `recording-externalTrigger`: characters the standard disallows are
+   removed and the word boundary they marked is kept by capitalising
+   what followed, so the label still reads as the words it came from.
+   Names that clean up to the same label are numbered apart, because two
+   recordings with one name means the second overwrites the first.
+
+   Alphanumeric-only, deliberately. The `label` pattern differs by BIDS
+   version: `[0-9a-zA-Z]+` through 1.10.0 and `[0-9a-zA-Z+]+` from
+   1.10.1, where the plus sign means "several applicable labels" rather
+   than being a separator. Alphanumeric is the one spelling valid under
+   every version. `tests/unit/test_physio_labels.py` checks the produced
+   labels against every schema the installed `bidsval` ships, so this
+   claim is verified rather than asserted.
+
+5. Otherwise no behavioural changes. Every other function and class
    body is verbatim. Original per-file MIT headers are preserved.
 
 **What's in the tree:**

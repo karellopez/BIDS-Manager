@@ -85,7 +85,7 @@ _LABEL_COL = 120
 _EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 # Human display names for the datatypes that carry a recording sidecar.
-_MODALITY_NAMES = {
+_DATATYPE_NAMES = {
     "eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS", "pet": "PET",
 }
 
@@ -108,9 +108,9 @@ def _answered_field(name: str, value):
     return TemplateField(name=name, level="optional", type=kind)
 
 
-def _modality_label(datatype: str) -> str:
+def _datatype_label(datatype: str) -> str:
     """Display name for a single datatype (``eeg`` -> ``EEG``)."""
-    return _MODALITY_NAMES.get(datatype, datatype.upper())
+    return _DATATYPE_NAMES.get(datatype, datatype.upper())
 
 
 log = logging.getLogger(__name__)
@@ -399,7 +399,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(sec)
         self._body_layout.addWidget(self._build_path_preview(row, datatype, suffix, entities))
 
-        # 4. Row-state notice (from the scanner's proposed_issues) +
+        # 4. Row-state notice (from the scanner's issues) +
         # schema validation. Two distinct sources of "what's wrong with
         # this row": scanner-detected operational issues vs. schema's
         # entity-set verdicts. Both render with the same ValMessage
@@ -411,19 +411,22 @@ class PropertiesPanel(QWidget):
             self._body_layout.addWidget(vmsg)
 
         # 5. Per-row metadata, split into two clearly-separated regions:
-        # modality-agnostic (participant demographics + companion files, written
-        # for any modality incl. MRI) and modality-specific (the recording
-        # sidecar, EEG/MEG/iEEG/NIRS only). Sections within each region are
-        # labelled by their BIDS destination file.
+        # what applies to EVERY datatype (participant demographics and
+        # companion files, written for MRI as much as for EEG) and what
+        # belongs to THIS datatype (the recording sidecar, EEG / MEG / iEEG /
+        # NIRS / PET). Sections within each region are labelled by their BIDS
+        # destination file.
         self._append_metadata_title()
-        self._append_region_label("Modality-agnostic", agnostic=True)
+        self._append_region_label("Every datatype", agnostic=True)
         self._append_participant_section(row)
         self._append_companion_section(row)
         if datatype == "pet":
-            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_region_label(
+                f"{_datatype_label(datatype)} only", agnostic=False)
             self._append_blood_section(row)
         if datatype in _EEG_MEG_DATATYPES:
-            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_region_label(
+                f"{_datatype_label(datatype)} only", agnostic=False)
             self._append_recording_section(row, datatype)
 
         # 6. Everything else the standard lets this file carry, asked exactly as
@@ -692,7 +695,7 @@ class PropertiesPanel(QWidget):
 
     def _region_label(self, text: str, *, agnostic: bool) -> QWidget:
         """A bold, colour-coded region divider separating the two metadata
-        regions (modality-agnostic vs modality-specific)."""
+        regions (every datatype vs this datatype only)."""
         pal = CUR()
         color = pal["teal"] if agnostic else pal["purple"]
         lbl = QLabel(
@@ -739,8 +742,9 @@ class PropertiesPanel(QWidget):
         """A colour-coded section title plus a dim ``<tag> -> <destination>`` note.
 
         ``agnostic`` colours the title; ``tag`` states which modalities the
-        section applies to (``any modality`` for agnostic sections, or the
-        recording's modality such as ``EEG``) so the destination is unambiguous.
+        section applies to (``any datatype`` for the agnostic ones, or the
+        recording's own datatype such as ``EEG``) so the destination is
+        unambiguous.
         """
         pal = CUR()
         color = pal["teal"] if agnostic else pal["purple"]
@@ -769,7 +773,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "PARTICIPANT", "participants.tsv", agnostic=True, tag="any modality"))
+            "PARTICIPANT", "participants.tsv", agnostic=True, tag="any datatype"))
         self._body_layout.addWidget(self._meta_combo_row(
             "sex", "PatientSex", ["", "M", "F", "O"], self._cell(row, "PatientSex"), "",
         ))
@@ -800,7 +804,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
             "CONVERSION", "electrodes.tsv + coordsystem.json",
-            agnostic=False, tag=_modality_label(datatype)))
+            agnostic=False, tag=_datatype_label(datatype)))
 
         if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
@@ -955,7 +959,7 @@ class PropertiesPanel(QWidget):
         """The name of the file this row will produce, for the section heading."""
         if self._model is None:
             return ""
-        basename = self._cell(row, "proposed_basename")
+        basename = self._cell(row, "bids_name")
         return f"{datatype}/{basename}.json" if basename else ""
 
     def _field_suggestions(self, row: int, name: str) -> tuple:
@@ -1164,7 +1168,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
             "COMPANION FILES", "events / beh / stim (copied into BIDS)",
-            agnostic=True, tag="any modality"))
+            agnostic=True, tag="any datatype"))
 
         self._companion_list = QListWidget()
         self._companion_list.setMaximumHeight(72)

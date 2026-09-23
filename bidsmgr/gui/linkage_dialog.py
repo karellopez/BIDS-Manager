@@ -65,7 +65,12 @@ from .dialog_chrome import build_footer_with, build_header, card, hint
 
 log = logging.getLogger(__name__)
 
+#: A row with unsaved edits. Not a linkage state: it is a state of the
+#: DIALOG, and it has to read differently from the four the engine reports.
+_EDITED = "edited, not saved"
+
 _COLOURS = {
+    _EDITED: "#58a6ff",
     linkage.BROKEN: "#f85149",
     linkage.DIFFERS: "#d29922",
     linkage.IMPLIED: "#d29922",
@@ -209,6 +214,26 @@ class LinkageDialog(QDialog):
         )
         self._left.itemSelectionChanged.connect(self._on_source_changed)
         ll.addWidget(self._left, 1)
+
+        # The bulk path is the reason this tool exists: "every fieldmap in
+        # this dataset has nothing set, give them all what the times imply".
+        # That needs selecting them all, and Ctrl+A is not discoverable.
+        picks = QHBoxLayout()
+        picks.setSpacing(8)
+        for text, tip, fn in (
+            ("Select all", "Act on every file listed here.",
+             self._left.selectAll),
+            ("Select none", "Start the selection again.",
+             self._left.clearSelection),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("tb-btn")
+            btn.setToolTip(tip)
+            btn.clicked.connect(fn)
+            picks.addWidget(btn)
+        picks.addStretch(1)
+        ll.addLayout(picks)
+
         self._left_note = hint("")
         ll.addWidget(self._left_note)
         return box
@@ -357,8 +382,9 @@ class LinkageDialog(QDialog):
         self._left.clear()
         for row in self._rows:
             targets = self._targets_now(row)
-            pending = row.sidecar in self._pending
-            status = row.status if not pending else "edited, not saved"
+            status = (
+                _EDITED if row.sidecar in self._pending else row.status
+            )
             item = QTreeWidgetItem(self._left, [
                 self._rel(row.path),
                 self._describe(targets, row),
@@ -451,15 +477,9 @@ class LinkageDialog(QDialog):
             item = QTreeWidgetItem(self._right, [self._rel(candidate), others])
             item.setData(0, _PATH_ROLE, str(candidate))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            on = sum(1 for t in ticked if candidate in t)
-            if on == 0:
-                item.setCheckState(0, Qt.CheckState.Unchecked)
-            elif on == len(rows):
-                item.setCheckState(0, Qt.CheckState.Checked)
-            else:
-                # Tri-state rather than a guess: the selected files disagree
-                # and flattening that silently would lose an edit.
-                item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+            item.setCheckState(0, self._tick_state(
+                sum(1 for t in ticked if candidate in t), len(rows),
+            ))
             self._right.addTopLevelItem(item)
 
         # Targets that are written and are not there. They cannot be ticked,
@@ -530,7 +550,7 @@ class LinkageDialog(QDialog):
             elif not on and target in current:
                 current.remove(target)
             self._pending[row.sidecar] = sorted(set(current))
-        self._after_edit()
+        self._after_edit(sync_ticks=False)
 
     def _on_propose(self) -> None:
         for row in self._selected_rows():
@@ -544,22 +564,74 @@ class LinkageDialog(QDialog):
             self._pending[row.sidecar] = []
         self._after_edit()
 
-    def _after_edit(self) -> None:
-        keep = [str(r.path) for r in self._selected_rows()]
-        self._fill_left()
-        self._restore_selection(keep)
-        self._on_source_changed()
+    def _after_edit(self, *, sync_ticks: bool = True) -> None:
+        """Show an edit WITHOUT rebuilding either list.
 
-    def _restore_selection(self, keys: list[str]) -> None:
-        self._left.blockSignals(True)
-        self._left.clearSelection()
+        This used to refill the left list and then rebuild the right one, and
+        it segfaulted. Ticking a box emits ``itemChanged``; clearing the tree
+        from inside that handler destroys the very item whose signal is still
+        running, and Qt goes on using it. Not a Python exception: the process
+        dies.
+
+        Rebuilding was also the wrong thing to do even where it survived. The
+        lists are what the user is pointing at, and having them rebuild,
+        re-sort and lose their scroll position under the cursor on every tick
+        is what made this feel unusable.
+
+        So an edit updates the cells that changed and nothing else.
+        ``sync_ticks`` is skipped when the edit CAME from a tick, because the
+        box is already in the state the user just put it in.
+        """
+        if sync_ticks:
+            self._sync_ticks()
+        self._refresh_left_cells()
+        self._refresh_status()
+
+    def _sync_ticks(self) -> None:
+        """Put the right list's boxes back in step with the pending edits."""
+        rows = self._selected_rows()
+        if not rows:
+            return
+        ticked = [set(self._targets_now(r)) for r in rows]
+        self._loading = True
+        try:
+            for i in range(self._right.topLevelItemCount()):
+                item = self._right.topLevelItem(i)
+                key = item.data(0, _PATH_ROLE)
+                if not key:
+                    continue
+                on = sum(1 for t in ticked if Path(key) in t)
+                item.setCheckState(0, self._tick_state(on, len(rows)))
+        finally:
+            self._loading = False
+
+    @staticmethod
+    def _tick_state(on: int, total: int) -> Qt.CheckState:
+        if on == 0:
+            return Qt.CheckState.Unchecked
+        if on == total:
+            return Qt.CheckState.Checked
+        # Tri-state rather than a guess: the selected files disagree and
+        # flattening that silently would lose an edit.
+        return Qt.CheckState.PartiallyChecked
+
+    def _refresh_left_cells(self) -> None:
+        """Re-word the left list's two right-hand columns, in place."""
+        by_path = {str(r.path): r for r in self._rows}
         for i in range(self._left.topLevelItemCount()):
             item = self._left.topLevelItem(i)
-            if item.data(0, _PATH_ROLE) in keys:
-                item.setSelected(True)
-                if self._left.currentItem() is None:
-                    self._left.setCurrentItem(item)
-        self._left.blockSignals(False)
+            row = by_path.get(str(item.data(0, _PATH_ROLE) or ""))
+            if row is None:
+                continue
+            status = (
+                _EDITED if row.sidecar in self._pending else row.status
+            )
+            item.setText(1, self._describe(self._targets_now(row), row))
+            item.setText(2, status)
+            colour = _COLOURS.get(status)
+            item.setForeground(
+                2, QBrush(QColor(colour)) if colour else QBrush()
+            )
 
     def _refresh_status(self) -> None:
         pending = len(self._pending)
@@ -596,8 +668,25 @@ class LinkageDialog(QDialog):
             )
             return
         self._pending.clear()
+        # Keep the user where they were. Saving re-reads the dataset, and
+        # dropping the selection meant a pass over twenty fieldmaps was
+        # twenty saves each followed by finding your place again.
+        keep = [str(r.path) for r in self._selected_rows()]
         self._reload()
+        self._reselect(keep)
         self._status.setText(f"Saved. {self._changed} file(s) changed so far.")
+
+    def _reselect(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        wanted = set(keys)
+        self._left.clearSelection()
+        for i in range(self._left.topLevelItemCount()):
+            item = self._left.topLevelItem(i)
+            if str(item.data(0, _PATH_ROLE) or "") in wanted:
+                item.setSelected(True)
+                if self._left.currentItem() is None:
+                    self._left.setCurrentItem(item)
 
     def _on_close(self) -> None:
         if self._pending:

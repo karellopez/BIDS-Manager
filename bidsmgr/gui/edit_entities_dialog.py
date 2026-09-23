@@ -105,7 +105,7 @@ class EditEntitiesDialog(QDialog):
         # on what was picked and behaves as it always did; opened from the
         # Tools menu with nothing selected it starts on the whole dataset and
         # is narrowed from there.
-        self._scope_bar = ScopeBar(self._root, self._targets, parent=self)
+        self._scope_bar = ScopeBar(self._root, self._targets, show_summary=False, parent=self)
         self._targets = self._scope_bar.targets()
         self._scope_bar.changed.connect(self._on_scope_changed)
         form.addRow("Applies to:", self._scope_bar)

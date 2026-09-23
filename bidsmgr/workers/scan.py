@@ -132,7 +132,7 @@ class ScanWorker(QThread):
             from .. import schema as schema_mod
 
             pairs = set()
-            for column in ("proposed_datatype", "bids_guess_datatype"):
+            for column in ("datatype", "bids_guess_datatype"):
                 if column not in df.columns:
                     continue
                 suffixes = df.get("bids_guess_suffix")

@@ -28,22 +28,22 @@ pytestmark = pytest.mark.gui
 
 def _eeg_row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "",
         "include": 1,
         "modality": "eeg",
-        "modality_bids": "eeg",
+        "sequence_kind": "eeg",
         "sequence": "",
         "series_uid": "",
-        "proposed_datatype": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg",
-        "Proposed BIDS name": "sub-001_task-rest_eeg",
+        "datatype": "eeg",
+        "bids_name": "sub-001_task-rest_eeg",
+        "bids_path": "sub-001_task-rest_eeg",
         "bids_guess_classifier": "mne",
         "bids_guess_datatype": "eeg",
         "bids_guess_suffix": "eeg",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps({"subject": "001", "task": "rest"}, sort_keys=True),
         "task": "rest",
         "run": "",
@@ -56,22 +56,22 @@ def _eeg_row(**overrides) -> dict:
 
 def _func_row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "modality_bids": "func",
+        "sequence_kind": "func",
         "sequence": "bold_rest",
         "series_uid": "1.2.3.4",
-        "proposed_datatype": "func",
-        "proposed_basename": "sub-001_ses-pre_task-rest_bold",
-        "Proposed BIDS name": "sub-001_ses-pre_task-rest_bold",
+        "datatype": "func",
+        "bids_name": "sub-001_ses-pre_task-rest_bold",
+        "bids_path": "sub-001_ses-pre_task-rest_bold",
         "bids_guess_classifier": "dcm2niix_bidsguess",
         "bids_guess_datatype": "func",
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "rest"}, sort_keys=True,
         ),
@@ -178,12 +178,12 @@ def test_filter_pane_starts_empty(qtbot) -> None:
 def test_filter_pane_builds_tree_from_model(qtbot) -> None:
     df = make_df([
         _func_row(),
-        _func_row(BIDS_name="sub-002", session="ses-post",
-                  proposed_basename="sub-002_ses-post_task-rest_bold",
+        _func_row(participant_id="sub-002", session="ses-post",
+                  bids_name="sub-002_ses-post_task-rest_bold",
                   series_uid="9.9.9"),
-        _func_row(BIDS_name="sub-002", session="ses-post",
-                  proposed_datatype="anat", bids_guess_suffix="T1w",
-                  proposed_basename="sub-002_ses-post_T1w",
+        _func_row(participant_id="sub-002", session="ses-post",
+                  datatype="anat", bids_guess_suffix="T1w",
+                  bids_name="sub-002_ses-post_T1w",
                   series_uid="8.8.8", task=""),
     ])
     model = InventoryTableModel(df)
@@ -243,11 +243,11 @@ def test_filter_pane_partial_state_when_rows_mixed(qtbot) -> None:
 
 def test_filter_pane_per_sequence_leaves_show_basenames(qtbot) -> None:
     """Each sequence under a datatype is its own leaf labeled by
-    ``proposed_basename`` (or fallback)."""
+    ``bids_name`` (or fallback)."""
     df = make_df([
-        _func_row(proposed_basename="sub-001_ses-pre_task-rest_bold", series_uid="1.1"),
+        _func_row(bids_name="sub-001_ses-pre_task-rest_bold", series_uid="1.1"),
         _func_row(
-            proposed_basename="sub-001_ses-pre_task-mb_bold", series_uid="2.2",
+            bids_name="sub-001_ses-pre_task-mb_bold", series_uid="2.2",
             task="mb",
             entities=json.dumps(
                 {"subject": "001", "session": "pre", "task": "mb"}, sort_keys=True,
@@ -273,9 +273,9 @@ def test_filter_pane_unchecking_one_sequence_only_toggles_that_row(qtbot) -> Non
     include flag — not the whole datatype group.
     """
     df = make_df([
-        _func_row(proposed_basename="sub-001_ses-pre_task-rest_bold",
+        _func_row(bids_name="sub-001_ses-pre_task-rest_bold",
                   series_uid="1.1"),
-        _func_row(proposed_basename="sub-001_ses-pre_task-mb_bold",
+        _func_row(bids_name="sub-001_ses-pre_task-mb_bold",
                   series_uid="2.2", task="mb",
                   entities=json.dumps(
                       {"subject": "001", "session": "pre", "task": "mb"},
