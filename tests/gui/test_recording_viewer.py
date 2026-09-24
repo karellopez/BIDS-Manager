@@ -138,7 +138,7 @@ def test_event_jump_to_first_when_outside_window(qapp) -> None:
 def test_psd_dialog_handles_channel_subset(qapp) -> None:
     """The PSD dialog must not crash when the caller passes more channel
     names/types than PSD data rows (compute_psd drops non-data channels)."""
-    from bidsmgr.gui.widgets.recording_viewer_pane import _PsdDialog
+    from bidsmgr.gui.widgets.psd_dialog import PsdDialog
 
     res = {
         "freqs": np.linspace(1.0, 40.0, 40),
@@ -146,7 +146,7 @@ def test_psd_dialog_handles_channel_subset(qapp) -> None:
         "ch_names": ["a", "b", "c", "d", "e"],  # longer than data on purpose
         "ch_types": ["eeg", "eeg", "eeg", "mag", "mag"],
     }
-    dlg = _PsdDialog(res)
+    dlg = PsdDialog(res)
     assert dlg._tabs.count() == 2
     dlg._on_db_toggled(False)
     dlg._on_db_toggled(True)

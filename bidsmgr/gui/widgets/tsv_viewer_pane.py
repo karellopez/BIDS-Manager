@@ -776,13 +776,23 @@ class TsvViewerPane(QWidget):
         self.set_file(path, root)
 
     def repaint_for_palette(self, pal: dict) -> None:
-        """Same QSS-only refresh pattern as :class:`SidecarFormPane`."""
-        del pal
+        """Same QSS-only refresh pattern as :class:`SidecarFormPane`.
+
+        With one exception, and it is the reason this takes ``pal`` at all:
+        **the plot is drawn by pyqtgraph, which reads no QSS.** Unpolishing
+        and re-polishing it does nothing, so a dark/light swap left the
+        plot on the old theme's background until the app was restarted and
+        it happened to be built under the new one. The palette is handed
+        down instead, the way the MEG/EEG viewer already hands it to its
+        own plot.
+        """
         style = self.style()
         for w in [self, *self.findChildren(QWidget)]:
             style.unpolish(w)
             style.polish(w)
             w.update()
+        if self._plot_page is not None:
+            self._plot_page.repaint_for_palette(pal)
 
     # ----------------------------------------------------------------------
     # Toolbar handlers

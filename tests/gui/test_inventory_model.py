@@ -666,6 +666,20 @@ def test_overlay_with_no_matching_row_id_is_safe(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Integration: model inside a real QTableView
 # ---------------------------------------------------------------------------
+#
+# A view does NOT own its model: ``QAbstractItemView::setModel`` takes no
+# ownership, and neither does PyQt. A model held only by a local name is
+# therefore deleted the moment the test function returns, while the view
+# that is still pointing at it lives on under ``qtbot``. pytest-qt then
+# processes the events left over from the test, one of which is the paint
+# the ``show()`` queued, and the delegate asks a destroyed model for its
+# data. That is a segmentation fault in ``CellTextDelegate.paint``, about
+# one run in six, with every test in the file reported as passed first.
+#
+# So the model is made a CHILD of the view. Qt then keeps it alive exactly
+# as long as the thing using it, and destroys them in an order it survives.
+# This is a hazard of holding a model in a local, not of the model: the
+# Converter keeps its own in ``self._model`` and is not affected.
 
 
 def test_checkbox_delegate_toggle_on_click(qtbot) -> None:
@@ -674,8 +688,8 @@ def test_checkbox_delegate_toggle_on_click(qtbot) -> None:
     from PyQt6.QtGui import QMouseEvent
 
     df = make_df([_ok_row(include=1)])
-    model = InventoryTableModel(df)
     view = QTableView()
+    model = InventoryTableModel(df, parent=view)
     view.setModel(model)
     qtbot.addWidget(view)
 
@@ -698,9 +712,9 @@ def test_checkbox_delegate_toggle_on_click(qtbot) -> None:
 
 def test_model_renders_in_real_qtableview(qtbot) -> None:
     df = make_df([_ok_row(), _func_row(), _physio_row(), _err_row(), _skip_row()])
-    model = InventoryTableModel(df)
 
     view = QTableView()
+    model = InventoryTableModel(df, parent=view)
     view.setModel(model)
     qtbot.addWidget(view)
 

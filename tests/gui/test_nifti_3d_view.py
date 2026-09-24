@@ -244,26 +244,40 @@ def test_colour_fa_is_3d_capable(
     assert pane._gl.is_rgb_volume() is True      # uploaded as colour
 
 
-def test_first_scan_opens_in_default_view(
+def test_every_scan_opens_in_the_remembered_view(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
-    """The first volume of a session opens in Multi-Planar 3D with a GPU (plain
-    Multi-Planar without one); later scans keep whatever view the user is in."""
+    """A volume opens in the layout the user last chose. Every volume.
+
+    With nothing remembered yet the pane offers the best this machine can
+    show: the three planes plus the render when there is a GPU. Once the
+    user picks something else, the NEXT volume opens in that instead.
+
+    It used to apply the preference to the first scan of a session only and
+    leave later ones in whatever the pane happened to be in, which is not
+    the same thing as keeping the user's choice: :meth:`_clear` drops the
+    pane back to a single plane between files to free the GPU textures, so
+    "whatever it happened to be in" was a single axial slice.
+    """
     pane = NiftiViewerPane()
     qtbot.addWidget(pane)
     pane._gpu_ok = True
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
-    assert pane._combo_view is True                 # landed in Multi-Planar 3D
+    assert pane._combo_view is True                 # nothing remembered yet
 
-    # The user picks a different view; a later scan must not override it.
-    pane._set_view_mode("single")
+    # Clicking the toggle is what stores the choice: the preference is
+    # written as the user switches, not at shut-down.
+    pane._tri_btn.click()
     qapp.processEvents()
-    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._tri_view is True
     assert pane._combo_view is False
-    assert pane._tri_view is False                  # user's choice persisted
+
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._tri_view is True                   # honoured by the next scan
+    assert pane._combo_view is False
 
 
-def test_first_scan_default_view_without_gpu(
+def test_default_view_without_gpu(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     """Without a GPU the default is the 2-D three-plane Multi-Planar view."""

@@ -65,16 +65,15 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
-    QTabWidget,
     QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import icons
-from ..theme_manager import CUR
 from .flow_layout import flow
 from .primitives import ElidedLabel, PaneHeader
+from .psd_dialog import PsdDialog, series_color, type_color
 from .spinner import BusySpinner
 
 log = logging.getLogger(__name__)
@@ -93,19 +92,6 @@ _VIEWER_FILE_EXTS: frozenset[str] = frozenset({
     ".vhdr", ".edf", ".bdf", ".gdf", ".set", ".cnt", ".egi", ".mef", ".nwb",
 })
 _VIEWER_DIR_EXTS: frozenset[str] = frozenset({".ds", ".mff"})
-
-# channel-type -> palette token, so trace colours follow the theme.
-_TYPE_TOKENS: dict[str, str] = {
-    "mag": "accent", "grad": "success", "eeg": "purple", "seeg": "purple",
-    "ecog": "purple", "eog": "teal", "ecg": "error", "emg": "warning",
-    "stim": "warning", "ref_meg": "dim", "misc": "dim", "bio": "teal",
-    "resp": "teal", "dbs": "purple",
-}
-
-# Distinct colours (palette tokens) for event IDs / PSD curves.
-_SERIES_TOKENS: tuple[str, ...] = (
-    "accent", "success", "purple", "teal", "warning", "error", "dim",
-)
 
 
 def _full_ext(path) -> str:
@@ -256,251 +242,6 @@ def _read_events_tsv(path) -> List[tuple]:
         log.debug("could not read events.tsv %s: %s", path, exc)
         return []
     return out
-
-
-def _series_color(index: int) -> str:
-    pal = CUR()
-    token = _SERIES_TOKENS[index % len(_SERIES_TOKENS)]
-    return pal.get(token, pal.get("text", "#888888"))
-
-
-def _type_color(ch_type: str) -> str:
-    pal = CUR()
-    return pal.get(_TYPE_TOKENS.get(ch_type, "dim"), pal.get("text", "#888888"))
-
-
-# ===========================================================================
-# In-app PSD dialog (pyqtgraph, MNE-like, interactive, two tabs)
-# ===========================================================================
-class _PsdDialog(QDialog):
-    """Power Spectral Density viewer.
-
-    Two tabs:
-    * **Per channel** - every channel of the selected type overlaid (thin),
-      plus the type mean (bold); a "Highlight" picker isolates one channel.
-    * **Average** - the per-type mean with a +/-1 std shaded band + legend.
-
-    Both plots are fully interactive (pyqtgraph: drag-pan, wheel/right-drag
-    zoom, auto-range button) and carry a crosshair with a frequency / power
-    readout, mirroring the useful parts of MNE's spectrum plot.
-    """
-
-    def __init__(self, result: dict, *, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Power spectral density")
-        self.setObjectName("pane-dark")
-        self.resize(900, 560)
-        import pyqtgraph as pg
-
-        self._pg = pg
-        self._freqs = np.asarray(result["freqs"])
-        self._data = np.asarray(result["data"])          # (n_ch, n_freqs)
-        self._ch_names: List[str] = list(result["ch_names"])
-        self._ch_types: List[str] = list(result["ch_types"])
-        # Defensive clamp: only index rows that actually exist in ``data``
-        # (compute_psd returns a channel subset, so a caller passing the full
-        # name/type lists must never drive an out-of-range index).
-        n = min(self._data.shape[0], len(self._ch_names), len(self._ch_types))
-        self._by_type: dict[str, List[int]] = {}
-        for i in range(n):
-            self._by_type.setdefault(self._ch_types[i], []).append(i)
-        self._db = True
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
-
-        # Shared top bar.
-        top = QHBoxLayout()
-        self._db_chk = QCheckBox("dB (10·log10)")
-        self._db_chk.setChecked(True)
-        self._db_chk.toggled.connect(self._on_db_toggled)
-        top.addWidget(self._db_chk)
-        top.addStretch(1)
-        hint = QLabel("Drag to pan · wheel / right-drag to zoom · click ⟲ to reset")
-        hint.setObjectName("sidecar-footer-summary")
-        top.addWidget(hint)
-        outer.addLayout(top)
-
-        self._tabs = QTabWidget()
-        outer.addWidget(self._tabs, 1)
-        self._build_channel_tab()
-        self._build_average_tab()
-
-        self._redraw_channel()
-        self._redraw_average()
-
-    # ---- tab construction -------------------------------------------------
-    def _build_channel_tab(self) -> None:
-        pg = self._pg
-        page = QWidget()
-        page.setObjectName("pane-dark")
-        v = QVBoxLayout(page)
-        v.setContentsMargins(4, 4, 4, 4)
-        v.setSpacing(4)
-
-        ctrl = QHBoxLayout()
-        ctrl.addWidget(QLabel("Type:"))
-        self._type_combo = QComboBox()
-        for t in sorted(self._by_type):
-            self._type_combo.addItem(f"{t}  ({len(self._by_type[t])})", userData=t)
-        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
-        ctrl.addWidget(self._type_combo)
-        ctrl.addWidget(QLabel("Highlight:"))
-        self._hi_combo = QComboBox()
-        self._hi_combo.currentIndexChanged.connect(self._redraw_channel)
-        ctrl.addWidget(self._hi_combo, 1)
-        v.addLayout(ctrl)
-
-        self._ch_plot = pg.PlotWidget()
-        self._ch_plot.showGrid(x=True, y=True, alpha=0.15)
-        self._ch_plot.setLabel("bottom", "Frequency", units="Hz")
-        v.addWidget(self._ch_plot, 1)
-        self._ch_readout = QLabel("")
-        self._ch_readout.setObjectName("sidecar-footer-summary")
-        v.addWidget(self._ch_readout)
-        self._theme_plot(self._ch_plot)
-        self._ch_cross = self._wire_crosshair(self._ch_plot, self._ch_readout)
-        self._tabs.addTab(page, "Per channel")
-        self._refresh_highlight_combo()
-
-    def _build_average_tab(self) -> None:
-        pg = self._pg
-        page = QWidget()
-        page.setObjectName("pane-dark")
-        v = QVBoxLayout(page)
-        v.setContentsMargins(4, 4, 4, 4)
-        v.setSpacing(4)
-        self._avg_plot = pg.PlotWidget()
-        self._avg_plot.showGrid(x=True, y=True, alpha=0.15)
-        self._avg_plot.setLabel("bottom", "Frequency", units="Hz")
-        self._avg_plot.addLegend(offset=(-10, 10))
-        v.addWidget(self._avg_plot, 1)
-        self._avg_readout = QLabel("")
-        self._avg_readout.setObjectName("sidecar-footer-summary")
-        v.addWidget(self._avg_readout)
-        self._theme_plot(self._avg_plot)
-        self._avg_cross = self._wire_crosshair(self._avg_plot, self._avg_readout)
-        self._tabs.addTab(page, "Average (per type)")
-
-    # ---- helpers ----------------------------------------------------------
-    def _scale(self, arr):
-        if self._db:
-            return 10.0 * np.log10(np.maximum(arr, 1e-30))
-        return arr
-
-    def _ylabel(self) -> str:
-        return "Power (dB)" if self._db else "Power"
-
-    def _theme_plot(self, plot) -> None:
-        pg = self._pg
-        bg = self.palette().color(QPalette.ColorRole.Base)
-        fg = self.palette().color(QPalette.ColorRole.Text)
-        plot.setBackground(bg)
-        for axis in ("left", "bottom"):
-            ax = plot.getPlotItem().getAxis(axis)
-            ax.setPen(pg.mkPen(color=fg))
-            ax.setTextPen(pg.mkPen(color=fg))
-
-    def _wire_crosshair(self, plot, readout: QLabel):
-        pg = self._pg
-        pen = pg.mkPen(color=self.palette().color(QPalette.ColorRole.Text), width=1,
-                       style=Qt.PenStyle.DashLine)
-        vline = pg.InfiniteLine(angle=90, movable=False, pen=pen)
-        hline = pg.InfiniteLine(angle=0, movable=False, pen=pen)
-        vline.setZValue(10)
-        hline.setZValue(10)
-        plot.addItem(vline, ignoreBounds=True)
-        plot.addItem(hline, ignoreBounds=True)
-
-        def _moved(evt):
-            pos = evt[0]
-            vb = plot.getPlotItem().vb
-            if not plot.sceneBoundingRect().contains(pos):
-                return
-            pt = vb.mapSceneToView(pos)
-            vline.setPos(pt.x())
-            hline.setPos(pt.y())
-            readout.setText(
-                f"{pt.x():.2f} Hz   ·   {pt.y():.2f} {self._ylabel()}"
-            )
-
-        proxy = pg.SignalProxy(plot.scene().sigMouseMoved, rateLimit=30, slot=_moved)
-        return {"vline": vline, "hline": hline, "proxy": proxy}
-
-    def _refresh_highlight_combo(self) -> None:
-        t = self._type_combo.currentData()
-        self._hi_combo.blockSignals(True)
-        self._hi_combo.clear()
-        self._hi_combo.addItem("(none)", userData=-1)
-        for idx in self._by_type.get(t, []):
-            self._hi_combo.addItem(self._ch_names[idx], userData=idx)
-        self._hi_combo.blockSignals(False)
-
-    # ---- draw -------------------------------------------------------------
-    def _on_db_toggled(self, checked: bool) -> None:
-        self._db = checked
-        self._redraw_channel()
-        self._redraw_average()
-
-    def _on_type_changed(self) -> None:
-        self._refresh_highlight_combo()
-        self._redraw_channel()
-
-    def _redraw_channel(self) -> None:
-        pg = self._pg
-        plot = self._ch_plot
-        plot.clear()
-        plot.addItem(self._ch_cross["vline"], ignoreBounds=True)
-        plot.addItem(self._ch_cross["hline"], ignoreBounds=True)
-        t = self._type_combo.currentData()
-        idxs = self._by_type.get(t, [])
-        if not idxs:
-            return
-        base = QColor(_type_color(t))
-        thin = QColor(base)
-        thin.setAlpha(60)
-        thin_pen = pg.mkPen(color=thin, width=1)
-        for i in idxs:
-            plot.plot(self._freqs, self._scale(self._data[i]), pen=thin_pen)
-        # Mean (bold).
-        mean = np.mean(self._data[idxs], axis=0)
-        plot.plot(self._freqs, self._scale(mean),
-                  pen=pg.mkPen(color=base, width=2), name="mean")
-        # Highlighted channel.
-        hi = self._hi_combo.currentData()
-        if hi is not None and hi >= 0:
-            hi_color = self.palette().color(QPalette.ColorRole.Text)
-            plot.plot(self._freqs, self._scale(self._data[hi]),
-                      pen=pg.mkPen(color=hi_color, width=2))
-        plot.setLabel("left", self._ylabel())
-
-    def _redraw_average(self) -> None:
-        pg = self._pg
-        plot = self._avg_plot
-        plot.clear()
-        legend = plot.getPlotItem().legend
-        if legend is not None:
-            legend.clear()
-        plot.addItem(self._avg_cross["vline"], ignoreBounds=True)
-        plot.addItem(self._avg_cross["hline"], ignoreBounds=True)
-        for t in sorted(self._by_type):
-            idxs = self._by_type[t]
-            arr = self._data[idxs]
-            mean = self._scale(np.mean(arr, axis=0))
-            color = QColor(_type_color(t))
-            if arr.shape[0] > 1:
-                std = np.std(self._scale(arr), axis=0)
-                band = QColor(color)
-                band.setAlpha(40)
-                top = plot.plot(self._freqs, mean + std,
-                                pen=pg.mkPen(color=band, width=1))
-                bot = plot.plot(self._freqs, mean - std,
-                                pen=pg.mkPen(color=band, width=1))
-                fill = pg.FillBetweenItem(top, bot, brush=pg.mkBrush(band))
-                plot.addItem(fill)
-            plot.plot(self._freqs, mean, pen=pg.mkPen(color=color, width=2), name=t)
-        plot.setLabel("left", self._ylabel())
 
 
 # ===========================================================================
@@ -1180,7 +921,7 @@ class _TimeSeriesView(QWidget):
                   n_shown) -> None:
         ch_name = self._ch_names[ch_idx]
         ch_type = self._ch_types[ch_idx]
-        pen = self._pg.mkPen(color=_type_color(ch_type), width=1)
+        pen = self._pg.mkPen(color=type_color(ch_type), width=1)
         plot_item.plot(times, y, pen=pen)
         self._add_channel_label(ch_name, n_shown, label_color)
         self._shown_ch_info.append((offset, ch_name, ch_type))
@@ -1211,13 +952,13 @@ class _TimeSeriesView(QWidget):
             step = len(visible) // 500
             visible = visible[::step]
         labels = sorted({lbl for _, lbl in visible})
-        color_map = {lbl: _series_color(i) for i, lbl in enumerate(labels)}
+        color_map = {lbl: series_color(i) for i, lbl in enumerate(labels)}
         override = self._event_color_override
         width = self._event_line_width
         for t, lbl in visible:
             color = (
                 override.name() if override and override.isValid()
-                else color_map.get(lbl, _series_color(0))
+                else color_map.get(lbl, series_color(0))
             )
             pen = self._pg.mkPen(color=color, width=width)
             line = self._pg.InfiniteLine(pos=t, angle=90, pen=pen, movable=False)
@@ -1482,7 +1223,7 @@ class _TimeSeriesView(QWidget):
         self._psd_worker = None
         self.loading_changed.emit(False, "")
         self.btn_psd.setEnabled(True)
-        dlg = _PsdDialog(result, parent=self)
+        dlg = PsdDialog(result, parent=self)
         dlg.show()
         self.status_message.emit("PSD computed")
 

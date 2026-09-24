@@ -1117,9 +1117,9 @@ class PropertiesPanel(QWidget):
     def _on_psd_ready(self, result) -> None:
         self._psd_worker = None
         self._psd_row_id = None
-        from .widgets.recording_viewer_pane import _PsdDialog
+        from .widgets.psd_dialog import PsdDialog
 
-        dlg = _PsdDialog(result, parent=self)
+        dlg = PsdDialog(result, parent=self)
         dlg.show()
         if self._row is not None:
             self.set_selected_row(self._row)
