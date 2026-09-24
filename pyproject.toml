@@ -65,7 +65,16 @@ dependencies = [
     "pydantic>=2.6,<=2.13.4",
 
     # MRI conversion stack. dcm2niix invoked directly.
-    "dcm2niix>=1.0.20240202,<=1.0.20260416",
+    # The FLOOR matters as much as the ceiling here. v1.0.20260416 is where
+    # the PET sidecar contract changed: before it dcm2niix emitted TimeZero,
+    # InjectionStart and a hardcoded FrameTimesStart of [0]; from it, it emits
+    # SeriesTime and computes FrameTimesStart, leaving the time-zero convention
+    # to the downstream tool. Those are different datasets from the same
+    # DICOMs, and `fixups/pet_sidecar` now DERIVES TimeZero from SeriesTime, so
+    # a resolver free to install an older build would silently change what a
+    # PET scan means. Both ends ship the same seven cp38-abi3 wheels, so the
+    # narrower range costs no platform.
+    "dcm2niix>=1.0.20260416,<=1.0.20260724",
     "pydicom>=2.4,<=3.0.2",
     "nibabel>=5.0,<=5.4.2",
 

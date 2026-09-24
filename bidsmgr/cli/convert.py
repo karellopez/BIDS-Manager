@@ -173,6 +173,71 @@ def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
     return spec.model_copy(update={"pet_overrides": overrides})
 
 
+def _apply_pet_metadata_json(spec, path: Path, df) -> object:
+    """Fold a PET metadata JSON into ``spec`` as defaults plus per-row overrides.
+
+    The dataset-wide block (the file's unscoped keys) becomes
+    ``pet_defaults``; a ``sub-<label>`` block becomes an override on every
+    row of that subject. Both layer UNDER anything the user already stated
+    in the form, because a file is a starting point and the form is where
+    somebody looked at this particular scan.
+
+    The same alias matching as the spreadsheet: a subject-level key must
+    reach all of that subject's runs, not just the first.
+    """
+    from ..metadata.pet_metadata_json import read_pet_metadata_json
+    from ..project.orchestration import row_id as _row_id
+
+    blocks = read_pet_metadata_json(path)
+    if not blocks:
+        return spec
+
+    default = blocks.pop("", None)
+    if default is not None:
+        spec = spec.model_copy(update={
+            "pet_defaults": merge_pet(default, spec.pet_defaults)
+            if spec.pet_defaults is not None else default,
+        })
+
+    if not blocks:
+        return spec
+
+    aliases: dict[str, list[str]] = {}
+
+    def _add(key: str, rid: str) -> None:
+        text = key.strip()
+        if text and rid not in aliases.setdefault(text, []):
+            aliases[text].append(rid)
+
+    for i in df.index:
+        rid = _row_id(df, i)
+        for column in ("participant_id", "subject", "bids_name", "source_file"):
+            if column not in df.columns:
+                continue
+            value = str(df.at[i, column] or "").strip()
+            if not value:
+                continue
+            _add(value, rid)
+            _add(value[4:] if value.startswith("sub-") else f"sub-{value}", rid)
+            _add(Path(value).name, rid)
+
+    overrides = dict(spec.pet_overrides)
+    for key, block in blocks.items():
+        rids = aliases.get(key) or []
+        if not rids:
+            log.warning(
+                "PET metadata block %r matches no inventory row; ignoring", key,
+            )
+            continue
+        for rid in rids:
+            existing = overrides.get(rid)
+            overrides[rid] = (
+                block if existing is None else merge_pet(existing, block)
+            )
+
+    return spec.model_copy(update={"pet_overrides": overrides})
+
+
 def run_convert(
     tsv: Path,
     bids_parent: Path,
@@ -185,6 +250,7 @@ def run_convert(
     dcm2niix_bin: Optional[Path] = None,
     recording_meta: Optional[Path] = None,
     pet_spreadsheet: Optional[Path] = None,
+    pet_metadata: Optional[Path] = None,
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     force_edf: bool = False,
@@ -330,6 +396,11 @@ def run_convert(
     # records, and retyping it is both tedious and a fresh chance to mistype a
     # dose. Rows are matched on participant label or source filename, whichever
     # the spreadsheet used.
+    # The JSON first, then the spreadsheet: a spreadsheet is one row per
+    # SCAN and a JSON is usually one block per study, so the more specific
+    # statement layers on top of the more general one.
+    if pet_metadata is not None:
+        spec = _apply_pet_metadata_json(spec, Path(pet_metadata), df)
     if pet_spreadsheet is not None:
         spec = _apply_pet_spreadsheet(spec, Path(pet_spreadsheet), df)
 
@@ -1577,6 +1648,19 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--pet-metadata", default=None, type=Path,
+        help=(
+            "Path to a PET metadata JSON keyed by BIDS sidecar field names "
+            "(TracerName, InjectedRadioactivity, ModeOfAdministration, ...). "
+            "A flat object applies to every PET run; an object keyed by "
+            "sub-<label> scopes each block to that subject. This is the shape "
+            "pypet2bids accepts via --set-default-metadata-json, including its "
+            "nifti_json wrapper, so a file written for that tool is read here "
+            "unmodified. Keys BIDS does not define for a PET sidecar are "
+            "reported and dropped, never written."
+        ),
+    )
+    parser.add_argument(
         "--raw-root", default=None, type=Path,
         help=(
             "Folder the scan was run against. Used as the first "
@@ -1693,6 +1777,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
             dcm2niix_bin=args.dcm2niix,
             recording_meta=args.recording_meta,
             pet_spreadsheet=args.pet_spreadsheet,
+            pet_metadata=args.pet_metadata,
             raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
             skip_residuals=not args.keep_residuals,
             preserve_curation=not args.overwrite_curation,
@@ -1715,6 +1800,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         dcm2niix_bin=args.dcm2niix,
         recording_meta=args.recording_meta,
         pet_spreadsheet=args.pet_spreadsheet,
+        pet_metadata=args.pet_metadata,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
         preserve_curation=not args.overwrite_curation,

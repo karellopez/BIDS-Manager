@@ -392,9 +392,27 @@ def _run_classifier_chain(
     # Seed force user hints (0.95) before BidsGuess so BidsGuess (0.85) can't
     # displace them.
     chosen: dict[str, Classification] = dict(force_hints)
+    # A ``discard`` recommendation carries no positive content: it says only
+    # that dcm2niix would not convert the series. It therefore must NOT
+    # pre-empt a classifier that can actually NAME the series, so it is held
+    # back and applied after the fallback has had its turn.
+    #
+    # This matters because dcm2niix v1.0.20260724 renamed the label it uses
+    # for DWI scanner-derivatives from ``derived`` to ``discard``. ``derived``
+    # was never a schema datatype, so it was rejected here and the row fell
+    # through to ``sequence_dict``, which recognises ``FA`` / ``colFA`` /
+    # ``trace`` as the raw ``dwi/`` suffixes BIDS 1.11 defines for them.
+    # ``discard`` IS accepted (as a no-emit decision), so taking it at face
+    # value silently stopped converting eight real files in the lab's own
+    # data. Deferring it restores that and keeps the recommendation for the
+    # rows nothing else claims.
+    deferred_skips: dict[str, Classification] = {}
     for c in bg_results:
         if not _is_classification_schema_valid(c):
             log.debug("BidsGuess result rejected by schema: %s", c)
+            continue
+        if c.skip or c.datatype == "discard":
+            deferred_skips[c.row_id.hex] = c
             continue
         # BidsGuess often emits a generic ``dwi`` suffix for series whose
         # SeriesDescription clearly marks them as scanner-derivatives
@@ -423,6 +441,12 @@ def _run_classifier_chain(
     fb_results = sequence_dict.classify(needs_fallback)
     for c in fb_results:
         chosen.setdefault(c.row_id.hex, c)
+
+    # Last: the held-back ``discard`` recommendations, for the rows no
+    # classifier could name. ``setdefault`` is the whole point, so a series
+    # something else recognised keeps that classification.
+    for key, c in deferred_skips.items():
+        chosen.setdefault(key, c)
 
     return chosen
 
@@ -1152,6 +1176,27 @@ def _is_physio_row(df: pd.DataFrame, idx: object) -> bool:
     )
 
 
+def _is_spectroscopy_row(df: pd.DataFrame, idx: object) -> bool:
+    """True for MR spectroscopy, which no longer belongs in the non-image set.
+
+    An MRS DICOM carries no Image Pixel module, exactly like a TENSOR map, so
+    the pixel-data rule caught it. That rule's stated reason is that dcm2niix
+    cannot turn the series into a NIfTI, and **since v1.0.20260724 that is no
+    longer true for spectroscopy**: it writes NIfTI-MRS. Verified on this
+    lab's own data, where two `_svs` series produce real 32 KB volumes with
+    `SpectrometerFrequency` and `ResonantNucleus` filled in.
+
+    `mrs` is a BIDS 1.11 datatype with `svs` among its suffixes, so the
+    output has somewhere to go. Keyed on the classifier's DATATYPE rather
+    than the series description, because "svs" appears in plenty of protocol
+    names that are not spectroscopy, and because the datatype is the thing
+    that decides where the file lands.
+    """
+    if "bids_guess_datatype" not in df.columns:
+        return False
+    return str(df.at[idx, "bids_guess_datatype"]).strip().lower() == "mrs"
+
+
 def _flag_nonimage_rows(df: pd.DataFrame) -> None:
     """Exclude + annotate DICOM series that carry no pixel data.
 
@@ -1172,6 +1217,10 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
             continue
         # Physio rows have no pixel data but ARE convertible (bidsphysio).
         if _is_physio_row(df, df_idx):
+            continue
+        # Nor is spectroscopy a non-image object any more: dcm2niix writes
+        # NIfTI-MRS for it from v1.0.20260724.
+        if _is_spectroscopy_row(df, df_idx):
             continue
         df.at[df_idx, "bids_guess_skip"] = True
         df.at[df_idx, "include"] = 0
