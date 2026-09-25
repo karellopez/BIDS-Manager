@@ -101,3 +101,22 @@ def test_every_field_the_tool_can_write_can_also_be_read(tmp_path):
 
     writable = set(PET_SCALAR_TO_BIDS.values()) | set(PET_LIST_TO_BIDS.values())
     assert set(_bids_to_field()) == writable
+
+
+class TestTheShapesRealFilesCarry:
+    """A file written for pet2bids, or copied out of a finished sidecar."""
+
+    def test_a_one_element_array_where_the_spec_wants_a_scalar(self, tmp_path):
+        """BIDS types ReconFilterSize as an array; the spec models a scalar,
+        because a value is stated once and the conversion wraps it. Refusing
+        the file over a bracket would be refusing the shape the standard
+        describes."""
+        path = _write(tmp_path, {"ReconFilterSize": [0], "TracerName": "FDG"})
+        blocks = read_pet_metadata_json(path)
+        assert blocks[""].recon_filter_size == 0
+        assert blocks[""].tracer_name == "FDG"
+
+    def test_a_genuine_list_field_keeps_its_list(self, tmp_path):
+        path = _write(tmp_path, {"ReconMethodParameterLabels": ["subsets"]})
+        blocks = read_pet_metadata_json(path)
+        assert blocks[""].recon_method_parameter_labels == ["subsets"]

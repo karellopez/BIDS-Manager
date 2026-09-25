@@ -45,7 +45,14 @@ def _is_answer(value: Any) -> bool:
     """
     if value is None:
         return False
-    if isinstance(value, str) and value.strip().lower() in ("n/a", "na", ""):
+    if isinstance(value, str) and value.strip().lower() in (
+        # mne-bids writes "n/a" when BIDS requires a key it cannot answer.
+        "n/a", "na", "",
+        # dcm2niix v1.0.20260724 writes the literal "None" for a field the
+        # DICOM does not state. Offering that as an answer would tell the
+        # user the department is called None and stop the form asking.
+        "none",
+    ):
         return False
     if isinstance(value, (list, dict)) and not value:
         return False

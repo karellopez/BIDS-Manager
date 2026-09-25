@@ -63,6 +63,8 @@ from ..metadata.preserve import is_mergeable, merge_file
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    clean_mrs_outputs,
+    prune_identifiers,
     convert_blood_files,
     deface_staged,
     enrich_pet_sidecars,
@@ -119,6 +121,19 @@ def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
     from ..project.orchestration import row_id as _row_id
 
     table = read_pet_spreadsheet(path)
+    if not table:
+        return spec
+
+    # A sheet with no scan identifier is one row per FIELD, and the reader
+    # gives it back under the empty key meaning "every PET run". Same
+    # convention as the JSON route, so the two cannot disagree about what a
+    # study-wide dose means.
+    default = table.pop("", None)
+    if default is not None:
+        spec = spec.model_copy(update={
+            "pet_defaults": merge_pet(default, spec.pet_defaults)
+            if spec.pet_defaults is not None else default,
+        })
     if not table:
         return spec
 
@@ -563,6 +578,14 @@ def _convert_subject(
         # identifiers dcm2niix leaves behind under ``-ba n``. Runs even with
         # no spec, since the rename, type-fix and prune passes need no input.
         n_enriched += enrich_pet_sidecars(staging, tasks, spec)
+        # MR spectroscopy carries its metadata INSIDE the .nii.gz, as NIfTI
+        # extension 44, which is where the NIfTI-MRS standard puts the
+        # acquisition parameters a spectrum cannot be read without. It is
+        # also where dcm2niix puts the patient's name, ID, date of birth,
+        # sex and weight. No sidecar pass can reach inside an image, so
+        # this one opens it: measured on real data the moment MRS
+        # conversion was enabled, every _svs file carried all five.
+        n_enriched += clean_mrs_outputs(staging, tasks)
         # Physio: the vendored bidsphysio writes the three fields a physio
         # sidecar cannot do without and nothing the standard has asked for
         # since. This fills what can be DERIVED, asking the active schema
@@ -583,6 +606,15 @@ def _convert_subject(
         # What the USER stated is NOT applied here. That is the metadata step's
         # job, so this verb produces a faithful conversion and no opinions.
         n_enriched += repair_converter_output(staging)
+        # Identifiers, dataset-wide and LAST, so nothing above can put one
+        # back. dcm2niix is run with ``-ba n`` to keep SeriesInstanceUID for
+        # provenance, which also keeps the patient's name, ID, date of
+        # birth, age, sex, size and weight in every sidecar it writes. Until
+        # this existed only the PET fixup pruned them, so a PET dataset was
+        # clean and an MRI one was not: 58 of 71 MRI sidecars in this lab's
+        # own data carried all seven. BIDS is explicit that a sidecar must
+        # not carry identifying information, so there is no switch here.
+        n_enriched += prune_identifiers(staging)
         # Remove faces LAST, and before the commit, which is the whole point of
         # doing it here: the identifiable image exists only inside the staging
         # directory, for a few seconds, and what lands in the dataset was never

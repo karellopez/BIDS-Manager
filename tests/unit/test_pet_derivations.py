@@ -9,10 +9,10 @@ from __future__ import annotations
 import pytest
 
 from bidsmgr.editor.pet_checks import check_pet_sidecar, specific_activity_bq_per_g
+from bidsmgr.fixups.sidecar_schema import drop_stringified_nulls
 from bidsmgr.fixups.pet_sidecar import (
     _derive_radio_inputs,
     _derive_time_zero,
-    _drop_stringified_nulls,
     _normalise_enums,
 )
 
@@ -196,19 +196,28 @@ class TestModeOfAdministration:
 
 
 class TestStringifiedNulls:
+    """Dataset-wide, not PET-only: every modality gets these from dcm2niix."""
+
     def test_the_literal_string_none_is_dropped(self):
         """dcm2niix v1.0.20260724 writes "None" where the DICOM says nothing.
 
         ``InstitutionalDepartmentName`` is a real BIDS field, so an absent
         value and the four-character string ``None`` are different claims:
-        the second says the department is called None.
+        the second says the department is called None. It also reaches the
+        metadata form as an ANSWER, which stops the form asking.
         """
         data = {"InstitutionalDepartmentName": "None", "Manufacturer": "Siemens",
                 "MatrixCoilMode": "None"}
-        _drop_stringified_nulls(data)
+        assert drop_stringified_nulls(data) == 2
         assert data == {"Manufacturer": "Siemens"}
 
     def test_a_real_value_survives(self):
         data = {"InstitutionalDepartmentName": "Neurology"}
-        _drop_stringified_nulls(data)
+        assert drop_stringified_nulls(data) == 0
         assert data == {"InstitutionalDepartmentName": "Neurology"}
+
+    def test_the_preview_does_not_offer_it_as_an_answer(self):
+        from bidsmgr.metadata.converter_preview import _is_answer
+
+        assert _is_answer("None") is False
+        assert _is_answer("Neurology") is True

@@ -28,6 +28,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .identifiers import IDENTIFYING_KEYS
 from ..recording_meta import (
     PET_LIST_TO_BIDS,
     PET_SCALAR_TO_BIDS,
@@ -47,29 +48,16 @@ _RENAMES: dict[str, str] = {
     "ReconstructionMethod": "ReconMethodName",
 }
 
-# Identifying and non-BIDS keys dcm2niix leaves in the sidecar. BIDS Manager
-# passes ``-ba n`` to keep SeriesInstanceUID for provenance, which also keeps
-# these. None is a BIDS field and several directly identify the participant, so
-# they have no place in a shareable dataset.
+# The identifying keys live in ``fixups/identifiers`` now, because the MRS
+# header fixup prunes the same facts under partly different spellings
+# (``PatientDoB`` rather than ``PatientBirthDate``) and a key one pass
+# removes while another leaves is worse than a key neither removes: it makes
+# the dataset look cleaned.
 #
-# The study and series UIDs are deliberately NOT pruned: they are pseudonymous,
-# they are what lets a converted image be traced back to its source series, and
-# BIDS permits extra keys.
-IDENTIFYING_KEYS: frozenset[str] = frozenset({
-    "PatientName",
-    "PatientID",
-    "PatientBirthDate",
-    "PatientSex",
-    "PatientAge",
-    "PatientWeight",
-    "PatientSize",
-    "AccessionNumber",
-    "ReferringPhysicianName",
-    "PerformingPhysicianName",
-    "OperatorsName",
-    "RequestingPhysician",
-    "InstitutionalDepartmentAddress",
-})
+# BIDS Manager passes ``-ba n`` to keep SeriesInstanceUID for provenance,
+# which also keeps these. The study and series UIDs are deliberately NOT
+# pruned: they are pseudonymous, they are what lets a converted image be
+# traced back to its source series, and BIDS permits extra keys.
 
 # Non-identifying keys that are simply not part of BIDS and add noise. Kept
 # separate from the identifying set so the two can be reasoned about apart.
@@ -295,13 +283,17 @@ def _apply_sidecar(
         if key in data and not isinstance(data[key], list):
             data[key] = [data[key]]
 
-    # 7. prune. LAST, so it cannot be undone by anything above.
+    # 7. prune the PET-specific noise. LAST, so nothing above can undo it.
+    #
+    # The IDENTIFIERS are not pruned here any more: ``fixups.identifiers``
+    # does that for every sidecar in the dataset, which is where it belongs,
+    # since an MRI sidecar carries exactly the same keys and used to keep
+    # them. One owner per concern.
     drop = set(NON_BIDS_KEYS)
     if prune_identifiers:
         drop |= IDENTIFYING_KEYS
     for key in drop:
         data.pop(key, None)
-    _drop_stringified_nulls(data)
 
     if json.dumps(data, sort_keys=True) == before:
         return False
@@ -454,22 +446,6 @@ def _normalise_enums(data: dict) -> None:
             return
     data["ModeOfAdministration"] = text
 
-
-def _drop_stringified_nulls(data: dict) -> None:
-    """Remove keys whose value is the literal string ``"None"``.
-
-    dcm2niix v1.0.20260724 writes ``"InstitutionalDepartmentName": "None"``
-    when the DICOM does not state one, and the same for ``MatrixCoilMode``
-    and ``ScatterCorrectionMethod``. It is a stringified null, not a value:
-    39 of the sidecars in one real run carried it.
-
-    That matters more than it looks. ``InstitutionalDepartmentName`` is a
-    real BIDS field, so an absent value and the four-character string
-    ``None`` are not the same claim: the first says nothing, the second says
-    the department is called None. Worth reporting upstream.
-    """
-    for key in [k for k, v in data.items() if v == "None"]:
-        del data[key]
 
 
 __all__ = [

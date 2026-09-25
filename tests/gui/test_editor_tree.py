@@ -91,16 +91,18 @@ def _collect_items(tree) -> list[tuple[int, str, str | None]]:
 # ---------------------------------------------------------------------------
 
 
-def test_empty_state_hint_before_root(qapp) -> None:
+def test_empty_state_hint_before_root(qapp, qtbot) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     assert pane.root() is None
     assert pane._stack.currentIndex() == 0  # hint
     # Tree has no items yet.
     assert pane._tree.topLevelItemCount() == 0
 
 
-def test_set_root_populates_tree(qapp, bids_root: Path) -> None:
+def test_set_root_populates_tree(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     qapp.processEvents()
 
@@ -120,16 +122,18 @@ def test_set_root_populates_tree(qapp, bids_root: Path) -> None:
     assert "participants.tsv" in labels
 
 
-def test_hidden_and_junk_dirs_skipped(qapp, bids_root: Path) -> None:
+def test_hidden_and_junk_dirs_skipped(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     labels = {label for _, label, _ in _collect_items(pane._tree)}
     assert ".bidsmgr" not in labels
     assert ".tmp_bidsmgr" not in labels
 
 
-def test_folder_recording_collapses_to_leaf(qapp, bids_root: Path) -> None:
+def test_folder_recording_collapses_to_leaf(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     open_every_folder(pane._tree)
 
@@ -153,8 +157,9 @@ def test_folder_recording_collapses_to_leaf(qapp, bids_root: Path) -> None:
     assert ds_item.data(0, COLOR_TOKEN_ROLE) == "text"
 
 
-def test_color_tokens_match_kinds(qapp, bids_root: Path) -> None:
+def test_color_tokens_match_kinds(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     items = _collect_items(pane._tree)
     by_label = {label: token for _, label, token in items}
@@ -170,6 +175,7 @@ def test_color_tokens_match_kinds(qapp, bids_root: Path) -> None:
 
 def test_file_selected_signal_emits_path(qapp, bids_root: Path, qtbot) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     open_every_folder(pane._tree)
 
@@ -197,8 +203,9 @@ def test_file_selected_signal_emits_path(qapp, bids_root: Path, qtbot) -> None:
     assert target.data(0, PATH_ROLE) == str(emitted_path)
 
 
-def test_set_root_none_clears(qapp, bids_root: Path) -> None:
+def test_set_root_none_clears(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     assert pane._stack.currentIndex() == 1
     pane.set_root(None)
@@ -227,8 +234,9 @@ def _find_item(tree, label: str):
     return found[0] if found else None
 
 
-def test_refresh_picks_up_new_files(qapp, bids_root: Path) -> None:
+def test_refresh_picks_up_new_files(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     assert _find_item(pane._tree, "sub-01_ses-01_bold.nii.gz") is None
 
@@ -241,8 +249,9 @@ def test_refresh_picks_up_new_files(qapp, bids_root: Path) -> None:
     assert _find_item(pane._tree, "sub-01_ses-01_bold.nii.gz") is not None
 
 
-def test_refresh_preserves_expansion_and_selection(qapp, bids_root: Path) -> None:
+def test_refresh_preserves_expansion_and_selection(qapp, qtbot, bids_root: Path) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
 
     # Collapse the root, then expand + select a deep row.
@@ -262,10 +271,11 @@ def test_refresh_preserves_expansion_and_selection(qapp, bids_root: Path) -> Non
     assert cur is not None and cur.text(0) == "sub-01_ses-01_T1w.json"
 
 
-def test_set_root_same_path_preserves_view(qapp, bids_root: Path) -> None:
+def test_set_root_same_path_preserves_view(qapp, qtbot, bids_root: Path) -> None:
     """Re-setting the already-open root must not collapse the user's view
     (it routes through refresh), mirroring the output tree."""
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     # Collapse the root the user opened.
     pane._tree.topLevelItem(0).setExpanded(False)
@@ -278,10 +288,12 @@ def test_set_root_same_path_preserves_view(qapp, bids_root: Path) -> None:
     assert _find_item(pane._tree, "anat").isExpanded()
 
 
-def test_refresh_reapplies_badges(qapp, bids_root: Path) -> None:
+def test_refresh_reapplies_badges(qapp, qtbot, bids_root: Path) -> None:
     from bidsmgr.gui.delegates.bids_tree import BADGE_ROLE
 
     pane = BidsTreePane()
+
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     json_path = bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     pane.set_badges({json_path: "err"})
@@ -298,11 +310,13 @@ def test_refresh_reapplies_badges(qapp, bids_root: Path) -> None:
 
 
 def test_editor_panel_loads_persisted_root_on_construction(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     AppSettings.remember_editor_bids_root(bids_root)
 
     panel = EditorPanel()
+
+    qtbot.addWidget(panel)
     qapp.processEvents()
 
     assert panel.current_root() == bids_root
@@ -311,9 +325,10 @@ def test_editor_panel_loads_persisted_root_on_construction(
 
 
 def test_editor_panel_set_root_persists(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     assert panel.current_root() is None  # no setting yet
 
     # Drive the open flow directly (we don't want a real file dialog).
@@ -324,8 +339,9 @@ def test_editor_panel_set_root_persists(
     assert AppSettings.load().editor_bids_root == str(bids_root)
 
 
-def test_editor_panel_open_button_exists_and_enabled(qapp) -> None:
+def test_editor_panel_open_button_exists_and_enabled(qapp, qtbot) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     assert panel._open_btn.isEnabled()
     # Validate buttons stay disabled — wired in later steps.
     assert not panel._validate_file_btn.isEnabled()
@@ -360,9 +376,10 @@ def _drill(pane: BidsTreePane, *names: str):
 
 
 def test_an_open_folder_keeps_its_contents_across_a_refresh(
-    qapp, bids_root: Path,
+    qapp, qtbot, bids_root: Path,
 ) -> None:
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     anat = pane.reveal(bids_root / "sub-01" / "ses-01" / "anat")
     assert anat is not None
@@ -379,11 +396,12 @@ def test_an_open_folder_keeps_its_contents_across_a_refresh(
 
 
 def test_a_refresh_leaves_no_blank_row_on_screen(
-    qapp, bids_root: Path,
+    qapp, qtbot, bids_root: Path,
 ) -> None:
     """The placeholder exists to keep the expander arrow; it must never be
     what an opened folder shows."""
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
     pane.reveal(bids_root / "sub-01" / "ses-01" / "anat").setExpanded(True)
     pane.refresh()
@@ -402,7 +420,7 @@ def test_a_refresh_leaves_no_blank_row_on_screen(
 
 
 def test_a_folder_with_nothing_to_draw_offers_no_arrow(
-    qapp, bids_root: Path,
+    qapp, qtbot, bids_root: Path,
 ) -> None:
     """Otherwise it looks exactly like the bug where an open folder came
     back blank: an arrow that opens onto nothing."""
@@ -410,6 +428,7 @@ def test_a_folder_with_nothing_to_draw_offers_no_arrow(
     (bids_root / "sub-01" / "dotted").mkdir()
     (bids_root / "sub-01" / "dotted" / ".hidden").write_text("x")
     pane = BidsTreePane()
+    qtbot.addWidget(pane)
     pane.set_root(bids_root)
 
     subject = _drill(pane, "sub-01")

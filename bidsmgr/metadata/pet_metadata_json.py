@@ -100,9 +100,31 @@ def _spec_from_block(block: dict, source: str) -> Optional[PetAcquisitionSpec]:
         return None
     try:
         return PetAcquisitionSpec(**fields)
+    except Exception:  # noqa: BLE001 - try the shapes BIDS also allows
+        pass
+
+    # BIDS types several PET fields as ARRAYS that the spec models as
+    # scalars, because a value is stated once and the conversion wraps it.
+    # A file written for pet2bids, or copied out of a finished sidecar,
+    # carries the array. Unwrapping a one-element list is reading the file
+    # the standard describes rather than refusing it over a bracket.
+    relaxed = {
+        name: (value[0] if isinstance(value, list) and len(value) == 1
+               and not _expects_list(name) else value)
+        for name, value in fields.items()
+    }
+    try:
+        return PetAcquisitionSpec(**relaxed)
     except Exception as exc:  # noqa: BLE001 - a bad file must not abort a conversion
         log.warning("PET metadata %s: could not read the values (%s)", source, exc)
         return None
+
+
+def _expects_list(field: str) -> bool:
+    """Does the spec itself model this field as a list?"""
+    from ..recording_meta.chain import PET_LIST_TO_BIDS
+
+    return field in PET_LIST_TO_BIDS
 
 
 def read_pet_metadata_json(path: Path) -> dict[str, PetAcquisitionSpec]:

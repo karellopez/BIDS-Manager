@@ -50,6 +50,7 @@ from .widgets import (
     NiftiViewerPane,
     PanelFrame,
     PathBar,
+    MrsViewerPane,
     RecordingViewerPane,
     SidecarFormPane,
     TsvViewerPane,
@@ -57,6 +58,7 @@ from .widgets import (
     VSep,
     is_recording_path,
 )
+from .widgets.mrs_spectrum import is_mrs_path
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +125,7 @@ class EditorPanel(QWidget):
         self._tsv_viewer = TsvViewerPane()
         self._nifti_viewer = NiftiViewerPane()
         self._recording_viewer = RecordingViewerPane()
+        self._mrs_viewer = MrsViewerPane()
         self._center_stack = QStackedWidget()
         self._sidecar_form.apply_to_others_requested.connect(
             self._on_apply_field_to_others
@@ -132,6 +135,7 @@ class EditorPanel(QWidget):
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
         self._center_stack.addWidget(self._recording_viewer)
+        self._center_stack.addWidget(self._mrs_viewer)
         self._bidsignore_pane = BidsIgnorePane()
         self._center_stack.addWidget(self._bidsignore_pane)
         self._citation_pane = CitationPane()
@@ -975,11 +979,24 @@ class EditorPanel(QWidget):
             self._nifti_viewer.set_file(None, None)
             self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._tsv_viewer)
+        elif is_mrs_path(path):
+            # An MRS file is a NIfTI by container only: the data block is a
+            # complex free induction decay, and showing it as slices would
+            # show nothing. Routed on the DATATYPE folder and the schema's
+            # own suffix list, never by opening the file, because routing a
+            # click must not read a volume off disk.
+            self._mrs_viewer.set_file(path, root)
+            self._sidecar_form.set_file(None, None, None)
+            self._tsv_viewer.set_file(None, None)
+            self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
+            self._center_stack.setCurrentWidget(self._mrs_viewer)
         elif name.endswith(".nii") or name.endswith(".nii.gz"):
             self._nifti_viewer.set_file(path, root)
             self._sidecar_form.set_file(None, None, None)
             self._tsv_viewer.set_file(None, None)
             self._recording_viewer.set_file(None, None)
+            self._mrs_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._nifti_viewer)
         elif is_recording_path(path):
             self._show_recording(path)
@@ -1942,6 +1959,7 @@ class EditorPanel(QWidget):
         self._bidsignore_pane.repaint_for_palette(pal)
         self._citation_pane.repaint_for_palette(pal)
         self._recording_viewer.repaint_for_palette(pal)
+        self._mrs_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
         for frame in getattr(self, "_panel_frames", []):
             frame._refresh_icons()

@@ -393,17 +393,21 @@ class TsvViewerPane(QWidget):
         # numbers cannot answer any question about its shape. Offered only
         # when the sidecar says there IS a sampling frequency, which is how
         # BIDS distinguishes a recording from a table of onsets.
-        self._plot_btn = QPushButton("  Plot")
-        self._plot_btn.setObjectName("tb-btn")
-        self._plot_btn.setCheckable(True)
-        self._plot_btn.setVisible(False)
-        self._plot_btn.setToolTip(
-            "Draw the columns against time, from the sampling frequency "
-            "and start time in the sidecar. Triggers, cardiac and "
-            "respiratory traces read as shapes, not as numbers."
+        self._visualize_btn = QPushButton("  Visualize")
+        self._visualize_btn.setObjectName("tb-btn")
+        self._visualize_btn.setCheckable(True)
+        self._visualize_btn.setVisible(False)
+        self._visualize_btn.setToolTip(
+            "Open the columns in the time-series viewer, the same one the "
+            "MEG and EEG recordings use: channel picker, navigation, "
+            "amplitude and window controls, zero-phase filtering, resample, "
+            "spectrum and an events overlay. The sampling frequency and "
+            "start time come from the sidecar; the channel kinds are read "
+            "from the column names, so a cardiac trace is coloured and "
+            "grouped as one."
         )
-        self._plot_btn.toggled.connect(self._on_plot_toggled)
-        et.addWidget(self._plot_btn)
+        self._visualize_btn.toggled.connect(self._on_visualize_toggled)
+        et.addWidget(self._visualize_btn)
 
         et.addWidget(self._dirty_chip)
         # No stretch: a wrapping row has no fixed right-hand edge to push
@@ -496,7 +500,8 @@ class TsvViewerPane(QWidget):
         self._stack.addWidget(self._empty_hint)
         self._stack.addWidget(self._table)
         self._stack.addWidget(self._loading_page)
-        self._plot_page: Optional[QWidget] = None
+        self._viewer_page: Optional[QWidget] = None
+        self._signal_worker = None
         self._timing: Optional[dict] = None
         self._stack.setCurrentIndex(0)
 
@@ -658,7 +663,7 @@ class TsvViewerPane(QWidget):
             self._populate_model(header, rows)
             self._stack.setCurrentIndex(1)
         self._update_footer(path, self._current_root, len(rows), len(header), total)
-        self._offer_plot(path, header, rows)
+        self._offer_visualizer(path, header, rows)
         self._edit_toolbar.setVisible(True)
         self._refresh_dirty_ui()
         self._pre_edit = self._snapshot()
@@ -667,20 +672,20 @@ class TsvViewerPane(QWidget):
         self.loaded.emit(path)
 
     # ------------------------------------------------------------------
-    # The plot
+    # The viewer
     # ------------------------------------------------------------------
 
-    def _offer_plot(
+    def _offer_visualizer(
         self, path: Path, header: list, rows: list,
     ) -> None:
-        """Show the Plot toggle when this file is a continuous recording.
+        """Show the Visualize toggle when this file is a continuous recording.
 
         Decided by the SIDECAR, not by the filename: BIDS puts the sampling
         frequency there, and a table of onsets (``_events.tsv``) has none.
         That also means a ``_stim.tsv.gz`` or any future continuous suffix
-        is offered a plot without this knowing the suffix exists.
+        is offered a viewer without this knowing the suffix exists.
         """
-        from .physio_plot import read_timing
+        from .physio_viewer import read_timing
 
         timing = read_timing(path)
         # The header row counts as a sample. A physio TSV has no column
@@ -690,40 +695,101 @@ class TsvViewerPane(QWidget):
             rows = [list(header)] + [list(r) for r in rows]
         self._timing = timing
         self._plot_rows = rows if timing is not None else []
-        self._plot_btn.setVisible(timing is not None)
+        self._visualize_btn.setVisible(timing is not None)
         if timing is None:
-            self._plot_btn.setChecked(False)
-        elif self._plot_btn.isChecked():
-            self._show_plot()
+            self._visualize_btn.setChecked(False)
+        elif self._visualize_btn.isChecked():
+            self._show_visualizer()
 
-    def _on_plot_toggled(self, plotting: bool) -> None:
-        if plotting:
-            self._show_plot()
+    def _on_visualize_toggled(self, showing: bool) -> None:
+        if showing:
+            self._show_visualizer()
         else:
             self._stack.setCurrentIndex(1)
 
-    def _show_plot(self) -> None:
-        if self._timing is None:
-            self._plot_btn.setChecked(False)
-            return
-        if self._plot_page is None:
-            try:
-                from .physio_plot import PhysioPlot
+    def _show_visualizer(self) -> None:
+        """Read the whole recording on a worker, then hand it to the view.
 
-                self._plot_page = PhysioPlot()
-            except Exception as exc:  # noqa: BLE001 - reported, not hidden
-                log.warning("could not build the physio plot: %s", exc)
-                self._plot_btn.setChecked(False)
-                self._plot_btn.setEnabled(False)
-                self._plot_btn.setToolTip(
-                    f"Plotting is unavailable: {exc}"
+        The table's preview is NOT shown first. It is bounded at five
+        thousand rows, so on a 1.4-million-sample trigger channel it is the
+        first four seconds, and showing it while the real read completes
+        means the viewer visibly changes its mind about what the recording
+        is. A spinner that says "reading" is the honest version.
+        """
+        if self._timing is None:
+            self._visualize_btn.setChecked(False)
+            return
+        if self._viewer_page is None:
+            try:
+                from .time_series_view import TimeSeriesView
+
+                self._viewer_page = TimeSeriesView(self)
+                self._viewer_page.close_requested.connect(
+                    lambda: self._visualize_btn.setChecked(False)
                 )
+            except Exception as exc:  # noqa: BLE001 - reported, not hidden
+                log.warning("could not build the time-series viewer: %s", exc)
+                self._visualize_btn.setChecked(False)
+                self._visualize_btn.setEnabled(False)
+                self._visualize_btn.setToolTip(f"Unavailable: {exc}")
                 return
-            self._stack.addWidget(self._plot_page)
-        self._plot_page.set_recording(
-            self._current_file, self._timing, self._plot_rows,
-        )
-        self._stack.setCurrentWidget(self._plot_page)
+            self._stack.addWidget(self._viewer_page)
+
+        self._stack.setCurrentWidget(self._viewer_page)
+        self._start_signal_read()
+
+    def _start_signal_read(self) -> None:
+        """Read + build the RawArray off the GUI thread.
+
+        A ``QThread``, not the pool: this ends in scipy, and a pooled thread
+        retired between calls takes scipy's per-thread state with it
+        (CLAUDE.md guard 8b).
+        """
+        from ...workers.meeg_recording_loader import RecordingComputeWorker
+        from .physio_viewer import build_raw, read_columns
+
+        path = self._current_file
+        timing = dict(self._timing or {})
+        if path is None:
+            return
+
+        previous = self._signal_worker
+        if previous is not None:
+            previous.cancel()
+
+        def work():
+            columns, total, step = read_columns(path)
+            if not columns:
+                raise ValueError("no numeric columns could be read")
+            return path, build_raw(columns, timing, step), total, step
+
+        worker = RecordingComputeWorker(work, parent=self)
+        worker.finished_with_result.connect(self._on_signal_read)
+        worker.failed.connect(self._on_signal_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._signal_worker = worker
+        self.loading_changed.emit(True, "Reading the recording...")
+        worker.start()
+
+    def _on_signal_read(self, result) -> None:
+        path, raw, total, step = result
+        self._signal_worker = None
+        self.loading_changed.emit(False, "")
+        if path != self._current_file or self._viewer_page is None:
+            return
+        self._viewer_page.set_current_filepath(path, self._current_root)
+        self._viewer_page.load_raw(raw)
+        if step > 1:
+            self._viewer_page.status_message.emit(
+                f"{total:,} samples held as {raw.n_times:,}: the recording "
+                f"was read one sample in {step} to stay within memory"
+            )
+
+    def _on_signal_failed(self, message: str) -> None:
+        self._signal_worker = None
+        self.loading_changed.emit(False, "")
+        log.warning("could not open the recording for viewing: %s", message)
+        self._visualize_btn.setChecked(False)
 
     def _on_load_failed(self, path: Path, error: str) -> None:
         if path != self._current_file:
@@ -791,8 +857,8 @@ class TsvViewerPane(QWidget):
             style.unpolish(w)
             style.polish(w)
             w.update()
-        if self._plot_page is not None:
-            self._plot_page.repaint_for_palette(pal)
+        if self._viewer_page is not None:
+            self._viewer_page.repaint_for_palette(pal)
 
     # ----------------------------------------------------------------------
     # Toolbar handlers

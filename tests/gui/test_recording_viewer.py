@@ -122,9 +122,9 @@ def test_set_file_none_unloads(qapp, qtbot, rec: Path) -> None:
 def test_event_jump_to_first_when_outside_window(qapp) -> None:
     """Enabling events when none fall in the current window scrolls the
     view to the first event (the MEG sample's first trigger is ~102 s in)."""
-    from bidsmgr.gui.widgets.recording_viewer_pane import _TimeSeriesView
+    from bidsmgr.gui.widgets.time_series_view import TimeSeriesView
 
-    v = _TimeSeriesView()
+    v = TimeSeriesView()
     v._duration = 100.0
     v._time_window = 5.0
     v._time_start = 0.0
