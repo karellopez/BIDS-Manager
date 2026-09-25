@@ -2090,6 +2090,14 @@ class ConverterPanel(QWidget):
         from .bulk_edit_dialog import BulkEditDialog
         dlg = BulkEditDialog(self._model, rows, parent=self)
         dlg.exec()
+        # A removal applies row by row, so some rows can be left alone. Say
+        # so: "24 rows changed" must never quietly mean "and 6 were not".
+        skipped = dlg.skipped_count()
+        if skipped:
+            self._log_view.appendPlainText(
+                f"Bulk edit: {dlg.changed_count()} row(s) changed, {skipped} "
+                f"kept the entity because their datatype requires it."
+            )
         # Status chips + previews refresh via the model's dataChanged
         # signal — the dispatcher's per-row writes already trigger them.
 

@@ -1493,9 +1493,15 @@ class InventoryTableModel(QAbstractTableModel):
         set the entity people most often need: the one that tells two
         otherwise identical acquisitions apart.
 
-        The INTERSECTION, because a bulk edit writes to every selected row
-        and an entity the schema forbids on one of them is not a legal
-        thing to offer. Same rule as ``editor.restructure.addable_entities``.
+        The UNION, because a bulk edit is applied ROW BY ROW: an entity one
+        row may not carry is skipped on that row, not withheld from the
+        whole selection. Intersecting meant selecting a whole study offered
+        nothing at all, since no entity is legal on anat and eeg and meg and
+        pet at once, and with nothing in the list there was no way to reach
+        the remove tick either.
+
+        :meth:`entity_settable_on` is the per-row half, and
+        :meth:`bulk_set` applies it.
 
         A row whose datatype or suffix is not resolved yet constrains
         nothing rather than emptying the list: the schema cannot answer for
@@ -1520,7 +1526,13 @@ class InventoryTableModel(QAbstractTableModel):
                 here = set(schema_mod.allowed_entities(datatype, suffix))
             except Exception:  # noqa: BLE001 - an unknown pair constrains nothing
                 continue
-            allowed = here if allowed is None else (allowed & here)
+            if not here:
+                # The schema has NO RULE for this datatype and suffix pair,
+                # which is not the same as "no entities are allowed". It
+                # returns an empty set rather than raising, so the except
+                # above never fired. Such a row says nothing either way.
+                continue
+            allowed = here if allowed is None else (allowed | here)
 
         if allowed is None:
             # Nothing in the selection could be identified. Offer what the
@@ -1548,12 +1560,19 @@ class InventoryTableModel(QAbstractTableModel):
         tick. So a session could be set and never unset, and the only
         entity anyone could take off a group of files was ``acq``.
 
-        The UNION of what is required, then subtracted: an entity required
-        by any one row in the selection cannot be removed from the
-        selection, because the edit writes to all of them.
+        Decided PER ROW and then UNIONED, not intersected. Selecting every
+        row and asking for ``acq`` to go should take it off the rows that
+        have one and can lose it, leaving the rest alone. Intersecting
+        meant one ``_bold`` in the selection removed ``task`` from the
+        offer for everything, and one row of an unrecognised datatype
+        removed nearly everything, so the answer to "take this label off
+        the study" was almost always no.
+
+        :meth:`remove_entity_rows` then applies it, skipping the rows the
+        schema will not allow it on.
         """
-        required: set[str] = set()
-        allowed: Optional[set[str]] = None
+        out: set[str] = set()
+        seen_any = False
         for row in rows:
             if not (0 <= row < len(self._df)):
                 continue
@@ -1564,19 +1583,116 @@ class InventoryTableModel(QAbstractTableModel):
             if not datatype or not suffix:
                 continue
             try:
-                here = set(schema_mod.allowed_entities(datatype, suffix))
-                required |= set(schema_mod.required_entities(datatype, suffix))
+                allowed = set(schema_mod.allowed_entities(datatype, suffix))
+                required = set(schema_mod.required_entities(datatype, suffix))
             except Exception:  # noqa: BLE001 - an unknown pair constrains nothing
                 continue
-            allowed = here if allowed is None else (allowed & here)
+            if not allowed:
+                # No rule for this pair. It contributes nothing and it does
+                # not count as an answer, so a selection of nothing BUT
+                # derivative rows still falls back below rather than
+                # returning an empty offer.
+                continue
+            seen_any = True
+            out |= {e for e in allowed if e not in required}
 
-        if allowed is None:
-            allowed = set(schema_mod.entity_order())
+        if not seen_any:
             # Nothing could be identified, so nothing is known to be
             # required either, except the one entity BIDS requires of every
             # file there is.
-            required = {"subject"}
-        return {e for e in allowed if e not in required}
+            return {e for e in schema_mod.entity_order() if e != "subject"}
+        return out
+
+    def entity_removable_on(self, row: int, entity: str) -> bool:
+        """Whether ``entity`` can come off THIS row.
+
+        The per-row half of :meth:`bulk_removable_entities`. A row whose
+        datatype and suffix the schema does not describe is left alone
+        rather than edited on a guess.
+        """
+        if entity == "subject" or not (0 <= row < len(self._df)):
+            return False
+        datatype = str(self._df.at[row, "datatype"] or "") \
+            if "datatype" in self._df.columns else ""
+        suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+            if "bids_guess_suffix" in self._df.columns else ""
+        if not datatype or not suffix:
+            return False
+        try:
+            allowed = set(schema_mod.allowed_entities(datatype, suffix))
+            required = set(schema_mod.required_entities(datatype, suffix))
+        except Exception:  # noqa: BLE001
+            return False
+        if not allowed:
+            return False
+        long = self._long_entity(entity)
+        return long in allowed and long not in required
+
+    @staticmethod
+    def _long_entity(entity: str) -> str:
+        """The schema's own name for an entity, given either spelling.
+
+        Callers are not consistent and cannot be made so cheaply: the bulk
+        dialog builds its keys from :meth:`bulk_editable_entities`, which
+        returns the schema's long names (``acquisition``), while the
+        entities JSON on a row and several existing callers use the short
+        filename form (``acq``). ``allowed_entities`` answers in long names
+        only, so a check that skipped this normalisation silently refused
+        every short-form write.
+        """
+        if entity in schema_mod.entity_order():
+            return entity
+        for long in schema_mod.entity_order():
+            try:
+                if schema_mod.entity_info(long).name == entity:
+                    return long
+            except KeyError:
+                continue
+        return entity
+
+    def entity_settable_on(self, row: int, entity: str) -> bool:
+        """Whether ``entity`` may be written to THIS row.
+
+        A row whose datatype and suffix the schema has no rule for is left
+        alone rather than edited on a guess, which is the same answer
+        ``editor.restructure.plan_entity_edit`` gives such a file.
+        """
+        if not (0 <= row < len(self._df)):
+            return False
+        datatype = str(self._df.at[row, "datatype"] or "") \
+            if "datatype" in self._df.columns else ""
+        suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+            if "bids_guess_suffix" in self._df.columns else ""
+        if not datatype or not suffix:
+            # Not identified yet, so the schema cannot refuse it either. The
+            # Properties panel treats this unknown the same way.
+            return True
+        try:
+            allowed = set(schema_mod.allowed_entities(datatype, suffix))
+        except Exception:  # noqa: BLE001
+            return True
+        if not allowed:
+            return False
+        return self._long_entity(entity) in allowed
+
+    def remove_entity_rows(self, rows: list[int], entity: str) -> tuple[int, int]:
+        """Take ``entity`` off every row that can lose it.
+
+        Returns ``(changed, skipped)``. A row that never carried it counts
+        as neither: there was nothing to do and nothing was refused.
+        """
+        changed = skipped = 0
+        for row in rows:
+            if not (0 <= row < len(self._df)):
+                continue
+            if not self.entities(row).get(entity):
+                continue
+            if not self.entity_removable_on(row, entity):
+                skipped += 1
+                continue
+            if self.set_entity(row, entity, ""):
+                changed += 1
+        return changed, skipped
 
     def entity_values_in_use(self, rows: list[int], entity: str) -> list[str]:
         """The values ``entity`` already carries across ``rows``, sorted.
@@ -1662,9 +1778,14 @@ class InventoryTableModel(QAbstractTableModel):
         # JSON and rebuilds the basename, exactly as the per-row panel does.
         if column_key.startswith(self.ENTITY_KEY_PREFIX):
             entity = column_key[len(self.ENTITY_KEY_PREFIX):]
+            # Per row, because the dropdown offers what is usable on AT
+            # LEAST ONE row. A row the schema will not let carry this
+            # entity is skipped rather than written with a name the
+            # standard rejects.
             return sum(
                 1 for row in rows
                 if 0 <= row < self.rowCount()
+                and self.entity_settable_on(row, entity)
                 and self.set_entity(row, entity, value)
             )
 

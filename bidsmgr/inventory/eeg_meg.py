@@ -871,7 +871,7 @@ def scan_eeg_meg(
             "subject": sub_token,
             "participant_id": participant,
             "session": f"ses-{ses_hint}" if ses_hint else "",
-            "source_folder": str(path.parent.relative_to(root))
+            "source_folder": path.parent.relative_to(root).as_posix()
                 if path.parent != root else "",
             "include": 1,
             # For EEG and MEG the datatype IS the modality, so these agree
@@ -1049,7 +1049,7 @@ def _unsupported_row(
         "subject": sub_token,
         "participant_id": participant,
         "session": "",
-        "source_folder": str(path.parent.relative_to(root))
+        "source_folder": path.parent.relative_to(root).as_posix()
             if path.parent != root else "",
         "include": 0,
         "modality": "eeg",            # best-effort; we could not probe channels

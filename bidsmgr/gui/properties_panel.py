@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -140,6 +141,7 @@ class _EntityRow(QWidget):
         *,
         required: bool,
         deprecated: bool = False,
+        removable: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -176,6 +178,22 @@ class _EntityRow(QWidget):
         self.edit.setObjectName("ent-input")
         self.edit.setPlaceholderText("—")
         h.addWidget(self.edit, 1)
+
+        # Taking an entity OFF one recording, without going through Bulk
+        # edit. Clearing the box does the same thing, but nothing on screen
+        # said so: an empty field reads as "not filled in yet" rather than
+        # as an instruction, which is why this is a button and not a hint.
+        # Offered only where the schema allows the entity to go, and only
+        # while there is something to take away.
+        self.remove = QToolButton()
+        self.remove.setObjectName("tb-btn")
+        self.remove.setText("\u00d7")
+        self.remove.setToolTip(
+            f"Remove {entity_name} from this recording, so it stops "
+            f"appearing in its BIDS name."
+        )
+        self.remove.setVisible(removable and bool(value))
+        h.addWidget(self.remove, 0)
 
     def value(self) -> str:
         return self.edit.text().strip()
@@ -384,9 +402,13 @@ class PropertiesPanel(QWidget):
                 value,
                 required=entity in required_set,
                 deprecated=entity in deprecated_set,
+                removable=self._model.entity_removable_on(row, entity),
             )
             er.edit.editingFinished.connect(
                 lambda e=er: self._on_entity_committed(e.entity_name, e.value())
+            )
+            er.remove.clicked.connect(
+                lambda _checked=False, e=er: self._on_entity_removed(e)
             )
             self._entity_rows.append(er)
             self._body_layout.addWidget(er)
@@ -675,6 +697,23 @@ class PropertiesPanel(QWidget):
         # Translate the schema entity name (``subject``) — already the
         # canonical form used by the schema engine and ProjectState.
         self._model.set_entity(self._row, entity, value or None)
+
+
+    def _on_entity_removed(self, row_widget) -> None:
+        """Take one entity off THIS recording.
+
+        The schema decides whether it may go, and the button is only shown
+        where it may, so this is the confirmation rather than the check. The
+        row is rebuilt afterwards so the field empties and the button goes
+        with it.
+        """
+        if self._model is None or self._row is None:
+            return
+        entity = row_widget.entity_name
+        if not self._model.entity_removable_on(self._row, entity):
+            return
+        if self._model.set_entity(self._row, entity, ""):
+            self.set_selected_row(self._row)
 
     def _on_datatype_changed(self, new_value: str) -> None:
         if self._model is None or self._row is None:

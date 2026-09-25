@@ -294,7 +294,15 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         # without ANY identifier don't collapse all rows into one subject.
         identity_key = f"{subj}||{study}"
 
-    rel = os.path.relpath(file_root, root_dir)
+    # POSIX, ALWAYS. ``os.path.relpath`` spells this with a backslash on
+    # Windows, and ``source_folder`` is not a local convenience: it is written
+    # into the inventory TSV, and ``_collapse_fieldmap_rows`` uses it as a
+    # grouping AND SORTING key. A separator that sorts differently reorders
+    # the fieldmap rows, and that walk assigns the acquisition index
+    # POSITIONALLY, so the magnitude and phase rows of one fieldmap can end up
+    # grouped differently there than here. Right on macOS and Linux by
+    # coincidence. See CROSS_PLATFORM_RULES 1.1.
+    rel = Path(os.path.relpath(file_root, root_dir)).as_posix()
     folder = root_dir.name if rel == "." else rel
     series = str(getattr(ds, "SeriesDescription", "n/a")).strip()
     uid = str(getattr(ds, "SeriesInstanceUID", ""))

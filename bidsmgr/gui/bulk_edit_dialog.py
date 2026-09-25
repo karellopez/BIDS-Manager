@@ -116,6 +116,7 @@ class BulkEditDialog(QDialog):
         self._model = model
         self._rows: list[int] = list(rows)
         self._changed: int = 0
+        self._skipped: int = 0
         # Created first, because widgets wired below fire into them while
         # the dialog is still being built.
         self._loading = False
@@ -227,10 +228,14 @@ class BulkEditDialog(QDialog):
         # tick rather than an empty box. Only entities can be removed: a
         # column is part of the table's shape and an empty one is a blank
         # cell, not an absent field.
-        self._remove_check = QCheckBox("Remove this entity from every selected row")
+        self._remove_check = QCheckBox("Remove this entity from the rows that have it")
         self._remove_check.setToolTip(
             "Takes the entity off the selected rows entirely, so it stops "
-            "appearing in their BIDS names. The value box is ignored."
+            "appearing in their BIDS names. The value box is ignored.\n\n"
+            "Applied row by row: a row that never carried it is untouched, "
+            "and a row whose datatype REQUIRES it is left alone rather than "
+            "refusing the whole edit. So you can select everything and take "
+            "one label off the study."
         )
         self._remove_check.toggled.connect(self._on_remove_toggled)
         form.addRow("", self._remove_check)
@@ -333,12 +338,34 @@ class BulkEditDialog(QDialog):
         if not removable:
             self._remove_check.setChecked(False)
         if entity and not removable:
-            # Say WHY rather than hiding a control with no explanation: the
-            # schema requires this entity on at least one selected row.
+            # Say WHY rather than hiding a control with no explanation.
+            reason = (
+                "every BIDS file has one and it cannot be taken off. Use "
+                "Rename, so the participants.tsv row travels with it."
+                if entity == "subject" else
+                f"BIDS requires {entity} on every selected row, or none of "
+                f"them is allowed to carry it."
+            )
             self._description.setText(
-                (self._description.text() + "  ").strip()
-                + f"  BIDS requires {entity} on at least one of the selected "
-                f"rows, so it cannot be removed from them."
+                (self._description.text() + "  ").strip() + "  " + reason
+            )
+        elif removable:
+            # How many rows this will actually touch, before it is ticked.
+            can = sum(
+                1 for r in self._rows
+                if self._model.entities(r).get(entity)
+                and self._model.entity_removable_on(r, entity)
+            )
+            blocked = sum(
+                1 for r in self._rows
+                if self._model.entities(r).get(entity)
+                and not self._model.entity_removable_on(r, entity)
+            )
+            note = f"  Removing takes it off {can} of {len(self._rows)} rows."
+            if blocked:
+                note += (f"  {blocked} require it and are left alone.")
+            self._description.setText(
+                (self._description.text() + "  ").strip() + note
             )
         self._refill_targets(key)
 
@@ -555,8 +582,25 @@ class BulkEditDialog(QDialog):
         rows = self._ticked_rows()
         if not rows:
             return
-        self._changed = self._model.bulk_set(rows, key, value)
+        entity = self._entity_behind(key)
+        if self._remove_check.isChecked() and entity:
+            # Row by row, so a selection spanning several datatypes takes the
+            # entity off the ones that can lose it instead of being refused
+            # over the ones that cannot.
+            self._changed, skipped = self._model.remove_entity_rows(rows, entity)
+            self._skipped = skipped
+        else:
+            self._changed = self._model.bulk_set(rows, key, value)
+            self._skipped = 0
         self.accept()
+
+    def skipped_count(self) -> int:
+        """Rows that carried the entity but are not allowed to lose it.
+
+        Zero for every edit that is not a removal. The caller reports it, so
+        "24 rows changed" never quietly means "and 6 were not".
+        """
+        return getattr(self, "_skipped", 0)
 
 
 __all__ = ["BulkEditDialog"]

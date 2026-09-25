@@ -282,11 +282,21 @@ def addable_entities(root: Path, files: Iterable[Path]) -> list[EntitySlot]:
 
 
 def removable_entities(root: Path, files: Iterable[Path]) -> list[EntitySlot]:
-    """Entities the selection carries and is allowed to do without.
+    """Entities at least one selected file carries and can do without.
 
-    Required entities are left out rather than offered and refused: a
-    ``_bold`` without ``task`` is not a file BIDS has an opinion about, it is
-    a file BIDS has no name for.
+    Offered PER FILE, not per selection. Select a whole study and ask for
+    ``acq`` to go and it goes from the files that have one and are allowed
+    to lose it, leaving the rest alone. Requiring every file in the
+    selection to qualify meant the answer to "take the acquisition label
+    off this dataset" was almost always "no", because one ``_bold``
+    somewhere requires ``task`` and one file somewhere carries no ``acq``.
+
+    So an entity appears here when at least one file both carries it and is
+    allowed to do without it. ``present`` counts the files that will
+    actually change, which is what the preview then lists, and ``required``
+    says whether some OTHER file in the selection requires it, so the
+    dialog can say that those will be left alone rather than leaving it to
+    be discovered in the preview.
     """
     from ..schema import entity_order, required_entities
 
@@ -295,20 +305,24 @@ def removable_entities(root: Path, files: Iterable[Path]) -> list[EntitySlot]:
         return []
 
     long_to_short = _long_to_short()
-    required: set[str] = set()
-    for item in facts:
-        required |= set(required_entities(item.datatype, item.suffix))
-
     out: list[EntitySlot] = []
     for long in entity_order():
         short = long_to_short.get(long)
-        if not short or short == "sub" or long in required:
+        if not short or short == "sub":
             continue
-        carried = [f.entities[short] for f in facts if short in f.entities]
+        carried: list[str] = []
+        blocked = 0
+        for item in facts:
+            if short not in item.entities:
+                continue
+            if long in set(required_entities(item.datatype, item.suffix)):
+                blocked += 1
+                continue
+            carried.append(item.entities[short])
         if not carried:
             continue
         slot = _slot(
-            short, long, required=False, present=len(carried),
+            short, long, required=bool(blocked), present=len(carried),
             total=len(facts), values=carried,
         )
         if slot is not None:
@@ -542,7 +556,15 @@ def plan_entity_edit(
         )
 
     long = _short_to_long().get(entity, entity)
-    for item in facts:
+    # A file the edit cannot apply to is LEFT ALONE, not made to refuse the
+    # whole operation. Selecting a study and asking for the acquisition label
+    # to go should take it off the files that have one and can lose it; with
+    # an all-or-nothing rule the answer was almost always no, because one
+    # _bold somewhere requires task and one file somewhere carries no acq.
+    # The preview then lists exactly what moves, so what was skipped is
+    # visible before anything happens rather than asserted in a message.
+    skipped: list[str] = []
+    for item in list(facts):
         allowed = set(allowed_entities(item.datatype, item.suffix))
         if not allowed:
             # The schema has no rule for this datatype and suffix together, so
@@ -551,21 +573,35 @@ def plan_entity_edit(
             # entities as a recording that is moving, which is what makes it
             # that recording's companion, and a companion left behind while
             # its recording is renamed is an orphan no validator can attribute
-            # to anything. Refusing the whole operation over one file the
-            # standard does not describe would be worse still.
+            # to anything.
             continue
         if value is not None:
             if long not in allowed:
-                raise RenameError(
-                    f"{item.datatype}/{item.suffix} files may not carry "
-                    f"{entity}-, so {item.rel} cannot take it."
-                )
+                skipped.append(item.rel)
+                facts.remove(item)
         elif entity in item.entities:
             if long in set(required_entities(item.datatype, item.suffix)):
-                raise RenameError(
-                    f"{entity}- is required for {item.datatype}/"
-                    f"{item.suffix}, so {item.rel} cannot do without it."
-                )
+                skipped.append(item.rel)
+                facts.remove(item)
+
+    if not facts:
+        what = "take" if value is not None else "do without"
+        raise RenameError(
+            f"none of the {len(skipped)} selected recordings can {what} "
+            f"{entity}-, so there is nothing to do. "
+            + (f"{entity}- is required for {skipped[0]} and the rest."
+               if value is None else
+               f"{skipped[0]} and the rest may not carry it.")
+        )
+
+    # Count what will actually CHANGE, not what survived the filter. With a
+    # whole study selected, "Remove acq- from 84 files" when 24 carry one is
+    # a title that contradicts the preview underneath it.
+    if value is None:
+        touched = sum(1 for item in facts if entity in item.entities)
+    else:
+        touched = sum(1 for item in facts
+                      if item.entities.get(entity) != value)
 
     plan = RenamePlan(
         entity=entity,
@@ -574,8 +610,8 @@ def plan_entity_edit(
         ref_by_path=True,
         standard_scans_home=True,
         title=(
-            f"Remove {entity}- from {len(facts)} file(s)" if value is None
-            else f"Set {entity}-{value} on {len(facts)} file(s)"
+            f"Remove {entity}- from {touched} file(s)" if value is None
+            else f"Set {entity}-{value} on {touched} file(s)"
         ),
     )
 

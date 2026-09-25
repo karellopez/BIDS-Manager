@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.4.0"
+version = "1.4.1"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -65,16 +65,27 @@ dependencies = [
     "pydantic>=2.6,<=2.13.4",
 
     # MRI conversion stack. dcm2niix invoked directly.
-    # The FLOOR matters as much as the ceiling here. v1.0.20260416 is where
-    # the PET sidecar contract changed: before it dcm2niix emitted TimeZero,
-    # InjectionStart and a hardcoded FrameTimesStart of [0]; from it, it emits
-    # SeriesTime and computes FrameTimesStart, leaving the time-zero convention
-    # to the downstream tool. Those are different datasets from the same
-    # DICOMs, and `fixups/pet_sidecar` now DERIVES TimeZero from SeriesTime, so
-    # a resolver free to install an older build would silently change what a
-    # PET scan means. Both ends ship the same seven cp38-abi3 wheels, so the
-    # narrower range costs no platform.
-    "dcm2niix>=1.0.20260416,<=1.0.20260724",
+    # The FLOOR is EXACT, and it is not a guess. Measured 2026-09-25 by running
+    # both ends of the old range over the same Siemens study:
+    #
+    #   v1.0.20260416  19 NIfTI, no spectroscopy at all, localisers labelled
+    #                  `derived`, one series guessed `bold`
+    #   v1.0.20260724  21 NIfTI, both `_svs` series converted with
+    #                  BidsGuess ['mrs', '_svs'], localisers `discard`,
+    #                  that series guessed `sbref`
+    #
+    # So the old floor allowed a build that CANNOT convert spectroscopy, and
+    # pip's default upgrade strategy is `only-if-needed`: anybody who installed
+    # while 20260416 satisfied the pin kept it through every later upgrade and
+    # got a tool where MRS silently produced nothing. That is what "MRS does
+    # not work on Windows and Linux" turned out to be, and it was never about
+    # those platforms: all seven wheels exist for both versions.
+    #
+    # The ceiling stays pinned because the PET sidecar contract moved inside
+    # this range (TimeZero and InjectionStart gave way to SeriesTime, and
+    # `fixups/pet_sidecar` DERIVES TimeZero from SeriesTime), so a resolver
+    # free to roam would silently change what a PET scan means.
+    "dcm2niix>=1.0.20260724,<=1.0.20260724",
     "pydicom>=2.4,<=3.0.2",
     "nibabel>=5.0,<=5.4.2",
 

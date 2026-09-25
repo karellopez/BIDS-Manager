@@ -76,15 +76,47 @@ def test_entities_with_their_own_column_are_not_offered_twice(model):
         assert entity not in offered
 
 
-def test_the_list_is_the_intersection_across_the_selection(model):
-    """``echo`` is allowed on anat/T1w and not on fmap/magnitude1, so a
-    selection holding both must not offer it: a bulk edit writes to every
-    row, and one the schema forbids is not a legal thing to offer."""
+def test_the_list_is_the_union_across_the_selection(model):
+    """``echo`` is allowed on anat/T1w and not on fmap/magnitude1, and a
+    selection holding both still offers it.
+
+    This was an INTERSECTION and the intersection was wrong. A bulk edit is
+    applied row by row, so an entity one row may not carry is skipped on
+    that row rather than withheld from the whole selection. Intersecting
+    meant selecting a whole study offered NOTHING, because no entity is
+    legal on anat and eeg and meg and pet at once, and with an empty list
+    there was no way to reach the remove tick either.
+    """
     anat_only = model.bulk_editable_entities([2])
     mixed = model.bulk_editable_entities([0, 1, 2])
     assert "echo" in anat_only
-    assert "echo" not in mixed
-    assert "acquisition" in mixed, "what they have in common survives"
+    assert "echo" in mixed, "offered, and skipped on the rows that refuse it"
+    assert "acquisition" in mixed
+
+
+def test_setting_skips_the_rows_that_may_not_carry_it(model):
+    """The other half of the union: the OFFER is wide, the WRITE is not."""
+    assert model.entity_settable_on(2, "echo"), "anat/T1w may carry echo"
+    assert not model.entity_settable_on(0, "echo"), "fmap/magnitude1 may not"
+    written = model.bulk_set([0, 1, 2], "entity:echo", "1")
+    assert written == 1, "only the row the schema allows it on"
+    assert model.bulk_value(2, "entity:echo") == "1"
+    assert model.bulk_value(0, "entity:echo") == ""
+
+
+def test_a_derivative_row_does_not_empty_the_offer(model):
+    """A datatype the schema has no rule for returns an EMPTY allowed set
+    rather than raising, so it used to collapse the intersection and take
+    every entity out of the menu, acq included, with nothing on screen to
+    explain it."""
+    model._df.at[1, "datatype"] = "derivatives/dcm2niix/sub-001/dwi"
+    model._df.at[1, "bids_guess_suffix"] = "dwi"
+    offered = model.bulk_editable_entities([0, 1, 2])
+    assert "acquisition" in offered
+    assert offered, "one unclassifiable row must not empty the menu"
+    assert not model.entity_settable_on(1, "acquisition"), (
+        "and it is still left alone when the edit is applied"
+    )
 
 
 def test_the_list_is_in_bids_filename_order(model):
