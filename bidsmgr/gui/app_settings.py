@@ -46,6 +46,11 @@ KEYS = {
     # has never chosen, so the GPU-dependent default applies.
     "nifti_view_mode": "editor/nifti_view_mode",                # single|multi|3d|combo
     "nifti_orientation": "editor/nifti_orientation",           # 0 sag | 1 cor | 2 ax
+    # How every signal viewer draws a trace. One preference, not one per
+    # viewer: somebody who wants thicker lines wants them everywhere.
+    "trace_line_width": "editor/trace_line_width",
+    "trace_line_color": "editor/trace_line_color",
+    "trace_type_colors": "editor/trace_type_colors",   # JSON, channel type -> hex
     "nifti_crosshair_color": "editor/nifti_crosshair_color",   # hex string e.g. "#4FC3F7"
     "nifti_crosshair_thickness": "editor/nifti_crosshair_thickness",  # px, 1..5
     # Scan defaults
@@ -144,6 +149,20 @@ class AppSettings:
     # Empty on purpose: "no choice made yet" is a different thing from any
     # particular layout, and it is what lets the first run pick the best
     # default this machine can show rather than a stored one.
+    # How a trace is drawn in the signal viewers. ZERO means "decide from
+    # what is on screen": two pixels for a physio channel, one for a wall of
+    # MEG, because Qt strokes a wider pen 7x slower and a 300-channel view
+    # cannot pay it. A width the user picks in the Line popup is stored as
+    # that number and honoured everywhere.
+    trace_line_width: int = 0
+    trace_line_color: str = ""
+    # Per-channel-type trace colours, type -> hex. EMPTY is the shipped
+    # scheme, which is palette TOKENS rather than literals (mag takes the
+    # accent colour, grad the success colour) so it follows the theme and
+    # stays legible in both. A type appears here only when somebody chose
+    # a colour for it, which is what lets Reset defaults be a deletion
+    # rather than a second hardcoded table to keep in step.
+    trace_type_colors: dict = field(default_factory=dict)
     nifti_view_mode: str = ""
     # Which plane a single-pane view opens on. Axial by convention when the
     # user has never chosen.
@@ -341,6 +360,27 @@ class AppSettings:
         out.validate_flag_todos = _as_bool(
             s.value(KEYS["validate_flag_todos"]), out.validate_flag_todos,
         )
+        try:
+            out.trace_line_width = int(
+                s.value(KEYS["trace_line_width"], out.trace_line_width)
+            )
+        except (TypeError, ValueError):
+            pass
+        # 0 is legal and means automatic; anything outside 1..8 is not.
+        if out.trace_line_width and not (1 <= out.trace_line_width <= 8):
+            out.trace_line_width = 0
+        out.trace_line_color = _as_str(
+            s.value(KEYS["trace_line_color"]), out.trace_line_color,
+        )
+        try:
+            raw = s.value(KEYS["trace_type_colors"], "")
+            parsed = json.loads(raw) if isinstance(raw, str) and raw else {}
+            if isinstance(parsed, dict):
+                out.trace_type_colors = {
+                    str(k): str(v) for k, v in parsed.items() if v
+                }
+        except (TypeError, ValueError):
+            pass
         out.nifti_view_mode = _as_str(
             s.value(KEYS["nifti_view_mode"]), out.nifti_view_mode,
         )
@@ -520,6 +560,9 @@ class AppSettings:
         # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
+        s.setValue(KEYS["trace_line_width"], int(self.trace_line_width))
+        s.setValue(KEYS["trace_line_color"], self.trace_line_color)
+        s.setValue(KEYS["trace_type_colors"], json.dumps(self.trace_type_colors))
         s.setValue(KEYS["nifti_view_mode"], self.nifti_view_mode)
         s.setValue(KEYS["scan_index_widths"], json.dumps(self.scan_index_widths))
         s.setValue(KEYS["nifti_orientation"], int(self.nifti_orientation))
@@ -626,6 +669,20 @@ class AppSettings:
         from ..classifier import user_rules
         _, excl = user_rules.from_json({"scan_exclusions": self.scan_exclusions})
         return excl
+
+    @classmethod
+    def remember_trace_style(cls, width: int, colour: str) -> None:
+        """Store how a trace is drawn. One preference for every viewer."""
+        cls._settings().setValue(KEYS["trace_line_width"], int(width))
+        cls._settings().setValue(KEYS["trace_line_color"], str(colour))
+
+    @classmethod
+    def remember_type_colors(cls, mapping: dict) -> None:
+        """Store per-channel-type trace colours. Empty restores the defaults."""
+        clean = {str(k): str(v) for k, v in dict(mapping or {}).items() if v}
+        cls._settings().setValue(
+            KEYS["trace_type_colors"], json.dumps(clean),
+        )
 
     @classmethod
     def remember_nifti_view_mode(cls, mode: str) -> None:

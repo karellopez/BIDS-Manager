@@ -55,10 +55,74 @@ def series_color(index: int) -> str:
     return pal.get(token, pal.get("text", "#888888"))
 
 
-def type_color(ch_type: str) -> str:
-    """The colour a channel KIND is drawn in. Theme-aware."""
+#: Colours somebody chose for a channel type, keyed by type, as hex. Empty
+#: means every type takes its theme token, which is the shipped scheme.
+#:
+#: A module-level cache rather than a settings read per curve: this is called
+#: once for every channel drawn, on every redraw, and a three-hundred-channel
+#: MEG window redraws as the pointer moves.
+_TYPE_OVERRIDES: dict[str, str] = {}
+_TYPE_OVERRIDES_LOADED = False
+
+
+def default_type_color(ch_type: str) -> str:
+    """The SHIPPED colour for a kind, ignoring anything somebody chose.
+
+    Theme-aware, because the shipped scheme is palette tokens rather than
+    literals: ``mag`` is the accent colour and ``grad`` the success colour,
+    so they stay distinguishable and both stay legible in either theme.
+
+    A type the map does not name gets a token derived FROM ITS NAME rather
+    than the one grey they all used to share. A real MEG file carries
+    ``ias`` and ``syst`` alongside ``misc``, and three different kinds of
+    channel drawn in one colour is three kinds nobody can tell apart. The
+    derivation is a character sum, not :func:`hash`, because Python
+    randomises string hashing per process and a colour that changed every
+    time the app started would be worse than a collision.
+    """
     pal = CUR()
-    return pal.get(TYPE_TOKENS.get(ch_type, "dim"), pal.get("text", "#888888"))
+    token = TYPE_TOKENS.get(ch_type)
+    if token is None:
+        name = str(ch_type)
+        token = SERIES_TOKENS[
+            sum(ord(c) for c in name) % len(SERIES_TOKENS)
+        ] if name else "dim"
+    return pal.get(token, pal.get("text", "#888888"))
+
+
+def type_colors() -> dict[str, str]:
+    """The overrides currently in force. A copy, so callers cannot edit it."""
+    _load_type_overrides()
+    return dict(_TYPE_OVERRIDES)
+
+
+def set_type_colors(mapping: Optional[dict] = None) -> None:
+    """Install per-type colours. ``None`` or empty restores the defaults."""
+    global _TYPE_OVERRIDES, _TYPE_OVERRIDES_LOADED
+    _TYPE_OVERRIDES = {
+        str(k): str(v) for k, v in dict(mapping or {}).items() if v
+    }
+    _TYPE_OVERRIDES_LOADED = True
+
+
+def _load_type_overrides() -> None:
+    global _TYPE_OVERRIDES_LOADED
+    if _TYPE_OVERRIDES_LOADED:
+        return
+    _TYPE_OVERRIDES_LOADED = True
+    try:
+        from ..app_settings import AppSettings
+
+        set_type_colors(AppSettings.load().trace_type_colors)
+    except Exception:  # noqa: BLE001 - a preference is not worth a crash
+        pass
+
+
+def type_color(ch_type: str) -> str:
+    """The colour a channel KIND is drawn in: chosen, else shipped."""
+    _load_type_overrides()
+    chosen = _TYPE_OVERRIDES.get(ch_type)
+    return chosen if chosen else default_type_color(ch_type)
 
 
 class PsdDialog(QDialog):
@@ -309,6 +373,9 @@ __all__ = [
     "PsdDialog",
     "SERIES_TOKENS",
     "TYPE_TOKENS",
+    "default_type_color",
     "series_color",
+    "set_type_colors",
     "type_color",
+    "type_colors",
 ]

@@ -19,6 +19,7 @@ from bidsmgr.gui.widgets.mrs_spectrum import (
     metabolites_for,
     part,
     spectrum,
+    stagger,
 )
 
 SF_MHZ = 123.26          # a 3 T 1H spectrometer
@@ -168,3 +169,53 @@ class TestRouting:
         p.parent.mkdir(parents=True)
         p.write_bytes(b"")
         assert is_mrs_path(p) is False
+
+
+class TestLabelStaggering:
+    """Which row each metabolite name goes on, so none covers another.
+
+    The test is in fraction of the VISIBLE span, so the same table needs
+    staggering at one zoom and not at another. These lock that in, because
+    the failure is silent: the labels simply overlap.
+    """
+
+    shifts = [shift for _n, shift, _d in METABOLITES_1H]
+
+    def test_one_label_needs_no_row_but_the_first(self):
+        assert stagger([3.03], 4.0) == [0]
+
+    def test_no_labels_is_not_an_error(self):
+        assert stagger([], 4.0) == []
+
+    def test_far_apart_labels_share_the_top_row(self):
+        # 0.5 and 4.0 across a 4 ppm window are nowhere near each other.
+        assert stagger([0.5, 4.0], 4.0) == [0, 0]
+
+    def test_neighbours_are_pushed_apart(self):
+        # Creatine 3.03 and choline 3.22 across the whole window: 0.19 ppm
+        # is under five per cent of four, so they collide.
+        assert stagger([3.03, 3.22], 4.0) == [0, 1]
+
+    def test_zooming_in_gives_them_room_again(self):
+        # The same pair across half a ppm has the pane to itself.
+        assert stagger([3.03, 3.22], 0.5) == [0, 0]
+
+    def test_the_real_table_fits_in_the_rows_available(self):
+        rows = stagger(self.shifts, 4.0, rows=4)
+        assert len(rows) == len(self.shifts)
+        assert max(rows) < 4
+
+    def test_every_label_keeps_a_row_even_when_impossible(self):
+        # Ten labels on top of each other cannot all be separated. Dropping
+        # one would be a metabolite the reader cannot find, so each still
+        # gets a row.
+        rows = stagger([3.0] * 10, 4.0, rows=2)
+        assert len(rows) == 10
+        assert all(0 <= r < 2 for r in rows)
+
+    def test_a_zero_span_does_not_divide_by_zero(self):
+        assert len(stagger(self.shifts, 0.0)) == len(self.shifts)
+
+    def test_the_result_is_stable_for_the_same_input(self):
+        first = stagger(self.shifts, 2.0)
+        assert stagger(self.shifts, 2.0) == first

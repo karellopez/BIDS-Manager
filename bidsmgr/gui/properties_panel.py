@@ -54,6 +54,7 @@ import pandas as pd
 
 from .. import schema as schema_mod
 from ..fixups.blood import is_blood_role
+from ..recording_meta import merge_pet as _merge_pet
 from ..metadata.template_plan import sidecar_section
 from ..project import Project
 from ..recording_meta import CURATED_SUGGESTIONS, SCAN_SUGGESTION_COLUMNS
@@ -423,6 +424,7 @@ class PropertiesPanel(QWidget):
         if datatype == "pet":
             self._append_region_label(
                 f"{_datatype_label(datatype)} only", agnostic=False)
+            self._append_pet_dose_section(row)
             self._append_blood_section(row)
         if datatype in _EEG_MEG_DATATYPES:
             self._append_region_label(
@@ -1203,6 +1205,91 @@ class PropertiesPanel(QWidget):
         h.addWidget(rem)
         h.addStretch(1)
         self._body_layout.addWidget(ctl)
+
+    def _append_pet_dose_section(self, row: int) -> None:
+        """Import a dose file, for THIS recording, inside the PET region.
+
+        The dataset dialog has the same importer, and that is the right
+        place for a study-wide dose. This one exists because a dose is not
+        always study-wide: a second tracer, a re-injection, a subject whose
+        record came from a different sheet. Asking a user to leave the row
+        they are looking at, open a dataset dialog and scope a block by
+        subject label, in order to correct one scan, is asking them to do
+        the tool's filing for it.
+
+        It sits INSIDE the PET region rather than above it so that what the
+        file filled in is the next thing the eye reaches: the sidecar
+        fields below update in place, and the point of importing rather
+        than passing a path through is being able to see that happen.
+        """
+        from ..metadata.pet_metadata_json import read_pet_metadata_json
+        from ..metadata.pet_spreadsheet import read_pet_spreadsheet
+
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "DOSE FILE", "fills the PET fields below, for this recording",
+            agnostic=False, tag="pet"))
+
+        line = QWidget()
+        line.setObjectName("dose-row")
+        line.setStyleSheet("#dose-row { background: transparent; }")
+        h = QHBoxLayout(line)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(FieldLabel("Import", CUR()["text"], _LABEL_COL, fixed=True))
+
+        status = QLineEdit()
+        status.setObjectName("ent-input")
+        status.setReadOnly(True)
+        status.setPlaceholderText("(nothing imported for this recording)")
+        status.setToolTip(
+            "A JSON keyed by BIDS field names, which is the shape pypet2bids "
+            "accepts through --set-default-metadata-json, or a spreadsheet. "
+            "Applied to THIS recording only. Keys BIDS does not define for a "
+            "PET sidecar are reported and never written."
+        )
+        h.addWidget(status, 1)
+
+        browse = QPushButton("Choose…")
+        browse.setToolTip("Pick a dose file and apply it to this recording.")
+
+        def choose() -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select a PET dose file for this recording", "",
+                "PET metadata (*.json *.tsv *.csv *.xlsx *.ods);;All files (*)",
+            )
+            if not path:
+                return
+            chosen = Path(path)
+            blocks = (
+                read_pet_metadata_json(chosen)
+                if chosen.suffix.lower() == ".json"
+                else read_pet_spreadsheet(chosen)
+            )
+            # One recording, so every block in the file is for it: the
+            # dataset-wide one and any subject block alike. A file scoped to
+            # somebody else is the user's mistake to see, not ours to guess
+            # at, so they are merged in the order the file states them.
+            merged = None
+            for block in blocks.values():
+                merged = block if merged is None else _merge_pet(merged, block)
+            if merged is None:
+                status.setText(f"{chosen.name}: nothing readable")
+                return
+
+            applied = (
+                self._model.apply_pet_block(row, merged)
+                if self._model is not None else 0
+            )
+            status.setText(f"{chosen.name}: {applied} field(s)")
+            # Re-render so the sidecar fields below show what arrived. The
+            # whole reason for importing here rather than passing a path.
+            self.set_selected_row(row)
+
+        browse.clicked.connect(choose)
+        h.addWidget(browse)
+        self._body_layout.addWidget(line)
 
     def _append_blood_section(self, row: int) -> None:
         """Attach this PET run's blood curves.

@@ -30,6 +30,7 @@ across recordings; a colour means the same thing everywhere, so it can.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import List, Optional, Set
 
@@ -66,9 +67,21 @@ from .. import icons
 from .flow_layout import flow
 from .primitives import ElidedLabel
 from .recording_formats import full_ext
-from .psd_dialog import PsdDialog, series_color, type_color
+from .psd_dialog import PsdDialog, series_color, set_type_colors, type_color
 
 log = logging.getLogger(__name__)
+
+
+def _nan_mean(values) -> float:
+    """``np.nanmean`` that survives an all-gap channel."""
+    finite = values[np.isfinite(values)]
+    return float(finite.mean()) if finite.size else 0.0
+
+
+def _nan_ptp(values) -> float:
+    """Peak-to-peak ignoring gaps; 0 when there is nothing to measure."""
+    finite = values[np.isfinite(values)]
+    return float(finite.max() - finite.min()) if finite.size else 0.0
 
 #: Seconds of signal a recording opens showing. Ten is enough to see the
 #: shape of a cardiac or respiratory cycle and short enough that a long
@@ -90,6 +103,93 @@ _FILTER_DECIMALS = 3
 #: either side a 0.01 Hz high-pass wants; three hundred MEG channels cannot,
 #: and the budget is what lets the same code serve both.
 _FILTER_SAMPLE_BUDGET = 4_000_000
+
+#: Trace width when only a few traces are on screen. A hairline reads as a
+#: scratch on a modern display and the viewers people compare this to draw
+#: thicker, so a single physio channel gets two pixels.
+_THICK_LINE_WIDTH = 2
+
+#: Above this many traces NOTHING wider than one pixel is drawn, whatever is
+#: asked for, and it is not a matter of taste. Qt strokes a cosmetic (one
+#: pixel) pen through a fast path and has to stroke anything wider properly.
+#: Measured on a 323-channel MEG recording, painting the pane:
+#:
+#: ===== ======= =======
+#: shown width 1 width 2
+#: ===== ======= =======
+#: 1     4.1 ms  12.3 ms
+#: 2     4.0 ms   9.4 ms
+#: 8     11.3 ms 79.8 ms
+#: 20    12.9 ms 88.2 ms
+#: 323   145 ms  809 ms
+#: ===== ======= =======
+#:
+#: A drag redraws continuously, so above two traces the wider pen is the
+#: difference between a view that follows the cursor and one that does not.
+#: Reducing the point count does not rescue it: peak decimation cut a
+#: twenty-channel window from 200,000 points to 69,000 and width two only
+#: came down from 115 ms to 90, because the cost is the stroking.
+_THICK_LINE_MAX_TRACES = 2
+
+#: What a width of zero means: decide it from what is on screen. A width the
+#: user picked in the Line popup is honoured whatever it costs, because at
+#: that point the cost is theirs to choose.
+_LINE_WIDTH_AUTO = 0
+
+
+def _peak_decimate(times, values, pixels: int):
+    """Reduce a trace to about two points per pixel, KEEPING THE EXTREMES.
+
+    A pane is on the order of a thousand pixels wide. Asking Qt to stroke a
+    forty-minute recording sample by sample is a million points into a
+    thousand columns, a thousand of them per column, and all but two of
+    those thousand land on a pixel another one already covered: the work is
+    real and the result is identical. That is what made Fit all freeze.
+
+    Taking every n-th sample would be wrong, not just lossy: the peak of an
+    R wave or a trigger one sample wide falls between the samples kept and
+    the feature DISAPPEARS, which is worse than slow because it is quietly
+    incorrect. So each column keeps its MINIMUM and its MAXIMUM, which is
+    the standard answer and preserves the envelope exactly: what is drawn
+    covers the same pixels the full trace would have.
+
+    A gap stays a gap. A column is NaN only when every sample in it is,
+    because a column holding one dropped sample among a thousand good ones
+    still has a range worth drawing, and propagating the NaN would open a
+    hole the recording does not have.
+    """
+    n = int(np.asarray(values).size)
+    target = max(256, int(pixels) * 2)
+    if n <= target:
+        return times, values
+    buckets = target // 2
+    usable = (n // buckets) * buckets
+    if usable < buckets * 2:
+        return times, values
+
+    block = np.asarray(values[:usable], dtype=float).reshape(buckets, -1)
+    finite = np.isfinite(block)
+    has_any = finite.any(axis=1)
+    # +inf / -inf rather than nanmin / nanmax: same answer, no all-NaN
+    # RuntimeWarning to suppress, and one pass instead of two.
+    lo = np.where(finite, block, np.inf).min(axis=1)
+    hi = np.where(finite, block, -np.inf).max(axis=1)
+    lo = np.where(has_any, lo, np.nan)
+    hi = np.where(has_any, hi, np.nan)
+
+    t = np.asarray(times[:usable], dtype=float).reshape(buckets, -1)
+    out_t = np.empty(buckets * 2, dtype=float)
+    out_y = np.empty(buckets * 2, dtype=float)
+    out_t[0::2] = t[:, 0]
+    out_t[1::2] = t[:, -1]
+    out_y[0::2] = lo
+    out_y[1::2] = hi
+    # Whatever the reshape could not cover, at most one bucket's worth, so
+    # the trace still reaches the right-hand edge.
+    if usable < n:
+        out_t = np.concatenate([out_t, np.asarray(times[usable:], dtype=float)])
+        out_y = np.concatenate([out_y, np.asarray(values[usable:], dtype=float)])
+    return out_t, out_y
 
 
 def _events_sibling(path) -> Optional[Path]:
@@ -174,6 +274,19 @@ class TimeSeriesView(QWidget):
         self._selected_channels: Optional[Set[str]] = None
         self._normalize = False
         self._dark_plot = False
+        # Where the recording has no samples. MNE cannot carry NaN through a
+        # filter or an FFT, so the RawArray holds zeros and the mask says
+        # where they are: the filter sees a continuous signal and the DRAWING
+        # shows the gap. Without it, 28 percent of a real ECG was being drawn
+        # as a line at zero, which on a trace centred near 2050 is a spike to
+        # the floor of the plot. Reported as "artifacts".
+        self._gaps: Optional[np.ndarray] = None
+        # How the traces are drawn. Automatic by default, which means two
+        # pixels for a physio channel and one for a wall of MEG: see
+        # ``_THICK_LINE_MAX_TRACES`` for the measurement that forces it.
+        self._line_width = _LINE_WIDTH_AUTO
+        self._line_color: Optional[str] = None   # None = colour by channel type
+        self._restore_line_style()
 
         self._display_indices: List[int] = []
         self._shown_ch_info: list = []
@@ -236,7 +349,17 @@ class TimeSeriesView(QWidget):
         self._plot_widget.setMinimumWidth(60)
         self._plot_widget.showGrid(x=True, y=False, alpha=0.15)
         self._plot_widget.setLabel("bottom", "Time", units="s")
-        self._plot_widget.setMouseEnabled(x=True, y=False)
+        # pyqtgraph's own panning is OFF, and that is deliberate.
+        #
+        # Letting the ViewBox pan means dragging moves the CAMERA over the
+        # ten seconds that were fetched, so the recording appears to end at
+        # the edge of the window and everything beyond it is blank. What a
+        # reader means by dragging a trace is "show me further along",
+        # which is what the slider does, so the drag is translated into the
+        # same thing: it moves the window through the recording and the
+        # next stretch is read from disk.
+        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._install_drag_to_scrub()
         self._plot_widget.getPlotItem().getAxis("left").setWidth(0)
         self._plot_widget.getPlotItem().getAxis("left").setStyle(
             showValues=False
@@ -315,7 +438,8 @@ class TimeSeriesView(QWidget):
         l1 = flow(row1, h_spacing=6, v_spacing=4)
         l1.setContentsMargins(10, 4, 10, 4)
 
-        l1.addWidget(QLabel("Type:"))
+        self._lbl_type = QLabel("Type:")
+        l1.addWidget(self._lbl_type)
         self.cmb_ch_type = QComboBox()
         self.cmb_ch_type.addItem("all")
         self.cmb_ch_type.currentTextChanged.connect(self._on_ch_type_changed)
@@ -328,7 +452,8 @@ class TimeSeriesView(QWidget):
         self.btn_select.clicked.connect(self._open_channel_selector)
         l1.addWidget(self.btn_select)
 
-        l1.addWidget(QLabel("Count:"))
+        self._lbl_count = QLabel("Count:")
+        l1.addWidget(self._lbl_count)
         self.spn_n = QSpinBox()
         self.spn_n.setRange(1, 500)
         self.spn_n.setValue(self._visible_channels)
@@ -443,6 +568,30 @@ class TimeSeriesView(QWidget):
         self.btn_psd.clicked.connect(self._show_psd)
         l2.addWidget(self.btn_psd)
 
+        self.btn_line = QPushButton("  Line")
+        self.btn_line.setObjectName("tb-btn")
+        self.btn_line.setToolTip(
+            "How the traces are drawn: thickness, and whether they take "
+            "their channel type's colour or one you pick."
+        )
+        self.btn_line.clicked.connect(self._open_line_style)
+        l2.addWidget(self.btn_line)
+
+        self.btn_fit = QPushButton("  Fit all")
+        self.btn_fit.setObjectName("tb-btn")
+        self.btn_fit.setToolTip(
+            "Put the whole recording in the window at once, instead of "
+            "winding the window length up a step at a time."
+        )
+        self.btn_fit.clicked.connect(self._fit_all)
+        # OFF unless the caller says the recording is small enough. On a
+        # 300-channel MEG recording of forty minutes, the whole recording is
+        # a quarter of a billion samples to read, filter and stroke, so the
+        # button would be a freeze with a label on it. Physio asks for it;
+        # MEG and EEG do not. See ``enable_fit_all``.
+        self.btn_fit.setVisible(False)
+        l2.addWidget(self.btn_fit)
+
         l2.addStretch(1)
         cl.addWidget(row2)
 
@@ -542,11 +691,16 @@ class TimeSeriesView(QWidget):
         self._current_filepath = str(path) if path else None
         self._current_root = root
 
-    def load_raw(self, raw) -> None:
-        """Accept a preloaded ``mne.io.Raw`` and render it."""
+    def load_raw(self, raw, gaps=None) -> None:
+        """Accept a preloaded ``mne.io.Raw`` and render it.
+
+        ``gaps`` is an optional boolean array shaped like the data,
+        True where the recording has no sample. See ``_gaps``.
+        """
         import mne
 
         self._raw = raw
+        self._gaps = gaps
         info = raw.info
         self._sfreq = float(info["sfreq"])
         self._ch_names = list(raw.ch_names)
@@ -611,6 +765,7 @@ class TimeSeriesView(QWidget):
             w.blockSignals(False)
 
         self._rebuild_ch_type_combo()
+        self._sync_single_channel_controls()
         self._update_display_indices()
         self._update_channel_scrollbar()
         self._extract_events(raw)
@@ -872,6 +1027,18 @@ class TimeSeriesView(QWidget):
             hi = lo + (smax - smin)
             data = data[:, lo:hi]
             times = times[lo:hi]
+
+        # The gaps go back in LAST, after any filtering, so the filter saw a
+        # continuous signal and the picture shows the truth. A gap in a
+        # recording is a fact about the recording, and drawing it as a value
+        # invents a sample that was never taken.
+        if self._gaps is not None:
+            try:
+                mask = self._gaps[np.asarray(ch_indices), smin:smax]
+                if mask.shape == data.shape:
+                    data = np.where(mask, np.nan, data)
+            except Exception:  # noqa: BLE001 - a mask mismatch must not blank the view
+                pass
         return data, times
 
     def _redraw(self) -> None:
@@ -905,16 +1072,19 @@ class TimeSeriesView(QWidget):
         if self._normalize:
             for i in range(n_shown):
                 trace = data[i]
-                rng = np.ptp(trace) if np.ptp(trace) > 0 else 1.0
+                # nan-aware: a gap must not drag the centre or the range,
+                # and np.ptp over a NaN returns NaN, which blanks the trace.
+                spread = _nan_ptp(trace)
+                rng = spread if spread > 0 else 1.0
                 offset = n_shown - 1 - i
-                y = ((trace - np.mean(trace)) / rng) * scale + offset
+                y = ((trace - _nan_mean(trace)) / rng) * scale + offset
                 self._plot_one(plot_item, times, y, shown[i], offset, label_color,
                                n_shown)
         else:
             type_ranges: dict = {}
             for i in range(n_shown):
                 ct = self._ch_types[shown[i]]
-                type_ranges.setdefault(ct, []).append(np.ptp(data[i]))
+                type_ranges.setdefault(ct, []).append(_nan_ptp(data[i]))
             type_scale = {}
             for ct, ranges in type_ranges.items():
                 valid = [r for r in ranges if r > 0]
@@ -924,7 +1094,7 @@ class TimeSeriesView(QWidget):
                 ref = type_scale.get(ct, 1.0) or 1.0
                 trace = data[i]
                 offset = n_shown - 1 - i
-                y = ((trace - np.mean(trace)) / ref) * scale + offset
+                y = ((trace - _nan_mean(trace)) / ref) * scale + offset
                 self._plot_one(plot_item, times, y, shown[i], offset, label_color,
                                n_shown)
 
@@ -945,8 +1115,12 @@ class TimeSeriesView(QWidget):
                   n_shown) -> None:
         ch_name = self._ch_names[ch_idx]
         ch_type = self._ch_types[ch_idx]
-        pen = self._pg.mkPen(color=type_color(ch_type), width=1)
-        plot_item.plot(times, y, pen=pen)
+        colour = self._line_color or type_color(ch_type)
+        pen = self._pg.mkPen(color=colour, width=self._pen_width(n_shown))
+        times, y = _peak_decimate(times, y, self._plot_widget.width())
+        # ``connect="finite"`` breaks the curve at a NaN instead of drawing
+        # a line across it. That is the whole point of carrying the mask.
+        plot_item.plot(times, y, pen=pen, connect="finite")
         self._add_channel_label(ch_name, n_shown, label_color)
         self._shown_ch_info.append((offset, ch_name, ch_type))
 
@@ -1029,6 +1203,73 @@ class TimeSeriesView(QWidget):
     def _on_channel_scroll(self, val) -> None:
         self._channel_offset = val
         self._redraw()
+
+    def _install_drag_to_scrub(self) -> None:
+        """Make a horizontal drag move the window through the recording.
+
+        The ViewBox still receives the events; only what they MEAN changes.
+        One pixel of drag is one pixel of signal, so the trace follows the
+        cursor exactly as it would if the camera were moving, and the data
+        under it is fetched as the window travels.
+
+        Redraws are PACED BY THEIR OWN COST. Qt delivers a mouse-move event
+        per pixel of travel, and a redraw here is a read, a filter and a
+        repaint of every visible channel: redrawing on each one turned a
+        100 pixel drag into fifty full redraws, which is seconds of frozen
+        window on a 300-channel recording. So the next redraw waits until at
+        least as long as the last one took has passed, which self-tunes.
+        One physio channel updates every event; a wall of MEG updates a few
+        times per gesture and lands exactly where the cursor left it,
+        because the release always redraws.
+        """
+        view = self._plot_widget.getPlotItem().getViewBox()
+        self._drag_anchor: Optional[float] = None
+        self._drag_cost = 0.0        # seconds the last drag redraw took
+        self._drag_last = 0.0        # when it finished
+
+        def mouse_drag(event, axis=None):
+            if self._raw is None or self._duration <= 0:
+                event.ignore()
+                return
+            event.accept()
+            width = max(1, view.width())
+            # Seconds per pixel at the CURRENT window, so the trace tracks
+            # the cursor whatever the zoom.
+            per_pixel = self._time_window / width
+            if event.isStart():
+                self._drag_anchor = self._time_start
+                self._drag_origin = event.buttonDownPos().x()
+                return
+            if self._drag_anchor is None:
+                return
+            moved = event.pos().x() - self._drag_origin
+            # Dragging LEFT moves forward in time, the way a piece of paper
+            # moves under a finger.
+            target = self._drag_anchor - moved * per_pixel
+            max_start = max(0.0, self._duration - self._time_window)
+            target = max(0.0, min(target, max_start))
+            finish = event.isFinish()
+            if not finish and abs(target - self._time_start) < per_pixel / 2:
+                return
+            now = time.perf_counter()
+            # Twice the measured cost, because the redraw is only the half
+            # that happens here: the paint lands later, on the event loop,
+            # and costs about as much again. Never more often than 60 Hz,
+            # which no display would show anyway.
+            interval = max(2.0 * self._drag_cost, 1.0 / 60.0)
+            if not finish and now - self._drag_last < interval:
+                return
+            self._time_start = target
+            self._redraw()
+            self._drag_cost = time.perf_counter() - now
+            self._drag_last = time.perf_counter()
+            if finish:
+                self._drag_anchor = None
+
+        view.mouseDragEvent = mouse_drag
+        # Deliberately NO double-click override. Reset view is a button, and
+        # it also clears the filters and the channel selection, which is not
+        # what somebody double-clicking a trace is asking for.
 
     def _on_plot_wheel(self, event) -> None:
         delta = event.angleDelta().y()
@@ -1361,6 +1602,147 @@ class TimeSeriesView(QWidget):
             self.status_message.emit(f"Displaying {n} channels")
 
     # ----------------------------------------------------------------- reset
+    def enable_fit_all(self, enabled: bool = True) -> None:
+        """Offer the Fit all button, for a recording that can survive it.
+
+        Physio is a channel or four at 50 to 1000 Hz and fits in a window
+        whole. MEG and EEG do not: the caller is the one that knows which it
+        has, so the caller decides rather than this view guessing from a
+        sample count that a filter could change.
+        """
+        self.btn_fit.setVisible(bool(enabled))
+
+    def _drawn_count(self) -> int:
+        """How many traces reach the pane.
+
+        NOT the candidate pool: ``_display_indices`` holds every channel of
+        the selected type and only the first ``_visible_channels`` of them
+        are drawn.
+        """
+        return max(1, min(
+            self._visible_channels or 1, len(self._display_indices) or 1,
+        ))
+
+    def max_pen_width(self, n_shown: Optional[int] = None) -> int:
+        """The widest pen this view can draw at without going sluggish.
+
+        A CAP, not a suggestion. Thickness is worth having and it is not
+        free: above two traces a wider pen costs seven times the paint (see
+        ``_THICK_LINE_MAX_TRACES``), and a drag pays that on every frame. A
+        stored preference of six pixels must not turn a twenty-channel window
+        into a slideshow just because it was set on a physio trace, so the
+        cap applies to a chosen width as well as to the automatic one.
+        """
+        if n_shown is None:
+            n_shown = self._drawn_count()
+        return _THICK_LINE_WIDTH if n_shown <= _THICK_LINE_MAX_TRACES else 1
+
+    def _pen_width(self, n_shown: Optional[int] = None) -> int:
+        """The width to draw at: what was asked for, capped by what it costs."""
+        if self.max_pen_width(n_shown) <= 1:
+            return 1
+        return self._line_width if self._line_width > 0 else _THICK_LINE_WIDTH
+
+    def _open_line_style(self) -> None:
+        """The Line popup. Live, so the plot behind it updates as you drag."""
+        from .line_style_dialog import MAX_WIDTH, LineStyleDialog
+
+        # Only the widths THIS view can draw at, so a number that would be
+        # capped on the way out is never offered in the first place.
+        ceiling = MAX_WIDTH if self.max_pen_width() > 1 else 1
+        dlg = LineStyleDialog(
+            self._line_width, self._line_color,
+            allow_by_type=len(set(self._ch_types)) > 1,
+            # Only the types THIS recording has: a MEG file offers mag, grad
+            # and ref_meg, a physio run offers cardiac and trigger, and
+            # neither is asked about a type it cannot draw.
+            channel_types=self._present_channel_types(),
+            max_width=ceiling,
+            traces_shown=self._drawn_count(),
+            parent=self,
+        )
+        dlg.changed.connect(self._set_line_style)
+        dlg.type_colors_changed.connect(self._set_type_colors)
+        dlg.exec()
+        self._remember_line_style()
+
+    def _present_channel_types(self) -> list[str]:
+        """The channel types in this recording, in the order it lists them."""
+        return list(dict.fromkeys(self._ch_types))
+
+    def _set_line_style(self, width: int, colour: str) -> None:
+        # Zero is kept: it is the automatic width, not a bad one.
+        self._line_width = max(0, int(width))
+        self._line_color = colour or None
+        self._redraw()
+
+    def _set_type_colors(self, mapping: dict) -> None:
+        """Install and persist per-type colours, then redraw.
+
+        Stored globally per type rather than per viewer, so a recording's
+        traces and its spectrum agree: the PSD dialog resolves a kind's
+        colour through the same function.
+        """
+        set_type_colors(mapping)
+        try:
+            from ..app_settings import AppSettings
+
+            AppSettings.remember_type_colors(mapping)
+        except Exception:  # noqa: BLE001 - a preference is not worth a crash
+            log.debug("could not store the channel-type colours")
+        self._redraw()
+
+    def _remember_line_style(self) -> None:
+        try:
+            from ..app_settings import AppSettings
+
+            AppSettings.remember_trace_style(
+                self._line_width, self._line_color or "",
+            )
+        except Exception:  # noqa: BLE001 - a preference is not worth a crash
+            log.debug("could not store the trace style")
+
+    def _restore_line_style(self) -> None:
+        """Zero is kept as zero: it is the automatic setting, not a bad one."""
+        try:
+            from ..app_settings import AppSettings
+
+            settings = AppSettings.load()
+            stored = int(settings.trace_line_width)
+            self._line_width = stored if stored > 0 else _LINE_WIDTH_AUTO
+            self._line_color = settings.trace_line_color or None
+        except Exception:  # noqa: BLE001
+            log.debug("could not read the trace style")
+
+    def _fit_all(self) -> None:
+        """Show the whole recording at once.
+
+        The window length is a spin box, and winding it from ten seconds to
+        forty minutes one step at a time is not a thing to ask of anyone.
+        """
+        if self._raw is None or self._duration <= 0:
+            return
+        self._time_start = 0.0
+        self._time_window = self._duration
+        self.spn_window.blockSignals(True)
+        self.spn_window.setMaximum(max(0.1, self._duration))
+        self.spn_window.setValue(self._duration)
+        self.spn_window.blockSignals(False)
+        self._redraw()
+
+    def _sync_single_channel_controls(self) -> None:
+        """Hide what a one-channel recording has no use for.
+
+        A type filter, a channel picker and a "how many at once" count are
+        three controls that can only ever say the same thing when there is
+        one channel, and a control that cannot change anything is noise in
+        a toolbar that is already full.
+        """
+        multi = len(self._ch_names) > 1
+        for widget in (self._lbl_type, self.cmb_ch_type, self.btn_select,
+                       self._lbl_count, self.spn_n, self._chan_scroll):
+            widget.setVisible(multi)
+
     def _reset_view(self) -> None:
         if self._raw is None:
             return

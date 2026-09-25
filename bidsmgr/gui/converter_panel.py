@@ -1173,6 +1173,8 @@ class ConverterPanel(QWidget):
         dlg = ColumnManagerDialog(dict(self._column_visible), self)
         if dlg.exec() == dlg.DialogCode.Accepted:
             self.set_columns_visible(dlg.result_visibility())
+            if dlg.order_was_reset():
+                self.reset_column_order()
 
     def _open_recording_meta(self) -> None:
         """Open the dataset-level recording-metadata editor.
@@ -1347,18 +1349,54 @@ class ConverterPanel(QWidget):
         keys = [COLUMNS[logical].key for logical in ordered]
         self._settings().setValue("inspector/column_order", ",".join(keys))
 
+    def default_column_order(self) -> list[str]:
+        """The order the table opens in: the seven a person reads first.
+
+        ``include`` and ``status`` stay where they are, at the very left,
+        because they are the tick and the badge the eye goes to and a text
+        column in front of them buries both.
+        """
+        leading = [
+            k for k in InventoryTableModel.DEFAULT_LEADING_KEYS
+            if any(c.key == k for c in COLUMNS)
+        ]
+        pinned = [c.key for c in COLUMNS if c.role in ("checkbox", "status")]
+        rest = [
+            c.key for c in COLUMNS
+            if c.key not in leading and c.key not in pinned
+        ]
+        return pinned + leading + rest
+
+    def reset_column_order(self) -> None:
+        """Put the leading columns back at the front, keeping the rest.
+
+        Offered as "Reset defaults" rather than applied silently, because a
+        user who has arranged their own layout has said something about how
+        they work and a release should not overrule it.
+        """
+        self._apply_column_order(self.default_column_order())
+        self._persist_column_order()
+
     def _restore_column_order(self) -> None:
-        """Re-apply the persisted visual order to the header (if any)."""
+        """Re-apply the persisted visual order, or the default first time."""
         raw = self._settings().value("inspector/column_order", "")
         if not raw:
+            # No stored layout: this is a fresh install or a fresh profile,
+            # so the table opens in the order that reads best rather than in
+            # the order the inventory happens to be built in.
+            self._apply_column_order(self.default_column_order())
             return
         saved = [k for k in str(raw).split(",") if k]
+        self._apply_column_order(saved)
+
+    def _apply_column_order(self, keys: list[str]) -> None:
+        """Move the header sections so they read in ``keys`` order."""
         key_to_logical = {spec.key: i for i, spec in enumerate(COLUMNS)}
         header = self._table.horizontalHeader()
         self._restoring_order = True
         try:
             target_visual = 0
-            for key in saved:
+            for key in keys:
                 logical = key_to_logical.get(key)
                 if logical is None:
                     continue

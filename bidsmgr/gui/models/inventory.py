@@ -1031,6 +1031,44 @@ class InventoryTableModel(QAbstractTableModel):
         self.refresh_row(row)
         return True
 
+    def apply_pet_block(self, row: int, block) -> int:
+        """Lay a whole ``PetAcquisitionSpec`` onto ONE row. Returns fields set.
+
+        Used by the per-row dose importer. Going field by field through
+        :meth:`set_pet_override` would mean stringifying every value and
+        parsing it straight back, which loses the list fields entirely and
+        would round-trip a float through text for no reason: the block
+        arrived already typed, from a reader that validated it.
+
+        Merges rather than replaces, so importing a file that states the
+        tracer does not silently clear a mass somebody typed. A field the
+        block leaves unset is a field the block says nothing about.
+        """
+        from ...recording_meta import merge_pet
+
+        if not (0 <= row < len(self._df)) or block is None:
+            return 0
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        stated = {
+            name for name, value in block.model_dump().items()
+            if value not in (None, "", [], {})
+        }
+        if not stated:
+            return 0
+
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.pet_overrides)
+        current = overrides.get(rid)
+        overrides[rid] = merge_pet(current, block) if current is not None else block
+        self._global_spec = self._global_spec.model_copy(
+            update={"pet_overrides": overrides})
+
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return len(stated)
+
     # ------------------------------------------------------------------
     # Qt model API
     # ------------------------------------------------------------------
@@ -1404,6 +1442,27 @@ class InventoryTableModel(QAbstractTableModel):
     # This list covers COLUMNS. Entities without a column are offered too,
     # and are read from the schema rather than listed here: see
     # :meth:`bulk_editable_entities`.
+    # The columns a person reads FIRST, in the order they read them.
+    #
+    # The table has 62 columns and its natural order is the order the
+    # inventory was built in, which is not the order anyone looks in. This
+    # is: who, in what format, which session, where it lands, what it is,
+    # what it will be called, and what the scanner called it. Everything
+    # else keeps its existing position behind them.
+    #
+    # ``include`` and ``status`` are deliberately NOT here: they are the
+    # two-pixel-wide tick and badge that live at the very left, and putting
+    # a text column before them would bury the thing the eye goes to.
+    DEFAULT_LEADING_KEYS: tuple[str, ...] = (
+        "id",         # subject
+        "format",
+        "ses",        # session
+        "datatype",
+        "suffix",
+        "basename",   # BIDS name
+        "sequence",
+    )
+
     BULK_EDITABLE_KEYS: tuple[str, ...] = (
         "id",        # → subject entity + participant_id
         # "dataset" is intentionally excluded: it is owned by the project /
@@ -1472,6 +1531,52 @@ class InventoryTableModel(QAbstractTableModel):
             e for e in schema_mod.entity_order()
             if e in allowed and e not in self._ENTITY_COLUMN_KEYS
         ]
+
+    def bulk_removable_entities(self, rows: list[int]) -> set[str]:
+        """Entity long names that can be TAKEN OFF every row in ``rows``.
+
+        Every entity the schema allows minus the ones it REQUIRES, which is
+        the same rule ``editor.restructure.removable_entities`` applies to a
+        finished dataset. A ``_bold`` cannot lose its ``task`` and nothing
+        can lose its ``sub``, so offering to remove them would be offering
+        to produce a filename the standard rejects.
+
+        Includes the four entities that have a column of their own
+        (``sub``, ``ses``, ``task``, ``run``). They were left out of the
+        removable set entirely, because the dialog edits them as COLUMNS
+        rather than as entities and only the entity path carried a remove
+        tick. So a session could be set and never unset, and the only
+        entity anyone could take off a group of files was ``acq``.
+
+        The UNION of what is required, then subtracted: an entity required
+        by any one row in the selection cannot be removed from the
+        selection, because the edit writes to all of them.
+        """
+        required: set[str] = set()
+        allowed: Optional[set[str]] = None
+        for row in rows:
+            if not (0 <= row < len(self._df)):
+                continue
+            datatype = str(self._df.at[row, "datatype"] or "") \
+                if "datatype" in self._df.columns else ""
+            suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+                if "bids_guess_suffix" in self._df.columns else ""
+            if not datatype or not suffix:
+                continue
+            try:
+                here = set(schema_mod.allowed_entities(datatype, suffix))
+                required |= set(schema_mod.required_entities(datatype, suffix))
+            except Exception:  # noqa: BLE001 - an unknown pair constrains nothing
+                continue
+            allowed = here if allowed is None else (allowed & here)
+
+        if allowed is None:
+            allowed = set(schema_mod.entity_order())
+            # Nothing could be identified, so nothing is known to be
+            # required either, except the one entity BIDS requires of every
+            # file there is.
+            required = {"subject"}
+        return {e for e in allowed if e not in required}
 
     def entity_values_in_use(self, rows: list[int], entity: str) -> list[str]:
         """The values ``entity`` already carries across ``rows``, sorted.
@@ -1578,6 +1683,22 @@ class InventoryTableModel(QAbstractTableModel):
 
             if column_key == "id":
                 if self.set_entity(row, "subject", value):
+                    changed += 1
+                continue
+
+            # ``ses`` / ``task`` / ``run`` are entities that happen to have
+            # a column. Routed through ``set_entity`` so that clearing one
+            # REMOVES it from the basename, which is what the dialog's
+            # remove tick now offers for them. ``setData`` on the cell
+            # writes an empty string, which is not the same thing: the
+            # entity stays in the name with nothing after the dash.
+            entity = next(
+                (e for e, col in self._ENTITY_COLUMN_KEYS.items()
+                 if col == column_key and e != "subject"),
+                None,
+            )
+            if entity is not None:
+                if self.set_entity(row, entity, value):
                     changed += 1
                 continue
 

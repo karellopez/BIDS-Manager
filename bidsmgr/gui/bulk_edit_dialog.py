@@ -170,6 +170,8 @@ class BulkEditDialog(QDialog):
         # set ``acq``, which is the entity that tells two otherwise
         # identical acquisitions apart and therefore the one most often
         # wanted on a multi-row selection.
+        # Every entity the schema will let these rows go WITHOUT.
+        self._removable = self._model.bulk_removable_entities(self._rows)
         self._entity_descriptions: dict[str, str] = {}
         for entity in self._model.bulk_editable_entities(self._rows):
             try:
@@ -321,10 +323,23 @@ class BulkEditDialog(QDialog):
             or _COLUMN_DESCRIPTION.get(key, "")
         )
 
-        is_entity = key.startswith(InventoryTableModel.ENTITY_KEY_PREFIX)
-        self._remove_check.setVisible(is_entity)
-        if not is_entity:
+        # Which entity does this column edit? An entity-prefixed key names
+        # one directly; ``ses`` / ``task`` / ``run`` edit one through a
+        # column of their own, and used to carry no remove tick at all, so
+        # a session could be set and never unset.
+        entity = self._entity_behind(key)
+        removable = bool(entity) and entity in self._removable
+        self._remove_check.setVisible(removable)
+        if not removable:
             self._remove_check.setChecked(False)
+        if entity and not removable:
+            # Say WHY rather than hiding a control with no explanation: the
+            # schema requires this entity on at least one selected row.
+            self._description.setText(
+                (self._description.text() + "  ").strip()
+                + f"  BIDS requires {entity} on at least one of the selected "
+                f"rows, so it cannot be removed from them."
+            )
         self._refill_targets(key)
 
         # Decide which editor to show.
@@ -369,6 +384,21 @@ class BulkEditDialog(QDialog):
     # ------------------------------------------------------------------
     # Which rows
     # ------------------------------------------------------------------
+
+    def _entity_behind(self, key: str) -> str:
+        """The entity long name a column key edits, or ``""``.
+
+        Two spellings reach the same entity: the dialog offers ``ses`` as a
+        COLUMN and ``direction`` as an ENTITY, and both end up writing an
+        entity into the basename. Removal has to work the same either way.
+        """
+        prefix = InventoryTableModel.ENTITY_KEY_PREFIX
+        if key.startswith(prefix):
+            return key[len(prefix):]
+        for entity, column in InventoryTableModel._ENTITY_COLUMN_KEYS.items():
+            if column == key:
+                return entity
+        return ""
 
     def _refill_targets(self, key: str) -> None:
         """Offer the values this column actually holds, with row counts."""
@@ -512,7 +542,9 @@ class BulkEditDialog(QDialog):
             # take one off a group of files: an entity the scan proposed
             # but the dataset should not carry. Every other column keeps
             # the old rule, because an empty value there is a user who has
-            # not finished typing rather than an instruction.
+            # not finished typing rather than an instruction. The tick is
+            # what distinguishes the two, and it is only ever offered for
+            # an entity the schema does not require.
             if not self._remove_check.isChecked():
                 return
         elif self._remove_check.isChecked():

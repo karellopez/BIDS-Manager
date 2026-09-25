@@ -259,6 +259,51 @@ def metabolites_for(nucleus: str) -> tuple[tuple[str, float, str], ...]:
     return METABOLITES_1H if nucleus.upper() == "1H" else ()
 
 
+def stagger(
+    shifts: list[float], span: float, *, rows: int = 4, min_gap: float = 0.055,
+) -> list[int]:
+    """Which row each label should sit on so none covers its neighbour.
+
+    ``shifts`` in ppm, ``span`` the ppm width currently on screen. Returns a
+    row index per label, 0 being the highest.
+
+    Metabolites are not evenly spaced: creatine at 3.03 and choline at 3.22
+    are a fifth of a ppm apart, and glutamate at 3.75 sits beside creatine's
+    second peak at 3.91. Drawn on one line they overlap into an unreadable
+    smear exactly where a 1H spectrum is busiest.
+
+    The test is in FRACTION OF THE VISIBLE SPAN, not in ppm, because a
+    label's width in PIXELS does not change with the zoom while the pane's
+    does not either: what changes is how much ppm a pixel is worth. So two
+    names 0.19 ppm apart collide across the whole 4 ppm window and have
+    room to spare zoomed into half a ppm, and the rows have to be recomputed
+    on every range change rather than decided once.
+
+    Each label takes the highest row far enough from the last one already on
+    it, which is the standard greedy pass and is stable, so a label does not
+    jump rows as a neighbour scrolls past.
+    """
+    if not shifts:
+        return []
+    width = (span if span > 0 else 1.0) * float(min_gap)
+    last: list[float] = [-1e9] * max(1, rows)
+    out: list[int] = []
+    for shift in shifts:
+        for row in range(len(last)):
+            if abs(shift - last[row]) >= width:
+                last[row] = shift
+                out.append(row)
+                break
+        else:
+            # Everything is crowded. Put it on the row whose last label is
+            # furthest away rather than dropping it: a missing label is a
+            # metabolite the reader cannot find.
+            row = max(range(len(last)), key=lambda r: abs(shift - last[r]))
+            last[row] = shift
+            out.append(row)
+    return out
+
+
 def default_ppm_range(nucleus: str, ppm: np.ndarray) -> tuple[float, float]:
     """The window to open at: conventional for 1H, the data's own otherwise."""
     if nucleus.upper() == "1H":
@@ -279,4 +324,5 @@ __all__ = [
     "part",
     "read_mrs",
     "spectrum",
+    "stagger",
 ]

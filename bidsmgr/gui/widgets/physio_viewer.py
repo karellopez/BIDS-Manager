@@ -205,18 +205,22 @@ def read_columns(
 
 
 def build_raw(columns: list[np.ndarray], timing: dict, step: int = 1):
-    """An ``mne.io.RawArray`` from physio columns, typed by column name.
+    """``(RawArray, gaps)`` from physio columns, typed by column name.
 
     ``step`` divides the sampling rate, because a strided read really is a
     slower recording and every frequency the viewer computes depends on
     getting that right.
 
-    NaN becomes zero, and that is a loss worth naming: a gap in a physio
-    recording is a fact about it, and the table view still shows the blank.
-    MNE's filtering and spectral code cannot carry NaN through, so a viewer
-    built on MNE has to choose between the gap and the filters. It keeps the
-    filters, because the questions people bring to a physio trace are about
-    shape and timing.
+    **The gaps are returned, not discarded.** MNE cannot carry NaN through a
+    filter or an FFT, so the array holds zeros where the recording has no
+    sample and the mask says where they are. The viewer then filters a
+    continuous signal and DRAWS the gaps as breaks.
+
+    That matters more than it sounds. A real ECG in this lab's own data is
+    28 percent gaps, because the scanner dropped samples: filling them with
+    zero and drawing the result puts a spike to the floor of the plot at
+    every one, on a trace centred near 2050. It was reported as the viewer
+    showing artefacts, and it was.
     """
     import mne
 
@@ -239,16 +243,135 @@ def build_raw(columns: list[np.ndarray], timing: dict, step: int = 1):
     rate = float(timing.get("sampling_frequency", 1.0)) or 1.0
     rate = rate / max(1, int(step))
     types = [guess_channel_type(name) for name in names]
-    data = np.vstack([
-        np.nan_to_num(np.asarray(columns[i], dtype=np.float64), nan=0.0)
-        for i in range(n)
+    stacked = np.vstack([
+        np.asarray(columns[i], dtype=np.float64) for i in range(n)
     ])
+    gaps = ~np.isfinite(stacked)
+    data = np.where(gaps, 0.0, stacked)
     info = mne.create_info(unique, sfreq=rate, ch_types=types, verbose=False)
-    return mne.io.RawArray(data, info, verbose=False)
+    return mne.io.RawArray(data, info, verbose=False), gaps
+
+
+def related_recordings(path: Path) -> list[Path]:
+    """Every physio recording of the same run, this one first.
+
+    BIDS splits a run's physio by the ``recording`` entity: the cardiac
+    trace, the respiratory belt and the trigger are three files describing
+    one acquisition. Reading them apart is reading a three-channel
+    recording one channel at a time, and the question people bring to
+    physio (did the trigger fire where the ECG says it should) cannot be
+    answered that way at all.
+
+    Matched on the basename with the ``recording`` entity removed, so it is
+    the run that groups them and not the folder: two runs in the same
+    ``func/`` do not get mixed.
+    """
+    path = Path(path)
+    stem = path.name
+    for ext in (".tsv.gz", ".tsv"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    def key(name: str) -> str:
+        return "_".join(
+            part for part in name.split("_")
+            if not part.startswith("recording-")
+        )
+
+    mine = key(stem)
+    found = []
+    for sibling in sorted(path.parent.glob("*_physio.tsv*")):
+        if sibling.suffix not in (".gz",) and not sibling.name.endswith(".tsv"):
+            continue
+        name = sibling.name
+        for ext in (".tsv.gz", ".tsv"):
+            if name.endswith(ext):
+                name = name[: -len(ext)]
+                break
+        if key(name) == mine:
+            found.append(sibling)
+    # The one that was clicked comes first, so it keeps the colour and the
+    # position a reader already has in their head.
+    found.sort(key=lambda q: (q != path, q.name))
+    return found
+
+
+def build_combined_raw(paths: list[Path]):
+    """``(RawArray, gaps)`` holding every recording in ``paths``.
+
+    They are resampled onto the FASTEST one's grid, because that is the
+    only rate at which nothing is thrown away, and a trigger sampled at
+    1000 Hz beside a belt at 50 is exactly the case this exists for.
+    Upsampling is nearest-sample, not interpolation: inventing values
+    between two samples of a trigger would invent edges.
+
+    Each recording keeps its own StartTime by being placed at its own
+    offset on the shared clock, which is what makes the comparison mean
+    anything: physio starts before the scanner does, and by a different
+    amount per device.
+    """
+    import mne
+
+    loaded = []
+    for path in paths:
+        timing = read_timing(path)
+        if timing is None:
+            continue
+        columns, _total, step = read_columns(path)
+        if not columns:
+            continue
+        rate = (float(timing["sampling_frequency"]) or 1.0) / max(1, step)
+        loaded.append((path, timing, columns, rate))
+    if not loaded:
+        raise ValueError("none of these files could be read as a recording")
+
+    target = max(rate for _p, _t, _c, rate in loaded)
+    starts = [t["start_time"] for _p, t, _c, _r in loaded]
+    origin = min(starts)
+    # How long the shared clock has to be to hold all of them.
+    span = max(
+        (t["start_time"] - origin) + len(c[0]) / r
+        for _p, t, c, r in loaded
+    )
+    n_out = max(1, int(round(span * target)))
+
+    names, types, rows, gaps = [], [], [], []
+    for path, timing, columns, rate in loaded:
+        offset = int(round((timing["start_time"] - origin) * target))
+        for index, column in enumerate(columns):
+            label = (
+                timing["columns"][index]
+                if index < len(timing["columns"]) else f"{path.stem}-{index}"
+            )
+            # Nearest-sample placement onto the shared grid.
+            source = np.arange(n_out - offset) * (rate / target)
+            source = np.clip(source.astype(int), 0, len(column) - 1)
+            placed = np.full(n_out, np.nan)
+            placed[offset:] = column[source]
+            rows.append(np.nan_to_num(placed, nan=0.0))
+            gaps.append(~np.isfinite(placed))
+            names.append(label)
+            types.append(guess_channel_type(label))
+
+    seen: dict[str, int] = {}
+    unique = []
+    for name in names:
+        if name in seen:
+            seen[name] += 1
+            unique.append(f"{name}-{seen[name]}")
+        else:
+            seen[name] = 0
+            unique.append(name)
+
+    info = mne.create_info(unique, sfreq=target, ch_types=types, verbose=False)
+    return mne.io.RawArray(np.vstack(rows), info, verbose=False), np.vstack(gaps)
 
 
 __all__ = [
+    "build_combined_raw",
     "build_raw",
+    "related_recordings",
     "guess_channel_type",
     "read_columns",
     "read_timing",

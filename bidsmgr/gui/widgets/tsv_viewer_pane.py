@@ -394,7 +394,12 @@ class TsvViewerPane(QWidget):
         # when the sidecar says there IS a sampling frequency, which is how
         # BIDS distinguishes a recording from a table of onsets.
         self._visualize_btn = QPushButton("  Visualize")
-        self._visualize_btn.setObjectName("tb-btn")
+        # NOT "tb-btn". Every other control in this bar edits the table:
+        # add a row, delete a column, save. This one leaves the table
+        # behind and opens a different view of the same file, so it is
+        # styled as the accent action it is rather than as one more verb in
+        # a row of eight.
+        self._visualize_btn.setObjectName("primary-btn")
         self._visualize_btn.setCheckable(True)
         self._visualize_btn.setVisible(False)
         self._visualize_btn.setToolTip(
@@ -408,6 +413,24 @@ class TsvViewerPane(QWidget):
         )
         self._visualize_btn.toggled.connect(self._on_visualize_toggled)
         et.addWidget(self._visualize_btn)
+
+        # BIDS splits one run's physio by the ``recording`` entity, so the
+        # cardiac trace, the belt and the trigger are three files describing
+        # one acquisition. The question people bring to physio (did the
+        # trigger fire where the ECG says it should) cannot be answered one
+        # file at a time.
+        self._together_btn = QPushButton("  All of this run")
+        self._together_btn.setObjectName("tb-btn")
+        self._together_btn.setCheckable(True)
+        self._together_btn.setVisible(False)
+        self._together_btn.setToolTip(
+            "Show every physio recording of this run at once, on one "
+            "clock. They are resampled onto the fastest one's grid and "
+            "each keeps its own start time, because physio starts before "
+            "the scanner does and by a different amount per device."
+        )
+        self._together_btn.toggled.connect(self._on_together_toggled)
+        et.addWidget(self._together_btn)
 
         et.addWidget(self._dirty_chip)
         # No stretch: a wrapping row has no fixed right-hand edge to push
@@ -502,6 +525,7 @@ class TsvViewerPane(QWidget):
         self._stack.addWidget(self._loading_page)
         self._viewer_page: Optional[QWidget] = None
         self._signal_worker = None
+        self._siblings: list = []
         self._timing: Optional[dict] = None
         self._stack.setCurrentIndex(0)
 
@@ -685,7 +709,7 @@ class TsvViewerPane(QWidget):
         That also means a ``_stim.tsv.gz`` or any future continuous suffix
         is offered a viewer without this knowing the suffix exists.
         """
-        from .physio_viewer import read_timing
+        from .physio_viewer import read_timing, related_recordings
 
         timing = read_timing(path)
         # The header row counts as a sample. A physio TSV has no column
@@ -696,8 +720,12 @@ class TsvViewerPane(QWidget):
         self._timing = timing
         self._plot_rows = rows if timing is not None else []
         self._visualize_btn.setVisible(timing is not None)
+        siblings = related_recordings(path) if timing is not None else []
+        self._siblings = siblings
+        self._together_btn.setVisible(len(siblings) > 1)
         if timing is None:
             self._visualize_btn.setChecked(False)
+            self._together_btn.setChecked(False)
         elif self._visualize_btn.isChecked():
             self._show_visualizer()
 
@@ -724,6 +752,11 @@ class TsvViewerPane(QWidget):
                 from .time_series_view import TimeSeriesView
 
                 self._viewer_page = TimeSeriesView(self)
+                # Physio is a channel or four and fits in a window whole, so
+                # this is the one consumer that offers Fit all. MEG and EEG
+                # do not, where the whole recording is hundreds of millions
+                # of samples.
+                self._viewer_page.enable_fit_all(True)
                 self._viewer_page.close_requested.connect(
                     lambda: self._visualize_btn.setChecked(False)
                 )
@@ -746,7 +779,7 @@ class TsvViewerPane(QWidget):
         (CLAUDE.md guard 8b).
         """
         from ...workers.meeg_recording_loader import RecordingComputeWorker
-        from .physio_viewer import build_raw, read_columns
+        from .physio_viewer import build_combined_raw, build_raw, read_columns
 
         path = self._current_file
         timing = dict(self._timing or {})
@@ -757,11 +790,18 @@ class TsvViewerPane(QWidget):
         if previous is not None:
             previous.cancel()
 
+        together = self._together_btn.isChecked() and len(self._siblings) > 1
+        siblings = list(self._siblings)
+
         def work():
+            if together:
+                raw, gaps = build_combined_raw(siblings)
+                return path, raw, gaps, raw.n_times, 1
             columns, total, step = read_columns(path)
             if not columns:
                 raise ValueError("no numeric columns could be read")
-            return path, build_raw(columns, timing, step), total, step
+            raw, gaps = build_raw(columns, timing, step)
+            return path, raw, gaps, total, step
 
         worker = RecordingComputeWorker(work, parent=self)
         worker.finished_with_result.connect(self._on_signal_read)
@@ -771,14 +811,19 @@ class TsvViewerPane(QWidget):
         self.loading_changed.emit(True, "Reading the recording...")
         worker.start()
 
+    def _on_together_toggled(self, _checked: bool) -> None:
+        """Re-read in the other mode, if a viewer is open."""
+        if self._visualize_btn.isChecked():
+            self._start_signal_read()
+
     def _on_signal_read(self, result) -> None:
-        path, raw, total, step = result
+        path, raw, gaps, total, step = result
         self._signal_worker = None
         self.loading_changed.emit(False, "")
         if path != self._current_file or self._viewer_page is None:
             return
         self._viewer_page.set_current_filepath(path, self._current_root)
-        self._viewer_page.load_raw(raw)
+        self._viewer_page.load_raw(raw, gaps=gaps)
         if step > 1:
             self._viewer_page.status_message.emit(
                 f"{total:,} samples held as {raw.n_times:,}: the recording "
