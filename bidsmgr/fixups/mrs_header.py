@@ -60,6 +60,36 @@ _SIDECAR_FIELDS: tuple[str, ...] = (
 )
 
 
+#: Fields where ZERO is not a measurement but the absence of one.
+#:
+#: dcm2niix writes ``InversionTime: 0`` for single-voxel spectroscopy, which
+#: has no inversion pulse, into the sidecar AND into the NIfTI-MRS header. The
+#: BIDS schema constrains ``InversionTime`` to be greater than zero wherever it
+#: appears, so every spectroscopy dataset failed validation with an ERROR.
+#: Measured across 42 real sidecars: all 11 zeros were ``mrs``, all 31
+#: positive values were inversion-recovery ``anat`` scans, which keep theirs.
+#: An absent field is how the standard says "no inversion", and the schema
+#: neither requires nor recommends this one for ``mrs``, so nothing is lost.
+_ZERO_MEANS_ABSENT: tuple[str, ...] = ("InversionTime",)
+
+
+def _is_zero(value: object) -> bool:
+    """A numeric zero. ``False`` is a bool, not a time, and is left alone."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == 0
+    )
+
+
+def _drop_zero_absent(data: dict) -> list[str]:
+    """Remove the fields whose zero means "not done". Return their names."""
+    gone = [k for k in _ZERO_MEANS_ABSENT if k in data and _is_zero(data[k])]
+    for key in gone:
+        data.pop(key)
+    return gone
+
+
 def read_mrs_header(path: Path) -> Optional[dict]:
     """The NIfTI-MRS JSON header inside ``path``, or ``None``.
 
@@ -98,9 +128,13 @@ def clean_mrs_file(path: Path, *, write_sidecar: bool = True) -> list[str]:
         return []
 
     removed = strip_identifiers(header)
+    # From the HEADER as well as the sidecar: _write_sidecar copies the
+    # header's acquisition fields out, so a zero left here would be written
+    # straight back the next time this runs.
+    dropped = _drop_zero_absent(header)
     if write_sidecar:
         _write_sidecar(path, header)
-    if not removed:
+    if not removed and not dropped:
         return []
 
     try:
@@ -137,15 +171,22 @@ def clean_mrs_file(path: Path, *, write_sidecar: bool = True) -> list[str]:
         log.warning(
             "could not rewrite the MRS header of %s (%s); "
             "the file still carries %s",
-            path.name, exc, ", ".join(removed),
+            path.name, exc, ", ".join(removed + dropped),
         )
         return []
 
-    log.info(
-        "%s: removed %d identifying field(s) from the NIfTI-MRS header: %s",
-        path.name, len(removed), ", ".join(sorted(removed)),
-    )
-    return removed
+    if removed:
+        log.info(
+            "%s: removed %d identifying field(s) from the NIfTI-MRS header: %s",
+            path.name, len(removed), ", ".join(sorted(removed)),
+        )
+    if dropped:
+        log.info(
+            "%s: dropped %s = 0 from the NIfTI-MRS header (no inversion "
+            "pulse; BIDS requires a value above zero when the field is present)",
+            path.name, ", ".join(dropped),
+        )
+    return removed + dropped
 
 
 def _write_sidecar(path: Path, header: dict) -> None:
@@ -170,6 +211,10 @@ def _write_sidecar(path: Path, header: dict) -> None:
     except (OSError, ValueError):
         existing = {}
 
+    # dcm2niix writes its own sidecar before this runs, zero included, and
+    # the copy below never overwrites. So the zero has to be taken out here
+    # explicitly or it survives into the dataset.
+    cleared = _drop_zero_absent(existing)
     added = False
     for field in _SIDECAR_FIELDS:
         value = header.get(field)
@@ -177,7 +222,7 @@ def _write_sidecar(path: Path, header: dict) -> None:
             continue
         existing[field] = value
         added = True
-    if not added:
+    if not added and not cleared:
         return
     try:
         sidecar.write_text(

@@ -243,20 +243,22 @@ class EditEntitiesDialog(QDialog):
             )
         return (
             "Add or remove an entity",
-            "Only entities the <b>schema</b> allows for these files are "
-            "offered, and only ones it treats as optional can be removed. The "
-            "new entity is placed in the position the standard puts it in, "
-            "not where it was typed, and sidecars and companion files travel "
-            "with the recording they belong to.",
+            "Only entities the <b>schema</b> allows are offered, and each "
+            "change is applied <b>file by file</b>: a file that may not carry "
+            "the entity, or that requires the one being removed, is left as it "
+            "is, and the preview lists exactly the files that change. The new "
+            "entity is placed in the position the standard puts it in, not "
+            "where it was typed, and sidecars and companion files travel with "
+            "the recording they belong to.",
         )
 
     def _on_scope_changed(self) -> None:
         """A wider or narrower scope means different entities are offerable.
 
-        Both lists are an INTERSECTION over the files in scope, so they have
-        to be recomputed rather than filtered: widening from one func run to
-        the whole subject can only take entities away, and narrowing can add
-        them back.
+        Both lists are the UNION over the files in scope, each change then
+        applied file by file, so they have to be recomputed rather than
+        filtered: widening from one func run to the whole subject brings in
+        entities other datatypes allow, and narrowing takes them away again.
         """
         self._targets = self._scope_bar.targets()
         self._describe_scope()

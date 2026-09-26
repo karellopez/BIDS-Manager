@@ -220,12 +220,18 @@ def _typed(root: Path, files: Iterable[Path]) -> list[FileFacts]:
 
 
 def addable_entities(root: Path, files: Iterable[Path]) -> list[EntitySlot]:
-    """Entities every selected file is ALLOWED to carry, in filename order.
+    """Entities at least one selected file is ALLOWED to carry, in filename order.
 
-    The intersection across the selection, not the union: offering ``echo`` for
-    a set that is half ``_bold`` and half ``_eeg`` would produce a name the
-    standard rejects for one half, and a preview that shows it happening is
-    not a substitute for not offering it.
+    The UNION across the selection, the same rule as removal and as the
+    Converter's bulk edit. It used to be the intersection, on the grounds that
+    offering ``echo`` for a set that is half ``_bold`` and half ``_eeg`` would
+    produce a name the standard rejects for one half. That stopped being true
+    when :func:`plan_entity_edit` learned to SKIP a file that may not carry the
+    entity rather than refuse the whole operation: the rejected name is never
+    produced, and the preview lists exactly the files that change. The
+    intersection meant a selection spanning datatypes was offered almost
+    nothing, while the same selection could have the same entity REMOVED file
+    by file, which is two rules for one tool.
 
     ``sub`` is excluded. Every BIDS file has a subject and no file may gain or
     lose one, and moving a file to a different subject is a rename, which the
@@ -238,20 +244,17 @@ def addable_entities(root: Path, files: Iterable[Path]) -> list[EntitySlot]:
         return []
 
     long_to_short = _long_to_short()
-    allowed: Optional[set[str]] = None
+    allowed: set[str] = set()
     required: set[str] = set()
     for item in facts:
         here = set(allowed_entities(item.datatype, item.suffix))
         if not here:
             # No rule for this datatype and suffix pair, so it has no opinion
-            # to contribute. Intersecting with the empty set would let one
-            # unclassifiable companion empty the menu and leave the user
-            # looking at a dialog that offers nothing, for a reason nothing
-            # on screen could explain.
+            # to contribute, and plan_entity_edit moves it without asserting
+            # anything about it.
             continue
-        allowed = here if allowed is None else (allowed & here)
+        allowed |= here
         required |= set(required_entities(item.datatype, item.suffix))
-    allowed = allowed or set()
 
     # Values already used ANYWHERE in the dataset, not just in the selection:
     # adding a session almost always means adding the one the other subjects

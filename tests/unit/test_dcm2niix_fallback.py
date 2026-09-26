@@ -245,11 +245,124 @@ class TestTheTwoBuildsTakeDifferentArguments:
         monkeypatch.setattr(bg.subprocess, "run", fake)
         monkeypatch.setattr(bg, "vendored_dcm2niix", lambda: vendored)
 
-        deep = "\\\\?\\C:\\" + "\\".join(["d" * 40] * 8)
+        # Joined with the HOST separator, because that is what the guard
+        # tests for (``os.sep in a``) and what ``str(Path)`` produces on the
+        # platform the fallback runs on. Spelled with backslashes only, this
+        # passed on Windows and failed on macOS and Linux, where the argument
+        # did not look like a path at all and the retry went ahead.
+        deep = "\\\\?\\C:" + os.sep + os.sep.join(["d" * 40] * 8)
         result = run_dcm2niix(["wheel.exe", "-b", "o", deep])
 
         assert result.returncode == STACK_OVERFLOW_RC
         assert len(calls) == 1, "a retry that cannot work must not be made"
+
+
+class TestTheRetryIsJudgedByWhatItMustOpen:
+    """dcm2niix opens the FILES inside the folder it walks, so their length,
+    not the folder's, decides whether the unprefixed retry can work.
+
+    Built on a real tree rather than mocked, because the length of a real
+    path is the whole question. Passes the same on every platform: the
+    ceiling it enforces is Windows', but the arithmetic is not.
+    """
+
+    @staticmethod
+    def _touch(path: Path) -> None:
+        """Create ``path`` even past MAX_PATH.
+
+        Through the long-path form, because on a Windows runner without
+        long-path support a plain ``open`` of a 300-character path fails,
+        and the test would then error on the very platform it protects. A
+        no-op wrapper everywhere else.
+        """
+        from bidsmgr.util.paths import long_path
+
+        with open(long_path(path), "wb"):
+            pass
+
+    def _deep_tree(self, root: Path, *, file_len: int) -> Path:
+        folder = root / ("s" * 30)
+        folder.mkdir(parents=True)
+        self._touch(folder / ("d" * file_len + ".dcm"))
+        return folder
+
+    def _setup(self, monkeypatch, tmp_path):
+        vendored = tmp_path / "v" / "dcm2niix.exe"
+        vendored.parent.mkdir()
+        vendored.write_bytes(b"")
+        fake, calls = _recorder([STACK_OVERFLOW_RC, 0])
+        monkeypatch.setattr(bg.subprocess, "run", fake)
+        monkeypatch.setattr(bg, "vendored_dcm2niix", lambda: vendored)
+        return calls
+
+    def test_a_short_folder_of_long_files_is_not_retried(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """The case the old check let through: the FOLDER is well under the
+        ceiling, and every file inside it is over."""
+        calls = self._setup(monkeypatch, tmp_path)
+        folder = self._deep_tree(tmp_path, file_len=250)
+        assert len(str(folder)) < bg._MAX_PATH_BUDGET, "the folder itself is fine"
+        longest = bg._longest_path_under(str(folder))
+        assert longest > bg._MAX_FILE_PATH, "and its file is not"
+
+        result = run_dcm2niix(["wheel.exe", "-o", str(tmp_path), str(folder)])
+
+        assert result.returncode == STACK_OVERFLOW_RC, "the real crash is reported"
+        assert len(calls) == 1, "a retry that can open nothing must not be made"
+
+    def test_a_tree_that_fits_is_retried(self, monkeypatch, tmp_path) -> None:
+        calls = self._setup(monkeypatch, tmp_path)
+        folder = self._deep_tree(tmp_path, file_len=20)
+        assert bg._longest_path_under(str(folder)) <= bg._MAX_FILE_PATH
+
+        result = run_dcm2niix(["wheel.exe", "-o", str(tmp_path), str(folder)])
+
+        assert len(calls) == 2
+        assert result.returncode == 0
+
+    def test_depth_is_bounded_as_dcm2niix_bounds_it(self, tmp_path) -> None:
+        """A file below dcm2niix's own search depth is one it never opens,
+        so it must not stop a retry either."""
+        here = tmp_path
+        for level in range(bg._DCM2NIIX_DEPTH + 2):
+            here = here / f"l{level}"
+        here.mkdir(parents=True)
+        self._touch(here / ("x" * 200))
+        measured = bg._longest_path_under(str(tmp_path))
+        assert measured < len(str(here / ("x" * 200)))
+
+    def test_an_unreadable_folder_is_not_an_error(self, tmp_path) -> None:
+        assert bg._longest_path_under(str(tmp_path / "missing")) == len(
+            str(tmp_path / "missing")
+        )
+
+
+class TestTheExitCodeIsNamed:
+    """dcm2niix writes nothing to stderr when Windows kills it, so the
+    number is all the log has to go on."""
+
+    @pytest.mark.parametrize("rc", [0xC00000FD, 0xC00000FD - (1 << 32)])
+    def test_the_measured_stack_overflow_is_recognised(self, rc) -> None:
+        """The code measured on spectroscopy, whichever sign it arrives in."""
+        assert "0xC00000FD" in bg._exit_hint(rc)
+        assert "stack overflow" in bg._exit_hint(rc)
+
+    def test_the_path_failure_is_a_different_code(self) -> None:
+        assert "MAX_PATH" in bg._exit_hint(0xC0000409)
+        assert "MAX_PATH" not in bg._exit_hint(0xC00000FD)
+
+    def test_a_missing_dll_is_named(self) -> None:
+        assert "DLL" in bg._exit_hint(0xC0000135)
+
+    @pytest.mark.parametrize("rc,word", [(-11, "SIGSEGV"), (-6, "SIGABRT")])
+    def test_posix_signals_survive_the_mask(self, rc, word) -> None:
+        """Masking to 32 bits first would turn -11 into 4294967285."""
+        assert word in bg._exit_hint(rc)
+
+    @pytest.mark.parametrize("rc", [0, 1, 2])
+    def test_an_ordinary_code_gets_no_note(self, rc) -> None:
+        assert bg._exit_hint(rc) == ""
 
 
 def test_posix_exit_codes_can_never_reach_the_fallback(monkeypatch) -> None:
@@ -299,3 +412,102 @@ class TestTheVendoredBinary:
         text = doc.read_text(encoding="utf-8")
         assert "0xC00000FD" in text
         assert "16,777,216" in text or "16777216" in text
+
+
+class TestItIsPackagedWithWhatItOwes:
+    """Runs on every platform, unlike ``TestTheVendoredBinary``.
+
+    That class needs Windows to execute the binary, so on macOS and Linux CI
+    nothing checked that a release carries the files the binary cannot do
+    without. These are all things a wheel can silently drop.
+    """
+
+    DIR = Path(bg.__file__).resolve().parent.parent / "vendor" / "dcm2niix_win"
+
+    def test_the_binary_ships_its_licence(self) -> None:
+        """BSD 2-Clause, clause 2: a redistribution IN BINARY FORM must
+        reproduce the notice. Shipping the executable without it is a licence
+        breach, not an omission of style."""
+        licence = self.DIR / "LICENSE"
+        assert licence.is_file()
+        text = licence.read_text(encoding="utf-8")
+        assert "Chris Rorden" in text
+        assert "Redistributions in binary form" in text
+
+    def test_pyproject_ships_all_three(self) -> None:
+        """package-data is an allowlist: a file present in the repo and absent
+        here is left out of the wheel with no warning."""
+        pyproject = (
+            Path(bg.__file__).resolve().parents[2] / "pyproject.toml"
+        ).read_text(encoding="utf-8")
+        line = next(
+            ln for ln in pyproject.splitlines()
+            if ln.lstrip().startswith('"bidsmgr.vendor.dcm2niix_win"')
+        )
+        for name in ("dcm2niix.exe", "PROVENANCE.md", "LICENSE"):
+            assert f'"{name}"' in line, f"{name} would be left out of the wheel"
+
+    def test_the_binary_needs_no_toolchain_dlls(self) -> None:
+        """A MinGW build that links its runtime DYNAMICALLY runs on the machine
+        it was built on, where the toolchain is on PATH, and nowhere else: it
+        fails to start with STATUS_DLL_NOT_FOUND on a user's clean install.
+
+        Reads the PE IMPORT TABLE, not the bytes. The string
+        ``libgcc_s_dw2-1.dll`` IS in this binary, and must be: MinGW's startup
+        code probes for it with LoadLibrary to register unwind frames and skips
+        quietly when it is absent. That is not a dependency, and a substring
+        search reports it as one.
+        """
+        imports = {n.lower() for n in _pe_imported_dlls(self.DIR / "dcm2niix.exe")}
+        assert "kernel32.dll" in imports, "the parser found no imports at all"
+        toolchain = {n for n in imports
+                     if n.startswith(("libgcc", "libstdc", "libwinpthread"))}
+        assert not toolchain, f"needs the MinGW runtime on PATH: {sorted(toolchain)}"
+        # Everything left must be Windows' own: the kernel, advapi, and the
+        # Universal CRT that ships with Windows 10+ and that Python needs too.
+        foreign = {n for n in imports
+                   if n not in ("kernel32.dll", "advapi32.dll")
+                   and not n.startswith("api-ms-win-crt-")}
+        assert not foreign, f"imports DLLs a clean Windows may lack: {sorted(foreign)}"
+
+
+def _pe_imported_dlls(path: Path) -> list[str]:
+    """The DLL names in a PE32+ file's import directory.
+
+    Minimal and dependency-free on purpose: this runs on macOS and Linux CI,
+    where no Windows tooling exists, and ``pefile`` is not a dependency.
+    """
+    import struct
+
+    data = path.read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    assert data[pe:pe + 4] == b"PE\0\0", "not a PE file"
+    n_sections = struct.unpack_from("<H", data, pe + 6)[0]
+    opt_size = struct.unpack_from("<H", data, pe + 20)[0]
+    opt = pe + 24
+    assert struct.unpack_from("<H", data, opt)[0] == 0x20B, "not PE32+"
+    # Data directory 1 is the import table; PE32+ puts the directories at +112.
+    import_rva = struct.unpack_from("<I", data, opt + 112 + 8)[0]
+
+    sections = []
+    for i in range(n_sections):
+        at = opt + opt_size + i * 40
+        vsize, vaddr, rsize, raw = struct.unpack_from("<IIII", data, at + 8)
+        sections.append((vaddr, max(vsize, rsize), raw))
+
+    def offset(rva: int) -> int:
+        for vaddr, size, raw in sections:
+            if vaddr <= rva < vaddr + size:
+                return rva - vaddr + raw
+        raise ValueError(f"RVA {rva:#x} is in no section")
+
+    names = []
+    at = offset(import_rva)
+    while True:
+        name_rva = struct.unpack_from("<I", data, at + 12)[0]
+        if name_rva == 0:
+            break
+        start = offset(name_rva)
+        names.append(data[start:data.index(b"\0", start)].decode("ascii"))
+        at += 20
+    return names

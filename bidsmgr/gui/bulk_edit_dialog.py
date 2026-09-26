@@ -94,6 +94,19 @@ _FIXED_CHOICES: dict[str, list[str]] = {
 }
 
 
+def _first_paragraph(text: str) -> str:
+    """The first paragraph of a schema description, on one line.
+
+    Schema descriptions are Markdown written for the specification: several
+    paragraphs, hard-wrapped mid-sentence, with backticks around names. In a
+    dialog that is a wall of text with stray line breaks, so show the first
+    paragraph with its line breaks and backticks removed, and leave the rest
+    to the tooltip.
+    """
+    first = text.strip().split("\n\n", 1)[0]
+    return " ".join(first.replace("`", "").split())
+
+
 class BulkEditDialog(QDialog):
     """One-shot apply-value-to-column dialog.
 
@@ -174,6 +187,7 @@ class BulkEditDialog(QDialog):
         # Every entity the schema will let these rows go WITHOUT.
         self._removable = self._model.bulk_removable_entities(self._rows)
         self._entity_descriptions: dict[str, str] = {}
+        self._entity_full_descriptions: dict[str, str] = {}
         for entity in self._model.bulk_editable_entities(self._rows):
             try:
                 info = schema_mod.entity_info(entity)
@@ -181,9 +195,11 @@ class BulkEditDialog(QDialog):
                 continue
             key = f"{InventoryTableModel.ENTITY_KEY_PREFIX}{entity}"
             self._col_combo.addItem(f"{info.name} ({entity})", userData=key)
+            full = info.description.strip()
+            self._entity_full_descriptions[key] = full
             self._entity_descriptions[key] = (
-                f"{info.description.strip()} "
-                f"Written as ``{info.name}-<{info.format.name}>``."
+                f"{_first_paragraph(full)} "
+                f"Written as {info.name}-<{info.format.name}>."
             ).strip()
         self._col_combo.currentIndexChanged.connect(self._on_column_changed)
         form.addRow("Column:", self._col_combo)
@@ -239,6 +255,17 @@ class BulkEditDialog(QDialog):
         )
         self._remove_check.toggled.connect(self._on_remove_toggled)
         form.addRow("", self._remove_check)
+
+        # How many rows a removal reaches, or why it cannot. On its OWN line,
+        # directly under the tick it describes. It used to be appended to the
+        # schema description, and for an entity like acq that description is
+        # several paragraphs long: at the dialog's default size the text was
+        # clipped top and bottom, and the line cut off was this one.
+        self._reach = QLabel("")
+        self._reach.setObjectName("pane-hint")
+        self._reach.setWordWrap(True)
+        self._reach.setStyleSheet("padding: 0;")
+        form.addRow("", self._reach)
 
         # Which editor is active. Tracked explicitly rather than via
         # ``isVisible()`` (unreliable before the dialog is shown / in tests).
@@ -327,6 +354,13 @@ class BulkEditDialog(QDialog):
             self._entity_descriptions.get(key)
             or _COLUMN_DESCRIPTION.get(key, "")
         )
+        # The whole schema text is one hover away; the label shows only its
+        # first paragraph, so the preview below keeps its room.
+        self._description.setToolTip(
+            self._entity_full_descriptions.get(key, "")
+        )
+        self._reach.setText("")
+        self._reach.setVisible(False)
 
         # Which entity does this column edit? An entity-prefixed key names
         # one directly; ``ses`` / ``task`` / ``run`` edit one through a
@@ -346,9 +380,8 @@ class BulkEditDialog(QDialog):
                 f"BIDS requires {entity} on every selected row, or none of "
                 f"them is allowed to carry it."
             )
-            self._description.setText(
-                (self._description.text() + "  ").strip() + "  " + reason
-            )
+            self._reach.setText(f"Cannot be removed: {reason}")
+            self._reach.setVisible(True)
         elif removable:
             # How many rows this will actually touch, before it is ticked.
             can = sum(
@@ -361,12 +394,11 @@ class BulkEditDialog(QDialog):
                 if self._model.entities(r).get(entity)
                 and not self._model.entity_removable_on(r, entity)
             )
-            note = f"  Removing takes it off {can} of {len(self._rows)} rows."
+            note = f"Removing takes it off {can} of {len(self._rows)} rows."
             if blocked:
-                note += (f"  {blocked} require it and are left alone.")
-            self._description.setText(
-                (self._description.text() + "  ").strip() + note
-            )
+                note += f" {blocked} require it and are left alone."
+            self._reach.setText(note)
+            self._reach.setVisible(True)
         self._refill_targets(key)
 
         # Decide which editor to show.

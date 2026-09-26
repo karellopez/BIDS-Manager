@@ -210,7 +210,7 @@ include = ["bidsmgr*"]
 # cannot: it is killed with 0xC00000FD before it writes anything. Used only
 # as a fallback on that exit code, never in preference to the wheel's binary.
 # See bidsmgr/vendor/dcm2niix_win/PROVENANCE.md.
-"bidsmgr.vendor.dcm2niix_win" = ["dcm2niix.exe", "PROVENANCE.md"]
+"bidsmgr.vendor.dcm2niix_win" = ["dcm2niix.exe", "PROVENANCE.md", "LICENSE"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
 "bidsmgr.vendor.bidsval"    = ["LICENSE"]
 # The schema files bidsval resolves against. Vendoring the code without this

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import List, Optional, Set
 
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QPalette
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -365,6 +365,13 @@ class TimeSeriesView(QWidget):
             showValues=False
         )
         self._plot_widget.wheelEvent = self._on_plot_wheel
+        # The names are placed from the view's geometry, so they have to
+        # follow it when the pane is resized or a splitter is dragged. Cheap:
+        # it moves existing labels and reads nothing.
+        self._channel_labels: list = []
+        self._plot_widget.getPlotItem().getViewBox().sigResized.connect(
+            self._position_labels
+        )
         self._hover_proxy = self._pg.SignalProxy(
             self._plot_widget.scene().sigMouseMoved,
             rateLimit=30,
@@ -1100,6 +1107,7 @@ class TimeSeriesView(QWidget):
 
         plot_item.setXRange(tmin, tmax, padding=0)
         plot_item.setYRange(-0.5, n_shown - 0.5, padding=0.02)
+        self._position_labels()
         if self._show_events:
             self._draw_events(tmin, tmax, n_shown)
         self.lbl_time.setText(
@@ -1125,21 +1133,83 @@ class TimeSeriesView(QWidget):
         self._shown_ch_info.append((offset, ch_name, ch_type))
 
     def _clear_labels(self) -> None:
+        self._channel_labels = []
         while self._label_layout.count() > 0:
             item = self._label_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
     def _add_channel_label(self, ch_name, n_shown, color) -> None:
-        lbl = QLabel(ch_name)
-        lbl.setFixedHeight(
-            max(1, int(self._plot_widget.height() / max(n_shown, 1)))
-        )
+        # Elided in the MIDDLE, with the whole name on hover. The strip is a
+        # fixed 68 pixels, and a long physio column like ``external_trigger``
+        # was cut to "external_tri", losing the end that says what it is.
+        lbl = ElidedLabel(ch_name, mode=Qt.TextElideMode.ElideMiddle)
         lbl.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         lbl.setStyleSheet(f"QLabel {{ color: {color}; font-size: 9px; }}")
-        self._label_layout.addWidget(lbl)
+        # Sized and placed by _position_labels, once every trace is drawn
+        # and the view knows where it put them.
+        self._channel_labels.append(lbl)
+
+    def _label_y(self, data_y: float) -> int:
+        """Where ``data_y`` in the plot falls, in the label strip's pixels.
+
+        Mapped through the view rather than divided out of a height, because
+        the two columns do not share a geometry: the plot widget contains an
+        x-axis and margins that no trace enters, and the traces are spread
+        over the view's range plus its padding.
+        """
+        view = self._plot_widget
+        vb = view.getPlotItem().getViewBox()
+        scene = vb.mapViewToScene(QPointF(0.0, float(data_y)))
+        on_screen = view.viewport().mapToGlobal(view.mapFromScene(scene))
+        return self._label_area.mapFromGlobal(on_screen).y()
+
+    def _position_labels(self, *_args) -> None:
+        """Put each channel's name level with its trace.
+
+        The names used to be ``plot_widget.height() / n`` pixels each,
+        stacked from the top of the WIDGET. The widget includes the x-axis
+        and margins the traces never enter, so every name was slightly too
+        tall and the error accumulated down the column: measured on a real
+        MEG recording, the last of 8 names sat 46 pixels below its trace and
+        the last of 20 sat 48 below, a band and a half, pointing at a trace
+        that was not there. And nothing recomputed them on a resize.
+
+        Now each band's edges are mapped from the data coordinates the
+        traces are drawn at, and each height is the difference of two ROUNDED
+        edges, so rounding cannot accumulate either. Called after every
+        redraw and whenever the view is resized.
+        """
+        labels = getattr(self, "_channel_labels", [])
+        if not labels:
+            return
+        n = len(labels)
+        lay = self._label_layout
+        try:
+            # Trace i is drawn at offset n-1-i, so its band runs from
+            # n-0.5-i down to n-1.5-i.
+            edges = [self._label_y(n - 0.5 - i) for i in range(n + 1)]
+        except Exception:  # noqa: BLE001 - geometry not available yet
+            edges = []
+        while lay.count() > 0:
+            lay.takeAt(0)
+        if len(edges) != n + 1 or edges[-1] <= edges[0]:
+            # Not laid out yet (a view that has never been shown has no
+            # geometry to map through). Divide evenly for now; the first
+            # resize, which showing it is, puts them right.
+            height = max(1, int(self._plot_widget.height() / n))
+            for lbl in labels:
+                lbl.setFixedHeight(height)
+                lay.addWidget(lbl)
+            return
+        top = max(0, edges[0])
+        lay.addSpacing(top)
+        for lbl, upper, lower in zip(labels, [top, *edges[1:-1]], edges[1:]):
+            lbl.setFixedHeight(max(1, lower - upper))
+            lay.addWidget(lbl)
+        lay.addStretch(1)
 
     def _draw_events(self, tmin, tmax, n_shown) -> None:
         events = self._active_events()

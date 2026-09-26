@@ -5,7 +5,10 @@
 The released Windows dcm2niix cannot convert MR spectroscopy. Its linker
 reserves 16,388,608 bytes of stack, an MSVC build needs more than that on a
 Siemens `svs_se` series, and Windows terminates the process with
-`0xC00000FD` (STATUS_STACK_BUFFER_OVERRUN) **and an empty stderr**. Nothing is
+`0xC00000FD` (STATUS_STACK_OVERFLOW) **and an empty stderr**. Not to be
+confused with `0xC0000409` (STATUS_STACK_BUFFER_OVERRUN), which is what
+dcm2niix dies with when handed a path past `MAX_PATH`: a different
+failure with a different fix. Nothing is
 written and nothing is said, so every caller reads it as "this folder holds no
 DICOM images" rather than "the converter was killed".
 
@@ -75,4 +78,6 @@ fallback branch in `run_dcm2niix` should all go.
 
 dcm2niix is BSD 2-Clause, Chris Rorden and contributors. This is an unmodified
 build of their source apart from the linker stack reserve described above; the
-upstream `license.txt` applies unchanged.
+upstream `license.txt` applies unchanged and ships beside the binary as
+`LICENSE`, since the BSD licence requires a binary redistribution to carry
+its notice.

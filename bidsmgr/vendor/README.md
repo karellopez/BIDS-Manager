@@ -227,3 +227,40 @@ upstream patch is genuinely worth chasing. If the upstream resumes
 work, we can re-sync. If we extend the code, we keep it in-tree and
 upstream is welcome to take the diff back. Either way the file
 headers stay attributed to the original authors.
+
+
+### `bidsmgr.vendor.dcm2niix_win`
+
+**Upstream:** `dcm2niix` (Chris Rorden and contributors). BSD 2-Clause,
+shipped unchanged as `LICENSE` beside the binary, as clause 2 requires of
+any redistribution in binary form. Source:
+<https://github.com/rordenlab/dcm2niix>, branch `development`, commit
+`fda9c11`.
+
+**What it is:** not source, unlike the other two. One compiled
+`dcm2niix.exe` for Windows x86-64, built with MinGW-w64 GCC and a linker
+stack reserve of exactly 16,777,216 bytes. The MinGW runtime is linked
+statically: the executable imports only `KERNEL32`, `ADVAPI32` and the
+Universal CRT, all present on any Windows that can run Python 3.10, so it
+does not depend on a toolchain being installed.
+
+**Why vendored:** the released Windows dcm2niix cannot convert MR
+spectroscopy. It reserves 16,388,608 bytes of stack, the frames an MSVC
+build emits for a Siemens `svs_se` series need more, and Windows kills the
+process with `0xC00000FD` (`STATUS_STACK_OVERFLOW`) and an empty stderr.
+Measured, how it was built and why a GCC build at the SAME reserve works:
+`dcm2niix_win/PROVENANCE.md`.
+
+**How it is used:** as a fallback only, never in preference to the wheel.
+`classifier.dcm2niix_bidsguess.run_dcm2niix` runs the pinned wheel binary
+first and retries with this one only on that exact exit code, so a genuine
+conversion failure is reported as itself. It is a narrower build (JPEG 2000,
+JPEG-LS, TurboJPEG, Jasper and Zstandard are off), which is why it is never
+the first choice. `vendored_dcm2niix()` returns `None` off Windows and on
+Windows for any architecture but x86-64.
+
+**When to delete it:** when a released `dcm2niix` wheel reserves
+16,777,216. The fix is submitted upstream from `karellopez/dcm2niix`, branch
+`fix/windows-msvc-stack-spectroscopy`. Delete the directory, its
+`package-data` entry in `pyproject.toml` and the fallback branch of
+`run_dcm2niix` together.

@@ -123,8 +123,10 @@ def find_dcm2niix() -> Path:
 
 
 # What Windows returns when it kills a process for exhausting its stack:
-# STATUS_STACK_BUFFER_OVERRUN. dcm2niix writes NOTHING to stderr on the way
-# out, so this number is the only evidence there is.
+# STATUS_STACK_OVERFLOW. Not to be confused with 0xC0000409,
+# STATUS_STACK_BUFFER_OVERRUN, which is the path-length failure and has a
+# different fix. dcm2niix writes NOTHING to stderr on the way out, so this
+# number is the only evidence there is.
 STACK_OVERFLOW_RC = 0xC00000FD
 
 
@@ -201,6 +203,24 @@ def run_dcm2niix(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
     # the failure mode it exists to remove.
     args = [_without_long_path_prefix(a) for a in list(cmd)[1:]]
     too_long = [a for a in args if len(a) >= _MAX_PATH_BUDGET and os.sep in a]
+    # The folder dcm2niix WALKS is the last argument, as its own CLI requires
+    # and every caller here does. What decides whether the unprefixed retry
+    # can open anything is the longest FILE under it, not the folder: a
+    # 200-character folder of 90-character Siemens filenames passes a check on
+    # the folder and then opens nothing, and the retry answers `rc=2, Unable
+    # to find any DICOM images`, which reads as "not DICOM". This is the trap
+    # util.paths.long_path_for_tree documents for the first attempt.
+    walked = args[-1] if args else ""
+    deepest = _longest_path_under(walked) if walked and os.path.isdir(walked) else 0
+    if deepest > _MAX_FILE_PATH:
+        log.warning(
+            "dcm2niix was killed by Windows (0x%08X, stack exhausted) and the "
+            "bundled build cannot be used here: it cannot open a path longer "
+            "than %d characters, and the deepest file under %s is %d. Move "
+            "the data somewhere shallower to convert MR spectroscopy.",
+            STACK_OVERFLOW_RC, _MAX_FILE_PATH, walked[:80], deepest,
+        )
+        return proc
     if too_long:
         # Stripping the prefix would put it back over the ceiling, so the
         # retry cannot succeed either. Report the crash rather than replace it
@@ -230,6 +250,46 @@ def run_dcm2niix(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
 # ``\\?\`` prefix that lifts the limit. Matches the threshold in
 # ``util.paths.long_path``.
 _MAX_PATH_BUDGET = 248
+
+#: The longest FILE path the vendored build can open. MAX_PATH is 260
+#: characters INCLUDING the terminating NUL, so 259 is the last that fits.
+#: The 248 above is the directory limit, which leaves room for an 8.3 name.
+_MAX_FILE_PATH = 259
+
+#: How deep dcm2niix searches by default (``-d 5``), so how deep a file can
+#: sit and still be one it will try to open.
+_DCM2NIIX_DEPTH = 5
+
+
+def _longest_path_under(folder: str, depth: int = _DCM2NIIX_DEPTH) -> int:
+    """The longest path dcm2niix would have to open walking ``folder``.
+
+    Measures names rather than opening files, so it works on a tree whose
+    files are too long for this process to open either. Lengths are counted
+    in the UNPREFIXED form, because that is what the retry hands dcm2niix;
+    each folder is LISTED through ``long_path``, so a subfolder already past
+    248 characters is still read on Windows instead of being skipped and
+    leaving its files unmeasured. A folder that genuinely cannot be listed is
+    skipped; its own path has already been counted.
+    """
+    longest = len(folder)
+    stack = [(folder, 0)]
+    while stack:
+        here, level = stack.pop()
+        try:
+            with os.scandir(long_path(here)) as entries:
+                for entry in entries:
+                    full = os.path.join(here, entry.name)
+                    longest = max(longest, len(full))
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        is_dir = False
+                    if is_dir and level < depth:
+                        stack.append((full, level + 1))
+        except OSError:
+            continue
+    return longest
 
 
 def _without_long_path_prefix(arg: str) -> str:
@@ -408,19 +468,33 @@ def _validate_classification(datatype: str, suffix: str, entities: dict[str, str
 def _exit_hint(returncode: int) -> str:
     """A human-readable note for an exit code worth recognising.
 
-    ``0xC0000409`` is the Windows stack buffer overrun dcm2niix dies with
-    when handed a path longer than ``MAX_PATH``. It writes nothing to stderr
-    on the way out, so without naming it here the log says only that a
-    number was not zero.
+    dcm2niix writes nothing to stderr when Windows kills it, so without
+    naming the code here the log says only that a number was not zero.
+
+    Windows codes are compared after masking to 32 bits, the way
+    :func:`run_dcm2niix` compares them, because the same NTSTATUS can reach
+    Python as a large positive number or as its negative two's complement.
+    POSIX signals are looked up BEFORE masking: they arrive negative, and
+    masking ``-11`` would turn SIGSEGV into an unrecognisable 4294967285.
     """
-    codes = {
-        3221226505: " (0xC0000409, a Windows stack buffer overrun: this is "
-                    "what dcm2niix does when a path exceeds MAX_PATH)",
-        3221225477: " (0xC0000005, an access violation)",
+    posix = {
         -11: " (SIGSEGV)",
         -6: " (SIGABRT)",
     }
-    return codes.get(returncode, "")
+    if returncode in posix:
+        return posix[returncode]
+    windows = {
+        STACK_OVERFLOW_RC:
+            " (0xC00000FD, a Windows stack overflow: the released dcm2niix "
+            "dies this way on MR spectroscopy)",
+        0xC0000409:
+            " (0xC0000409, a Windows stack buffer overrun: this is what "
+            "dcm2niix does when a path exceeds MAX_PATH)",
+        0xC0000135:
+            " (0xC0000135, a DLL the program needs was not found)",
+        0xC0000005: " (0xC0000005, an access violation)",
+    }
+    return windows.get(returncode & 0xFFFFFFFF, "")
 
 
 def classify_dicom_folder(
