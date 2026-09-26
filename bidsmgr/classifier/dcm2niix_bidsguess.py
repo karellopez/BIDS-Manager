@@ -27,7 +27,7 @@ from typing import Iterable, Optional, Sequence
 
 from .. import schema
 from ..inventory.types import InventoryRow
-from ..util.paths import long_path
+from ..util.paths import long_path, long_path_for_tree
 from .types import Classification
 
 log = logging.getLogger(__name__)
@@ -176,6 +176,20 @@ def _run_dcm2niix_sidecars(
     row reads ``SeriesInstanceUID`` from INSIDE the JSON, never from the
     filename. Where two pooled studies do collide, dcm2niix's default
     ``-w 2`` adds a suffix rather than overwriting, so no sidecar is lost.
+
+    The two directories are prefixed by DIFFERENT helpers, and the difference
+    matters. ``output_dir`` is a path we are about to write into, and we
+    control the names in it, so its own length is the length that counts:
+    :func:`~bidsmgr.util.paths.long_path`. ``dicom_dir`` is a path dcm2niix
+    will WALK, and what has to fit under the ceiling is the files inside it,
+    which we have not measured: :func:`~bidsmgr.util.paths.long_path_for_tree`.
+
+    Shortening the output name to ``%s`` and prefixing both with ``long_path``
+    was not enough on the reporting dataset, because its 200-character subject
+    folder is under that helper's 248 threshold and was passed through
+    unprefixed — while the ~90-character DICOM filenames inside put every file
+    at 290. All three subjects still came back ``rc=2`` "Unable to find any
+    DICOM images".
     """
 
     binary = str(dcm2niix_bin or find_dcm2niix())
@@ -186,7 +200,7 @@ def _run_dcm2niix_sidecars(
         "-z", "n",
         "-o", str(long_path(output_dir)),
         "-f", "%s",
-        str(long_path(dicom_dir)),
+        long_path_for_tree(dicom_dir),
     ]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
