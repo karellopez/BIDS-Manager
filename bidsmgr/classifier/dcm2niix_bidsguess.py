@@ -215,6 +215,28 @@ def canonicalise(datatype: str, suffix: str) -> tuple[str, str]:
     return dt, sfx_map.get(suffix.lower(), suffix)
 
 
+def looks_like_uid(value: object) -> bool:
+    """Whether ``value`` is plausibly a DICOM UID.
+
+    A UID is dot-separated numeric components, and in practice at least
+    three of them. This exists because dcm2niix does not always write one.
+
+    Measured 2026-09-26 on a Siemens study whose spectroscopy is stored under
+    the STANDARD MR Spectroscopy Storage SOP class
+    (``1.2.840.10008.5.1.4.1.1.4.2``): the sidecar's ``SeriesInstanceUID``
+    came out as ``133347.357000``, which is the series TIME, not the UID. The
+    image series in the same folder got a correct UID, and so did a second
+    study whose spectroscopy uses the Siemens private CSA class
+    (``1.3.12.2.1107.5.9.1``). So this is specific to that SOP class, and it
+    is invisible until a join on the UID quietly matches nothing.
+    """
+    text = str(value or "")
+    if not text:
+        return False
+    parts = text.split(".")
+    return len(parts) >= 3 and all(part.isdigit() for part in parts)
+
+
 def _validate_classification(datatype: str, suffix: str, entities: dict[str, str]) -> bool:
     """Return ``True`` if the schema accepts this (datatype, suffix, entities) tuple."""
     if datatype == "discard":
@@ -249,6 +271,20 @@ def classify_dicom_folder(
     for r in rows:
         if r.series_uid:
             rows_by_uid[r.series_uid].append(r)
+
+    # A second index, used only when the sidecar's UID is unusable. Keyed on
+    # the series description, and ONLY where that description names exactly
+    # one series in this folder: two runs of one protocol share a
+    # description, and guessing between them would be worse than not
+    # classifying either.
+    by_description: dict[str, list[InventoryRow]] = defaultdict(list)
+    for r in rows:
+        if r.series_description:
+            by_description[r.series_description.strip()].append(r)
+    unique_by_description = {
+        desc: found for desc, found in by_description.items()
+        if len({x.series_uid for x in found}) == 1
+    }
 
     use_temp = workdir is None
     if use_temp:
@@ -285,6 +321,19 @@ def classify_dicom_folder(
 
         uid = sidecar.get("SeriesInstanceUID")
         matching_rows = rows_by_uid.get(uid, [])
+        if not matching_rows and not looks_like_uid(uid):
+            # dcm2niix wrote something that is not a UID, so the join was
+            # never going to land. Fall back to the series description, which
+            # it reports correctly, and say so: a scan that silently
+            # classified nothing is the symptom this repairs.
+            description = str(sidecar.get("SeriesDescription") or "").strip()
+            matching_rows = unique_by_description.get(description, [])
+            if matching_rows:
+                log.info(
+                    "dcm2niix wrote %r as the SeriesInstanceUID for %r, which "
+                    "is not a UID; matched on the series description instead",
+                    uid, description,
+                )
         if not matching_rows:
             log.debug("BidsGuess sidecar with no matching inventory row: uid=%s", uid)
             continue
@@ -345,6 +394,7 @@ def classify(
 
 
 __all__ = [
+    "looks_like_uid",
     "classify",
     "classify_dicom_folder",
     "parse_bids_guess",
