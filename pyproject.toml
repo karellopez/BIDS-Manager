@@ -206,6 +206,11 @@ include = ["bidsmgr*"]
 # See bidsmgr/deface/atlas/PROVENANCE.md.
 "bidsmgr.deface"            = ["atlas/*.nii.gz", "atlas/PROVENANCE.md"]
 "bidsmgr.vendor"            = ["README.md"]
+# A Windows dcm2niix that can convert MR spectroscopy. The released one
+# cannot: it is killed with 0xC00000FD before it writes anything. Used only
+# as a fallback on that exit code, never in preference to the wheel's binary.
+# See bidsmgr/vendor/dcm2niix_win/PROVENANCE.md.
+"bidsmgr.vendor.dcm2niix_win" = ["dcm2niix.exe", "PROVENANCE.md"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
 "bidsmgr.vendor.bidsval"    = ["LICENSE"]
 # The schema files bidsval resolves against. Vendoring the code without this

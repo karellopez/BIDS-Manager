@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from ... import schema
-from ...classifier.dcm2niix_bidsguess import find_dcm2niix
+from ...classifier.dcm2niix_bidsguess import find_dcm2niix, run_dcm2niix
 from ...util.paths import long_path
 from ..types import ConvertResult, ConvertTask
 
@@ -312,7 +312,7 @@ def _run_dcm2niix(
         "-f", basename,
         str(dicom_dir),
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return run_dcm2niix(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def _drop_disallowed_extensions(staged: list[Path], task) -> list[Path]:

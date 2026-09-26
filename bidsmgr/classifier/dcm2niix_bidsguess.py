@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -121,6 +122,130 @@ def find_dcm2niix() -> Path:
     )
 
 
+# What Windows returns when it kills a process for exhausting its stack:
+# STATUS_STACK_BUFFER_OVERRUN. dcm2niix writes NOTHING to stderr on the way
+# out, so this number is the only evidence there is.
+STACK_OVERFLOW_RC = 0xC00000FD
+
+
+# The architectures the vendored binary can actually run as. It is an x86-64
+# PE, built and tested as one. Windows on ARM would run it under x64 emulation,
+# which we have not tested and which would be slower than the native build the
+# wheel already supplies there, so an ARM process is left with the real error
+# rather than handed a foreign binary that silently seems to work. A native
+# ARM64 build could be added beside it later; see the PROVENANCE note.
+_VENDORED_ARCHES = frozenset({"AMD64", "X86_64"})
+
+
+def vendored_dcm2niix() -> Optional[Path]:
+    """Our own Windows x86-64 build of dcm2niix, or ``None`` if not usable here.
+
+    ``None`` on every platform but Windows, on Windows for any architecture but
+    x86-64, and wherever the file is simply absent. Only ever a fallback. See
+    :func:`run_dcm2niix`.
+    """
+    if os.name != "nt":
+        return None
+    if platform.machine().upper() not in _VENDORED_ARCHES:
+        return None
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "vendor" / "dcm2niix_win" / "dcm2niix.exe"
+    )
+    return path if path.is_file() else None
+
+
+def run_dcm2niix(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run dcm2niix, and retry with the vendored build if Windows kills it.
+
+    The released Windows dcm2niix cannot convert MR spectroscopy. Its linker
+    reserves 16,388,608 bytes of stack; a Siemens ``svs_se`` series needs more
+    than the MSVC build fits in that, so Windows terminates the process with
+    ``0xC00000FD`` and an empty stderr. Nothing is written and nothing is
+    said, which is why it read as "this folder holds no DICOM images".
+
+    Measured on that series, same machine, same input: the released binary
+    fails; the same binary with its PE stack reserve patched to 16,777,216
+    converts; a GCC build of the same source converts at either value. So it
+    is the frames MSVC emits rather than the constant alone, and Windows fixes
+    the reserve at link time and cannot grow it. macOS and Linux never see it.
+
+    The wheel's binary is ALWAYS tried first and its result is always
+    preferred: it is the pinned, JPEG2000- and JPEG-LS-capable build that
+    every platform shares, and the vendored one is a narrow GCC build with
+    those decoders off. The fallback is reached only on the one exit code that
+    means "the process was killed before it could do anything", so a genuine
+    conversion failure is still reported as itself.
+
+    A no-op off Windows: :func:`vendored_dcm2niix` returns ``None`` there.
+    """
+    proc = subprocess.run(list(cmd), **kwargs)
+    if (proc.returncode & 0xFFFFFFFF) != STACK_OVERFLOW_RC:
+        return proc
+
+    fallback = vendored_dcm2niix()
+    if fallback is None:
+        return proc
+    try:
+        same = Path(cmd[0]).resolve() == fallback.resolve()
+    except OSError:
+        same = False
+    if same:
+        return proc          # already the fallback; nothing left to try
+
+    # The two builds do not accept the same arguments. The released MSVC
+    # binary understands the Win32 long-path prefix and we rely on that in
+    # _run_dcm2niix_sidecars; the vendored MinGW one does not parse it at all
+    # and answers `rc=5, Input folder invalid: \\30_svs_se`. Handing the retry
+    # the prefixed argv made the fallback produce nothing, silently, which is
+    # the failure mode it exists to remove.
+    args = [_without_long_path_prefix(a) for a in list(cmd)[1:]]
+    too_long = [a for a in args if len(a) >= _MAX_PATH_BUDGET and os.sep in a]
+    if too_long:
+        # Stripping the prefix would put it back over the ceiling, so the
+        # retry cannot succeed either. Report the crash rather than replace it
+        # with a second, more confusing failure.
+        log.warning(
+            "dcm2niix was killed by Windows (0x%08X, stack exhausted) and the "
+            "bundled build cannot be used here: it does not accept long-path "
+            "arguments, and %s is %d characters. Move the data somewhere "
+            "shallower to convert MR spectroscopy.",
+            STACK_OVERFLOW_RC, too_long[0][:80], len(too_long[0]),
+        )
+        return proc
+
+    log.warning(
+        "dcm2niix was killed by Windows (0x%08X, stack exhausted) running %s. "
+        "This is the released build failing on MR spectroscopy. Retrying with "
+        "the bundled build at %s.",
+        STACK_OVERFLOW_RC, Path(cmd[0]).name, fallback,
+    )
+    retried = subprocess.run([str(fallback), *args], **kwargs)
+    if retried.returncode == 0:
+        log.info("the bundled dcm2niix converted what the released one could not")
+    return retried
+
+
+# Where the vendored binary stops being usable, since it cannot take the
+# ``\\?\`` prefix that lifts the limit. Matches the threshold in
+# ``util.paths.long_path``.
+_MAX_PATH_BUDGET = 248
+
+
+def _without_long_path_prefix(arg: str) -> str:
+    """``arg`` with the Win32 long-path prefix removed, if it carries one.
+
+    The vendored MinGW build cannot parse ``\\\\?\\``; it reads the argument as
+    a UNC path and rejects it. Everything else is returned untouched, so
+    flags and basenames pass through.
+    """
+    if arg.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + arg[len("\\\\?\\UNC\\"):]
+    if arg.startswith("\\\\?\\"):
+        return arg[len("\\\\?\\"):]
+    return arg
+
+
 def _binary_candidates(bin_path: Path) -> list[Path]:
     """``bin_path`` and the executable suffixes Windows spells it with.
 
@@ -202,7 +327,7 @@ def _run_dcm2niix_sidecars(
         "-f", "%s",
         long_path_for_tree(dicom_dir),
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return run_dcm2niix(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def _collect_sidecars(directory: Path) -> list[dict]:
@@ -461,4 +586,6 @@ __all__ = [
     "classify_dicom_folder",
     "parse_bids_guess",
     "find_dcm2niix",
+    "run_dcm2niix",
+    "vendored_dcm2niix",
 ]

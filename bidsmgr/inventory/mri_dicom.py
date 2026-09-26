@@ -202,6 +202,108 @@ def acquisition_time(ds) -> str:
     return ""
 
 
+# SOP Class UID the standard reserves for MR spectroscopy. The authoritative
+# marker: a series stored under it IS spectroscopy, whatever it is called.
+MR_SPECTROSCOPY_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.4.2"
+
+# ``ImageType`` value 3 on a spectroscopy frame, where a vendor sets one.
+SPECTROSCOPY_IMAGE_TYPE = "SPECTROSCOPY"
+
+# Siemens stores spectroscopy under its OWN non-image SOP class rather than
+# the standard one, and that class is shared: physio logs and diffusion TENSOR
+# maps arrive under it too. So it is never evidence on its own.
+SIEMENS_CSA_NONIMAGE_SOP_CLASS = "1.3.12.2.1107.5.9.1"
+
+# Siemens' private "CSA Image Type" (0029,1008 / 0029,1108). Measured across
+# the three kinds of CSA non-image object in one study::
+#
+#     spectroscopy   SPEC NUM 4   ImageType ORIGINAL, PRIMARY
+#     physio log     SPEC NUM 4   ImageType ORIGINAL, PRIMARY, RAWDATA, PHYSIO
+#     TENSOR map     DTI NUM 4    ImageType DERIVED, PRIMARY, DIFFUSION, TENSOR
+#
+# ``SPEC`` separates spectroscopy and physio from the tensor map; ``PHYSIO`` in
+# ``ImageType`` then separates those two from each other. Neither test alone is
+# enough, which is why both are here.
+_SIEMENS_CSA_TYPE_TAGS = ((0x0029, 0x1008), (0x0029, 0x1108))
+_SIEMENS_CSA_SPECTROSCOPY_PREFIX = "SPEC"
+_PHYSIO_IMAGE_TYPE = "PHYSIO"
+
+
+def _siemens_csa_image_type(ds) -> str:
+    """Siemens' private CSA Image Type, or "" when the tag is absent."""
+    for tag in _SIEMENS_CSA_TYPE_TAGS:
+        try:
+            value = ds[tag].value
+        except (KeyError, IndexError, TypeError):
+            continue
+        if value:
+            return str(value).strip().upper()
+    return ""
+
+
+def read_mrs_tags(ds) -> dict:
+    """Facts that decide whether a series is MR spectroscopy, and which kind.
+
+    Read here rather than inferred later because they come from the DICOM
+    header and nothing downstream reopens the file.
+
+    This exists because the classifier that would otherwise answer the
+    question cannot. dcm2niix's BidsGuess is the only thing that ever returned
+    ``mrs``, and on Windows it dies on spectroscopy with a stack overflow
+    (``0xC00000FD``) and an empty stderr — measured on two unrelated samples,
+    one Siemens CSA and one stored under the standard SOP class. The series
+    then reached the inventory with no datatype at all, which is what "MRS is
+    not detected" looked like. A DICOM header does not crash, so the datatype
+    no longer depends on a converter surviving the file.
+
+    Returns an empty dict for anything that is not spectroscopy, so callers
+    can merge blindly.
+    """
+    sop = str(getattr(ds, "SOPClassUID", "") or "").strip()
+    image_type = [v.upper() for v in normalize_image_type(
+        getattr(ds, "ImageType", None)
+    )]
+
+    standard = sop == MR_SPECTROSCOPY_SOP_CLASS
+    tagged = SPECTROSCOPY_IMAGE_TYPE in image_type
+    siemens_csa = (
+        sop == SIEMENS_CSA_NONIMAGE_SOP_CLASS
+        and _siemens_csa_image_type(ds).startswith(
+            _SIEMENS_CSA_SPECTROSCOPY_PREFIX
+        )
+        and _PHYSIO_IMAGE_TYPE not in image_type
+    )
+    if not (standard or tagged or siemens_csa):
+        return {}
+
+    def _int(name: str) -> int:
+        """0 when the tag is absent, which for a CSA object is most of them."""
+        try:
+            return int(getattr(ds, name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # Single voxel or an imaging grid. BIDS splits the suffix on exactly this:
+    # ``svs`` is one voxel, ``mrsi`` is a matrix of them.
+    rows, columns = _int("Rows"), _int("Columns")
+    # Localisation technique (PRESS, STEAM, ...). Absent or NONE means the
+    # acquisition was not localised to a voxel at all, which BIDS calls
+    # ``unloc``.
+    localisation = str(
+        getattr(ds, "VolumeLocalizationTechnique", "") or ""
+    ).strip()
+
+    return {
+        "sop_class": sop,
+        "rows": rows,
+        "columns": columns,
+        "localisation": localisation,
+        # The nucleus observed (``1H``, ``31P``, ...). BIDS has an entity for
+        # it on every ``mrs`` suffix, so it is worth carrying.
+        "nucleus": str(getattr(ds, "ResonantNucleus", "") or "").strip(),
+    }
+
+
 def read_pet_tags(ds) -> dict:
     """Extract the PET-relevant DICOM tags from an open dataset.
 
@@ -354,6 +456,10 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         # cannot be inferred from the series description alone.
         "dicom_modality": str(getattr(ds, "Modality", "")).strip().upper(),
         "pet": read_pet_tags(ds),
+        # Empty for everything that is not spectroscopy. ``cli/scan`` reads it
+        # to give the series the ``mrs`` datatype without needing dcm2niix,
+        # which crashes on these files.
+        "mrs": read_mrs_tags(ds),
         "demo": {
             "GivenName": given,
             "FamilyName": family_name,
@@ -407,6 +513,9 @@ def scan_dicoms_long(
     # constant within a series, so the first non-empty file wins.
     dicom_modalities: dict = defaultdict(lambda: defaultdict(dict))
     pet_tags: dict = defaultdict(lambda: defaultdict(dict))
+    # Per-series spectroscopy facts, empty for every other series. Same
+    # first-non-empty-file-wins rule: they are constant within a series.
+    mrs_tags: dict = defaultdict(lambda: defaultdict(dict))
     # study-level metadata (per series): subj_key -> folder -> (series,uid) -> study tuple
     study_uids: dict = defaultdict(lambda: defaultdict(dict))
     # all distinct study tuples seen for each subject (for session inference).
@@ -473,6 +582,8 @@ def scan_dicoms_long(
             dicom_modalities[subj_key][folder][key] = res["dicom_modality"]
         if key not in pet_tags[subj_key][folder] and res.get("pet"):
             pet_tags[subj_key][folder][key] = res["pet"]
+        if key not in mrs_tags[subj_key][folder] and res.get("mrs"):
+            mrs_tags[subj_key][folder][key] = res["mrs"]
         # Track every DICOM file path per UID for later per-series probe.
         uid_str = res["uid"]
         if uid_str:
@@ -606,6 +717,7 @@ def scan_dicoms_long(
                         (series, uid), ""
                     ),
                     "_pet_tags": pet_tags[subj_key][folder].get((series, uid), {}),
+                    "_mrs_tags": mrs_tags[subj_key][folder].get((series, uid), {}),
                     **demo[subj_key],
                 })
 

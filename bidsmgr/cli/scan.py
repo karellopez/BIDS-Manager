@@ -40,6 +40,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import pandas as pd
 
@@ -1112,6 +1113,9 @@ def _augment_dataframe(
     # derive the suggestion columns, then exclude the CT companion of a
     # PET/CT study (which raw BIDS cannot hold).
     _classify_pet_rows(df)
+    # Before the non-image cull, which is exactly what it saves these rows
+    # from: a spectroscopy series carries no Image Pixel module either.
+    _classify_mrs_rows(df)
     _fill_pet_suggestions(df)
     _flag_ct_companion_rows(df)
 
@@ -1347,6 +1351,156 @@ def _classify_pet_rows(df: pd.DataFrame) -> None:
         df.at[idx, "bids_guess_confidence"] = 0.80
         if "modality" in df.columns:
             df.at[idx, "modality"] = "pet"
+
+
+def _mrs_may_overrule(classifier: str) -> bool:
+    """May the header's spectroscopy verdict replace this classifier's?
+
+    Unlike :func:`_classify_pet_rows`, which only fills blanks, this one has
+    to be able to overrule the regex layer, and the reason is in the data: a
+    Siemens spectroscopy series called
+
+        task-xx_rec-tra_run-sedley_voi-RAC_acq-hermes_svs
+
+    matched ``task-`` and was filed as ``func``/``bold``, its reference scan as
+    ``func``/``sbref``. Both then failed the pixel-data test and were dropped
+    from the conversion as non-image series. A name pattern guessing from
+    ``task-`` is weaker evidence than a SOP class that says MR Spectroscopy,
+    so the header wins.
+
+    It does NOT overrule dcm2niix. Where BidsGuess survives the file it is the
+    better classifier, reads the same header and more, and is the layer this
+    one exists to stand in for.
+    """
+    name = classifier.strip().lower()
+    if not name:
+        return True
+    return name.startswith("sequence_dict")
+
+
+def _classify_mrs_rows(df: pd.DataFrame) -> None:
+    """Classify MR spectroscopy from its DICOM header, not from a conversion.
+
+    ``mrs`` only ever arrived via dcm2niix's BidsGuess, and on Windows
+    dcm2niix does not survive spectroscopy: it dies with a stack overflow
+    (``0xC00000FD``) and an EMPTY stderr. Measured on two unrelated samples,
+    one Siemens CSA non-image and one stored under the standard MR
+    Spectroscopy SOP class; in both, ordinary images in the same study
+    converted fine. The spectroscopy series then reached the inventory with no
+    datatype at all, and a series with no datatype is also the one
+    :func:`_is_spectroscopy_row` cannot rescue from the non-image cull. That
+    is what "MRS is not detected" was.
+
+    The header answers the question on its own and cannot crash, so this does
+    not wait for a converter. Same contract as :func:`_classify_pet_rows`: it
+    fills in only where nothing else has, at a confidence just under
+    BidsGuess's 0.85, so a real BidsGuess result still wins where dcm2niix
+    does survive (it does on macOS).
+
+    The suffix comes from the standard rather than from the protocol name:
+
+    * ``VolumeLocalizationTechnique`` explicitly ``NONE`` -> ``unloc``;
+    * a grid of voxels (``Rows`` x ``Columns`` > 1) -> ``mrsi``;
+    * otherwise ``svs``.
+
+    Note which way the default falls. An ABSENT localisation tag is not a
+    claim that the acquisition was unlocalised — Siemens' CSA objects carry no
+    such tag at all, and the ones here are plainly voxel spectroscopy
+    (``voi-RAC`` in the protocol name). Reading absence as ``unloc`` would
+    assert something specific the header never said, so only an explicit
+    ``NONE`` earns it.
+
+    ``mrsref`` is deliberately never guessed. A water-reference scan is not
+    reliably distinguishable from the metabolite scan in the header — the two
+    samples here differ only by an ``_ave`` in the series description — and
+    silently labelling the wrong one reference is worse than leaving a
+    curation decision to the user.
+    """
+    if "_mrs_tags" not in df.columns:
+        return
+    for idx in df.index:
+        tags = df.at[idx, "_mrs_tags"]
+        if not isinstance(tags, dict) or not tags:
+            continue
+        if not _mrs_may_overrule(str(df.at[idx, "bids_guess_classifier"] or "")):
+            continue
+        voxels = int(tags.get("rows") or 0) * int(tags.get("columns") or 0)
+        localisation = str(tags.get("localisation") or "").strip().upper()
+        if localisation == "NONE":
+            suffix = "unloc"
+        elif voxels > 1:
+            suffix = "mrsi"
+        else:
+            suffix = "svs"
+        df.at[idx, "bids_guess_datatype"] = "mrs"
+        df.at[idx, "bids_guess_suffix"] = suffix
+        df.at[idx, "bids_guess_classifier"] = "dicom_spectroscopy"
+        df.at[idx, "bids_guess_confidence"] = 0.80
+        if "modality" in df.columns:
+            df.at[idx, "modality"] = "mrs"
+        _name_the_row(df, idx, suffix)
+
+
+def _name_the_row(df: pd.DataFrame, idx: object, suffix: str) -> None:
+    """Give a spectroscopy row the BIDS name the converter writes it to.
+
+    Setting only the ``bids_guess_*`` columns is not enough, and the gap is
+    silent: those columns are the CLASSIFIER's opinion, while ``datatype`` /
+    ``bids_name`` / ``bids_path`` are where the file actually goes, and the
+    converter reads the latter. A row classified ``mrs`` with no name reached
+    the inventory looking correct, showed the right datatype in the table, and
+    then converted to nowhere.
+
+    The name is built through :func:`_propose_basename`, the same call
+    :func:`_augment_dataframe` makes for every other row, rather than
+    assembled here. That is the point: entity order, the schema check and the
+    ``entities`` JSON that ``bidsmgr-rebuild`` reads all come out identical to
+    every other datatype, and a change to BIDS naming reaches spectroscopy
+    without anybody remembering this function exists.
+    """
+    participant = str(df.at[idx, "participant_id"] or "").replace("sub-", "")
+    session = str(df.at[idx, "session"] or "").replace("ses-", "")
+    datatype, basename, _issues, entities_used = _propose_basename(
+        participant,
+        session,
+        Classification(
+            row_id=uuid4(),
+            classifier="dicom_spectroscopy",
+            datatype="mrs",
+            suffix=suffix,
+            confidence=0.80,
+        ),
+    )
+    if not basename:
+        return
+    # NIfTI-MRS is a NIfTI, so the extension is the ordinary one.
+    df.at[idx, "datatype"] = datatype
+    df.at[idx, "bids_name"] = basename
+    df.at[idx, "bids_path"] = f"{datatype}/{basename}.nii.gz"
+    if entities_used:
+        df.at[idx, "entities"] = json.dumps(entities_used, sort_keys=True)
+
+    # Whatever the superseded verdict complained about is no longer true of
+    # this row. A spectroscopy series filed as ``func``/``sbref`` carried
+    # "Required entity 'task' missing" -- a fact about ``sbref``, which needs
+    # one, and not about ``svs``, which does not. Left in place it reads as an
+    # unfixable problem with a row that is now correct, and no later pass
+    # revisits it because nothing else knows the classification changed.
+    if "issues" in df.columns:
+        df.at[idx, "issues"] = " | ".join(
+            note for note in str(df.at[idx, "issues"] or "").split(" | ")
+            if note.strip() and _survives_reclassification(note)
+        )
+
+
+# Notes that describe the DATA rather than the verdict, and so remain true
+# when the verdict changes. Everything else is discarded on reclassification.
+_ROW_FACT_TOKENS = ("suspected_abort", "user-excluded", "existing subject")
+
+
+def _survives_reclassification(note: str) -> bool:
+    """Is this note about the data, or about the classification we replaced?"""
+    return any(token in note for token in _ROW_FACT_TOKENS)
 
 
 def _fill_pet_suggestions(df: pd.DataFrame) -> None:
