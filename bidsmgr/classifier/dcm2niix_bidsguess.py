@@ -27,6 +27,7 @@ from typing import Iterable, Optional, Sequence
 
 from .. import schema
 from ..inventory.types import InventoryRow
+from ..util.paths import long_path
 from .types import Classification
 
 log = logging.getLogger(__name__)
@@ -159,8 +160,22 @@ def _run_dcm2niix_sidecars(
     * ``-b o``  : sidecar only (no NIfTI written)
     * ``-ba n`` : do not anonymize the sidecar (keeps SeriesInstanceUID)
     * ``-z n``  : no compression (irrelevant for sidecar-only)
-    * ``-f %j`` : filename = SeriesInstanceUID (with ``_e<N>``, ``_ph`` suffixes
-                  for multi-echo / phase splits)
+    * ``-f %s`` : filename = SERIES NUMBER. **Not ``%j``.**
+
+    ``%j`` is the SeriesInstanceUID, which is ~59 characters of unbounded
+    identifier in a path component, and CROSS_PLATFORM_RULES 1.2 forbids
+    exactly that: Windows caps a path at 260 characters and dcm2niix does not
+    fail politely when handed a longer one. It dies with a stack buffer
+    overrun and an EMPTY stderr, so every layer above reads "no sidecars" as
+    "nothing to say" and the scan reports success having classified nothing.
+    ``converter/backends/dcm2niix_direct`` already says "do not use ``%j``
+    here" for the same reason; this call site was missed.
+
+    The series number is short, and it is unique per series within a folder.
+    It does not need to be unique beyond that: the join back to an inventory
+    row reads ``SeriesInstanceUID`` from INSIDE the JSON, never from the
+    filename. Where two pooled studies do collide, dcm2niix's default
+    ``-w 2`` adds a suffix rather than overwriting, so no sidecar is lost.
     """
 
     binary = str(dcm2niix_bin or find_dcm2niix())
@@ -169,9 +184,9 @@ def _run_dcm2niix_sidecars(
         "-b", "o",
         "-ba", "n",
         "-z", "n",
-        "-o", str(output_dir),
-        "-f", "%j",
-        str(dicom_dir),
+        "-o", str(long_path(output_dir)),
+        "-f", "%s",
+        str(long_path(dicom_dir)),
     ]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
@@ -251,6 +266,24 @@ def _validate_classification(datatype: str, suffix: str, entities: dict[str, str
     return all(ent in allowed or ent == "subject" for ent in entities)
 
 
+def _exit_hint(returncode: int) -> str:
+    """A human-readable note for an exit code worth recognising.
+
+    ``0xC0000409`` is the Windows stack buffer overrun dcm2niix dies with
+    when handed a path longer than ``MAX_PATH``. It writes nothing to stderr
+    on the way out, so without naming it here the log says only that a
+    number was not zero.
+    """
+    codes = {
+        3221226505: " (0xC0000409, a Windows stack buffer overrun: this is "
+                    "what dcm2niix does when a path exceeds MAX_PATH)",
+        3221225477: " (0xC0000005, an access violation)",
+        -11: " (SIGSEGV)",
+        -6: " (SIGABRT)",
+    }
+    return codes.get(returncode, "")
+
+
 def classify_dicom_folder(
     dicom_dir: Path,
     rows: Iterable[InventoryRow],
@@ -296,12 +329,27 @@ def classify_dicom_folder(
 
     try:
         proc = _run_dcm2niix_sidecars(dicom_dir, out_dir, dcm2niix_bin=dcm2niix_bin)
-        if proc.returncode != 0:
-            log.warning(
-                "dcm2niix returncode=%s for %s; stderr=%s",
-                proc.returncode, dicom_dir, proc.stderr[-500:],
-            )
         sidecars = _collect_sidecars(out_dir)
+        # SAY SO when this produces nothing. The whole classifier chain reads
+        # an empty result as "this classifier has no opinion", so a dcm2niix
+        # that died leaves a scan that reports success with every MRI row
+        # unclassified, and the user sees a feature that stopped working with
+        # no error anywhere. That is the shape of every Windows defect in
+        # CROSS_PLATFORM_RULES, and it is the reason this branch is loud.
+        if rows and not sidecars:
+            log.warning(
+                "dcm2niix produced NO sidecars for %s, so none of its %d "
+                "series could be classified. returncode=%s%s stderr=%r",
+                dicom_dir, len(rows), proc.returncode,
+                _exit_hint(proc.returncode),
+                (proc.stderr or "")[-500:] or "(empty)",
+            )
+        elif proc.returncode != 0:
+            log.warning(
+                "dcm2niix returncode=%s for %s%s; stderr=%s",
+                proc.returncode, dicom_dir, _exit_hint(proc.returncode),
+                (proc.stderr or "")[-500:],
+            )
     finally:
         if use_temp:
             workdir_ctx.cleanup()  # type: ignore[name-defined]
