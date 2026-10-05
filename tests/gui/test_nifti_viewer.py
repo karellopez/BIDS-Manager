@@ -473,6 +473,81 @@ def test_tri_view_click_propagates_crosshair_to_all_panels(
         assert 0 <= after[axis] < dim
 
 
+def _anisotropic_volume(root: Path) -> Path:
+    """A thick-slice scan: 1 x 1 mm in plane, 5 mm between slices."""
+    anat = root / "sub-01" / "anat"
+    anat.mkdir(parents=True)
+    path = anat / "sub-01_FLAIR.nii.gz"
+    arr = np.arange(40 * 40 * 8, dtype=np.float32).reshape(40, 40, 8)
+    nib.save(nib.Nifti1Image(arr, affine=np.diag([1.0, 1.0, 5.0, 1.0])), str(path))
+    return path
+
+
+def _tri_view_with(qapp, qtbot, pane, path: Path, root: Path) -> None:
+    pane.show()
+    pane.resize(1200, 500)
+    qapp.processEvents()
+    _load_and_wait(pane, path, root, qtbot=qtbot)
+    pane._tri_btn.click()
+    qapp.processEvents()
+
+
+def test_anisotropic_voxels_are_drawn_to_scale(
+    qapp, qtbot, tmp_path: Path, isolated_settings,
+) -> None:
+    """A slice is fitted by its size in millimetres, not in voxels.
+
+    Fitting by voxel count drew a 5 mm slice spacing as if it were 1 mm, so
+    the coronal and sagittal views of a thick-slice scan came out five times
+    too flat. Every view must show the same number of millimetres per screen
+    pixel across and down.
+    """
+    pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
+    _tri_view_with(qapp, qtbot, pane, _anisotropic_volume(tmp_path), tmp_path)
+
+    for axis in (_AXIS_SAGITTAL, _AXIS_CORONAL, _AXIS_AXIAL):
+        sx, sy = pane._img_scale[axis]
+        dh, dv = pane._plane_spacing(axis)
+        mm_per_px_across, mm_per_px_down = dh / sx, dv / sy
+        assert mm_per_px_down == pytest.approx(mm_per_px_across, rel=0.03), axis
+
+    # The through-plane voxels really are drawn five times taller.
+    sx, sy = pane._img_scale[_AXIS_CORONAL]
+    assert sy / sx == pytest.approx(5.0, rel=0.03)
+
+
+def test_click_on_a_thick_slice_lands_on_the_voxel_under_the_cursor(
+    qapp, qtbot, tmp_path: Path, isolated_settings,
+) -> None:
+    """With unequal horizontal and vertical scales, a click must still map
+    back to the voxel drawn beneath it."""
+    from PyQt6.QtCore import QPointF, Qt as QtMod
+    from PyQt6.QtGui import QMouseEvent
+
+    pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
+    _tri_view_with(qapp, qtbot, pane, _anisotropic_volume(tmp_path), tmp_path)
+
+    coronal = pane._tri_labels[_AXIS_CORONAL]
+    pix = coronal.pixmap()
+    off_x = (coronal.width() - pix.width()) / 2
+    off_y = (coronal.height() - pix.height()) / 2
+    sx, sy = pane._img_scale[_AXIS_CORONAL]
+
+    want = [30, pane._cross_voxel[_AXIS_CORONAL], 6]
+    x, y = pane._voxel_to_arr(want, _AXIS_CORONAL)
+    point = QPointF(off_x + (x + 0.5) * sx, off_y + (y + 0.5) * sy)
+    ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress, point, point,
+        QtMod.MouseButton.LeftButton, QtMod.MouseButton.LeftButton,
+        QtMod.KeyboardModifier.NoModifier,
+    )
+    pane._on_image_clicked(ev, _AXIS_CORONAL, coronal)
+    qapp.processEvents()
+    assert list(pane._cross_voxel) == want
+
+
 def test_drag_moves_crosshair_continuously(
     qapp, qtbot, bids_root_with_nifti: Path, isolated_settings,
 ) -> None:

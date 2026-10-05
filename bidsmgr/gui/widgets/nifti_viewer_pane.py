@@ -1900,6 +1900,14 @@ class NiftiViewerPane(QWidget):
         except Exception:  # pragma: no cover - header always present in practice
             return (1.0, 1.0, 1.0)
 
+    def _plane_spacing(self, axis: int) -> tuple[float, float]:
+        """Voxel size (mm) along the screen-horizontal and screen-vertical of
+        the slice drawn for ``axis``. A 2-D image has no third zoom, so the
+        spacing is padded to three axes first."""
+        spacing = (tuple(self._volume_spacing()) + (1.0, 1.0, 1.0))[:3]
+        h_ax, v_ax = _PLANE_HV[axis]
+        return spacing[h_ax], spacing[v_ax]
+
     def _push_volume_to_3d(self) -> None:
         """Send the current (4-D-aware) 3-D volume to the shared GL render."""
         if self._data is None or self._gl is None:
@@ -2480,9 +2488,19 @@ class NiftiViewerPane(QWidget):
         if target.width() < 2 or target.height() < 2:
             scaled = pix
         else:
+            # Fit the slice by its size in MILLIMETRES, not in voxels. A
+            # 1 x 1 x 5 mm scan has five times fewer voxels top to bottom
+            # than its coronal slice is tall, so fitting by voxel count drew
+            # the head five times too flat (and disagreed with the 3-D view,
+            # which already uses the spacing). Horizontal and vertical scale
+            # differ from here on; ``_img_scale`` keeps both for click mapping.
+            dh, dv = self._plane_spacing(axis)
+            mm_w, mm_h = w * dh, h * dv
+            px_per_mm = min(target.width() / mm_w, target.height() / mm_h)
             scaled = pix.scaled(
-                target,
-                Qt.AspectRatioMode.KeepAspectRatio,
+                max(1, round(mm_w * px_per_mm)),
+                max(1, round(mm_h * px_per_mm)),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
         if w > 0 and h > 0:
@@ -2498,8 +2516,11 @@ class NiftiViewerPane(QWidget):
         if not scaled.isNull():
             x_rot, y_rot = self._voxel_to_arr(self._cross_voxel, axis)
             sx, sy = self._img_scale[axis]
-            x_s = int(x_rot * sx)
-            y_s = int(y_rot * sy)
+            # Through the CENTRE of the voxel. On thin voxels the corner was
+            # close enough; a 5 mm voxel is now drawn many pixels tall, and a
+            # crosshair on its top edge would sit beside the voxel it names.
+            x_s = int((x_rot + 0.5) * sx)
+            y_s = int((y_rot + 0.5) * sy)
             thickness = max(1, self._crosshair_thickness)
             sq = max(4, int(min(scaled.width(), scaled.height()) * 0.025))
             half = sq // 2
