@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QRect, QSize, Qt
+from PyQt6.QtCore import QEvent, QRect, QSize, Qt
 from PyQt6.QtWidgets import QLayout, QSizePolicy, QVBoxLayout, QWidget
 
 
@@ -158,22 +158,49 @@ class FlowBar(QWidget):
         return QSize(width + left + right, height + top + bottom)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        """The WIDEST CHILD, not the sum. This is the point of the class."""
+        """The WIDEST CHILD, not the sum. This is the point of the class.
+
+        The height is what the rows need at the CURRENT width. A splitter
+        does not ask ``heightForWidth``; told one row, it squeezed a bar that
+        had wrapped onto three, and the rows below the first were painted
+        over the plot under them."""
         left, top, right, bottom = self._margins
         size = QSize(0, 0)
         for child in self._visible():
             size = size.expandedTo(child.minimumSizeHint())
-        return QSize(size.width() + left + right, size.height() + top + bottom)
+        height = size.height() + top + bottom
+        if self.width() > 0:
+            height = max(height, self._arrange(self.width(), apply=False))
+        return QSize(size.width() + left + right, height)
 
     # -- the wrap ----------------------------------------------------------
 
+    _rows_height = -1
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._arrange(self.width(), apply=True)
+        height = self._arrange(self.width(), apply=True)
+        if height != self._rows_height:
+            # More (or fewer) rows: the parents must ask again how tall the
+            # bar has to be. Only on a change, so a resize cannot loop.
+            self._rows_height = height
+            self.updateGeometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._arrange(self.width(), apply=True)
+
+    def event(self, event) -> bool:  # noqa: D401
+        # A child that changed what it needs (new text, shown, hidden) asks
+        # its parent to lay it out again. Ignored, a button whose label grew
+        # was cut off, and a checkbox shown later was painted at the origin,
+        # over the first control of the row.
+        if event.type() == QEvent.Type.LayoutRequest:
+            height = self._arrange(self.width(), apply=True)
+            if height != self._rows_height:
+                self._rows_height = height
+            self.updateGeometry()
+        return super().event(event)
 
     def _arrange(self, width: int, *, apply: bool) -> int:
         """Place the children across ``width``; return the height they need."""

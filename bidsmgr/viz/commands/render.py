@@ -141,15 +141,23 @@ def render_use_colormap(store: "SceneStore", value: Optional[bool] = None) -> se
 
 @command("render.reset_params", "Reset this effect's parameters",
          category="3-D", undoable=True)
-def render_reset_params(store: "SceneStore") -> set[str]:
-    """Reset the current effect's own parameters to its baseline. The clip
-    plane, the camera and every other effect are left alone."""
-    eff = store.scene.render.effect
-    overrides = store.scene.render.params.get(eff) or {}
-    keep = {k: v for k, v in overrides.items() if k not in render3d.EFFECT_PARAMS[eff]}
-    if keep == overrides:
+def render_reset_params(store: "SceneStore", keys: Optional[list[str]] = None) -> set[str]:
+    """Reset the current effect's own parameters to its baseline. With
+    ``keys`` (one section of the controls), those keys only, the ones every
+    effect shares (see-through, overlays) included; without, the effect's own
+    and never the shared ones. The clip plane, the camera and every other
+    effect are left alone."""
+    rs = store.scene.render
+    eff = rs.effect
+    wanted = set(render3d.EFFECT_PARAMS[eff]) if keys is None else set(keys)
+    overrides = rs.params.get(eff) or {}
+    keep = {k: v for k, v in overrides.items() if k not in wanted}
+    shared = (dict(rs.shared) if keys is None
+              else {k: v for k, v in rs.shared.items() if k not in wanted})
+    if keep == overrides and shared == rs.shared:
         return set()
-    store.scene.render.params[eff] = keep
+    rs.params[eff] = keep
+    rs.shared = shared
     return {"render.params"}
 
 

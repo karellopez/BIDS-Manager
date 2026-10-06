@@ -74,7 +74,7 @@ def test_controls_carry_the_model_s_range_unit_and_help(qtbot) -> None:
     memory = page.control("volume.memory_mb")
     assert memory.specialValueText() == "Automatic"
     mode = page.control("volume.mode")
-    assert mode.itemText(mode.findData("combo")) == "Three planes and 3-D"
+    assert mode.itemText(mode.findData("combo")) == "Planes + 3-D"
 
 
 def test_load_and_apply_round_trip(qtbot) -> None:

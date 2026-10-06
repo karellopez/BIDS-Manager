@@ -27,11 +27,10 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 import numpy as np
-from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap, QPolygonF
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QIcon, QImage, QPainter, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel, QListWidget,
+    QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -68,24 +67,60 @@ def swatch_icon(name: str) -> QIcon:
 
 
 class _Header(QWidget):
-    """A section's title bar: caret and title, painted; click to fold."""
+    """A section's title bar: caret and title, painted; click to fold. A
+    section with defaults has a restore button at the right."""
 
     clicked = pyqtSignal()
+    #: The restore button was clicked.
+    reset_clicked = pyqtSignal()
+    RESET_PX = 22
 
     def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent)
         self.title = title
         self.open = True
+        #: Whether the restore button is shown.
+        self.resettable = False
         self.setFixedHeight(28)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setMouseTracking(True)
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(200, 28)
 
+    def reset_rect(self) -> QRectF:
+        w = self.RESET_PX
+        return QRectF(self.width() - w - 6, (self.height() - w) / 2.0, w, w)
+
+    def _on_reset(self, pos) -> bool:
+        return self.resettable and self.reset_rect().contains(QPointF(pos))
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            if self._on_reset(event.position()):
+                self.reset_clicked.emit()
+            else:
+                self.clicked.emit()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def event(self, event) -> bool:  # noqa: D401
+        if event.type() == QEvent.Type.ToolTip:
+            from PyQt6.QtWidgets import QToolTip
+
+            if self._on_reset(QPointF(event.pos())):
+                QToolTip.showText(event.globalPos(),
+                                  f"Restore the defaults of {self.title.lower()} (undoable)",
+                                  self)
+            else:
+                QToolTip.showText(event.globalPos(),
+                                  "Click to fold or unfold" if self.open else
+                                  "Click to unfold", self)
+            return True
+        return super().event(event)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         from ..bridge import ThemeHub
@@ -111,8 +146,21 @@ class _Header(QWidget):
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
         p.setFont(font)
         p.setPen(QColor(theme.text) if self.open else dim)
-        p.drawText(QRectF(26, 0, self.width() - 30, self.height()),
+        right = self.RESET_PX + 12 if self.resettable else 4
+        p.drawText(QRectF(26, 0, self.width() - 26 - right, self.height()),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.title)
+        if self.resettable:
+            from ... import icons
+
+            r = self.reset_rect()
+            hover = self.underMouse() and r.contains(QPointF(self.mapFromGlobal(QCursor.pos())))
+            if hover:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(theme.token("surface2", "#161b22")))
+                p.drawRoundedRect(r, 5.0, 5.0)
+            colour = theme.text if hover else theme.dim
+            pix = icons.icon("restore", colour).pixmap(16, 16)
+            p.drawPixmap(int(r.center().x() - 8), int(r.center().y() - 8), pix)
         p.end()
 
 
@@ -133,6 +181,8 @@ class Section(QWidget):
         v.setSpacing(0)
         self.header = _Header(title)
         self.header.clicked.connect(self.toggle)
+        self.header.reset_clicked.connect(self.restore_defaults)
+        self.header.resettable = type(self).restore_defaults is not Section.restore_defaults
         v.addWidget(self.header)
         self.body = QWidget()
         self.body.setObjectName("viz-section-body")
@@ -185,6 +235,11 @@ class Section(QWidget):
     def rows(self) -> list[str]:
         return list(self._rows)
 
+    # -- defaults --------------------------------------------------------
+    def restore_defaults(self) -> None:
+        """Put this section's settings back as installed (a section with
+        none to restore does not override this, and shows no button)."""
+
     # -- folding ---------------------------------------------------------
     def is_open(self) -> bool:
         return self.header.open
@@ -236,7 +291,6 @@ def _combo() -> QComboBox:
     gives it, its popup showing the whole text. By default a combo is as
     wide as its longest item, and one long choice cut every control off."""
     box = QComboBox()
-    box.setObjectName("ent-input")
     box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
     box.setMinimumContentsLength(8)
     return box
@@ -361,6 +415,23 @@ class LayerPropsSection(Section):
             widget = self._make(prop)
             self._controls[prop.key] = widget
             self.add_row(prop.key, None if prop.kind == "bool" else prop.title, widget, prop.help)
+
+    def restore_defaults(self) -> None:
+        """The selected layer's look as it opened: the user's defaults for
+        the base image, the look its content called for for an overlay."""
+        layer = self.inspector.selected_layer()
+        if layer is None:
+            return
+        default = self.inspector.presenter.default_look(layer)
+        if self.key == "display":
+            # The look, not the overlay options (they have their own section).
+            default["outline_px"] = layer.display.outline_px
+            self.ctx.run("layer.reset", layer=layer.id, display=default)
+        else:
+            params = {"outline_px": float(default.get("outline_px", 0.0))}
+            if self.inspector.is_overlay(layer.id):
+                params["in_3d"] = True
+            self.ctx.run("layer.set", layer=layer.id, **params)
 
     def _set(self, key: str, value) -> None:
         self.ctx.run("layer.set", layer=self.inspector.selected_id(), **{key: value})
@@ -501,7 +572,7 @@ class QualitySection(Section):
     FIXED = {"tsnr": (0.0, 100.0)}
 
     def __init__(self, inspector) -> None:
-        super().__init__(inspector, "quality", "Quality map")
+        super().__init__(inspector, "quality", "QC map")
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
         self.summary.setObjectName("sidecar-footer-summary")
@@ -516,6 +587,9 @@ class QualitySection(Section):
         self.add_row("scale", "Scale", self.scale,
                      "Relative: the colours use this run's own range. Fixed: the same "
                      "colour means the same value in every run.")
+
+    def restore_defaults(self) -> None:
+        self._on_scale("run")
 
     def _notes(self) -> dict:
         layer = self.inspector.selected_layer()
@@ -558,12 +632,12 @@ class ViewSection(Section):
              "view.colorbar", "view.crosshair")
 
     def __init__(self, inspector) -> None:
-        super().__init__(inspector, "view", "View")
+        super().__init__(inspector, "view", "Slice views")
         self._boxes: dict[str, QCheckBox] = {}
         for action_id in self.FLAGS:
             d = A.ACTION_BY_ID[action_id]
             box = self.check(d.short or d.title, lambda _v, a=action_id: self._toggle(a))
-            box.setToolTip(d.title)
+            box.setToolTip(f"{d.title}. {d.help}" if d.help else d.title)
             self._boxes[action_id] = box
             self.add_row(action_id, None, box)
         from ..settings_pages import ColourButton
@@ -581,6 +655,13 @@ class ViewSection(Section):
         self.add_row("cross.gap", "Gap at the centre", self.cross_gap,
                      "Pixels left empty around the centre, so the voxel under "
                      "the crosshair stays visible.")
+
+    def restore_defaults(self) -> None:
+        """Display conventions and the crosshair's look as installed."""
+        from ....viz.settings import CrosshairSettings
+
+        self.ctx.run("display.reset")
+        self.ctx.settings_hub.update(lambda s: setattr(s, "crosshair", CrosshairSettings()))
 
     def _toggle(self, action_id: str) -> None:
         run = self.ctx.run_action
@@ -612,39 +693,45 @@ class LayoutSection(Section):
             (("auto", "Automatic"), ("row", "In a row"), ("column", "In a column"),
              ("grid", "In a grid")),
             lambda v: self.ctx.run("layout.set", arrangement=v))
-        self.add_row("arrangement", "Views", self.arrangement,
-                     "Automatic picks whichever of row, column or grid makes the "
-                     "images largest for the window's shape.")
+        self.add_row("arrangement", "Arrangement", self.arrangement,
+                     "How the views of the multi-planar layouts are placed. Automatic "
+                     "picks whichever of row, column or grid makes the images largest "
+                     "for the viewer's shape.")
         planes = QWidget()
         row = QHBoxLayout(planes)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         self._plane_boxes: dict[str, QCheckBox] = {}
-        for plane, text in (("sagittal", "Sag"), ("coronal", "Cor"), ("axial", "Ax")):
+        for plane, text in (("sagittal", "Sag."), ("coronal", "Cor."), ("axial", "Ax.")):
             box = self.check(text, lambda _v: self._planes())
-            box.setToolTip(f"Show the {plane} plane in the three-plane layouts")
+            box.setToolTip(f"Show the {plane} plane in the multi-planar layouts")
             self._plane_boxes[plane] = box
             row.addWidget(box)
         row.addStretch(1)
-        self.add_row("planes", "Planes", planes)
+        self.add_row("planes", "Planes shown", planes,
+                     "Which planes the multi-planar layouts show (at least one).")
         self.hero = self.combo(
             (("", "The chosen plane"), ("sagittal", "Sagittal"), ("coronal", "Coronal"),
              ("axial", "Axial"), ("render", "3-D")),
             lambda v: self.ctx.run("layout.set", hero=v))
         self.add_row("hero", "Large view", self.hero,
-                     "In the hero layout, the view drawn large.")
+                     "In the large-view layout, which view is drawn large.")
         self.hero_size = self.number(30, 85, step=1, unit="%", default=62,
                                      on_change=lambda v: self.ctx.run(
                                          "layout.set", hero_fraction=v / 100.0))
-        self.add_row("hero_size", "Its share", self.hero_size,
-                     "Also: drag the gap beside the large view.")
+        self.add_row("hero_size", "Large view size", self.hero_size,
+                     "Its share of the viewer. You can also drag the gap beside it.")
         self.hero_side = self.combo((("left", "On the left"), ("top", "At the top")),
                                     lambda v: self.ctx.run("layout.set", hero_side=v))
-        self.add_row("hero_side", "Placed", self.hero_side)
+        self.add_row("hero_side", "Large view position", self.hero_side)
         self.graph_side = self.combo((("bottom", "Below the views"),
                                       ("right", "Right of the views")),
                                      lambda v: self.ctx.run("layout.set", graph=v))
-        self.add_row("graph", "Time-course graph", self.graph_side)
+        self.add_row("graph", "Time course position", self.graph_side,
+                     "Where the time-course graph of a 4-D image goes.")
+
+    def restore_defaults(self) -> None:
+        self.ctx.run("layout.reset")
 
     def _planes(self) -> None:
         planes = [p for p, box in self._plane_boxes.items() if box.isChecked()]
@@ -679,25 +766,139 @@ class LayoutSection(Section):
 # ---------------------------------------------------------------------------
 
 
+class MosaicSection(Section):
+    """A mosaic as a figure is described: one plane, a grid of slices across
+    the head, labels, a reference slice. The grammar line it builds is shown
+    and can be written by hand for its extras (rows of different planes,
+    renders)."""
+
+    def __init__(self, inspector) -> None:
+        super().__init__(inspector, "mosaic", "Mosaic", open_=False)
+        run = self._set
+        self.plane = self.combo((("axial", "Axial"), ("coronal", "Coronal"),
+                                 ("sagittal", "Sagittal")), lambda v: run(plane=v))
+        self.add_row("plane", "Plane", self.plane, "The plane every tile of the grid cuts.")
+        self.rows = self.number(1, 10, step=1, default=3, on_change=lambda v: run(rows=int(v)))
+        self.add_row("rows", "Rows", self.rows)
+        self.cols = self.number(1, 16, step=1, default=6, on_change=lambda v: run(cols=int(v)))
+        self.add_row("cols", "Columns", self.cols)
+        self.start = self.number(-200, 200, step=0.5, unit="mm",
+                                 on_change=lambda v: run(start=float(v)))
+        self.add_row("start", "From", self.start,
+                     "The first slice's side of the range, in mm along the plane's axis "
+                     "(scanner coordinates). The slices are spread evenly across it.")
+        self.end = self.number(-200, 200, step=0.5, unit="mm",
+                               on_change=lambda v: run(end=float(v)))
+        self.add_row("end", "To", self.end)
+        fit = QPushButton("Fit to the head")
+        fit.setObjectName("tb-btn")
+        fit.setToolTip("Spread the slices across the head found in the image (for an axial "
+                       "grid of a head with its neck, the top 140 mm: the brain).")
+        fit.clicked.connect(lambda: self.ctx.run("mosaic.set", fit=True))
+        self.add_row("fit", None, fit, span=True)
+        self.crop = self.check("Crop the tiles to the head", lambda v: run(crop=v))
+        self.add_row("crop", None, self.crop,
+                     "Leave out the empty field of view around the head, the same crop for "
+                     "every tile so they stay alike.")
+        self.labels = self.check("Slice positions under the tiles", lambda v: run(labels=v))
+        self.add_row("labels", None, self.labels)
+        self.reference = self.check("Reference slice", lambda v: run(reference=v))
+        self.add_row("reference", None, self.reference,
+                     "A perpendicular slice before the grid with a line where every tile "
+                     "cuts, so a reader sees where the slices are.")
+        self.overlap = self.number(0.0, 0.5, step=0.05, default=0.0,
+                                   on_change=lambda v: run(overlap=float(v)))
+        self.add_row("overlap", "Overlap", self.overlap,
+                     "Neighbouring tiles overlap by this fraction of their width: a "
+                     "compact figure.")
+        self.line = QLineEdit()
+        self.line.setToolTip(
+            "The mosaic as a line (NiiVue's grammar), to write by hand for what the "
+            "builder does not do: A, C, S choose the plane; numbers are positions in mm; "
+            "';' starts a row; X draws where other tiles cut; L- hides the labels; H 0.3 "
+            "overlaps tiles. Written by hand, the builder leaves it alone until a "
+            "control above is used.")
+        self.line.editingFinished.connect(
+            lambda: self.ctx.run("view.mosaic_text", text=self.line.text()))
+        self.add_row("line", "Line", self.line)
+        buttons = QWidget()
+        row = QHBoxLayout(buttons)
+        row.setContentsMargins(0, 2, 0, 0)
+        row.setSpacing(4)
+        self.show_button = QPushButton("Show the mosaic")
+        self.show_button.setObjectName("tb-btn")
+        self.show_button.clicked.connect(lambda: self.ctx.run("view.mode", mode="mosaic"))
+        row.addWidget(self.show_button)
+        save = QPushButton("Save the figure...")
+        save.setObjectName("tb-btn-primary")
+        save.setToolTip("The mosaic as a PNG, at two to four times the screen's resolution "
+                        "for print, on black or transparent")
+        save.clicked.connect(lambda: self.inspector.presenter.save_mosaic_figure())
+        row.addWidget(save)
+        row.addStretch(1)
+        self.add_row("buttons", None, buttons, span=True)
+
+    def _set(self, **params) -> None:
+        try:
+            self.ctx.run("mosaic.set", **params)
+        except ValueError as exc:
+            self.ctx.status.emit(str(exc))
+
+    def restore_defaults(self) -> None:
+        from ....viz.scene import MosaicBuild
+
+        d = MosaicBuild()
+        self.ctx.run("mosaic.set", plane=d.plane, rows=d.rows, cols=d.cols, labels=d.labels,
+                     reference=d.reference, overlap=d.overlap, crop=d.crop, fit=True)
+
+    def sync(self) -> None:
+        from ....viz.commands.volume import mosaic_extent
+
+        b = self.ctx.scene.mosaic_build
+        _set_combo(self.plane, b.plane)
+        self.rows.set_value(b.rows)
+        self.cols.set_value(b.cols)
+        _set_check(self.labels, b.labels)
+        _set_check(self.crop, b.crop)
+        _set_check(self.reference, b.reference)
+        self.overlap.set_value(b.overlap)
+        fit = mosaic_extent(self.ctx.store, b.plane)
+        if fit is not None:
+            pad = max(20.0, 0.3 * (fit[1] - fit[0]))
+            lo, hi = fit[0] - pad, fit[1] + pad
+            for ctl in (self.start, self.end):
+                ctl.set_range(round(lo, 1), round(hi, 1))
+        self.start.set_value(b.start if b.start is not None else (fit[0] if fit else 0.0))
+        self.end.set_value(b.end if b.end is not None else (fit[1] if fit else 0.0))
+        if self.line.text() != self.ctx.scene.mosaic and not self.line.hasFocus():
+            self.line.setText(self.ctx.scene.mosaic)
+        self.show_button.setVisible(self.ctx.scene.mode != "mosaic")
+
+
 class RenderSection(Section):
     """The 3-D parameters of one purpose group."""
 
     def __init__(self, inspector, group: str) -> None:
         super().__init__(inspector, f"3d.{group}", render3d.PARAM_GROUPS[group],
-                         open_=group in ("look", "overlays"))
+                         open_=group in ("look", "transfer", "overlays"))
         self.group = group
         self.params = [p for p in render3d.PARAMS if p.group == group]
         self._controls: dict[str, QWidget] = {}
         if group == "look":
             self.effect = self.combo([(e, e) for e in render3d.EFFECTS],
                                      lambda v: self.ctx.run("render.effect", effect=v))
-            self.add_row("effect", "Effect", self.effect)
+            self.add_row("effect", "Rendering effect", self.effect,
+                         "How the volume is turned into a picture: shaded surfaces "
+                         "(Standard, Matte, Realistic, Topography), translucent shells "
+                         "(Glass, Edges, Shell), a maximum intensity projection (MIP), an "
+                         "X-ray, or opacity peeling. Each keeps its own parameters.")
             self.use_colormap = self.check(
-                "Colour from the 2-D colour map",
+                "Use the 2-D colour map",
                 lambda v: self.ctx.run("render.use_colormap", value=v))
             self.add_row("use_colormap", None, self.use_colormap,
-                         "Colour the render with the image's colour map and window, as "
-                         "the slices are; the cut face is then the slice itself.")
+                         "Colour the render with the image's colour map, window and gamma, "
+                         "as the slices are coloured; the cut surface is then the slice "
+                         "itself. Off: the effect's own colouring.")
         for param in self.params:
             self._controls[param.key] = self._make(param)
             self.add_row(param.key, None if param.kind == "check" else param.label,
@@ -720,6 +921,18 @@ class RenderSection(Section):
                 row.addWidget(b)
             row.addStretch(1)
             self.add_row("reset", None, buttons, span=True)
+
+    def restore_defaults(self) -> None:
+        """This group's parameters back to the effect's own (the appearance
+        group also puts the effect and the colour source back)."""
+        from ....viz.scene import RenderState
+
+        with self.ctx.store.gesture():
+            if self.group == "look":
+                fresh = RenderState()
+                self.ctx.run("render.effect", effect=fresh.effect)
+                self.ctx.run("render.use_colormap", value=fresh.use_colormap)
+            self.ctx.run("render.reset_params", keys=[p.key for p in self.params])
 
     def _make(self, param: render3d.Param) -> QWidget:
         key = param.key
@@ -773,9 +986,9 @@ class RenderSection(Section):
 
 class ClipSection(Section):
     def __init__(self, inspector) -> None:
-        super().__init__(inspector, "3d.clip", "Clipping", open_=False)
+        super().__init__(inspector, "3d.clip", "3-D: clip planes", open_=False)
         self.preset = self.combo(CLIP_PRESETS, lambda v: self.ctx.run("clip.preset", preset=v))
-        self.add_row("preset", "Cut", self.preset,
+        self.add_row("preset", "Preset", self.preset,
                      "Replace the clip planes with an arrangement. At the crosshair, "
                      "the cut faces are the slices the 2-D views show.")
         self.at_cursor = self.check("Through the crosshair",
@@ -783,30 +996,41 @@ class ClipSection(Section):
         self.at_cursor.setToolTip("Every plane passes through the crosshair, keeping its "
                                   "angle, and follows it.")
         self.add_row("at_cursor", None, self.at_cursor)
-        self.cut_away = self.check("Cut out where all planes meet",
+        self.cut_away = self.check("Remove only where all planes cut",
                                    lambda v: self.ctx.run("clip.mode", cut_away=v))
         self.cut_away.setToolTip("On: remove only what every plane cuts (a wedge, a "
                                  "corner). Off: remove what any plane cuts (a crop).")
         self.add_row("cut_away", None, self.cut_away)
         self.choice = self.combo([(i, f"Plane {i + 1}") for i in range(render3d.MAX_CLIP_PLANES)],
                                  self._choose)
-        self.add_row("choice", "Edit", self.choice,
+        self.add_row("choice", "Plane to adjust", self.choice,
                      "Which plane the controls below, the Shift keys and the "
                      "gestures act on.")
-        self.enabled = self.check("Plane on", lambda v: self._clip(active=v))
+        self.enabled = self.check("Plane active", lambda v: self._clip(active=v))
         self.add_row("enabled", None, self.enabled)
         self.az = self.number(0, 360, step=1, unit="deg", default=0,
                               on_change=lambda v: self._clip(az=v))
-        self.add_row("az", "Azimuth", self.az)
+        self.add_row("az", "Azimuth", self.az,
+                     "The plane's direction around the vertical axis (degrees).")
         self.el = self.number(-90, 90, step=1, unit="deg", default=0,
                               on_change=lambda v: self._clip(el=v))
-        self.add_row("el", "Elevation", self.el)
+        self.add_row("el", "Elevation", self.el,
+                     "The plane's tilt above or below the horizontal (degrees).")
         self.pos = self.number(0, 100, step=1, unit="%", default=50,
                                on_change=lambda v: self._clip(pos=v / 100.0))
-        self.add_row("pos", "Depth", self.pos)
+        self.add_row("pos", "Depth", self.pos,
+                     "Where the plane cuts, from one side of the volume (0 %) to the "
+                     "other (100 %).")
         self.thick = self.number(0, 100, step=1, unit="%", default=100,
                                  on_change=lambda v: self._clip(thick=v / 100.0))
-        self.add_row("thick", "Thickness", self.thick)
+        self.add_row("thick", "Slab thickness", self.thick,
+                     "Below 100 %, only a slab this thick is removed (a slot), not "
+                     "everything beyond the plane.")
+
+    def restore_defaults(self) -> None:
+        with self.ctx.store.gesture():
+            self.ctx.run("clip.preset", preset="none")
+            self.ctx.run("clip.mode", cut_away=False, at_cursor=False)
 
     def _choose(self, index) -> None:
         index = int(index)
@@ -861,16 +1085,23 @@ class Inspector(QWidget):
         v.setContentsMargins(0, 4, 0, 8)
         v.setSpacing(0)
         self.sections: dict[str, Section] = {}
+        # By purpose: the layers and how the selected one is drawn; the
+        # slice views and their arrangement; then the 3-D, the clip planes
+        # beside the cut surface they make.
+        render_groups = list(render3d.PARAM_GROUPS)
         builders = [
             LayersSection,
-            lambda i: LayerPropsSection(i, "display", "Display", "display"),
-            lambda i: LayerPropsSection(i, "overlay", "Overlay", "overlay"),
+            lambda i: LayerPropsSection(i, "display", "Layer display", "display"),
+            lambda i: LayerPropsSection(i, "overlay", "Overlay options", "overlay"),
             QualitySection,
             ViewSection,
             LayoutSection,
-            *[(lambda i, g=g: RenderSection(i, g)) for g in render3d.PARAM_GROUPS],
-            ClipSection,
+            MosaicSection,
         ]
+        for g in render_groups:
+            builders.append(lambda i, g=g: RenderSection(i, g))
+            if g == "cut":
+                builders.append(ClipSection)
         for build in builders:
             section = build(self)
             self.sections[section.key] = section

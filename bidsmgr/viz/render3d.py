@@ -132,62 +132,99 @@ class Param:
 
 #: The sections of the 3-D controls, in panel order, with their titles.
 PARAM_GROUPS: dict[str, str] = {
-    "look": "3-D look",
-    "edges": "Edges and outlines",
-    "peel": "Peeling",
-    "lighting": "Lighting",
-    "overlays": "Overlays in 3-D",
-    "quality": "Quality",
+    "look": "3-D: appearance",
+    "transfer": "3-D: opacity",
+    "cut": "3-D: cut surface",
+    "edges": "3-D: edges",
+    "peel": "3-D: peeling",
+    "lighting": "3-D: lighting",
+    "overlays": "3-D: overlays",
+    "quality": "3-D: rendering quality",
 }
 
 #: Every parameter, in panel order. Single source of truth for the panel,
-#: the presets, the defaults and the shader conversion.
+#: the presets, the defaults and the shader conversion. Labels use the
+#: field's own terms (transfer function, Phong lighting); each tooltip says
+#: what the control does to the picture.
 PARAMS: list[Param] = [
     Param("light", "Material", 0, len(LIGHTINGS) - 1, 0, 1, "choice",
-          "The material the surface is shaded with."),
-    Param("lo", "Tissue starts at", 0, 1000, 100, 1000,
-          help="Below this (a fraction of the image's range) nothing is drawn."),
-    Param("hi", "Tissue solid at", 0, 1000, 420, 1000,
-          help="From this (a fraction of the image's range) tissue is fully opaque."),
-    Param("density", "Density", 0, 300, 100,
-          help="How quickly tissue becomes opaque along a ray."),
-    Param("brighten", "Brightness", 50, 300, 150),
-    Param("surface", "Surface shading", 0, 100, 70,
-          help="How much the image's own intensity shades the surface."),
-    Param("colortemp", "Colour temperature", 0, 100, 50, group="edges"),
-    Param("hardness", "Surface hardness", 0, 100, 50),
-    Param("gradientmix", "Edge emphasis", 0, 100, 60,
-          help="Topography: how much opacity follows edges rather than intensity."),
-    Param("intensitymix", "Intensity shading", 0, 100, 35,
-          help="Topography: how much the shading follows intensity."),
-    Param("overlay", "Cut face shows the slice", 0, 1, 1, 1, "check",
-          "Draw the cut face as the slice it is, with the overlays on it."),
-    Param("overlaydepth", "Cut face hides below", 0, 100, 28,
-          help="On the cut face, values below this (a fraction of the range) "
-               "are left open, so a ventricle is a recess."),
-    Param("boundthresh", "Boundary threshold", 0, 100, 30, group="edges"),
-    Param("edgethresh", "Edge threshold", 0, 100, 12, group="edges"),
-    Param("edgemix", "Edges against boundaries", 0, 100, 65, group="edges"),
+          "The surface material (a lit sphere, or matcap) the render is shaded with."),
+    Param("lo", "Opacity threshold, low", 0, 1000, 100, 1000,
+          help="Transfer function: intensities below this fraction of the display range "
+               "are fully transparent. Raise it to strip away background, noise and skin.",
+          group="transfer"),
+    Param("hi", "Opacity threshold, high", 0, 1000, 420, 1000,
+          help="Transfer function: from this fraction of the display range upward tissue "
+               "is fully opaque; between the low and high thresholds opacity ramps up "
+               "smoothly.", group="transfer"),
+    Param("density", "Absorption", 0, 300, 100,
+          help="How fast opacity builds up along each ray. Low lets deeper structures "
+               "show through the surface; high gives a solid surface.", group="transfer"),
+    Param("brighten", "Brightness", 50, 300, 150,
+          help="Overall gain of the shaded colour."),
+    Param("surface", "Intensity shading", 0, 100, 70,
+          help="How much the image's own intensities colour the surface: 0 is the "
+               "material's colour alone, 1 the image's grey levels."),
+    Param("colortemp", "Colour temperature", 0, 100, 50, group="edges",
+          help="Edges and Glass effects: the outline colour, from cool (blue) to warm "
+               "(orange)."),
+    Param("hardness", "Relief contrast", 0, 100, 50,
+          help="Topography effect: how strongly intensity differences are drawn as "
+               "relief."),
+    Param("gradientmix", "Gradient opacity", 0, 100, 60,
+          help="Topography effect: how much opacity follows the intensity GRADIENT (tissue "
+               "boundaries) rather than the intensity itself."),
+    Param("intensitymix", "Intensity blend", 0, 100, 35,
+          help="Topography effect: how much of the colour comes from intensity shading "
+               "rather than from the material."),
+    Param("overlay", "Show the slice on the cut surface", 0, 1, 1, 1, "check",
+          "Where a clip plane cuts the volume, paint the cut surface with the 2-D slice "
+          "(its window, colour map and overlays), as the slice views show it. Off: the "
+          "rendered volume is seen through the cut.", group="cut"),
+    Param("overlaydepth", "Cavity threshold", 0, 100, 28,
+          help="On the cut surface, intensities below this fraction of the range are left "
+               "open, so cavities (ventricles, sulci, air) appear as recesses with the "
+               "rendered surface behind them.", group="cut"),
+    Param("boundthresh", "Boundary threshold", 0, 100, 30, group="edges",
+          help="Edges and Glass effects: the gradient strength above which a voxel counts "
+               "as a tissue boundary."),
+    Param("edgethresh", "Contour threshold", 0, 100, 12, group="edges",
+          help="Edges effect: the gradient strength above which a thin contour is drawn."),
+    Param("edgemix", "Contours against boundaries", 0, 100, 65, group="edges",
+          help="0 emphasises broad tissue boundaries, 1 thin contour lines."),
     Param("peel", "Layers peeled", 0, 6, 1, 1, group="peel",
-          help="How many surfaces are peeled away before the one shown."),
-    Param("tlow", "A layer ends below", 0, 100, 25, group="peel"),
-    Param("thigh", "A layer is full at", 0, 100, 85, group="peel"),
-    Param("ambient", "Ambient", 0, 150, 60, group="lighting"),
-    Param("diffuse", "Diffuse", 0, 150, 55, group="lighting"),
-    Param("specular", "Specular", 0, 100, 30, group="lighting"),
-    Param("shininess", "Shininess", 1, 100, 40, 1, group="lighting"),
-    Param("lightaz", "Light azimuth", 0, 360, 0, 1, group="lighting"),
-    Param("lightel", "Light elevation", -90, 90, 0, 1, group="lighting"),
-    Param("layers", "Draw the overlays", 0, 1, 1, 1, "check",
-          "Draw the overlays (atlases, maps, masks) in the render, coloured "
-          "as the slices draw them.", group="overlays"),
-    Param("seethrough", "See-through", 0, 100, 40,
-          help="How strongly an overlay inside the head is laid over the "
-               "surface in front of it. 0: plain depth, it shows only where "
-               "the volume is cut open; 1: drawn over everything.",
-          group="overlays"),
-    Param("quality", "Ray steps", QUALITY_MIN, QUALITY_MAX, QUALITY_DEFAULT, 1,
-          help="Ray-march steps. Higher is finer and slower.", group="quality"),
+          help="Opacity peeling: how many surfaces are removed before the one shown "
+               "(0: the outer surface; 1: the next one inside; and so on)."),
+    Param("tlow", "Layer exit threshold", 0, 100, 25, group="peel",
+          help="Peeling: once a layer is full, it ends where a sample's opacity falls "
+               "below this."),
+    Param("thigh", "Layer fill threshold", 0, 100, 85, group="peel",
+          help="Peeling: the accumulated opacity at which a layer counts as full."),
+    Param("ambient", "Ambient", 0, 150, 60, group="lighting",
+          help="Phong lighting: light every surface receives, whatever way it faces."),
+    Param("diffuse", "Diffuse", 0, 150, 55, group="lighting",
+          help="Phong lighting: light in proportion to how directly a surface faces the "
+               "light."),
+    Param("specular", "Specular", 0, 100, 30, group="lighting",
+          help="Phong lighting: the strength of the highlights."),
+    Param("shininess", "Shininess", 1, 100, 40, 1, group="lighting",
+          help="Phong lighting: how tight the highlights are (higher: smaller and "
+               "sharper)."),
+    Param("lightaz", "Light azimuth", 0, 360, 0, 1, group="lighting",
+          help="Where the light comes from, around the viewing direction (degrees)."),
+    Param("lightel", "Light elevation", -90, 90, 0, 1, group="lighting",
+          help="Where the light comes from, above (positive) or below the viewing "
+               "direction (degrees)."),
+    Param("layers", "Show overlays in 3-D", 0, 1, 1, 1, "check",
+          "Draw the overlays (atlases, maps, masks, the MRS voxel) in the render, "
+          "coloured as the slices draw them.", group="overlays"),
+    Param("seethrough", "Overlay see-through", 0, 100, 40,
+          help="How strongly an overlay inside the head is laid over the surface in front "
+               "of it. 0: depth only, it shows where the volume is cut open; 1: drawn over "
+               "everything.", group="overlays"),
+    Param("quality", "Ray samples", QUALITY_MIN, QUALITY_MAX, QUALITY_DEFAULT, 1,
+          help="Samples taken along each ray. More shows finer detail and renders slower.",
+          group="quality"),
 ]
 PARAM_BY_KEY = {p.key: p for p in PARAMS}
 
@@ -458,6 +495,39 @@ def world_of_texcoord(canon_affine: np.ndarray, dims, texcoord) -> np.ndarray:
     return a[:3, :3] @ c + a[:3, 3]
 
 
+#: Shapes (MRS voxels) the ray caster intersects analytically, at most.
+MAX_SHAPES = 4
+
+
+def shape_uniforms(boxes, canon_affine: np.ndarray, dims, box_half) -> tuple[np.ndarray, np.ndarray]:
+    """For each box (a :class:`~bidsmgr.viz.compute.shapes.GridBox`), the
+    4 x 4 that takes the ray caster's box space (centred, half extents
+    ``box_half``) into the box's own unit cube, and the box's edge lengths
+    in box-space units. ``(MAX_SHAPES, 4, 4)`` and ``(MAX_SHAPES, 3)``,
+    padded with identity and zeros.
+
+    The chain: box space -> texture coordinate (0..1) -> canonical voxel ->
+    world -> the shape's unit cube. One matrix per shape, so the shader
+    tests a ray against it exactly instead of sampling a texture (a 20 mm
+    voxel sampled at 20 mm a texel landed up to 10 mm off)."""
+    half = np.asarray(box_half, dtype=float)
+    d = np.asarray(dims, dtype=float)
+    to_tex = np.eye(4)
+    to_tex[:3, :3] = np.diag(1.0 / (2.0 * half))
+    to_tex[:3, 3] = 0.5
+    tex_to_vox = np.eye(4)
+    tex_to_vox[:3, :3] = np.diag(d)
+    tex_to_vox[:3, 3] = -0.5
+    ray_to_world = np.asarray(canon_affine, dtype=float) @ tex_to_vox @ to_tex
+    mats = np.tile(np.eye(4, dtype=np.float32), (MAX_SHAPES, 1, 1))
+    lens = np.zeros((MAX_SHAPES, 3), dtype=np.float32)
+    for i, box in enumerate(list(boxes)[:MAX_SHAPES]):
+        m = box.unit_from_world() @ ray_to_world
+        mats[i] = m
+        lens[i] = np.linalg.norm(np.linalg.inv(m[:3, :3]), axis=0)
+    return mats, lens
+
+
 def light_dir_view(az_deg: float, el_deg: float) -> tuple[float, float, float]:
     """Light direction in view space (x right, y up, z toward camera)."""
     az, el = np.radians(az_deg), np.radians(el_deg)
@@ -571,12 +641,12 @@ def cube_geometry() -> np.ndarray:
 
 __all__ = [
     "EFFECTS", "EFFECT_FX", "EFFECT_PARAMS", "EFFECT_PRESET", "LIGHTINGS",
-    "MATERIALS", "MAX_CLIP_PLANES", "PARAM_GROUPS", "PARAMS", "PARAM_BY_KEY", "Param",
+    "MATERIALS", "MAX_CLIP_PLANES", "MAX_SHAPES", "PARAM_GROUPS", "PARAMS", "PARAM_BY_KEY", "Param",
     "QUALITY_DEFAULT", "QUALITY_MAX", "QUALITY_MIN", "SLICE_DEFAULT_ON",
     "SHARED_PARAMS", "THRESH_GAP", "baseline", "camera_basis", "camera_eye",
     "clamp_param", "clip_normal_from", "clip_plane_uniforms", "clip_uniforms",
     "cube_geometry", "cut_mask", "effective", "intersect_box", "light_dir_view", "look_at", "make_matcap",
     "normalize_to_u8", "ortho", "perspective", "pick_depth", "ray_from_ndc",
-    "rgb_to_u8", "texcoord_of_world", "transfer_lut", "uniform_values", "values_for",
+    "rgb_to_u8", "shape_uniforms", "texcoord_of_world", "transfer_lut", "uniform_values", "values_for",
     "world_of_texcoord",
 ]

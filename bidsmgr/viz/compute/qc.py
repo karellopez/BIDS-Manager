@@ -297,6 +297,172 @@ def quality_overlay(src, which: Map, *, cancel=None, progress=None):
                    note=note, name=f"{TITLES[which]} of {src.path.name}")
 
 
-__all__ = ["Cancelled", "HELP", "Map", "QUANTITY", "TITLES", "TSNR_LOW", "brain_mask",
-           "describe_summary", "display_for", "non_steady_state", "per_volume",
-           "quality_map", "quality_overlay", "series_moments", "summary"]
+# ---------------------------------------------------------------------------
+# Per-volume rows beyond DVARS: outlier voxels, slice spikes, the carpet
+# ---------------------------------------------------------------------------
+
+#: The QC rows under the time course, in the order they are drawn, with what
+#: each is for. ``motion`` is FD and the six parameters (``compute.motion``).
+QC_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("motion", "Head motion",
+     "Framewise displacement (Power 2012) and the six rigid parameters: from "
+     "fMRIPrep's confounds when the run has them, else estimated here."),
+    ("dvars", "DVARS",
+     "How much the whole image changes from one volume to the next, with the "
+     "volumes above the box-plot fence marked."),
+    ("outliers", "Outlier voxels",
+     "The share of the head's voxels that are outliers in each volume "
+     "(AFNI's 3dToutcount rule, on a sample of voxels)."),
+    ("spikes", "Slice spikes",
+     "Volumes where one slice jumps on its own: a spike or a slice dropped "
+     "by motion during the volume."),
+    ("global", "Global signal", "The mean over the head, per volume."),
+    ("carpet", "Carpet plot",
+     "Every sampled voxel's signal over time, one row each, from the edge of "
+     "the head inwards (Power 2017): motion and spikes show as vertical "
+     "bands across many rows."),
+)
+QC_ROW_IDS = tuple(r[0] for r in QC_ROWS)
+#: Volumes with more than this share of outlier voxels are worth a look
+#: (afni_proc.py's default censoring limit).
+OUTLIER_LIMIT = 0.05
+#: A slice this many robust standard deviations from its own course is a spike.
+SPIKE_Z = 6.0
+#: Voxels sampled for the outlier count and the carpet.
+SAMPLE_VOXELS = 8000
+#: Rows the carpet is drawn with (voxels are averaged in groups).
+CARPET_ROWS = 240
+
+
+def sample_series(src, *, skip: int = 0, voxels: int = SAMPLE_VOXELS, slice_axis: int = 2,
+                  seed: int = 0, cancel: Optional[Callable[[], bool]] = None,
+                  progress: Optional[Callable[[int, int], None]] = None) -> dict:
+    """One pass over the frames: ``series`` (frames x voxels, a fixed random
+    sample of the head), ``depth`` (each sampled voxel's distance from the
+    head's edge, voxels) and ``slice_means`` (frames x slices along
+    ``slice_axis``, over the whole head)."""
+    from scipy import ndimage
+
+    n = src.loaded_frames
+    if n < 3:
+        raise ValueError("a series of at least three volumes is needed")
+    ref = src.scale(np.asarray(src.raw_frame(min(skip + 1, n - 1))))
+    mask = brain_mask(np.asarray(ref, dtype=np.float64))
+    if not mask.any():
+        raise ValueError("no voxel is bright enough to be in the head")
+    # Fortran order: a frame is an (X, Y, Z) view of a (Z, Y, X) block, so
+    # its F-order ravel is free where a C-order one copies the volume.
+    inside = np.flatnonzero(mask.ravel(order="F"))
+    rng = np.random.default_rng(seed)
+    pick = (np.sort(rng.choice(inside, voxels, replace=False))
+            if inside.size > voxels else inside)
+    slice_of = np.unravel_index(inside, mask.shape, order="F")[slice_axis]
+    n_slices = mask.shape[slice_axis]
+    counts = np.bincount(slice_of, minlength=n_slices).astype(float)
+    series = np.empty((n, pick.size), dtype=np.float32)
+    slice_means = np.full((n, n_slices), np.nan)
+    for t in range(n):
+        if cancel is not None and cancel():
+            raise Cancelled()
+        flat = np.asarray(src.raw_frame(t)).ravel(order="F")
+        series[t] = src.scale(flat[pick])
+        sums = np.bincount(slice_of, weights=src.scale(flat[inside]).astype(np.float64),
+                           minlength=n_slices)
+        slice_means[t] = np.where(counts > 0, sums / np.maximum(counts, 1.0), np.nan)
+        if progress is not None and (t % 64 == 0 or t == n - 1):
+            progress(t + 1, n)
+    depth = ndimage.distance_transform_edt(mask).ravel(order="F")[pick]
+    return {"series": series, "depth": depth, "slice_means": slice_means}
+
+
+def detrend(values: np.ndarray, order: int = 2) -> np.ndarray:
+    """Each column less its polynomial trend of ``order`` (slow drift is not
+    an outlier, a spike or a band in a carpet)."""
+    y = np.asarray(values, dtype=np.float64)
+    m = y.shape[0]
+    order = max(0, min(int(order), m - 2))
+    u = np.linspace(-1.0, 1.0, m)
+    basis = np.stack([u ** k for k in range(order + 1)], axis=1)
+    q, _r = np.linalg.qr(basis)
+    return y - q @ (q.T @ y)
+
+
+def outlier_fraction(series: np.ndarray, *, skip: int = 0) -> np.ndarray:
+    """The share of the sampled voxels that are outliers in each volume
+    (NaN for the skipped ones). AFNI's 3dToutcount rule: after the drift is
+    removed, a value is an outlier when it is further from its voxel's median
+    than ``qginv(0.001 / N) * sqrt(pi / 2) * MAD``, N the number of volumes."""
+    from scipy.special import ndtri
+
+    n = series.shape[0]
+    out = np.full(n, np.nan)
+    m = n - skip
+    if m < 3:
+        return out
+    r = detrend(series[skip:])
+    med = np.median(r, axis=0)
+    dev = np.abs(r - med)
+    mad = np.median(dev, axis=0)
+    alpha = float(-ndtri(0.001 / m))
+    limit = alpha * np.sqrt(np.pi / 2.0) * mad
+    hits = (dev > limit) & (mad > 0)
+    out[skip:] = hits.mean(axis=1)
+    return out
+
+
+def slice_spikes(slice_means: np.ndarray, *, skip: int = 0, z: float = SPIKE_Z) -> dict:
+    """Volumes where a slice departs from its own course, beyond what the
+    volume as a whole did (a global change, additive or a scaling, is not a
+    spike): ``score`` (the
+    largest robust z of any slice, per volume), ``flagged`` (volumes above
+    ``z``) and ``slice`` (the slice that did it, per flagged volume)."""
+    n = slice_means.shape[0]
+    score = np.full(n, np.nan)
+    sm = slice_means[skip:]
+    ok = np.all(np.isfinite(sm), axis=0)
+    if sm.shape[0] < 3 or not ok.any():
+        return {"score": score, "flagged": np.empty(0, int), "slice": np.empty(0, int)}
+    sm = sm[:, ok]
+    # What the volume as a whole did (an offset and a scaling of the run's
+    # typical slice profile) is taken out, so only a slice that moved on its
+    # own is left.
+    profile = np.median(sm, axis=0)
+    design = np.stack([np.ones_like(profile), profile], axis=1)
+    resid = sm - (design @ (np.linalg.pinv(design) @ sm.T)).T
+    r = detrend(resid)
+    med = np.median(r, axis=0)
+    mad = np.median(np.abs(r - med), axis=0) * 1.4826
+    mad[mad == 0] = np.inf
+    zs = np.abs(r - med) / mad
+    score[skip:] = zs.max(axis=1)
+    flagged = np.flatnonzero(np.nan_to_num(score) > z)
+    slices = np.flatnonzero(ok)[zs.argmax(axis=1)][flagged - skip] if flagged.size else \
+        np.empty(0, int)
+    return {"score": score, "flagged": flagged, "slice": slices}
+
+
+def carpet(series: np.ndarray, depth: np.ndarray, *, skip: int = 0,
+           rows: int = CARPET_ROWS) -> np.ndarray:
+    """(rows x volumes) z-scores clipped to +-3: the sampled voxels from the
+    head's edge (top) inwards, averaged in groups to ``rows``; NaN for the
+    skipped volumes."""
+    n, k = series.shape
+    out = np.full((min(rows, max(k, 1)), n), np.nan, dtype=np.float32)
+    if n - skip < 3 or k == 0:
+        return out
+    r = detrend(series[skip:])
+    sd = r.std(axis=0)
+    sd[sd == 0] = 1.0
+    zs = np.clip(r / sd, -3.0, 3.0)
+    order = np.argsort(depth, kind="stable")
+    groups = np.array_split(order, out.shape[0])
+    for i, g in enumerate(groups):
+        out[i, skip:] = zs[:, g].mean(axis=1)
+    return out
+
+
+__all__ = ["CARPET_ROWS", "Cancelled", "HELP", "Map", "OUTLIER_LIMIT", "QC_ROWS",
+           "QC_ROW_IDS", "QUANTITY", "SAMPLE_VOXELS", "SPIKE_Z", "TITLES", "TSNR_LOW",
+           "brain_mask", "carpet", "describe_summary", "detrend", "display_for",
+           "non_steady_state", "outlier_fraction", "per_volume", "quality_map",
+           "quality_overlay", "sample_series", "series_moments", "slice_spikes", "summary"]

@@ -1209,14 +1209,16 @@ class SettingsDialog(QDialog):
         # Layout memory, sizes and saved views are not edited here: they
         # survive a Save untouched, unless the page was asked to forget the
         # first two.
+        from ..viz import memory
+
         current = SettingsHub.instance().settings
         new.view_presets = dict(current.view_presets)
+        # Every memory (layouts, sizes, the 3-D look, trace and spectrum
+        # options) as it is NOW: a view changed while this dialog was open
+        # must not roll back. Forgotten as one when asked.
+        memory.carry_memory(new, current)
         if self._viewer_page.forget_layouts:
-            new.layout_state = {}
-            new.layout_sizes = {}
-        else:
-            new.layout_state = dict(current.layout_state)
-            new.layout_sizes = dict(current.layout_sizes)
+            memory.forget(new)
         SettingsHub.instance().replace(new)
 
 

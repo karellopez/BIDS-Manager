@@ -251,6 +251,7 @@ class SliceCanvas(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._smooth)
         p.drawImage(self._image_rect, self._image)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        self._paint_shapes(p)
         display = self.ctx.scene.display
         if display.crosshair:
             self._paint_crosshair(p)
@@ -268,6 +269,49 @@ class SliceCanvas(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(self._band)
         p.end()
+
+    def shape_polygons(self) -> list[tuple]:
+        """``(layer, QPolygonF)`` for every shape layer this slice cuts, in
+        screen coordinates (empty before the first paint)."""
+        found = views.shape_layers(self.ctx.store)
+        grid = self._grid
+        if not found or grid is None or self._image_rect.width() <= 0:
+            return []
+        from ....viz.compute.shapes import section
+
+        out = []
+        for layer, src in found:
+            poly = section(src.box, grid.origin, grid.normal)
+            if not len(poly):
+                continue
+            pts = []
+            for w in poly:
+                c, r, _d = grid.world_to_pixel(w)
+                pts.append(self.grid_to_screen(c, r))
+            out.append((layer, QPolygonF(pts)))
+        return out
+
+    def _paint_shapes(self, p: QPainter) -> None:
+        """Every shape layer (the MRS voxel) as the polygon this slice's
+        plane cuts out of its box, in screen space: exact at any zoom and on
+        any anatomy, where a sampled box was only as precise as the
+        anatomy's pixels (22 mm tall on 2 mm rows, with stepped edges)."""
+        polygons = self.shape_polygons()
+        if not polygons:
+            return
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setClipRect(self._image_rect)
+        for layer, polygon in polygons:
+            red, green, blue, alpha = views.shape_colour(layer)
+            pen = QPen(QColor(red, green, blue, alpha),
+                       max(1.0, float(layer.display.outline_px or 2.0)))
+            pen.setCosmetic(True)
+            pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            p.setPen(pen)
+            p.setBrush(QColor(red, green, blue, int(alpha * render2d.SHAPE_FILL)))
+            p.drawPolygon(polygon)
+        p.restore()
 
     def _paint_crosshair(self, p: QPainter) -> None:
         grid = self._grid

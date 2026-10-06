@@ -67,8 +67,11 @@ def read_events_tsv(path) -> list[Event]:
     out: list[Event] = []
     is_gz = str(path).lower().endswith(".gz")
     try:
-        opener = (gzip.open(path, "rt", encoding="utf-8", newline="") if is_gz
-                  else open(path, "r", encoding="utf-8", newline=""))
+        # utf-8-sig: mne-bids writes its tables with a byte order mark, and
+        # read as plain UTF-8 the first column is "\ufeffonset": every row
+        # was dropped.
+        opener = (gzip.open(path, "rt", encoding="utf-8-sig", newline="") if is_gz
+                  else open(path, "r", encoding="utf-8-sig", newline=""))
         with opener as fh:
             for row in csv.DictReader(fh, delimiter="\t"):
                 try:
@@ -83,7 +86,10 @@ def read_events_tsv(path) -> list[Event]:
                     duration = 0.0
                 label = (row.get("trial_type") or row.get("value")
                          or row.get("event_type") or "")
-                out.append(Event(onset, duration, str(label)))
+                # A BAD row is a segment marked bad (the mne-bids spelling
+                # of an annotation), not an event.
+                kind = "bad" if str(row.get("trial_type") or "").upper().startswith("BAD") else ""
+                out.append(Event(onset, duration, str(label), kind))
     except Exception as exc:  # noqa: BLE001 - an unreadable table is no events
         log.debug("could not read events %s: %s", path, exc)
         return []

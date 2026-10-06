@@ -44,17 +44,14 @@ log = logging.getLogger(__name__)
 #: respiratory drift lives ("impossible to put a filter of 0.01").
 _DECIMALS = 3
 
-#: Three rows, by purpose, each under a thousand pixels so a narrow pane
-#: wraps a row rather than scattering it: WHICH channels and how they are
-#: drawn; the SCALE and the stretch of TIME, with the events; and what is
-#: DONE to the signal (filters, resampling, the spectrum).
+#: ONE row of what is reached for all the time, by purpose: how much of the
+#: signal is on screen (amplitude, time span), what is done to it (the
+#: filter band), checking and marking it (QC, annotation, saving), and the
+#: spectrum; then leaving it. Everything else is in the controls column
+#: (``panels.signal_controls``), grouped the same way.
 TOOLBAR_ROWS = (
-    ("widget:channels", "|", "traces.butterfly", "traces.normalize", "traces.page_scale",
-     "traces.clip", "traces.dc", "|", "channels.write_bads", "stretch",
-     "view.zen", "signal.close"),
-    ("widget:scale", "|", "time.fit", "traces.together", "|", "events.toggle",
-     "widget:events", "|", "traces.reset", "stretch", "help.shortcuts"),
-    ("widget:filters", "|", "widget:resample", "|", "widget:psd", "traces.line"),
+    ("widget:scale", "|", "widget:preset", "|", "traces.quality", "annotate.toggle",
+     "review.save", "|", "widget:psd", "stretch", "signal.close", "help.shortcuts"),
 )
 
 #: The width of a slider in the toolbar: enough to aim, not so much that
@@ -77,6 +74,20 @@ def _open(path, root, kind: str, together: bool) -> SignalSource:
     return open_meeg(path, root)
 
 
+class _SizedLabel(QLabel):
+    """A label whose size is that of ``widest``, whatever it shows: a
+    wrapping bar places its children once, at the size they ask for."""
+
+    def __init__(self, widest: str) -> None:
+        super().__init__("")
+        self._widest = widest
+
+    def sizeHint(self):  # noqa: N802 - Qt naming
+        hint = super().sizeHint()
+        hint.setWidth(max(hint.width(), self.fontMetrics().horizontalAdvance(self._widest) + 4))
+        return hint
+
+
 class SignalPresenter:
     """Signal content for a :class:`~bidsmgr.gui.viz.viewer.Viewer`."""
 
@@ -94,6 +105,12 @@ class SignalPresenter:
         self._root: Optional[Path] = None
         self._file_kind = "meeg"
         self.together = False
+        from PyQt6.QtCore import QTimer
+
+        self._memory_timer = QTimer(viewer)
+        self._memory_timer.setSingleShot(True)
+        self._memory_timer.setInterval(400)
+        self._memory_timer.timeout.connect(self._remember)
         #: Zen mode: the traces alone, no toolbar and no overview.
         self.zen = False
         self._relatives: list[Path] = []
@@ -103,6 +120,11 @@ class SignalPresenter:
         ctx.jobs.failed.connect(self._on_job_failed)
         ctx.qstore.changed.connect(self._on_changed)
         ctx.status.connect(viewer.status_message)
+        from ..bridge import connect_while_alive
+
+        self._qc_params = ctx.settings.meeg_qc.model_dump_json()
+        connect_while_alive(ctx.settings_hub.changed, viewer,
+                            lambda v, _s: v.presenter.on_settings_changed())
 
     # ------------------------------------------------------------------
     # Content
@@ -113,16 +135,52 @@ class SignalPresenter:
         self.pages.setObjectName("pane-dark")
         self.meta_page = self._build_meta_page()
         self.pages.addWidget(self.meta_page)
-        self.traces_page = QWidget()
-        self.traces_page.setObjectName("pane-dark")
-        v = QVBoxLayout(self.traces_page)
+        traces = QWidget()
+        traces.setObjectName("pane-dark")
+        v = QVBoxLayout(traces)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         self._traces_slot = v
+        self.annotation_bar = self._build_annotation_bar()
+        v.addWidget(self.annotation_bar)
+        self.quality_row = self._build_quality_row()
+        v.addWidget(self.quality_row)
         self.navigation = self._build_navigation()
         v.addWidget(self.navigation)
+        self.traces_page = self._beside_controls(traces)
         self.pages.addWidget(self.traces_page)
         return self.pages
+
+    def _beside_controls(self, traces: QWidget) -> QWidget:
+        """The traces with the controls column on their right."""
+        from ..panels.side_column import SideColumn
+        from ..panels.signal_controls import SignalControls
+
+        self.controls = SignalControls(self)
+
+        def remember(on: bool) -> None:
+            if self.ctx.settings.traces.controls_open != on:
+                self.ctx.settings_hub.update(lambda s: setattr(s.traces, "controls_open", on))
+
+        self.column = SideColumn(traces, self.controls, remember=remember,
+                                 changed=self.viewer.refresh_actions)
+        self.side_tab = self.column.tab
+        self.side = self.column.scroll
+        return self.column.widget
+
+    # -- the controls column ---------------------------------------------------
+
+    def inspector_open(self) -> bool:
+        return self.column.is_open()
+
+    def set_inspector(self, on: bool, *, remember: bool = True) -> None:
+        self.column.set_open(on, remember=remember)
+
+    def open_section(self, key: str) -> None:
+        """Open the controls column at one section (QC's Settings button)."""
+        section = self.controls.section(key)
+        section.set_open(True)
+        self.column.show_section(section)
 
     def _ensure_traces(self):
         """The pyqtgraph canvas is built when a signal first arrives: an
@@ -131,7 +189,8 @@ class SignalPresenter:
             from ..canvases.traces import TracesCanvas
 
             self._traces = TracesCanvas(self.ctx)
-            self._traces_slot.insertWidget(0, self._traces, 1)
+            # Under the annotation bar, above the navigation.
+            self._traces_slot.insertWidget(1, self._traces, 1)
         return self._traces
 
     @property
@@ -168,6 +227,209 @@ class SignalPresenter:
         bl.addStretch(1)
         outer.addWidget(bar)
         return page
+
+    def _build_annotation_bar(self) -> QWidget:
+        """What annotation mode adds: how to use it, the label of the next
+        segment, delete, what is marked, save, and the way out."""
+        from ...widgets.flow_layout import FlowBar
+        from ....viz.commands.signal import BAD_LABELS
+
+        bar = FlowBar(h_spacing=8, v_spacing=4)
+        bar.setObjectName("toolbar")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar.setContentsMargins(10, 4, 10, 4)
+        title = QLabel("Annotation mode")
+        title.setObjectName("viewer-meta-section")
+        bar.addWidget(title)
+        self.label_combo = QComboBox()
+        self.label_combo.setEditable(True)
+        self.label_combo.addItems(BAD_LABELS)
+        self.label_combo.setToolTip(
+            "The label of the next segment: BAD_ and a reason. mne-bids reads BAD_ "
+            "rows of _events.tsv back as annotations, which MNE leaves out of epochs "
+            "and spectra.")
+        self.label_combo.activated.connect(
+            lambda _i: self._run_ui("annotate.label", label=self.label_combo.currentText()))
+        self.label_combo.lineEdit().editingFinished.connect(
+            lambda: self._run_ui("annotate.label", label=self.label_combo.currentText()))
+        bar.addWidget(self._group(self._label("Label"), self.label_combo))
+        manager = self.viewer.action_manager
+        bar.addWidget(manager.button("annotate.delete"))
+        # Sized for its longest text: a wrapping bar places a child at the
+        # size it had when placed, and a count that grew was cut to "1".
+        self.review_summary = _SizedLabel("999 bad channels · 999 bad segments (9999.9 s)")
+        self.review_summary.setObjectName("sidecar-footer-summary")
+        bar.addWidget(self.review_summary)
+        bar.addWidget(manager.button("review.save"))
+        done = QPushButton("Done")
+        done.setObjectName("tb-btn")
+        done.setToolTip("Leave annotation mode (A); what is marked stays marked.")
+        done.clicked.connect(lambda: self.viewer.trigger("annotate.toggle"))
+        bar.addWidget(done)
+        hint = QLabel("Drag across the traces to mark a bad segment · drag its edges to "
+                      "adjust it · right-click it to relabel or delete it · click a channel "
+                      "name to mark the channel bad")
+        hint.setObjectName("sidecar-footer-summary")
+        bar.addWidget(hint)
+        bar.setVisible(False)
+        return bar
+
+    def _build_quality_row(self) -> QWidget:
+        """The quality check under the traces: its lanes over the whole
+        recording, and what to do with what it found."""
+        from ..canvases.quality_strip import QualityStrip
+
+        row = QFrame()
+        row.setObjectName("toolbar")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 4, 10, 4)
+        h.setSpacing(8)
+        self.quality_strip = QualityStrip(self.ctx)
+        h.addWidget(self.quality_strip, 1)
+        buttons = QVBoxLayout()
+        buttons.setSpacing(4)
+        self.mark_flagged_button = QPushButton("Mark flagged segments bad")
+        self.mark_flagged_button.setObjectName("tb-btn")
+        self.mark_flagged_button.setToolTip(
+            "Every segment QC flagged becomes a bad segment, labelled by why "
+            "(BAD_muscle, BAD_jump, BAD_noise): undoable, and saved only with Save to "
+            "dataset.")
+        self.mark_flagged_button.clicked.connect(self.mark_flagged_segments)
+        buttons.addWidget(self.mark_flagged_button)
+        report = QPushButton("Report...")
+        report.setObjectName("tb-btn")
+        report.setToolTip("Every channel and every flagged segment, with the reasons, and "
+                          "how to read them")
+        report.clicked.connect(self.show_quality_report)
+        buttons.addWidget(report)
+        settings = QPushButton("QC settings...")
+        settings.setObjectName("tb-btn")
+        settings.setToolTip("The check's parameters (segment length, thresholds, which "
+                            "measures), in the controls column")
+        settings.clicked.connect(lambda: self.open_section("signal.qc"))
+        buttons.addWidget(settings)
+        h.addLayout(buttons)
+        row.setVisible(False)
+        self._quality: Optional[dict] = None
+        #: (recording, parameters) the QC on screen was computed for.
+        self._quality_of: Optional[tuple] = None
+        return row
+
+    def _sync_quality(self) -> None:
+        """Start the check the first time it is switched on for a recording;
+        show or hide its lanes and flags."""
+        tr = self.ctx.scene.traces
+        src = self.source
+        on = bool(tr.quality and src is not None and self._file_kind == "meeg")
+        settings = self.ctx.settings.meeg_qc
+        # Checked again when the recording OR the user's parameters change.
+        key = (id(src), settings.model_dump_json())
+        if on and self._quality_of != key:
+            from ....viz.commands.signal import bad_channels
+            from ....viz.compute.meeg_qc import quality
+            from ....viz.data.signal import line_frequency
+
+            self._quality_of = key
+            self._quality = None
+            self.viewer.loading_changed.emit(True, "Checking the quality of the recording")
+            self.ctx.jobs.start("quality", self._generation, quality, src,
+                                settings=settings, line_freq=line_frequency(src),
+                                exclude=bad_channels(self.ctx.store))
+        shown = on and self._quality is not None and self._quality_of == key
+        self.quality_row.setVisible(shown)
+        if self._traces is not None:
+            flags = self._quality_flags() if shown else {}
+            if flags != getattr(self._traces, "quality_flags", {}):
+                self._traces.set_quality_flags(flags)
+
+    def _quality_flags(self) -> dict:
+        tokens = {"noisy": "warning", "flat": "accent", "uncorrelated": "warning",
+                  "line noise": "purple"}
+        out = {}
+        for c in (self._quality or {}).get("channels", []):
+            if c["reasons"]:
+                follows = ("" if c.get("follows") is None
+                           else f", follows its type at {c['follows']:.2f}")
+                text = (", ".join(c["reasons"]) + f" (against the other {c['label']} "
+                        f"channels: STD {c['std_z']:+.1f} z, peak-to-peak "
+                        f"{c['ptp_z']:+.1f} z{follows})")
+                out[c["name"]] = (tokens[c["reasons"][0]], text)
+        return out
+
+    def quality_result(self) -> Optional[dict]:
+        """What the QC found for the recording on screen, or None."""
+        src = self.source
+        if self._quality is None or src is None or not self._quality_of:
+            return None
+        return self._quality if self._quality_of[0] == id(src) else None
+
+    def on_settings_changed(self) -> None:
+        """The QC parameters changed (here or on the Settings page): show
+        them, and check again when QC is on. Other settings (a section
+        folded) leave a half-edited form alone."""
+        params = self.ctx.settings.meeg_qc.model_dump_json()
+        if params == self._qc_params:
+            return
+        self._qc_params = params
+        self.controls.put_qc_settings(self.ctx.settings.meeg_qc)
+        self._sync_quality()
+        self.controls.sync()
+
+    def recheck_quality(self) -> None:
+        """Run the QC again (new parameters, or bad channels marked since)."""
+        self._quality_of = None
+        if self.ctx.scene.traces.quality:
+            self._sync_quality()
+        else:
+            self._run_ui("traces.quality", value=True)
+
+    def mark_suggested_channels(self) -> int:
+        res = self.quality_result()
+        if not res or not res["suggested_bads"]:
+            return 0
+        names = list(res["suggested_bads"])
+        self._run_ui("channels.set_bad", names=names)
+        self.viewer.status_message.emit(
+            f"{len(names)} channel{'s' if len(names) != 1 else ''} marked bad; Save to "
+            "dataset writes them into the run's _channels.tsv")
+        return len(names)
+
+    def mark_flagged_segments(self) -> int:
+        """The flagged segments as bad segments, labelled by why."""
+        res = self._quality
+        if res is None:
+            return 0
+        from ....viz.compute.meeg_qc import bad_label
+
+        step = float(res["segment_s"])
+        by_label: dict[str, list] = {}
+        for t, bad, kinds in zip(res["times"], res["flagged"], res["segment_kinds"]):
+            if not bad:
+                continue
+            by_label.setdefault(bad_label(kinds), []).append((float(t), step))
+        n = 0
+        for label, segments in by_label.items():
+            self._run_ui("annotate.add_many", segments=segments, label=label)
+            n += len(segments)
+        self.viewer.status_message.emit(
+            f"{n} flagged segment{'s' if n != 1 else ''} marked bad; Save to dataset "
+            "writes them into the run's events.tsv")
+        return n
+
+    def show_quality_report(self):
+        from ..panels.quality_report import QualityReport
+
+        if self._quality is None or self.source is None:
+            return None
+        dlg = QualityReport(self._quality, self.source.path.name, parent=self.viewer)
+        dlg.go_to.connect(lambda t: self._run_ui(
+            "time.set", t0=max(0.0, t - self.source.start_time
+                               - 0.4 * self.ctx.scene.traces.width)))
+        dlg.mark_channels.connect(lambda names: self._run_ui("channels.set_bad", names=names))
+        dlg.mark_segments.connect(self.mark_flagged_segments)
+        self.quality_report = dlg
+        dlg.show()
+        return dlg
 
     def _build_navigation(self) -> QWidget:
         """|<  <  [the whole recording]  >  >|  and where the window is."""
@@ -215,9 +477,8 @@ class SignalPresenter:
 
     def make_widget(self, name: str):
         return {
-            "channels": self._widget_channels, "filters": self._widget_filters,
-            "resample": self._widget_resample, "psd": self._widget_psd,
-            "events": self._widget_events, "scale": self._widget_scale,
+            "preset": self._widget_preset, "psd": self._widget_psd,
+            "scale": self._widget_scale,
         }.get(name, lambda: None)()
 
     def _label(self, text: str) -> QLabel:
@@ -267,13 +528,12 @@ class SignalPresenter:
         self.channels_button.clicked.connect(self.open_channel_picker)
         self.count_control = self._number(
             1, 500, step=1, decimals=0, default=sigcmd.DEFAULT_COUNT, widest="500",
-            tip="Traces on screen at once (PgUp and PgDown page through the rest).")
+            tip="How many channels are drawn at once (PgUp and PgDown page through "
+                "the rest; the wheel scrolls one at a time).")
         self.count_control.value_changed.connect(
             lambda v: self._run_ui("traces.count", n=int(round(v))))
-        self._multi_channel_widgets = [
-            self._group(self._label("Type"), self.type_combo), self.channels_button,
-            self._group(self._label("Count"), self.count_control),
-        ]
+        self._multi_channel_widgets = [self.type_combo, self.channels_button,
+                                       self.count_control]
         return list(self._multi_channel_widgets)
 
     def _widget_scale(self) -> list[QWidget]:
@@ -290,7 +550,7 @@ class SignalPresenter:
         self.width_control.value_changed.connect(
             lambda v: self._run_ui("time.width", seconds=float(v)))
         return [self._group(self._label("Amplitude"), self.scale_control),
-                self._group(self._label("Window"), self.width_control)]
+                self._group(self._label("Time span"), self.width_control)]
 
     def _widget_events(self) -> QWidget:
         self.event_source = QComboBox()
@@ -300,10 +560,16 @@ class SignalPresenter:
             lambda _i: self._run_ui("events.source", which=self.event_source.currentData()))
         return self.event_source
 
-    def _widget_filters(self) -> list[QWidget]:
+    def _widget_preset(self) -> QWidget:
         self.preset_combo = QComboBox()
-        self.preset_combo.setToolTip("A common band, applied at once (the notch is kept)")
+        self.preset_combo.setToolTip("A common band, applied at once (the notch is kept); "
+                                     "the exact cut-offs and a notch are in the controls "
+                                     "column, under Filters")
         self.preset_combo.activated.connect(self._on_preset)
+        return self._group(self._label("Filter"), self.preset_combo)
+
+    def _widget_filter_fields(self) -> None:
+        """The three cut-offs and their Apply (the controls column)."""
         self.hp_spin, self.lp_spin, self.notch_spin = (QDoubleSpinBox() for _ in range(3))
         for spin, hi, tip in ((self.hp_spin, 500.0, "High-pass (Hz)"),
                               (self.lp_spin, 5000.0, "Low-pass (Hz)"),
@@ -316,15 +582,10 @@ class SignalPresenter:
             spin.setToolTip(f"{tip}. Zero-phase. A cut-off at or above the Nyquist "
                             "frequency is refused, with the reason. Enter applies.")
             spin.lineEdit().returnPressed.connect(self.apply_filters)
-        apply_btn = QPushButton("Apply")
-        apply_btn.setObjectName("tb-btn")
-        apply_btn.setToolTip("Apply the three cut-offs")
-        apply_btn.clicked.connect(self.apply_filters)
-        reset = self.viewer.action_manager.button("traces.reset_filters")
-        return [self._group(self._label("Filter"), self.preset_combo),
-                self._group(self._label("HP"), self.hp_spin),
-                self._group(self._label("LP"), self.lp_spin),
-                self._group(self._label("Notch"), self.notch_spin), apply_btn, reset]
+        self.filter_apply_button = QPushButton("Apply")
+        self.filter_apply_button.setObjectName("tb-btn")
+        self.filter_apply_button.setToolTip("Apply the three cut-offs")
+        self.filter_apply_button.clicked.connect(self.apply_filters)
 
     def _compact(self, spin: QDoubleSpinBox, widest: str = "5000.000") -> None:
         """A number field like the sliders' own: no arrows, a decimal point
@@ -379,7 +640,7 @@ class SignalPresenter:
         self.resample_button = QPushButton("Resample")
         self.resample_button.setObjectName("tb-btn")
         self.resample_button.clicked.connect(self.resample)
-        return [self._group(self._label("Rate"), self.resample_spin), self.resample_button]
+        return [self.resample_spin, self.resample_button]
 
     def _widget_psd(self) -> QWidget:
         btn = QPushButton("PSD")
@@ -401,6 +662,9 @@ class SignalPresenter:
     # ------------------------------------------------------------------
 
     def load(self, path: Path, root: Optional[Path]) -> None:
+        if self._memory_timer.isActive():
+            self._memory_timer.stop()
+            self._remember()
         self._generation += 1
         self._release()
         self._path = Path(path)
@@ -426,8 +690,10 @@ class SignalPresenter:
                             self._file_kind, self.together and len(self._relatives) > 1)
 
     def _release(self) -> None:
-        for tag in ("meta", "signal", "resample", "psd", "overview"):
+        for tag in ("meta", "signal", "resample", "psd", "overview", "quality"):
             self.ctx.jobs.cancel(tag)
+        self._quality = None
+        self._quality_of = None
         self.source = None
         self.meta = None
         store = self.ctx.store
@@ -441,7 +707,20 @@ class SignalPresenter:
         self.ctx.qstore.flush()
 
     def stop(self) -> None:
-        pass
+        if self._memory_timer.isActive():
+            self._memory_timer.stop()
+            self._remember()
+
+    def _remember(self) -> None:
+        """The trace options and filters, for the next recording of this
+        kind, in any window (``viz.memory``)."""
+        from ....viz import memory
+
+        if self.source is None:
+            return
+        prefs = memory.trace_prefs(self.ctx.scene.traces)
+        kind = self._file_kind
+        self.ctx.settings_hub.update(lambda s: s.traces_state.__setitem__(kind, prefs))
 
     def _on_job_done(self, tag: str, generation: int, result) -> None:
         if generation != self._generation:
@@ -463,6 +742,13 @@ class SignalPresenter:
             self.resample_button.setEnabled(True)
             self.viewer.status_message.emit(
                 f"Resampled to {result.sfreq:.0f} Hz ({result.n_times:,} samples)")
+        elif tag == "quality":
+            self.viewer.loading_changed.emit(False, "")
+            self._quality = result
+            self.quality_strip.set_result(result)
+            self._sync_quality()
+            self.controls.sync()
+            self.viewer.status_message.emit(f"QC: {result['summary']}")
         elif tag == "psd":
             self.viewer.loading_changed.emit(False, "")
             self.psd_button.setEnabled(True)
@@ -487,6 +773,11 @@ class SignalPresenter:
                                     f"Could not load {self._path.name}:\n{message}")
             else:
                 self.viewer.on_load_failed(self._path, message)
+        elif tag == "quality":
+            self.viewer.loading_changed.emit(False, "")
+            self._quality_of = None
+            self._run_ui("traces.quality", value=False)
+            QMessageBox.information(self.viewer, "QC", message)
         elif tag in ("resample", "psd"):
             self.viewer.loading_changed.emit(False, "")
             for btn in (getattr(self, "resample_button", None), getattr(self, "psd_button", None)):
@@ -506,10 +797,16 @@ class SignalPresenter:
             scene.traces.t0 = min(scene.traces.t0, max(0.0, src.duration - scene.traces.width))
             store.changed({"sources:sig0", "traces.time"})
         else:
+            from ....viz import memory
+
             scene = Scene()
             scene.sources = {sid: SourceRef(id=sid, path=str(src.path), kind="signal")}
             scene.layers = [SignalLayer(id="sig", source=sid, name=src.path.name)]
-            scene.traces = TracesState(**sigcmd.opening_state(src))
+            # Its own defaults, with the options left on the last recording
+            # of this kind that suit it (``viz.memory``).
+            scene.traces = TracesState(**memory.restore_traces(
+                sigcmd.opening_state(src), self.ctx.settings.traces_state.get(self._file_kind),
+                src))
             store.replace_scene(scene)
         self._ensure_traces()
         self.pages.setCurrentWidget(self.traces_page)
@@ -670,6 +967,10 @@ class SignalPresenter:
     # ------------------------------------------------------------------
 
     def _on_changed(self, paths) -> None:
+        if self.source is not None and any(
+                p.startswith("traces") and p not in ("traces.annotations",) for p in paths):
+            self._memory_timer.start()
+        self._sync_quality()
         self.sync_widgets()
         self.viewer.update_footer()
 
@@ -718,12 +1019,35 @@ class SignalPresenter:
                 self.event_source.setCurrentIndex(
                     max(0, self.event_source.findData(tr.event_source)))
                 self.event_source.setVisible(bool(src.event_sources()))
+                self._sync_annotation_bar(src, tr)
                 t1 = min(tr.t0 + tr.width, src.duration)
                 self.time_label.setText(f"{tr.t0 + src.start_time:.1f} - "
                                         f"{t1 + src.start_time:.1f} / "
                                         f"{src.duration:.1f} s")
+            self.controls.sync()
         finally:
             self._syncing = False
+
+    def _sync_annotation_bar(self, src, tr) -> None:
+        from ....viz.commands.signal import bad_channels, bad_spans
+
+        self.annotation_bar.setVisible(bool(tr.annotate) and self._file_kind == "meeg")
+        if not tr.annotate:
+            return
+        if self.label_combo.currentText() != tr.annotate_label:
+            self.label_combo.setCurrentText(tr.annotate_label)
+        spans = bad_spans(self.ctx.store)
+        seconds = sum(sp.duration for sp in spans)
+        n_bad = len(bad_channels(self.ctx.store))
+        self.review_summary.setText(
+            f"{n_bad} bad channel{'s' if n_bad != 1 else ''} · {len(spans)} bad "
+            f"segment{'s' if len(spans) != 1 else ''} ({seconds:.1f} s)")
+        from ....viz.data.signal import channels_sibling
+
+        self.review_summary.setToolTip(
+            "" if channels_sibling(src.path) is not None else
+            "This recording has no _channels.tsv beside it: its bad channels are kept "
+            "for this session but cannot be saved to the dataset.")
 
     def _sync_presets(self, tr) -> None:
         presets = self._presets()
@@ -759,9 +1083,12 @@ class SignalPresenter:
             "traces.remove_dc": tr.remove_dc,
             "traces.page_scale": tr.page_scale,
             "zen": self.zen,
-            # Something to write: the session's bads differ from the file's.
-            "bads.changed": bool(src is not None and tr.bads is not None
-                                 and set(tr.bads) != set(src.bads)),
+            # Something to write: the session's review differs from the files.
+            "review.changed": self._review_changed(),
+            "annotate": bool(tr.annotate),
+            "span.selected": tr.selected_span is not None,
+            "quality": bool(tr.quality),
+            "panel.inspector": self.inspector_open(),
         }
 
     def toolbar_wanted(self) -> bool:
@@ -780,7 +1107,8 @@ class SignalPresenter:
         pass
 
     def restore_panels(self) -> None:
-        pass
+        if self.ctx.settings.traces.controls_open and not self.inspector_open():
+            self.set_inspector(True, remember=False)
 
     def canvases(self, kind: str) -> list:
         if kind == "traces" and self._traces is not None and self._traces.isVisible():
@@ -797,6 +1125,9 @@ class SignalPresenter:
     # ------------------------------------------------------------------
 
     def gui_action(self, name: str, params) -> bool:
+        if name == "inspector":
+            self.set_inspector(not self.inspector_open())
+            return True
         if name == "psd":
             self.show_psd(filtered=False)
             return True
@@ -810,8 +1141,8 @@ class SignalPresenter:
         if name == "close_signal":
             self.close_signal()
             return True
-        if name == "write_bads":
-            self.write_bads()
+        if name == "save_review":
+            self.save_review()
             return True
         if name == "zen":
             self.set_zen(not self.zen)
@@ -829,45 +1160,92 @@ class SignalPresenter:
             key = ", ".join(self.viewer.action_manager.keys_for("view.zen")) or "Z"
             self.viewer.status_message.emit(f"Zen mode: {key} brings the controls back")
 
-    def write_bads(self) -> bool:
-        """The channels marked bad in this session, into the recording's
-        ``_channels.tsv`` (one undoable operation of the dataset)."""
-        from ....editor.channels import set_bad_channels
-        from ....viz.bids import dataset_root
-        from ....viz.commands.signal import bad_channels
+    def _bads_changed(self) -> bool:
+        src = self.source
+        tr = self.ctx.scene.traces
+        return bool(src is not None and tr.bads is not None and set(tr.bads) != set(src.bads))
+
+    def _review_changed(self) -> bool:
+        """Whether there is something the dataset can take: bad channels
+        when the recording has a _channels.tsv, bad segments always (a run
+        without an events table gets one)."""
+        from ....viz.commands.signal import spans_changed
         from ....viz.data.signal import channels_sibling
 
         src = self.source
         if src is None:
             return False
-        tsv = channels_sibling(src.path)
-        if tsv is None:
-            self.viewer.status_message.emit(
-                f"{src.path.name} has no _channels.tsv beside it to write the bad "
-                "channels into.")
+        bads = self._bads_changed() and channels_sibling(src.path) is not None
+        return bool(bads or spans_changed(self.ctx.store))
+
+    def save_review(self) -> bool:
+        """The bad channels into the recording's ``_channels.tsv`` and the
+        bad segments into the run's ``_events.tsv``, as ONE undoable
+        operation of the dataset. A failure is shown, not only said in the
+        status line (where it went unnoticed)."""
+        from ....editor.annotations import save_review
+        from ....viz.bids import dataset_root
+        from ....viz.commands.signal import bad_channels, bad_spans, spans_changed
+        from ....viz.data.events import Event, events_sibling, read_events_tsv, run_base
+        from ....viz.data.signal import channels_sibling
+
+        src = self.source
+        if src is None:
             return False
+        tr = self.ctx.scene.traces
         root = self.viewer.current_root() or dataset_root(src.path) or src.path.parent
         bads = bad_channels(self.ctx.store)
+        spans = bad_spans(self.ctx.store)
+        channels_tsv = channels_sibling(src.path)
+        events_tsv = events_sibling(src.path) or src.path.parent / f"{run_base(src.path)}_events.tsv"
+        write_bads = tr.bads is not None and set(tr.bads) != set(src.bads)
+        write_spans = spans_changed(self.ctx.store)
+        problems = []
+        if write_bads and channels_tsv is None:
+            problems.append(f"{src.path.name} has no _channels.tsv beside it, so the bad "
+                            "channels cannot be written.")
+            write_bads = False
         try:
-            changed = set_bad_channels(root, tsv, bads)
+            result = save_review(
+                root, recording=src.path.name,
+                channels_tsv=channels_tsv if write_bads else None,
+                bads=bads if write_bads else None,
+                events_tsv=events_tsv if write_spans else None,
+                spans=spans if write_spans else None, sfreq=src.sfreq)
         except Exception as exc:  # noqa: BLE001 - said, never swallowed
-            self.viewer.status_message.emit(f"The bad channels were not written: {exc}")
+            log.exception("could not save the review of %s", src.path)
+            QMessageBox.warning(self.viewer, "Not saved",
+                                f"The review of {src.path.name} was not written:\n{exc}")
             return False
-        src.bads = set(bads)
-        src.bads_from = tsv.name
-        self.ctx.store.changed({"traces.look"})
+        if write_bads:
+            src.bads = set(bads)
+            src.bads_from = channels_tsv.name
+        if write_spans:
+            src.events_tsv = read_events_tsv(events_tsv)
+            src.bad_spans = [Event(sp.onset, sp.duration, sp.label, "bad") for sp in spans]
+        self.ctx.store.changed({"traces.look", "traces.annotations"})
         self.viewer.refresh_actions()
-        self.viewer.status_message.emit(
-            f"{len(bads)} bad channel{'s' if len(bads) != 1 else ''} written to {tsv.name}"
-            f" ({changed} row{'s' if changed != 1 else ''} changed); undo it from the "
-            "Editor's history" if changed else f"{tsv.name} already says so")
-        return True
+        done = []
+        if result["channels"]:
+            done.append(f"{len(bads)} bad channel{'s' if len(bads) != 1 else ''} in "
+                        f"{channels_tsv.name}")
+        if result["segments"]:
+            done.append(f"{len(spans)} bad segment{'s' if len(spans) != 1 else ''} in "
+                        f"{events_tsv.name}")
+        message = ("Saved " + " and ".join(done) + "; undo it from the Editor's history"
+                   if done else "The dataset already says so")
+        if problems:
+            QMessageBox.information(self.viewer, "Saved in part", "\n".join(problems))
+        self.viewer.status_message.emit(message)
+        return bool(done)
 
     def close_signal(self) -> None:
         """Drop the samples, back to the metadata card (MEG/EEG) or out."""
         self._generation += 1
-        for tag in ("signal", "resample", "psd"):
+        for tag in ("signal", "resample", "psd", "quality"):
             self.ctx.jobs.cancel(tag)
+        self._quality = None
+        self._quality_of = None
         self.source = None
         self.ctx.store.sources.clear()
         if self.zen:

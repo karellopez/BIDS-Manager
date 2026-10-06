@@ -184,7 +184,7 @@ def test_the_first_volume_opens_planes_with_the_render(qtbot, ds, gpu) -> None:
 def test_the_3d_button_shows_the_render_and_its_panel(qtbot, ds, gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     viewer.run("view.mode", mode="single")
-    viewer.button("view.3d").click()
+    viewer.action("view.3d").trigger()
     viewer.qstore.flush()
     render = viewer.presenter.render_canvas
     qtbot.waitUntil(render.has_volume, timeout=10_000)
@@ -196,7 +196,7 @@ def test_the_3d_button_shows_the_render_and_its_panel(qtbot, ds, gpu) -> None:
     assert not viewer.action("slice.next").isEnabled()
     # The planes stay one click away: they leave 3-D.
     assert viewer.action("view.multi").isEnabled()
-    viewer.button("view.3d").click()
+    viewer.action("view.3d").trigger()
     viewer.qstore.flush()
     assert viewer.scene.mode == "single"
     assert viewer.canvases("render") == []
@@ -206,9 +206,11 @@ def test_one_layout_at_a_time(qtbot, ds, gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     for action, mode in (("view.multi", "multi"), ("view.3d", "3d"),
                          ("view.combo", "combo"), ("view.multi", "multi")):
-        viewer.button(action).click()
+        viewer.action(action).trigger()
         viewer.qstore.flush()
         assert viewer.scene.mode == mode
+        assert viewer.presenter.layout_button.text() == {
+            "multi": "Multi-planar", "3d": "3-D", "combo": "Planes + 3-D"}[mode]
         checked = {a for a in ("view.multi", "view.3d", "view.combo")
                    if viewer.action(a).isChecked()}
         assert checked == {action}

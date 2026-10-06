@@ -186,9 +186,12 @@ class GraphState(_Model):
     events: bool = True
     #: The run's physio recordings drawn under the graph, on the same axis.
     physio: bool = False
-    #: Per-volume quality under the graph: global signal, DVARS, and the
-    #: volumes that jump (computed once per series).
+    #: Per-volume quality control under the graph (computed once per
+    #: series, each row only when it is shown).
     qc: bool = False
+    #: Which QC rows (ids of ``compute.qc.QC_ROWS``): head motion, DVARS,
+    #: outlier voxels, slice spikes, the global signal, the carpet.
+    qc_rows: list[str] = Field(default_factory=lambda: ["motion", "dvars", "outliers"])
     #: The 4-D layer the graph and the volume controls follow ("" =
     #: automatic: the base image when it is a series, else the top-most
     #: 4-D overlay, so a BOLD drawn over a T1 has its time course).
@@ -268,6 +271,17 @@ class RenderState(_Model):
     use_colormap: bool = True
 
 
+class Span(_Model):
+    """A stretch of a recording marked bad: seconds of RUN time (as events
+    are), and its label, ``BAD_`` and a reason (``BAD_muscle``), which is how
+    mne-bids writes such a stretch into ``_events.tsv`` and reads it back as
+    an annotation."""
+
+    onset: float
+    duration: float
+    label: str = "BAD_"
+
+
 class TracesState(_Model):
     """How a signal is shown: which stretch, which channels, how scaled,
     how filtered. ``t0`` and ``width`` are seconds of RECORDING time."""
@@ -302,6 +316,17 @@ class TracesState(_Model):
     #: The channels marked bad in this session (None: the recording's own,
     #: from its info and its _channels.tsv).
     bads: Optional[list[str]] = None
+    #: The bad segments in this session (None: the recording's own, from its
+    #: ``_events.tsv`` BAD rows, else its BAD annotations).
+    bad_spans: Optional[list[Span]] = None
+    #: Annotation mode: a drag marks a bad segment instead of scrolling.
+    annotate: bool = False
+    #: The label a new segment gets.
+    annotate_label: str = "BAD_"
+    #: The segment selected for editing (an index into the bad segments).
+    selected_span: Optional[int] = None
+    #: The quality check shown (computed when first switched on).
+    quality: bool = False
 
 
 class SpectrumState(_Model):
@@ -327,6 +352,29 @@ class SpectrumState(_Model):
     exclude_water: bool = True
     #: Height gain over the fitted one: >1 looks under the tallest peak.
     y_gain: float = 1.0
+
+
+class MosaicBuild(_Model):
+    """A mosaic described by what a figure needs, not by its grammar line:
+    one plane, a grid of slices across a range. The line
+    (:attr:`Scene.mosaic`) is built from it; written by hand, the line is
+    ``custom`` and the builder leaves it alone."""
+
+    plane: Plane = "axial"
+    rows: int = Field(3, ge=1, le=10)
+    cols: int = Field(6, ge=1, le=16)
+    #: Millimetres along the plane's axis; None: fitted to the head.
+    start: Optional[float] = None
+    end: Optional[float] = None
+    labels: bool = True
+    #: A perpendicular slice before the grid, showing where every tile cuts.
+    reference: bool = False
+    #: Neighbouring tiles overlap by this fraction.
+    overlap: float = Field(0.0, ge=0.0, le=0.5)
+    #: Tiles cropped to the head (one crop for all, so they stay alike).
+    crop: bool = True
+    #: The line was written by hand: the builder does not overwrite it.
+    custom: bool = False
 
 
 class Measurement(_Model):
@@ -373,6 +421,8 @@ class Scene(_Model):
     render: RenderState = Field(default_factory=RenderState)
     clips: list[ClipPlane] = Field(default_factory=lambda: [ClipPlane()])
     mosaic: str = "A -20 0 20 40 ; C 0 S X R 0"
+    #: How the mosaic is built (plane, grid, range); the line follows.
+    mosaic_build: MosaicBuild = Field(default_factory=MosaicBuild)
     measurements: list[Measurement] = Field(default_factory=list)
 
     # -- signals and spectra --------------------------------------------
@@ -405,9 +455,9 @@ class Scene(_Model):
 
 
 __all__ = [
-    "Camera", "ClipPlane", "Cursor", "Display", "GraphState", "LabelTable",
+    "Camera", "ClipPlane", "Cursor", "Display", "GraphState", "LabelTable", "MosaicBuild",
     "Layer", "LayoutState", "Measurement", "PLANES", "PLANE_AXIS", "PLANE_HV", "Plane",
-    "RenderState", "Scene", "SignalLayer", "SliceViewState", "SourceRef",
+    "RenderState", "Scene", "SignalLayer", "SliceViewState", "SourceRef", "Span",
     "SpectrumLayer", "SpectrumState", "TracesState", "Vec3", "ViewMode",
     "VolumeDisplay", "VolumeLayer",
 ]

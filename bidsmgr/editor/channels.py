@@ -22,11 +22,22 @@ from typing import Iterable
 from ..project.operations import begin_operation
 
 
+#: The UTF-8 byte order mark. mne-bids writes its tables with one; read as
+#: plain UTF-8 it became part of the first column's name, every table was
+#: refused for having "no name column", and no bad channel was ever saved.
+BOM = "\ufeff"
+
+
 def read_rows(path: Path) -> tuple[list[str], list[dict]]:
-    with open(path, "r", encoding="utf-8", newline="") as fh:
+    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         rows = list(reader)
         return list(reader.fieldnames or []), rows
+
+
+def has_bom(path: Path) -> bool:
+    with open(path, "rb") as fh:
+        return fh.read(3) == BOM.encode("utf-8")
 
 
 def status_table(path: Path, bads: Iterable[str]) -> tuple[str, int]:
@@ -45,6 +56,10 @@ def status_table(path: Path, bads: Iterable[str]) -> tuple[str, int]:
             changed += 1
         row["status"] = new
     out = io.StringIO()
+    # Written as it was found: a table that carried a byte order mark keeps
+    # it, so the only difference in the file is the status column.
+    if has_bom(path):
+        out.write(BOM)
     writer = csv.DictWriter(out, fieldnames=fields, delimiter="\t", lineterminator="\n",
                             extrasaction="ignore")
     writer.writeheader()
@@ -68,4 +83,4 @@ def set_bad_channels(root: Path, path: Path, bads: Iterable[str]) -> int:
     return changed
 
 
-__all__ = ["read_rows", "set_bad_channels", "status_table"]
+__all__ = ["BOM", "has_bom", "read_rows", "set_bad_channels", "status_table"]

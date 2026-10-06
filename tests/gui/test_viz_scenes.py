@@ -86,11 +86,11 @@ def test_the_views_menu_lists_the_datasets_scenes(qtbot, ds):
     with qtbot.waitSignal(v.loaded, timeout=20_000):
         v.set_file(_t1(ds), ds)
     v.presenter.save_scene("first look")
-    menu = v.presenter.views_button.menu()
-    v.presenter._fill_views_menu(menu)
+    menu = v.presenter.save_button.menu()
+    v.presenter._fill_save_menu(menu)
     entries = {a.text(): a for a in menu.actions()}
-    assert "Save as a scene of this dataset..." in entries
-    sub = entries["Scenes of this dataset"].menu()
+    assert "Save a scene in this dataset..." in entries
+    sub = entries["Open a scene of this dataset"].menu()
     assert [a.text() for a in sub.actions()] == ["first look"]
 
 

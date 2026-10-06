@@ -1,0 +1,106 @@
+"""The handle of a controls column: a tab on the edge, always in view.
+
+A "Controls" button among a toolbar's buttons was easy to miss, and once the
+column was closed nothing on screen said there was one. This is the drawer's
+handle: a slim tab on the right edge of the images, the column's name written
+down it with its icon, an arrow saying which way it opens. Click to open,
+click again to close (Ctrl+I as before).
+
+ONE painted widget, in the theme's colours, rounded on its outer side.
+"""
+
+from __future__ import annotations
+
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPolygonF
+from PyQt6.QtWidgets import QSizePolicy, QWidget
+
+from ....viz.theme import parse_colour
+
+
+def _qcolor(value: str, alpha=None) -> QColor:
+    c = QColor(*parse_colour(value))
+    if alpha is not None:
+        c.setAlpha(alpha)
+    return c
+
+
+class SideTab(QWidget):
+    """A vertical tab: the column's name, its icon and an arrow."""
+
+    clicked = pyqtSignal()
+    WIDTH = 24
+
+    def __init__(self, text: str = "Controls", icon: str = "controls", parent=None) -> None:
+        super().__init__(parent)
+        self.text = text
+        self.icon_name = icon
+        #: Whether the column it opens is open (the arrow points to close).
+        self.open = False
+        self.setFixedWidth(self.WIDTH)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setObjectName("viz-side-tab")
+        self._sync_tip()
+
+    def set_open(self, on: bool) -> None:
+        if self.open != bool(on):
+            self.open = bool(on)
+            self._sync_tip()
+            self.update()
+
+    def _sync_tip(self) -> None:
+        self.setToolTip(f"{'Close' if self.open else 'Open'} the {self.text.lower()} column "
+                        "(Ctrl+I): the layers and their look, the views, the layout, the "
+                        "mosaic and the 3-D, by purpose")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        from .. import bridge
+        from ... import icons
+
+        theme = bridge.ThemeHub.instance().theme
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        hover = self.underMouse()
+        r = QRectF(self.rect()).adjusted(1.0, 2.0, 0.0, -2.0)
+        path = QPainterPath()
+        path.addRoundedRect(r, 6.0, 6.0)
+        p.fillPath(path, _qcolor(theme.token("surface3" if hover else "surface2", "#161b22")))
+        p.setPen(_qcolor(theme.token("border", "#21262d")))
+        p.drawPath(path)
+        cx = r.center().x()
+        ink = _qcolor(theme.text, 255 if hover else 215)
+        # The arrow: pointing left (open it out) or right (put it away).
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        y = r.top() + 14.0
+        if self.open:
+            tri = [QPointF(cx - 3, y - 5), QPointF(cx - 3, y + 5), QPointF(cx + 3, y)]
+        else:
+            tri = [QPointF(cx + 3, y - 5), QPointF(cx + 3, y + 5), QPointF(cx - 3, y)]
+        p.drawPolygon(QPolygonF(tri))
+        pix = icons.icon(self.icon_name, theme.accent).pixmap(16, 16)
+        p.drawPixmap(int(cx - 8), int(y + 12), pix)
+        # The name, written down the tab.
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setBold(True)
+        font.setCapitalization(QFont.Capitalization.AllUppercase)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
+        p.setFont(font)
+        p.setPen(ink)
+        p.save()
+        p.translate(cx, y + 36.0)
+        p.rotate(90)
+        p.drawText(QRectF(0, -9, max(40.0, r.height() - 60.0), 18),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.text)
+        p.restore()
+        p.end()
+
+
+__all__ = ["SideTab"]

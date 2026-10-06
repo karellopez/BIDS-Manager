@@ -29,23 +29,26 @@ import logging
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSpinBox, QSplitter,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
+    QSplitter, QVBoxLayout, QWidget,
 )
 
 from ....viz import views
 from ....viz.scene import PLANE_AXIS
 from ....viz.theme import parse_colour
+from ...widgets.primitives import ElidedLabel
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
 
 log = logging.getLogger(__name__)
 
-_SCALINGS = (("raw", "Raw"), ("percent", "Percent change"), ("demean", "Demeaned"))
-_X_AXES = (("auto", "Automatic"), ("seconds", "Seconds"), ("frames", "Volumes"))
+_SCALINGS = (("raw", "Raw values"), ("percent", "% signal change"), ("demean", "Mean removed"))
+_X_AXES = (("auto", "Automatic"), ("seconds", "Seconds"), ("frames", "Volume index"))
+#: The neighbourhood choices: (scope, text). Scope n is a (2n-1)^2 square.
+_SCOPES = ((1, "Voxel"), (2, "3 × 3"), (3, "5 × 5"), (4, "7 × 7"))
 _Y_LABEL = {"raw": "Value", "percent": "Change (%)", "demean": "Value minus mean"}
 
 #: Inner margin of a small-multiple cell, as a fraction of the cell.
@@ -123,46 +126,145 @@ def physio_for_graph(path, t0: float, t1: float, points: int = 2000) -> dict:
     return {"names": [ln["name"] for ln in lanes], "lanes": lanes}
 
 
-def qc_for_graph(src) -> dict:
-    """Worker side: the series' per-volume quality as lanes (frame-indexed):
-    the global signal, DVARS, the volumes whose DVARS jumps above the
-    box-plot fence, and the non-steady-state volumes at the start."""
+def _scaled(values: np.ndarray, robust: bool = False, *, floor: Optional[float] = None,
+            top: Optional[float] = None) -> tuple[np.ndarray, float, float]:
+    """Values mapped to 0..1 for a lane, with the range used: robust (0.5
+    to 99.5 percentiles), the full range, or from ``floor`` (0 for FD and a
+    share) up to at least ``top`` (so a threshold line has its place)."""
+    v = np.asarray(values, dtype=float)
+    finite = v[np.isfinite(v)]
+    if finite.size == 0:
+        return v, 0.0, 1.0
+    lo, hi = (np.percentile(finite, (0.5, 99.5)) if robust
+              else (float(finite.min()), float(finite.max())))
+    if floor is not None:
+        lo = floor
+    if top is not None:
+        hi = max(hi, top)
+    if hi <= lo:
+        return np.where(np.isfinite(v), 0.5, np.nan), float(lo), float(hi)
+    return np.clip((v - lo) / (hi - lo), 0.0, 1.0), float(lo), float(hi)
+
+
+def _lane(name: str, kind: str = "misc", **kw) -> dict:
+    lane = {"name": name, "type": kind, "role": "waveform", "frames": True,
+            "x": np.empty(0), "y": np.empty(0), "ticks": np.empty(0), "note": ""}
+    lane.update(kw)
+    return lane
+
+
+def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
+                 cancel=None, progress=None) -> dict:
+    """Worker side: the QC ``rows`` asked for (ids of ``qc.QC_ROWS``) as
+    lanes, frame-indexed: ``{"rows": {id: [lane, ...]}, "skip": n}``. Each
+    row is computed only when asked for; the expensive one, motion, is read
+    from fMRIPrep's confounds when the run has them."""
+    from ....viz.compute import motion as M
     from ....viz.compute import qc
 
-    skip = qc.non_steady_state(src)
-    pv = qc.per_volume(src, skip=skip)
-    n = pv["global"].size
+    rows = set(rows if rows is not None else qc.QC_ROW_IDS)
+    skip = qc.non_steady_state(src, cancel=cancel)
+    n = src.loaded_frames
     frames = np.arange(n, dtype=float)
+    out: dict[str, list[dict]] = {}
+    if rows & {"dvars", "global"}:
+        pv = qc.per_volume(src, skip=skip, cancel=cancel)
+        if "global" in rows:
+            y, _lo, _hi = _scaled(pv["global"], True)
+            out["global"] = [_lane("global signal", "misc", x=frames, y=y,
+                                   note="the mean over the head, per volume")]
+        if "dvars" in rows:
+            y, _lo, hi = _scaled(pv["dvars"], floor=0.0)
+            fence = pv["fence"]
+            out["dvars"] = [_lane(
+                "DVARS", "eog", x=frames, y=y, ticks=pv["flagged"].astype(float),
+                label=f"DVARS (% of mean), max {hi:.2f}",
+                rule=(fence / hi if np.isfinite(fence) and hi > 0 else None),
+                note=(f"root mean square change from the previous volume, % of the "
+                      f"mean; median {np.nanmedian(pv['dvars']):.2f} %. Marked: "
+                      f"{pv['flagged'].size} volumes above the upper box-plot fence "
+                      f"({fence:.2f} %: 75th percentile + 1.5 IQR, FSL's rule)"))]
+    if "motion" in rows:
+        m = M.motion_for(src, path, root, skip=skip, cancel=cancel, progress=progress)
+        fd_max = float(np.nanmax(m.fd)) if np.isfinite(m.fd).any() else 0.0
+        y, _lo, hi = _scaled(m.fd, floor=0.0, top=M.FD_THRESHOLD_MM * 1.2)
+        over = np.flatnonzero(np.nan_to_num(m.fd) > M.FD_THRESHOLD_MM).astype(float)
+        trans = m.params[:, :3]
+        rot = np.degrees(m.params[:, 3:])
+        t_lo, t_hi = float(np.min(trans)), float(np.max(trans))
+        r_lo, r_hi = float(np.min(rot)), float(np.max(rot))
 
-    def scaled(values: np.ndarray, robust: bool) -> np.ndarray:
-        v = np.asarray(values, dtype=float)
-        finite = v[np.isfinite(v)]
-        if finite.size == 0:
-            return v
-        lo, hi = (np.percentile(finite, (0.5, 99.5)) if robust
-                  else (finite.min(), finite.max()))
-        return np.clip((v - lo) / (hi - lo), 0.0, 1.0) if hi > lo else np.full_like(v, 0.5)
+        def joint(block: np.ndarray, lo: float, hi: float) -> list[np.ndarray]:
+            span = hi - lo
+            if span <= 0:
+                return [np.full(n, 0.5) for _ in range(block.shape[1])]
+            return [(block[:, k] - lo) / span for k in range(block.shape[1])]
 
-    fence = pv["fence"]
-    lanes = [
-        {"name": "global signal", "type": "misc", "role": "waveform", "frames": True,
-         "x": frames, "y": scaled(pv["global"], True), "ticks": np.empty(0),
-         "note": "the mean over the head, per volume"},
-        {"name": "DVARS", "type": "ecg", "role": "waveform", "frames": True,
-         "x": frames, "y": scaled(pv["dvars"], False), "ticks": np.empty(0),
-         "note": (f"root mean square change from the previous volume, % of the mean; "
-                  f"median {np.nanmedian(pv['dvars']):.2f} %, fence {fence:.2f} %")},
-        {"name": "DVARS jumps", "type": "stim", "role": "events", "frames": True,
-         "x": np.empty(0), "y": np.empty(0), "ticks": pv["flagged"].astype(float),
-         "note": (f"{pv['flagged'].size} volumes above the upper box-plot fence "
-                  "(75th percentile + 1.5 IQR, FSL's rule): look at them")},
-    ]
-    if skip:
-        lanes.append({"name": "non-steady-state", "type": "stim", "role": "events",
-                      "frames": True, "x": np.empty(0), "y": np.empty(0),
-                      "ticks": np.arange(skip, dtype=float),
-                      "note": f"{skip} bright volumes at the start, left out of the maps"})
-    return {"names": [ln["name"] for ln in lanes], "lanes": lanes}
+        where = m.describe()
+        out["motion"] = [
+            _lane("framewise displacement", "ecg", x=frames, y=y, ticks=over,
+                  label=f"FD (mm), max {fd_max:.2f}",
+                  rule=M.FD_THRESHOLD_MM / hi if hi > 0 else None,
+                  note=(f"framewise displacement (Power 2012), {where}; mean "
+                        f"{np.nanmean(m.fd):.3f} mm. Marked: {over.size} volumes above "
+                        f"{M.FD_THRESHOLD_MM:g} mm (the dashed line)")),
+            _lane("translation", "misc", x=frames, ys=joint(trans, t_lo, t_hi), series=True,
+                  legend=("x", "y", "z"), label=f"translation (mm), {t_lo:.2f} to {t_hi:.2f}",
+                  note=f"the three translations, {where}"),
+            _lane("rotation", "misc", x=frames, ys=joint(rot, r_lo, r_hi), series=True,
+                  legend=("x", "y", "z"), label=f"rotation (degrees), {r_lo:.2f} to {r_hi:.2f}",
+                  note=f"the three rotations, {where}"),
+        ]
+    if rows & {"outliers", "spikes", "carpet"}:
+        sample = qc.sample_series(src, skip=skip, slice_axis=slice_axis, cancel=cancel)
+        if "outliers" in rows:
+            frac = qc.outlier_fraction(sample["series"], skip=skip)
+            y, _lo, hi = _scaled(frac, floor=0.0, top=qc.OUTLIER_LIMIT * 1.2)
+            over = np.flatnonzero(np.nan_to_num(frac) > qc.OUTLIER_LIMIT).astype(float)
+            peak = float(np.nanmax(frac)) if np.isfinite(frac).any() else 0.0
+            out["outliers"] = [_lane(
+                "outlier voxels", "resp", x=frames, y=y, ticks=over,
+                label=f"outlier voxels (%), max {peak * 100:.1f}",
+                rule=qc.OUTLIER_LIMIT / hi if hi > 0 else None,
+                note=(f"share of {sample['series'].shape[1]:,} sampled head voxels that "
+                      f"are outliers (3dToutcount's rule). Marked: {over.size} volumes "
+                      f"above {qc.OUTLIER_LIMIT * 100:g} % (the dashed line, "
+                      "afni_proc.py's censoring default)"))]
+        if "spikes" in rows:
+            sp = qc.slice_spikes(sample["slice_means"], skip=skip)
+            where = ", ".join(f"volume {int(t)} slice {int(z)}"
+                              for t, z in zip(sp["flagged"][:6], sp["slice"][:6]))
+            out["spikes"] = [_lane(
+                "slice spikes", "stim", role="events", ticks=sp["flagged"].astype(float),
+                note=(f"volumes where one slice departs from its own course by more "
+                      f"than {qc.SPIKE_Z:g} robust SD" + (f": {where}" if where else
+                                                         ": none")))]
+        if "carpet" in rows:
+            image = qc.carpet(sample["series"], sample["depth"], skip=skip)
+            out["carpet"] = [_lane(
+                "carpet", "misc", role="image", image=image, height=4,
+                note=(f"{sample['series'].shape[1]:,} sampled voxels' signal over time "
+                      f"(z-scored after drift removal), in {image.shape[0]} rows from "
+                      "the head's edge (top) inwards: a vertical band across many rows "
+                      "is motion or a spike (Power 2017)"))]
+    out["nss"] = ([_lane("non-steady-state", "stim", role="events",
+                         ticks=np.arange(skip, dtype=float),
+                         note=f"{skip} bright volumes at the start, left out of the measures")]
+                  if skip else [])
+    return {"rows": out, "skip": skip}
+
+
+class _CappedLabel(ElidedLabel):
+    """A name that asks for at most ``cap`` pixels and elides beyond them, so
+    a long file name never decides how narrow the graph may be."""
+
+    def __init__(self, cap: int) -> None:
+        super().__init__("", mode=Qt.TextElideMode.ElideMiddle)
+        self._cap = int(cap)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), self._cap), hint.height())
 
 
 class TimecourseGraph(QWidget):
@@ -192,7 +294,7 @@ class TimecourseGraph(QWidget):
         import pyqtgraph as pg
 
         self._pg = pg
-        lay.addLayout(self._build_controls())
+        lay.addWidget(self._build_controls())
 
         self.plot = pg.PlotWidget()
         pi = self.plot.getPlotItem()
@@ -269,6 +371,10 @@ class TimecourseGraph(QWidget):
         self._qc_src = None
         self._qc_key = None
         self._qc_generation = 0
+        #: QC rows asked of a worker for the current series (computed or not).
+        self._qc_asked: set[str] = set()
+        #: The carpet, pooled (created the first time, hidden when unused).
+        self._carpet_item = None
         self.split.addWidget(self.physio_plot)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 2)
@@ -295,103 +401,149 @@ class TimecourseGraph(QWidget):
         lbl.setObjectName("sidecar-footer-summary")
         return lbl
 
-    def _build_controls(self) -> QHBoxLayout:
+    def _group(self, label: str, widget: QWidget, tip: str) -> QWidget:
+        """A label and its control, kept together when the bar wraps."""
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        lbl = self._label(label)
+        lbl.setToolTip(tip)
+        widget.setToolTip(tip)
+        h.addWidget(lbl)
+        h.addWidget(widget)
+        return box
+
+    def _build_controls(self) -> QWidget:
+        """The graph's controls, by purpose: WHAT is plotted (the series,
+        the neighbourhood), HOW (values, time axis, marker), WHAT ELSE on the
+        same axis (events, physio, quality rows), and export. A wrapping bar:
+        a plain row of them was a 1139 px floor under the whole viewer."""
+        from ...widgets.flow_layout import FlowBar
+
         ctx = self.ctx
-        row = QHBoxLayout()
-        row.setContentsMargins(8, 0, 8, 0)
-        row.setSpacing(6)
+        bar = FlowBar(h_spacing=10, v_spacing=4)
+        bar.setContentsMargins(8, 0, 8, 0)
         # Which series is plotted: a name, or a choice when there are several
         # (the anatomy's own series and an overlaid BOLD, say).
-        self.series_label = QLabel("")
+        self.series_label = _CappedLabel(260)
         self.series_label.setObjectName("sidecar-footer-summary")
-        row.addWidget(self.series_label)
+        bar.addWidget(self.series_label)
         self.series_combo = QComboBox()
-        self.series_combo.setObjectName("ent-input")
+        self.series_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.series_combo.setMinimumContentsLength(10)
         self.series_combo.setToolTip("The 4-D image whose time course is plotted; the "
                                      "volume slider and Play follow it too.")
         self.series_combo.currentIndexChanged.connect(self._on_series_choice)
         self.series_combo.setVisible(False)
-        row.addWidget(self.series_combo)
-        row.addSpacing(10)
-        row.addWidget(self._label("Scope:"))
-        self.scope_spin = QSpinBox()
-        self.scope_spin.setRange(1, 4)
-        self.scope_spin.setToolTip(
-            "Neighbourhood around the crosshair voxel: 1 = the voxel, 2 = 3x3, "
-            "3 = 5x5, 4 = 7x7, taken in the plane of the current view."
-        )
-        self.scope_spin.valueChanged.connect(lambda v: ctx.run("graph.set", scope=v))
-        row.addWidget(self.scope_spin)
-        row.addSpacing(10)
-        row.addWidget(self._label("Dot size:"))
-        self.dot_spin = QSpinBox()
-        self.dot_spin.setRange(1, 20)
-        self.dot_spin.setToolTip("Diameter of the marker at the current frame.")
-        self.dot_spin.valueChanged.connect(lambda v: ctx.run("graph.set", dot=v))
-        row.addWidget(self.dot_spin)
-        row.addSpacing(12)
-        self.marks_box = QCheckBox("Mark neighbors")
-        self.marks_box.setToolTip("Off: only the centre voxel carries the frame marker.")
-        self.marks_box.toggled.connect(lambda v: ctx.run("graph.set", mark_neighbors=bool(v)))
-        row.addWidget(self.marks_box)
-        row.addSpacing(12)
-        row.addWidget(self._label("Scale:"))
+        bar.addWidget(self.series_combo)
+        self.scope_combo = QComboBox()
+        for value, text in _SCOPES:
+            self.scope_combo.addItem(text, value)
+        self.scope_combo.currentIndexChanged.connect(
+            lambda i: ctx.run("graph.set", scope=int(self.scope_combo.itemData(i))))
+        bar.addWidget(self._group(
+            "Neighbourhood", self.scope_combo,
+            "Which voxels are plotted: the crosshair voxel alone, or a square "
+            "around it in the plane of the active view, one small plot per voxel."))
         self.scaling_combo = QComboBox()
-        self.scaling_combo.setObjectName("ent-input")
         for value, text in _SCALINGS:
             self.scaling_combo.addItem(text, value)
-        self.scaling_combo.setToolTip(
-            "Raw values; percent change from the voxel's mean (the usual way "
-            "to read BOLD); or the mean removed."
-        )
         self.scaling_combo.currentIndexChanged.connect(
-            lambda i: ctx.run("graph.set", scaling=self.scaling_combo.itemData(i))
-        )
-        row.addWidget(self.scaling_combo)
-        row.addSpacing(8)
-        row.addWidget(self._label("Time:"))
+            lambda i: ctx.run("graph.set", scaling=self.scaling_combo.itemData(i)))
+        bar.addWidget(self._group(
+            "Values", self.scaling_combo,
+            "Raw values as stored; percent signal change from each voxel's own "
+            "mean (the usual way to read BOLD); or the mean removed."))
         self.x_combo = QComboBox()
-        self.x_combo.setObjectName("ent-input")
         for value, text in _X_AXES:
             self.x_combo.addItem(text, value)
-        self.x_combo.setToolTip(
-            "Automatic plots seconds whenever the sidecar times the volumes "
-            "(RepetitionTime, VolumeTiming, PET frame times), else the volume "
-            "number."
-        )
         self.x_combo.currentIndexChanged.connect(
-            lambda i: ctx.run("graph.set", x_axis=self.x_combo.itemData(i))
-        )
-        row.addWidget(self.x_combo)
-        row.addSpacing(12)
+            lambda i: ctx.run("graph.set", x_axis=self.x_combo.itemData(i)))
+        bar.addWidget(self._group(
+            "Time axis", self.x_combo,
+            "Automatic plots seconds whenever the sidecar times the volumes "
+            "(RepetitionTime, VolumeTiming, PET FrameTimesStart), else the "
+            "volume index."))
+        self.dot_spin = QSpinBox()
+        self.dot_spin.setRange(1, 20)
+        self.dot_spin.setSuffix(" px")
+        self.dot_spin.valueChanged.connect(lambda v: ctx.run("graph.set", dot=v))
+        bar.addWidget(self._group(
+            "Marker", self.dot_spin,
+            "Diameter of the marker at the volume on screen."))
+        self.marks_box = QCheckBox("On every voxel")
+        self.marks_box.setToolTip("Draw the current-volume marker on every voxel of the "
+                                  "neighbourhood; off, on the centre voxel only.")
+        self.marks_box.toggled.connect(lambda v: ctx.run("graph.set", mark_neighbors=bool(v)))
+        bar.addWidget(self.marks_box)
+        bar.addSpacing(6)
         self.events_box = QCheckBox("Events")
         self.events_box.setToolTip(
-            "The run's events.tsv on the same time axis: one band per event, "
+            "The run's _events.tsv on the same time axis: one band per event, "
             "coloured by trial type.")
         self.events_box.toggled.connect(lambda v: ctx.run("graph.set", events=bool(v)))
-        row.addWidget(self.events_box)
-        self.physio_box = QCheckBox("Physio")
+        bar.addWidget(self.events_box)
+        self.physio_box = QCheckBox("Physiology")
         self.physio_box.setToolTip(
-            "The run's physiological recordings under the graph, on the same "
-            "time axis, each placed by its own StartTime.")
+            "The run's physiological recordings (_physio.tsv.gz: cardiac, "
+            "respiration, triggers) in lanes under the graph, on the same time "
+            "axis, each placed by its own StartTime.")
         self.physio_box.toggled.connect(lambda v: ctx.run("graph.set", physio=bool(v)))
-        row.addWidget(self.physio_box)
-        self.qc_box = QCheckBox("QC traces")
+        bar.addWidget(self.physio_box)
+        self.qc_box = QCheckBox("QC")
         self.qc_box.setToolTip(
-            "Per volume, under the graph: the global signal, DVARS (how much the "
-            "head changes from one volume to the next) and the volumes that jump.")
+            "Quality control, per volume, in rows under the graph: head motion "
+            "(framewise displacement and the six parameters), DVARS, outlier "
+            "voxels, slice spikes, the global signal and a carpet plot. "
+            "Computed when switched on (motion is read from fMRIPrep's "
+            "confounds when the run has them); choose the rows with Rows.")
         self.qc_box.toggled.connect(lambda v: ctx.run("graph.set", qc=bool(v)))
-        row.addWidget(self.qc_box)
-        row.addStretch(1)
-        self.export_button = QPushButton("Export...")
+        bar.addWidget(self.qc_box)
+        self.qc_rows_button = QPushButton("Rows")
+        self.qc_rows_button.setObjectName("tb-btn")
+        self.qc_rows_button.setToolTip("Which quality-control rows are drawn.")
+        rows_menu = QMenu(self.qc_rows_button)
+        self._qc_row_actions = {}
+        from ....viz.compute.qc import QC_ROWS
+
+        for row_id, title, help_text in QC_ROWS:
+            act = rows_menu.addAction(title)
+            act.setCheckable(True)
+            act.setToolTip(help_text)
+            act.toggled.connect(lambda on, r=row_id: self._toggle_qc_row(r, on))
+            self._qc_row_actions[row_id] = act
+        rows_menu.setToolTipsVisible(True)
+        self.qc_rows_button.setMenu(rows_menu)
+        bar.addWidget(self.qc_rows_button)
+        bar.addStretch(1)
+        self.export_button = QPushButton("Export CSV...")
         self.export_button.setObjectName("tb-btn")
         self.export_button.setToolTip(
             "Save the plotted time courses as a CSV table: one row per volume, "
-            "the time (or volume number) and one column per voxel, in the "
-            "scaling shown.")
+            "the time (or volume index) and one column per voxel, in the values "
+            "shown.")
         self.export_button.clicked.connect(self._ask_export)
-        row.addWidget(self.export_button)
-        return row
+        bar.addWidget(self.export_button)
+        self.controls = bar
+        return bar
+
+    def add_panel_buttons(self, buttons) -> None:
+        """Buttons that act on the graph's PANEL (where it sits, maximised,
+        in its own window), placed last in the controls."""
+        for btn in buttons:
+            self.controls.addWidget(btn)
+
+    def _toggle_qc_row(self, row_id: str, on: bool) -> None:
+        rows = list(self.ctx.scene.graph.qc_rows)
+        if on and row_id not in rows:
+            rows.append(row_id)
+        elif not on and row_id in rows:
+            rows.remove(row_id)
+        else:
+            return
+        self.ctx.run("graph.set", qc_rows=rows)
 
     def _on_series_choice(self, _i: int) -> None:
         if self._series_syncing:
@@ -421,25 +573,37 @@ class TimecourseGraph(QWidget):
             else:
                 self.series_combo.setVisible(False)
                 name = current.name or current.id
-                self.series_label.setText(name if len(name) <= 48 else name[:45] + "...")
+                self.series_label.setText(name)
                 self.series_label.setToolTip(name)
         finally:
             self._series_syncing = False
 
     def _sync_controls(self) -> None:
         g = self.ctx.scene.graph
-        for w, v in ((self.scope_spin, g.scope), (self.dot_spin, g.dot)):
-            if w.value() != v:
-                w.blockSignals(True)
-                w.setValue(v)
-                w.blockSignals(False)
+        if self.dot_spin.value() != g.dot:
+            self.dot_spin.blockSignals(True)
+            self.dot_spin.setValue(g.dot)
+            self.dot_spin.blockSignals(False)
+        i = self.scope_combo.findData(int(g.scope))
+        if i >= 0 and self.scope_combo.currentIndex() != i:
+            self.scope_combo.blockSignals(True)
+            self.scope_combo.setCurrentIndex(i)
+            self.scope_combo.blockSignals(False)
         layer, src = views.series_layer(self.ctx.store)
         qc_ok = bool(src is not None and src.fully_loaded and src.loaded_frames >= 3)
-        self.qc_box.setVisible(qc_ok)
+        if self.qc_box.isHidden() == qc_ok:
+            self.qc_box.setVisible(qc_ok)
+            self.qc_rows_button.setVisible(qc_ok)
         if self.qc_box.isChecked() != g.qc:
             self.qc_box.blockSignals(True)
             self.qc_box.setChecked(g.qc)
             self.qc_box.blockSignals(False)
+        self.qc_rows_button.setEnabled(g.qc)
+        for row_id, act in self._qc_row_actions.items():
+            if act.isChecked() != (row_id in g.qc_rows):
+                act.blockSignals(True)
+                act.setChecked(row_id in g.qc_rows)
+                act.blockSignals(False)
         if self.marks_box.isChecked() != g.mark_neighbors:
             self.marks_box.blockSignals(True)
             self.marks_box.setChecked(g.mark_neighbors)
@@ -887,7 +1051,9 @@ class TimecourseGraph(QWidget):
         """The physio its remembered share, else room for every lane. Asks
         the host for the height that needs, first."""
         need = self._physio_px(lanes)
-        self.physio_plot.setMinimumHeight(min(need, 22 * lanes + 36))
+        # Asked for, never insisted on: a minimum of 22 px a lane made the
+        # whole viewer unable to shrink below ~430 px with physio open.
+        self.physio_plot.setMinimumHeight(48)
         self.wants_height.emit(self.GRAPH_PX + need + 50)
         total = max(self.split.height(), self.GRAPH_PX + need)
         saved = self.ctx.settings.layout_sizes.get(self._SPLIT_KEY)
@@ -898,13 +1064,26 @@ class TimecourseGraph(QWidget):
         self.split.setSizes([max(total - below, 80), max(below, 60)])
 
     def _lanes(self) -> list[dict]:
-        """Every lane the strip shows: the QC traces, then the physio."""
+        """Every lane the strip shows: the QC rows chosen, in their fixed
+        order, then the physio."""
+        from ....viz.compute.qc import QC_ROW_IDS
+
+        g = self.ctx.scene.graph
         out = []
-        if self.ctx.scene.graph.qc and self._qc_src is not None:
-            out += self._qc_src["lanes"]
-        if self.ctx.scene.graph.physio and self._physio_src is not None:
+        if g.qc and self._qc_src is not None:
+            have = self._qc_src["rows"]
+            for row_id in QC_ROW_IDS:
+                if row_id in g.qc_rows:
+                    out += have.get(row_id, [])
+            out += have.get("nss", [])
+        if g.physio and self._physio_src is not None:
             out += self._physio_src["lanes"]
         return out
+
+    @staticmethod
+    def _units(lanes: list[dict]) -> int:
+        """The strip's height in lane units (a carpet is several)."""
+        return int(sum(lane.get("height", 1) for lane in lanes))
 
     def _draw_physio(self) -> None:
         """The strip under the graph: per-volume QC traces and the run's
@@ -931,27 +1110,48 @@ class TimecourseGraph(QWidget):
             if self._qc_key != key:
                 self._qc_key = key
                 self._qc_src = None
+                self._qc_asked = set()
+            have = set(self._qc_src["rows"]) if self._qc_src is not None else set()
+            # Only the rows not yet computed. A new job replaces a running
+            # one, so it asks for everything still missing, not only the
+            # row just switched on; a row that failed is not retried until
+            # the rows asked for change.
+            missing = set(g.qc_rows) - have
+            if missing and not missing <= self._qc_asked:
+                self._qc_asked = missing
                 self._qc_generation += 1
-                self.ctx.jobs.start("graph-qc", self._qc_generation, qc_for_graph, src)
+                bids = self._context
+                axis = 2
+                if bids is not None:
+                    axis = {"i": 0, "j": 1, "k": 2}.get(
+                        str(bids.sidecar.get("SliceEncodingDirection", "k"))[:1], 2)
+                self.ctx.jobs.start(
+                    "graph-qc", self._qc_generation, qc_for_graph, src, sorted(missing),
+                    bids.path if bids is not None else None,
+                    bids.root if bids is not None else None, axis)
         lanes = self._lanes()
         if not lanes:
             self.physio_plot.setVisible(False)
             return
         first = not self.physio_plot.isVisible()
         self.physio_plot.setVisible(True)
-        if (first and not self._physio_sized) or len(lanes) > self._sized_lanes:
+        units = self._units(lanes)
+        if (first and not self._physio_sized) or units > self._sized_lanes:
             # Re-sized when lanes are added (QC traces after the physio, or
             # the other way round): eight lanes in four lanes' room is cramped.
             self._physio_sized = True
-            self._sized_lanes = len(lanes)
-            self._size_split(len(lanes))
+            self._sized_lanes = units
+            self._size_split(units)
         self._paint_physio()
 
     def _on_job_done(self, tag: str, generation: int, result) -> None:
         if tag == "graph-physio" and generation == self._physio_generation:
             self._physio_src = result
         elif tag == "graph-qc" and generation == self._qc_generation:
-            self._qc_src = result
+            if self._qc_src is None:
+                self._qc_src = result
+            else:
+                self._qc_src["rows"].update(result["rows"])
             self._physio_sized = False
         else:
             return
@@ -962,8 +1162,7 @@ class TimecourseGraph(QWidget):
             self._physio_src = None
             self.ctx.status.emit(f"The run's physio could not be read: {message}")
         elif tag == "graph-qc" and generation == self._qc_generation:
-            self._qc_src = None
-            self.ctx.status.emit(f"The QC traces could not be computed: {message}")
+            self.ctx.status.emit(f"The QC rows could not be computed: {message}")
 
     def _lane_x(self, lane: dict, values: np.ndarray) -> np.ndarray:
         """A lane's positions on the graph's axis: physio is in run seconds,
@@ -989,8 +1188,10 @@ class TimecourseGraph(QWidget):
                 for lane in self._lanes()]
 
     def _paint_physio(self) -> None:
-        """One lane per channel, top to bottom in file order: waveforms as
-        lines, event channels as ticks; names in the left gutter."""
+        """One lane per channel or QC row, top to bottom: waveforms as lines
+        (several in one lane share its scale: x, y and z), marks as ticks,
+        a threshold as a dashed line, a carpet as an image; each lane's name
+        and range inside it, top left."""
         pg = self._pg
         pi = self.physio_plot.getPlotItem()
         theme = self.ctx.theme
@@ -1000,37 +1201,59 @@ class TimecourseGraph(QWidget):
             ax.setPen(theme.plot_foreground)
             ax.setTextPen(theme.plot_foreground)
         lanes = self._lanes()
-        n = len(lanes)
-        waves = [i for i, lane in enumerate(lanes) if lane["role"] == "waveform"]
-        while len(self._physio_curves) < len(waves):
+        total = self._units(lanes)
+        curves_needed = sum(len(lane.get("ys", ())) or 1 for lane in lanes
+                            if lane["role"] == "waveform")
+        while len(self._physio_curves) < curves_needed:
             curve = pg.PlotCurveItem(antialias=False)
             pi.addItem(curve)
             self._physio_curves.append(curve)
         for k, curve in enumerate(self._physio_curves):
-            curve.setVisible(k < len(waves))
-        tick_x, tick_y, rule_x, rule_y, labels = [], [], [], [], []
+            curve.setVisible(k < curves_needed)
+        tick_x, tick_y, rule_x, rule_y, dash_x, dash_y, labels = [], [], [], [], [], [], []
         x0, x1 = float(self._x[0]), float(self._x[-1])
+        carpet = None
         k = 0
+        top = float(total)
         for i, lane in enumerate(lanes):
-            base = n - 1 - i
+            h = float(lane.get("height", 1))
+            base = top - h
             colour = theme.type_colour(lane["type"])
-            if i < n - 1:
+            if i < len(lanes) - 1:
                 rule_x += [x0, x1]
                 rule_y += [base, base]
             if lane["role"] == "waveform":
-                curve = self._physio_curves[k]
-                k += 1
-                curve.setPen(pg.mkPen(colour, width=1))
-                curve.setData(self._lane_x(lane, lane["x"]), lane["y"] * 0.8 + base + 0.1,
-                              connect="finite")
+                ys = lane.get("ys") or [lane["y"]]
+                xs = self._lane_x(lane, lane["x"])
+                for j, y in enumerate(ys):
+                    curve = self._physio_curves[k]
+                    k += 1
+                    pen = (parse_colour(theme.series(j)) if lane.get("series") else colour)
+                    curve.setPen(pg.mkPen(pen, width=1))
+                    curve.setData(xs, np.asarray(y, dtype=float) * 0.8 * h + base + 0.1 * h,
+                                  connect="finite")
+                if lane.get("rule") is not None:
+                    level = base + 0.1 * h + float(lane["rule"]) * 0.8 * h
+                    dash_x += [x0, x1]
+                    dash_y += [level, level]
+                if lane["ticks"].size:
+                    # Marked volumes: short ticks along the lane's top edge.
+                    tx = self._lane_x(lane, lane["ticks"])
+                    tick_x.append(np.repeat(tx, 2))
+                    tick_y.append(np.tile([top - 0.18 * h, top - 0.02 * h], tx.size))
             elif lane["role"] == "events" and lane["ticks"].size:
                 tx = self._lane_x(lane, lane["ticks"])
                 tick_x.append(np.repeat(tx, 2))
-                tick_y.append(np.tile([base + 0.12, base + 0.88], tx.size))
-            label = lane["name"]
-            if lane["role"] == "events":
-                label += f"  {lane['ticks'].size} marks"
-            labels.append((base + 1.0, label, colour))
+                tick_y.append(np.tile([base + 0.12 * h, base + 0.88 * h], tx.size))
+            elif lane["role"] == "image":
+                carpet = (lane, base, h)
+            label = lane.get("label", lane["name"])
+            if lane["ticks"].size or lane["role"] == "events":
+                label += f"  {lane['ticks'].size} marked"
+            # Several curves in one lane: their names in their own colours.
+            legend = [(text, theme.series(j)) for j, text in enumerate(lane.get("legend", ()))]
+            labels.append((top, label, colour, legend))
+            top = base
         if tick_x:
             self._physio_ticks.setData(np.concatenate(tick_x), np.concatenate(tick_y))
             self._physio_ticks.setPen(pg.mkPen(theme.token("warning", "#d29922"), width=1))
@@ -1038,6 +1261,8 @@ class TimecourseGraph(QWidget):
             self._physio_ticks.setData([], [])
         self._physio_rules.setData(np.asarray(rule_x, float), np.asarray(rule_y, float))
         self._physio_rules.setPen(pg.mkPen(theme.grid, width=1))
+        self._paint_thresholds(dash_x, dash_y)
+        self._paint_carpet(carpet)
         # Names INSIDE their lanes, top left, on the plot's colour: an axis
         # gutter wide enough for "external_trigger" would cost the graph
         # above the same width (the two axes are kept equal to align).
@@ -1051,21 +1276,66 @@ class TimecourseGraph(QWidget):
         for k, item in enumerate(self._physio_names):
             item.setVisible(k < len(labels))
             if k < len(labels):
-                top, text, colour = labels[k]
-                item.setText(text, color=colour)
+                lane_top, text, colour, legend = labels[k]
+                if legend:
+                    import html
+
+                    item.setHtml(
+                        f'<span style="color:{colour}">{html.escape(text)}</span>&nbsp;&nbsp;'
+                        + "&nbsp;".join(f'<span style="color:{c}"><b>{html.escape(t)}</b></span>'
+                                        for t, c in legend))
+                else:
+                    item.setText(text, color=colour)
                 item.fill = pg.mkBrush(fill)
                 # At the left edge of what is SHOWN: zoomed, the run's start
                 # is off screen and the names went with it.
-                item.setPos(self._time_view[0] if self._time_view else x0, top)
+                item.setPos(self._time_view[0] if self._time_view else x0, lane_top)
         if self._time_view is not None:
             pi.setXRange(*self._time_view, padding=0.0)
         else:
             pi.setXRange(x0, x1, padding=0.03)
-        pi.setYRange(0, n, padding=0.0)
+        pi.setYRange(0, total, padding=0.0)
         pi.setLabel("bottom", "Time" if self._x_is_time else "Volume",
                     units="s" if self._x_is_time else None)
         self.physio_plot.setToolTip("\n".join(
             f"{lane['name']}: {lane['note']}" for lane in lanes if lane["note"]))
+
+    def _paint_thresholds(self, xs: list, ys: list) -> None:
+        """The dashed threshold lines (FD 0.5 mm, 5 % outliers, the DVARS
+        fence), one pooled item."""
+        pg = self._pg
+        if getattr(self, "_physio_dashes", None) is None:
+            self._physio_dashes = pg.PlotCurveItem(connect="pairs", antialias=False)
+            self._physio_dashes.setZValue(-5)
+            self.physio_plot.getPlotItem().addItem(self._physio_dashes)
+        pen = pg.mkPen(self.ctx.theme.token("warning", "#d29922"), width=1,
+                       style=Qt.PenStyle.DashLine)
+        self._physio_dashes.setPen(pen)
+        self._physio_dashes.setData(np.asarray(xs, float), np.asarray(ys, float))
+
+    def _paint_carpet(self, carpet) -> None:
+        """The carpet lane as one image, pooled: hidden when not shown."""
+        pg = self._pg
+        if carpet is None:
+            if self._carpet_item is not None:
+                self._carpet_item.setVisible(False)
+            return
+        lane, base, h = carpet
+        if self._carpet_item is None:
+            self._carpet_item = pg.ImageItem()
+            self._carpet_item.setZValue(-8)
+            self.physio_plot.getPlotItem().addItem(self._carpet_item)
+        image = np.nan_to_num(np.asarray(lane["image"], dtype=np.float32))
+        # Rows top to bottom (the head's edge first); pyqtgraph's y runs up.
+        self._carpet_item.setImage(image[::-1].T, levels=(-2.0, 2.0), autoLevels=False)
+        x = np.asarray(self._x, dtype=float)
+        n = image.shape[1]
+        step = (x[-1] - x[0]) / (n - 1) if n > 1 and len(x) == n else 1.0
+        left = float(x[0]) - step / 2.0
+        from PyQt6.QtCore import QRectF
+
+        self._carpet_item.setRect(QRectF(left, base + 0.05 * h, step * n, 0.9 * h))
+        self._carpet_item.setVisible(True)
 
     def _marked_cells(self) -> list[tuple[int, int]]:
         """(row, col) of the cells that carry a marker, centre first."""

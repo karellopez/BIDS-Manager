@@ -151,7 +151,7 @@ def _channel_table_names(path: Path) -> list[str]:
         return []
     table = Path(path).with_name(stem.rsplit("_", 1)[0] + "_channels.tsv")
     try:
-        with open(table, encoding="utf-8", newline="") as fh:
+        with open(table, encoding="utf-8-sig", newline="") as fh:
             return [str(row["name"]) for row in csv.DictReader(fh, delimiter="\t")
                     if row.get("name")]
     except (OSError, KeyError, csv.Error):

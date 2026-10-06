@@ -91,7 +91,11 @@ class Viewer(QWidget):
         if header:
             v.addWidget(PaneHeader(self.presenter.title))
         self._toolbar = self._build_toolbar()
+        #: Its place in this layout (after the header), for ``lend_toolbar``.
+        self._toolbar_index = v.count()
         v.addWidget(self._toolbar)
+        #: Where the toolbar is shown when a host has it (else None).
+        self._toolbar_host = None
 
         self._stack = QStackedLayout()
         self._stack.setContentsMargins(0, 0, 0, 0)
@@ -271,10 +275,12 @@ class Viewer(QWidget):
         return self.action_manager.actions[action_id]
 
     def button(self, action_id: str):
-        """The toolbar button bound to ``action_id``, if the toolbar has one."""
-        for btn in self._toolbar.findChildren(QWidget):
-            if btn.property("viz_action") == action_id:
-                return btn
+        """The button bound to ``action_id``, in the toolbar or the content
+        (a controls column, a panel), if there is one."""
+        for root in (self._toolbar, self.presenter.content):
+            for btn in root.findChildren(QWidget):
+                if btn.property("viz_action") == action_id:
+                    return btn
         return None
 
     def canvases(self, kind: str = "slice") -> list:
@@ -352,6 +358,19 @@ class Viewer(QWidget):
 
     def set_toolbar_visible(self, visible: bool) -> None:
         self._toolbar_wanted = bool(visible)
+        self._sync_toolbar()
+
+    def lend_toolbar(self, layout=None) -> None:
+        """Show the toolbar in a host's ``layout`` (one toolbar above two
+        viewers driven as one), or take it back (``None``)."""
+        if layout is self._toolbar_host:
+            return
+        (self._toolbar_host or self.layout()).removeWidget(self._toolbar)
+        if layout is None:
+            self.layout().insertWidget(self._toolbar_index, self._toolbar)
+        else:
+            layout.addWidget(self._toolbar)
+        self._toolbar_host = layout
         self._sync_toolbar()
 
     _toolbar_wanted = True

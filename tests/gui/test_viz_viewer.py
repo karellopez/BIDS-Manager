@@ -255,9 +255,10 @@ def test_the_plane_buttons_size_the_slice_slider(qtbot, ds, no_gpu) -> None:
     for action, plane, depth in (("view.axial", "axial", 8),
                                  ("view.sagittal", "sagittal", 10),
                                  ("view.coronal", "coronal", 12)):
-        viewer.button(action).click()
+        viewer.action(action).trigger()           # from the Layout menu
         viewer.qstore.flush()
         assert viewer.scene.mode == "single" and viewer.scene.plane == plane
+        assert viewer.presenter.layout_button.text() == plane.capitalize()
         assert views.slice_count(viewer.store, plane) == depth
         assert viewer.presenter.slice_control.maximum() == depth - 1
 
@@ -348,7 +349,7 @@ def test_a_horizontal_scroll_steps_volumes(qtbot, ds, no_gpu) -> None:
 def test_multi_planar_shows_three_planes(qtbot, ds, no_gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     viewer.run("view.mode", mode="single")
-    viewer.button("view.multi").click()
+    viewer.action("view.multi").trigger()
     _settle(qtbot, viewer)
     assert viewer.scene.mode == "multi"
     assert sorted(c.plane for c in viewer.canvases("slice")) == ["axial", "coronal", "sagittal"]
@@ -356,7 +357,7 @@ def test_multi_planar_shows_three_planes(qtbot, ds, no_gpu) -> None:
         image = canvas.grab_image()
         assert not image.isNull()
     # Toggling again returns to one plane.
-    viewer.button("view.multi").click()
+    viewer.action("view.multi").trigger()
     viewer.qstore.flush()
     assert viewer.scene.mode == "single"
 
@@ -455,7 +456,7 @@ def test_the_graph_marker_follows_the_volume(qtbot, ds, no_gpu) -> None:
 
 def test_scope_builds_a_neighbour_grid(qtbot, ds, no_gpu) -> None:
     viewer, graph = _with_graph(qtbot, ds)
-    graph.scope_spin.setValue(2)
+    graph.scope_combo.setCurrentIndex(graph.scope_combo.findData(2))
     viewer.qstore.flush()
     assert graph.cell_count() == 9
     assert len(graph.marker_points()) == 9
@@ -465,7 +466,7 @@ def test_scope_builds_a_neighbour_grid(qtbot, ds, no_gpu) -> None:
     graph.dot_spin.setValue(16)
     viewer.qstore.flush()
     assert graph.marker_size() == 16
-    graph.scope_spin.setValue(1)
+    graph.scope_combo.setCurrentIndex(graph.scope_combo.findData(1))
     viewer.qstore.flush()
     assert graph.cell_count() == 1
 
@@ -473,7 +474,7 @@ def test_scope_builds_a_neighbour_grid(qtbot, ds, no_gpu) -> None:
 def test_a_neighbourhood_at_the_edge_skips_what_is_outside(qtbot, ds, no_gpu) -> None:
     viewer, graph = _with_graph(qtbot, ds)
     viewer.run("cursor.set_voxel", i=0, j=0, k=0)
-    graph.scope_spin.setValue(2)
+    graph.scope_combo.setCurrentIndex(graph.scope_combo.findData(2))
     viewer.qstore.flush()
     assert graph.cell_count() == 4      # a corner keeps 2 x 2 of its 3 x 3
 
@@ -671,11 +672,11 @@ def test_a_junk_setting_is_ignored(qtbot, ds, no_gpu) -> None:
 def test_switching_layout_is_remembered_at_once(qtbot, ds, no_gpu) -> None:
     """Written as the user switches: the Editor is not always closed cleanly."""
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
-    viewer.button("view.sagittal").click()
+    viewer.action("view.sagittal").trigger()
     viewer.qstore.flush()
     s = SettingsHub.instance().settings.volume
     assert (s.mode, s.plane) == ("single", "sagittal")
-    viewer.button("view.multi").click()
+    viewer.action("view.multi").trigger()
     viewer.qstore.flush()
     assert SettingsHub.instance().settings.volume.mode == "multi"
 
@@ -755,10 +756,11 @@ def test_a_saved_view_applies_to_another_image(qtbot, ds, no_gpu) -> None:
 def test_the_views_menu_lists_the_saved_views(qtbot, ds, no_gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     viewer.presenter.save_view("Mine")
-    menu = viewer.presenter.views_button.menu()
-    viewer.presenter._fill_views_menu(menu)
-    texts = [a.text() for a in menu.actions()]
-    assert "Save this view as..." in texts and "Mine" in texts
+    menu = viewer.presenter.save_button.menu()
+    viewer.presenter._fill_save_menu(menu)
+    entries = {a.text(): a for a in menu.actions()}
+    assert "Save the look as a preset..." in entries
+    assert [a.text() for a in entries["Apply a preset"].menu().actions()] == ["Mine"]
 
 
 def test_a_second_viewer_opens_the_way_the_first_was_left(qtbot, ds, no_gpu) -> None:
@@ -1179,3 +1181,261 @@ def test_a_transparent_figure_has_no_surround(qtbot, ds, no_gpu) -> None:
     canvas = _canvas(viewer, "axial")
     centre = canvas.mapTo(viewer.presenter.figure_widget(), canvas.grid_to_screen(3, 3).toPoint())
     assert clear.pixelColor(centre).alpha() == 255
+
+
+class TestShrinking:
+    """Opening the graph made the viewer 1463 x 428 px at least: its controls
+    were one row whose width was the sum of its parts, and the physio strip
+    asked 22 px a lane."""
+
+    def test_the_graph_does_not_pin_the_viewer_wide(self, qtbot, ds, no_gpu):
+        viewer, graph = _with_graph(qtbot, ds)
+        viewer.presenter.set_inspector(False, remember=False)
+        hint = viewer.minimumSizeHint()
+        assert hint.width() < 420 and hint.height() < 360
+
+    def test_wrapped_controls_are_never_painted_over(self, qtbot, ds, no_gpu):
+        viewer, graph = _with_graph(qtbot, ds)
+        viewer.presenter.set_inspector(False, remember=False)
+        viewer.resize(380, 600)
+        qtbot.wait(50)
+        bar = graph.controls
+        assert bar.height() >= bar.heightForWidth(bar.width())
+        assert bar.minimumSizeHint().height() == bar.heightForWidth(bar.width())
+
+    def test_the_controls_column_gives_way_and_comes_back(self, qtbot, ds, no_gpu):
+        viewer, _graph = _with_graph(qtbot, ds)
+        viewer.resize(1200, 700)
+        viewer.presenter.set_inspector(True, remember=False)
+        qtbot.wait(20)
+        assert viewer.presenter.inspector_open()
+        viewer.resize(520, 700)
+        qtbot.waitUntil(lambda: not viewer.presenter.inspector_open(), timeout=2000)
+        viewer.resize(1300, 700)
+        SettingsHub.instance().update(lambda s: setattr(s.volume, "inspector", True),
+                                      persist=False)
+        viewer.resize(1320, 700)
+        qtbot.waitUntil(viewer.presenter.inspector_open, timeout=2000)
+
+
+class TestEverythingPersists:
+    """Point 1 of round 4: a new window or file kept the mode and plane but
+    lost the layout, the 3-D look, the clip planes and the crosshair flag."""
+
+    def test_a_new_window_opens_with_the_layout_left(self, qtbot, ds, no_gpu):
+        first = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        first.run("view.mode", mode="hero")
+        first.run("layout.set", arrangement="grid", hero_fraction=0.7, hero_side="top",
+                  planes=["axial", "coronal"])
+        first.trigger("view.crosshair")
+        first.qstore.flush()
+        SettingsHub.reset_instance()
+        second = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        lay = second.scene.layout
+        assert second.scene.mode == "hero"
+        assert (lay.arrangement, lay.hero_fraction, lay.hero_side) == ("grid", 0.7, "top")
+        assert lay.planes == ["axial", "coronal"]
+        assert second.scene.display.crosshair is False
+
+    def test_the_3d_look_and_clip_planes_persist(self, qtbot, ds, no_gpu):
+        first = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        first.run("render.effect", effect="MIP")
+        first.run("clip.preset", preset="corner")
+        first.qstore.flush()
+        first.presenter.stop()            # what settles is written on close
+        SettingsHub.reset_instance()
+        second = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        assert second.scene.render.effect == "MIP"
+        assert [c.active for c in second.scene.clips] == [c.active for c in first.scene.clips]
+
+    def test_the_next_file_keeps_the_layout_and_mosaic(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.run("layout.set", arrangement="column")
+        viewer.run("view.mosaic_text", text="A -10 0 10")
+        viewer.qstore.flush()
+        _open(qtbot, viewer, _t2(ds), ds)
+        assert viewer.scene.layout.arrangement == "column"
+        assert viewer.scene.mosaic == "A -10 0 10"
+
+    def test_the_comparison_mirrors_the_layout(self, qtbot, ds, no_gpu):
+        from bidsmgr.gui.viz.compare import ComparePanes
+
+        panes = ComparePanes()
+        qtbot.addWidget(panes)
+        panes.resize(1100, 600)
+        panes.show()
+        with qtbot.waitSignal(panes.both_loaded, timeout=20_000):
+            panes.show_images(_t1(ds), _t2(ds), root=ds)
+        panes.left.run("layout.set", arrangement="row", planes=["sagittal"])
+        panes.left.qstore.flush()
+        assert panes.right.scene.layout.arrangement == "row"
+        assert panes.right.scene.layout.planes == ["sagittal"]
+
+
+class TestMosaicBuilder:
+    def test_the_builder_writes_a_grid_fitted_to_the_head(self, qtbot, ds, no_gpu):
+        from bidsmgr.viz.compute import mosaic as M
+
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.run("mosaic.set", plane="axial", rows=2, cols=3, fit=True)
+        viewer.run("view.mode", mode="mosaic")
+        viewer.qstore.flush()
+        spec = M.parse(viewer.scene.mosaic)
+        assert [len(r) for r in spec.rows] == [3, 3]
+        assert {t.plane for t in spec.tiles} == {"axial"}
+        mm = [t.mm for t in spec.tiles]
+        assert mm == sorted(mm) and len(set(mm)) == 6
+        (canvas,) = viewer.canvases("mosaic")
+        canvas.repaint()
+        assert not canvas.grab().isNull()
+
+    def test_a_line_written_by_hand_is_left_alone(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.run("view.mosaic_text", text="A 1 3 ; S 4")
+        viewer.run("view.mode", mode="mosaic")
+        viewer.qstore.flush()
+        assert viewer.scene.mosaic == "A 1 3 ; S 4", "not refitted on entering the mosaic"
+        viewer.run("mosaic.set", cols=2)
+        assert viewer.scene.mosaic != "A 1 3 ; S 4", "a control takes over again"
+
+    def test_the_section_drives_it(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.presenter.set_inspector(True)
+        section = viewer.presenter.inspector.section("mosaic")
+        section.rows.type_value(1)
+        section.cols.type_value(4)
+        viewer.qstore.flush()
+        assert (viewer.scene.mosaic_build.rows, viewer.scene.mosaic_build.cols) == (1, 4)
+        section.reference.setChecked(True)
+        viewer.qstore.flush()
+        assert viewer.scene.mosaic.startswith("S X")
+
+    def test_the_figure_is_saved_at_the_chosen_scale(self, qtbot, ds, no_gpu, tmp_path):
+        from PyQt6.QtGui import QImage
+
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        out = tmp_path / "fig.png"
+        assert viewer.presenter.save_mosaic_figure(out, scale=2.0, transparent=True) == out
+        assert viewer.scene.mode == "mosaic"
+        img = QImage(str(out))
+        assert img.width() >= 2 * viewer.canvases("mosaic")[0].width() - 2
+        assert img.hasAlphaChannel()
+
+
+class TestRestoringDefaults:
+    def test_a_section_restores_its_own_defaults(self, qtbot, ds, no_gpu):
+        from bidsmgr.viz.scene import LayoutState
+
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.presenter.set_inspector(True)
+        viewer.run("layout.set", arrangement="grid", hero_fraction=0.8)
+        viewer.run("view.flag", flag="radiological")
+        viewer.qstore.flush()
+        insp = viewer.presenter.inspector
+        assert insp.section("layout").header.resettable
+        assert not insp.section("layers").header.resettable, "the layers are content"
+        insp.section("layout").header.reset_clicked.emit()
+        assert viewer.scene.layout == LayoutState()
+        assert viewer.scene.display.radiological, "the other sections untouched"
+        viewer.store.undo()
+        assert viewer.scene.layout.arrangement == "grid"
+
+    def test_the_layer_display_goes_back_to_how_it_opened(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.presenter.set_inspector(True)
+        viewer.run("layer.set", colormap="hot", gamma=3.0)
+        viewer.qstore.flush()
+        viewer.presenter.inspector.section("display").restore_defaults()
+        d = viewer.scene.base_layer().display
+        assert (d.colormap, d.gamma) == ("gray", 1.25)
+
+    def test_everything_at_once_keeps_the_users_own_work(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.presenter.save_view("Mine")
+        viewer.run("view.mode", mode="hero")
+        viewer.run("render.effect", effect="MIP")
+        SettingsHub.instance().update(lambda s: s.keymap.update({"view.axial": ["Z"]}))
+        viewer.qstore.flush()
+        assert viewer.presenter.restore_all_defaults(confirm=False)
+        s = SettingsHub.instance().settings
+        assert "Mine" in s.view_presets and s.keymap == {"view.axial": ["Z"]}
+        assert s.layout_state == {} or viewer.scene.mode != "hero"
+        assert viewer.scene.render.effect != "MIP"
+
+
+class TestToolbarByPurpose:
+    def test_one_layout_menu_holds_planes_and_layouts(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        texts = [a.text() for a in viewer.presenter.layout_button.menu().actions() if a.text()]
+        assert texts[:3] == ["Axial view", "Coronal view", "Sagittal view"]
+        assert "Mosaic of many slices (lightbox)" in texts
+        assert viewer.button("view.axial") is None, "no separate plane buttons"
+
+    def test_the_side_tab_opens_and_closes_the_controls(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        viewer.presenter.set_inspector(False)
+        tab = viewer.presenter.side_tab
+        assert tab.isVisibleTo(viewer) and not tab.open
+        tab.clicked.emit()
+        assert viewer.presenter.inspector_open() and tab.open
+        tab.clicked.emit()
+        assert not viewer.presenter.inspector_open()
+
+    def test_the_save_menu_names_what_it_keeps(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        menu = viewer.presenter.save_button.menu()
+        viewer.presenter._fill_save_menu(menu)
+        texts = [a.text() for a in menu.actions() if a.text()]
+        assert texts == ["Save a screenshot...", "Save a mosaic figure...",
+                         "Save the look as a preset...", "Save a scene in this dataset...",
+                         "Show the command line...", "Restore every viewer default..."]
+        for a in menu.actions():
+            if a.text():
+                assert a.toolTip() and a.toolTip() != a.text().rstrip(".")
+
+    def test_a_3d_image_has_no_volume_stepper(self, qtbot, ds, no_gpu):
+        """Time course, Play and Volume mean nothing for one volume: they are
+        not there, rather than greyed."""
+        viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        assert viewer.presenter._frame_group.isHidden()
+        assert not viewer.button("view.graph").isVisibleTo(viewer)
+        assert not viewer.button("frame.play").isVisibleTo(viewer)
+        _open(qtbot, viewer, _bold(ds), ds)
+        assert not viewer.presenter._frame_group.isHidden()
+        assert viewer.button("view.graph").isVisibleTo(viewer)
+
+
+class TestMosaicCrop:
+    """Tiles cropped to the head, ONE crop per plane so they stay the same
+    size and a structure sits at the same place in each."""
+
+    def _head(self, ds) -> Path:
+        # A small bright block in a large empty field of view.
+        data = np.zeros((40, 40, 20), dtype=np.float32)
+        data[15:25, 12:28, 4:16] = 100.0
+        return _write(ds / "sub-01" / "anat" / "sub-01_PD.nii.gz", data)
+
+    def test_the_content_box_and_the_shared_crop(self):
+        from bidsmgr.gui.viz.canvases.mosaic import content_box, shared_crop
+
+        img = np.zeros((10, 20, 4), dtype=np.uint8)
+        assert content_box(img) is None
+        img[2:5, 4:10, :3] = 200
+        assert content_box(img) == (0.2, 0.2, 0.5, 0.5)
+        crop = shared_crop([(0.2, 0.2, 0.5, 0.5), (0.3, 0.1, 0.6, 0.4), None])
+        assert crop[0] < 0.2 and crop[1] < 0.1 and crop[2] > 0.6 and crop[3] > 0.5
+        assert shared_crop([None]) == (0.0, 0.0, 1.0, 1.0)
+
+    def test_tiles_are_cropped_unless_asked_not_to(self, qtbot, ds, no_gpu):
+        viewer = _open(qtbot, _viewer(qtbot), self._head(ds), ds)
+        viewer.run("mosaic.set", plane="axial", rows=1, cols=3, fit=False)
+        viewer.run("view.mode", mode="mosaic")
+        viewer.qstore.flush()
+        (canvas,) = viewer.canvases("mosaic")
+        left, top, right, bottom = canvas.crops(canvas.tile_rows())["axial"]
+        assert (right - left) < 0.8 and (bottom - top) < 0.8, "the empty field was kept"
+        viewer.run("mosaic.set", crop=False)
+        viewer.qstore.flush()
+        assert canvas.crops(canvas.tile_rows())["axial"] == (0.0, 0.0, 1.0, 1.0)
+        canvas.repaint()
+        assert not canvas.grab().isNull()

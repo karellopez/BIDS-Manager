@@ -273,7 +273,7 @@ class TestProcessing:
                          {"dim_5": "DIM_EDIT"})
         viewer = _open(qtbot, path, tmp_path)
         p = viewer.presenter
-        assert p.edit_box.isVisibleTo(viewer)
+        assert p.edit.isVisibleTo(viewer)
         assert p.edit.findData(-2) >= 0
         p.edit.setCurrentIndex(p.edit.findData(-2))
         viewer.qstore.flush()
@@ -283,7 +283,7 @@ class TestProcessing:
 
     def test_a_plain_file_hides_the_edit_control(self, qtbot, spectrum_file, tmp_path):
         viewer = _open(qtbot, spectrum_file, tmp_path)
-        assert not viewer.presenter.edit_box.isVisibleTo(viewer)
+        assert not viewer.presenter.edit.isVisibleTo(viewer)
 
     def test_line_broadening_lowers_the_peak(self, qtbot, spectrum_file, tmp_path):
         viewer = _open(qtbot, spectrum_file, tmp_path)
@@ -431,3 +431,17 @@ class TestTheEditor:
         ep._on_file_selected(sidecar)
         assert ep._spectrum_viewer.current_file() is None
         assert ep._spectrum_viewer.source() is None
+
+
+def test_the_options_persist_to_a_new_window_but_not_the_phase(qtbot, spectrum_file):
+    from bidsmgr.gui.viz.bridge import SettingsHub
+
+    first = _open(qtbot, spectrum_file, spectrum_file.parents[2])
+    first.run("spectrum.set", lb_hz=6.0, part="magnitude")
+    first.run("spectrum.toggle", field="metabolites")
+    first.qstore.flush()
+    first.presenter.stop()
+    SettingsHub.reset_instance()
+    second = _open(qtbot, spectrum_file, spectrum_file.parents[2])
+    sp = second.scene.spectrum
+    assert (sp.lb_hz, sp.part, sp.metabolites) == (6.0, "magnitude", False)

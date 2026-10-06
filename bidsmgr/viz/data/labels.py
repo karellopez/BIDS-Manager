@@ -41,7 +41,7 @@ def _hex(value: str) -> Optional[tuple[int, int, int]]:
 def read_label_tsv(path: Path) -> Optional[LabelTable]:
     """A BIDS lookup table (``index``, ``name``, optional ``color``), or None."""
     try:
-        with open(path, encoding="utf-8", newline="") as fh:
+        with open(path, encoding="utf-8-sig", newline="") as fh:
             rows = list(csv.DictReader(fh, delimiter="\t"))
     except (OSError, csv.Error):
         return None

@@ -135,6 +135,11 @@ class SignalSource:
     bads: set = field(default_factory=set)
     #: Where the bads came from, for the card ("" when none).
     bads_from: str = ""
+    #: The recording's bad segments, in RUN time: the ``_events.tsv`` BAD
+    #: rows when the run has a table (mne-bids reads that back as the
+    #: annotations, so it is the authority), else the file's own BAD
+    #: annotations.
+    bad_spans: list[Event] = field(default_factory=list)
     # -- derived, set by refresh() ---------------------------------------
     sfreq: float = 1.0
     ch_names: list[str] = field(default_factory=list)
@@ -295,13 +300,40 @@ def channels_sibling(path) -> Optional[Path]:
     return None
 
 
+def line_frequency(src) -> Optional[float]:
+    """The mains frequency of a recording: its own (``info["line_freq"]``),
+    else ``PowerLineFrequency`` from its BIDS sidecar; None when neither
+    says (``n/a`` is allowed by BIDS and means unknown)."""
+    value = None
+    try:
+        value = src.raw.info.get("line_freq")
+    except Exception:  # noqa: BLE001 - no info, no frequency
+        value = None
+    if not value:
+        import json
+
+        p = Path(src.path)
+        sidecar = p.parent / (p.name.split(".")[0] + ".json")
+        try:
+            value = json.loads(sidecar.read_text(encoding="utf-8-sig")).get("PowerLineFrequency")
+        except (OSError, ValueError, AttributeError):
+            value = None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def read_bad_channels(path) -> set:
     """Channel names whose ``status`` is ``bad`` in a ``_channels.tsv``."""
     import csv
 
     out = set()
     try:
-        with open(path, "r", encoding="utf-8", newline="") as fh:
+        # utf-8-sig: a byte order mark (mne-bids writes one) is not part
+        # of the first column's name.
+        with open(path, "r", encoding="utf-8-sig", newline="") as fh:
             for row in csv.DictReader(fh, delimiter="\t"):
                 if str(row.get("status", "")).strip().lower() == "bad" and row.get("name"):
                     out.add(row["name"])
@@ -331,6 +363,11 @@ def _with_events(src: SignalSource, root=None) -> SignalSource:
     else:
         src.events_stim = stim_events(src.raw, src.ch_types)
     src.events_annotations = annotation_events(src.raw)
+    if sibling is not None:
+        src.bad_spans = [e for e in src.events_tsv if e.kind == "bad"]
+    else:
+        src.bad_spans = [Event(e.onset + src.start_time, e.duration, e.label, "bad")
+                         for e in src.events_annotations if e.kind == "bad"]
     bads = set(src.raw.info.get("bads") or [])
     tsv = channels_sibling(src.path)
     if tsv is not None:
@@ -402,7 +439,8 @@ def resampled(src: SignalSource, sfreq: float) -> SignalSource:
                        note=src.note, events_tsv=list(src.events_tsv),
                        events_stim=list(src.events_stim),
                        events_annotations=list(src.events_annotations),
-                       bads=set(src.bads), bads_from=src.bads_from)
+                       bads=set(src.bads), bads_from=src.bads_from,
+                       bad_spans=list(src.bad_spans))
     return out
 
 

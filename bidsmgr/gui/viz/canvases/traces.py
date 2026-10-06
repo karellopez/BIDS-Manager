@@ -119,6 +119,9 @@ class _LabelStrip(QWidget):
         self.names: list[str] = []
         #: Bands whose channel is bad: painted in the error colour.
         self.bad_rows: set = set()
+        #: Bands the quality check flagged: ``{row: (colour, reason text)}``,
+        #: a marker beside the name and the reasons in its tooltip.
+        self.flags: dict[int, tuple[QColor, str]] = {}
         self._bad = QColor("#f85149")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._edges: list[int] = []
@@ -171,8 +174,19 @@ class _LabelStrip(QWidget):
             height = max(line, self._edges[i + 1] - self._edges[i])
             rect = QRect(2, int(round(centre - height / 2.0)), width, int(height))
             p.setPen(self._bad if i in self.bad_rows else self._fg)
+            name_width = width - (8 if i in self.flags else 0)
             p.drawText(rect, align, fm.elidedText(self.names[i], Qt.TextElideMode.ElideMiddle,
-                                                  width))
+                                                  name_width))
+            if i in self.flags:
+                p.save()
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(self.flags[i][0])
+                text_w = fm.horizontalAdvance(fm.elidedText(
+                    self.names[i], Qt.TextElideMode.ElideMiddle, name_width))
+                x = max(3.0, 2 + width - text_w - 8.0)
+                p.drawEllipse(QPointF(x, centre), 2.6, 2.6)
+                p.restore()
 
     def event(self, event) -> bool:  # noqa: D401
         if event.type() == QEvent.Type.ToolTip:
@@ -181,9 +195,11 @@ class _LabelStrip(QWidget):
                 QToolTip.hideText()
             else:
                 state = "bad" if i in self.bad_rows else "good"
-                QToolTip.showText(event.globalPos(),
-                                  f"{self.names[i]} ({state}): click to mark it "
-                                  f"{'good' if state == 'bad' else 'bad'}", self)
+                text = (f"{self.names[i]} ({state}): click to mark it "
+                        f"{'good' if state == 'bad' else 'bad'}")
+                if i in self.flags:
+                    text += f"\nQC: {self.flags[i][1]}"
+                QToolTip.showText(event.globalPos(), text, self)
             return True
         return super().event(event)
 
@@ -230,6 +246,13 @@ class TracesCanvas(QWidget):
         self._wheel_acc = 0.0
         # The time cursor: one line, made on first use, never removed.
         self._cursor_line = None
+        # Bad segments (pooled regions and their labels), the segment being
+        # drawn in annotation mode, and a guard while regions are placed.
+        self._bad_regions: list = []
+        self._bad_texts: list = []
+        self._draft = None
+        self._draft_t0: Optional[float] = None
+        self._placing = False
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -438,7 +461,10 @@ class TracesCanvas(QWidget):
             self._draw_scale_bars(src, shown, refs, tr, t1 + src.start_time, row_of)
         if tr.events:
             self._draw_events(t0 + src.start_time, t1 + src.start_time, top)
+        self._draw_bad_spans(t0 + src.start_time, t1 + src.start_time, top)
         self._draw_cursor()
+        self.plot.setCursor(Qt.CursorShape.CrossCursor if tr.annotate
+                            else Qt.CursorShape.ArrowCursor)
 
     def _refs(self, src, shown, envs, tr) -> dict:
         """Data units per band, per channel type: the recording's own
@@ -613,7 +639,8 @@ class TracesCanvas(QWidget):
             self._bars.setData([], [])
         for txt in self._bar_texts:
             txt.setVisible(False)
-        for pool in (self._event_lines, self._event_spans, self._event_texts):
+        for pool in (self._event_lines, self._event_spans, self._event_texts,
+                     self._bad_regions, self._bad_texts):
             for item in pool:
                 item.setVisible(False)
 
@@ -628,7 +655,9 @@ class TracesCanvas(QWidget):
     def _draw_events(self, x0: float, x1: float, top: float) -> None:
         src = self.source
         tr = self.ctx.scene.traces
-        events = [e for e in src.events(tr.event_source) if x0 <= e.onset <= x1]
+        # Bad segments are drawn by _draw_bad_spans, from the review.
+        events = [e for e in src.events(tr.event_source)
+                  if x0 <= e.onset <= x1 and getattr(e, "kind", "") != "bad"]
         if len(events) > MAX_EVENTS_DRAWN:
             events = events[:: len(events) // MAX_EVENTS_DRAWN]
         labels = sorted({e.label for e in events})
@@ -652,17 +681,125 @@ class TracesCanvas(QWidget):
         for line, e in zip(lines, events):
             line.setPen(pg.mkPen(color=colour_of(e), width=ts.event_width))
             line.setPos(e.onset)
+        # An event that lasts: a thin band just under the row of labels.
+        # Filled the full height, a task of 4 s trials painted every page
+        # over, and bad segments (red, full height) read as tinted.
+        h = max(float(self._vb.height()), 1.0)
+        band = (max(0.0, 1.0 - (_EVENT_LABEL_PX + 5.0) / h), max(0.0, 1.0 - _EVENT_LABEL_PX / h))
         for region, e in zip(regions, spans):
-            # A span for an event that lasts.
             colour = colour_of(e)
             region.setRegion((e.onset, e.onset + e.duration))
-            region.setBrush(pg.mkBrush(_qcolor(colour).name() + "30"))
+            region.setSpan(*band)
+            region.setBrush(pg.mkBrush(_qcolor(colour).name() + "b0"))
             for edge in region.lines:
-                edge.setPen(pg.mkPen(color=colour, width=ts.event_width))
+                edge.setPen(pg.mkPen(color=colour, width=1))
+                edge.setSpan(*band)
             region.setZValue(-10)
         for txt, e in zip(labels_drawn, texts):
             txt.setText(str(e.label), color=colour_of(e))
             txt.setPos(e.onset, top)
+
+    # -- bad segments -------------------------------------------------------
+
+    def _new_bad_region(self):
+        pg = self._pg
+        region = pg.LinearRegionItem(values=(0, 1), movable=False)
+        region.setZValue(-8)
+        region.sigRegionChangeFinished.connect(lambda r=region: self._on_region_moved(r))
+        region.mouseClickEvent = lambda ev, r=region: self._on_region_clicked(r, ev)
+        region._span_index = -1
+        return region
+
+    def _draw_bad_spans(self, x0: float, x1: float, top: float) -> None:
+        """The bad segments in view: red, labelled, always shown (they are
+        what an analysis leaves out). In annotation mode they move and
+        resize under the mouse; the selected one is drawn stronger."""
+        tr = self.ctx.scene.traces
+        spans = sigcmd.bad_spans(self.ctx.store)
+        shown = [(i, sp) for i, sp in enumerate(spans)
+                 if sp.onset + sp.duration >= x0 and sp.onset <= x1]
+        regions = self._pooled(self._bad_regions, self._new_bad_region, len(shown))
+        texts = self._pooled(self._bad_texts, self._new_text, len(shown))
+        red = self.ctx.theme.token("error", "#f85149")
+        pg = self._pg
+        self._placing = True
+        try:
+            for region, text, (i, sp) in zip(regions, texts, shown):
+                selected = tr.annotate and tr.selected_span == i
+                region._span_index = i
+                region.setMovable(bool(tr.annotate))
+                region.setRegion((sp.onset, sp.onset + sp.duration))
+                region.setBrush(pg.mkBrush(_qcolor(red).name() + ("58" if selected else "30")))
+                region.setHoverBrush(pg.mkBrush(_qcolor(red).name() + "48"))
+                for edge in region.lines:
+                    edge.setPen(pg.mkPen(color=red, width=3 if selected else 1))
+                    edge.setHoverPen(pg.mkPen(color=red, width=3))
+                text.setText(sp.label, color=red)
+                text.setPos(max(sp.onset, x0) + 0.002 * (x1 - x0), top)
+                text.setAnchor((0.0, 0.0))
+        finally:
+            self._placing = False
+
+    def _on_region_moved(self, region) -> None:
+        """A segment dragged or resized in annotation mode: one undoable
+        change of the review."""
+        if self._placing or region._span_index < 0:
+            return
+        lo, hi = region.getRegion()
+        try:
+            self.ctx.run("annotate.set", index=int(region._span_index), onset=float(lo),
+                         duration=float(hi - lo))
+        except ValueError as exc:
+            self.ctx.status.emit(str(exc))
+            self.redraw()
+
+    def _on_region_clicked(self, region, event) -> None:
+        tr = self.ctx.scene.traces
+        if not tr.annotate or region._span_index < 0:
+            event.ignore()
+            return
+        event.accept()
+        self.ctx.run("annotate.select", index=int(region._span_index))
+        if event.button() == Qt.MouseButton.RightButton:
+            self._span_menu(int(region._span_index))
+
+    def _span_menu(self, index: int) -> None:
+        """Right-click on a segment: relabel it, or delete it."""
+        from ..menus import popup_menu, submenu
+
+        menu = popup_menu(self)
+        relabel = submenu(menu, "Label")
+        current = sigcmd.bad_spans(self.ctx.store)[index].label
+        for label in sigcmd.BAD_LABELS:
+            act = relabel.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(label == current)
+            act.triggered.connect(lambda _c=False, lab=label: self.ctx.run(
+                "annotate.set", index=index, label=lab))
+        delete = menu.addAction("Delete this segment")
+        delete.triggered.connect(lambda: self.ctx.run("annotate.remove", index=index))
+        menu.exec(QCursor.pos())
+
+    def _draw_draft(self, t0: Optional[float], t1: Optional[float]) -> None:
+        """The segment being drawn, while the drag lasts."""
+        pg = self._pg
+        if self._draft is None:
+            if t0 is None:
+                return
+            self._draft = pg.LinearRegionItem(values=(0, 1), movable=False)
+            self._draft.setZValue(-7)
+            self.plot.addItem(self._draft, ignoreBounds=True)
+        self._draft.setVisible(t0 is not None)
+        if t0 is not None:
+            red = self.ctx.theme.token("error", "#f85149")
+            self._draft.setBrush(pg.mkBrush(_qcolor(red).name() + "40"))
+            for edge in self._draft.lines:
+                edge.setPen(pg.mkPen(color=red, width=2, style=Qt.PenStyle.DashLine))
+            self._draft.setRegion((min(t0, t1), max(t0, t1)))
+
+    def bad_region_items(self) -> list:
+        """The bad-segment regions on screen (tests)."""
+        return [r for r in self._bad_regions if r.isVisible()]
 
     def _labels_that_fit(self, events: list, x0: float, x1: float) -> list:
         """The events whose label has room: a label that would overlap the
@@ -714,12 +851,28 @@ class TracesCanvas(QWidget):
 
     # -- labels ------------------------------------------------------------
 
+    #: The quality check's verdict per channel name: ``{name: (token, text)}``.
+    quality_flags: dict = {}
+
+    def set_quality_flags(self, flags: dict) -> None:
+        """Mark channels the quality check flagged (``{name: (theme token,
+        reason text)}``), beside their names; empty clears them."""
+        self.quality_flags = dict(flags)
+        self.redraw()
+
     def _set_labels(self, names: list[str], bad_rows: Optional[set] = None) -> None:
         theme = self.ctx.theme
         self._strip.set_colours(_qcolor(theme.plot_background), _qcolor(theme.text),
                                 _qcolor(theme.token("error", "#f85149")))
         self._strip.names = list(names)
         self._strip.bad_rows = set(bad_rows or ())
+        flags = {}
+        if self.quality_flags and not self.ctx.scene.traces.butterfly:
+            for row, name in enumerate(names):
+                hit = self.quality_flags.get(name)
+                if hit is not None:
+                    flags[row] = (_qcolor(theme.token(hit[0], "#d29922")), hit[1])
+        self._strip.flags = flags
         self._position_labels()
 
     def _label_y(self, data_y: float) -> int:
@@ -788,6 +941,10 @@ class TracesCanvas(QWidget):
         often than 60 Hz; the release always redraws, so the view lands
         where the cursor left it."""
         src = self.source
+        if (src is not None and self.ctx.scene.traces.annotate
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._annotate_drag(event)
+            return
         button = {Qt.MouseButton.LeftButton: "left", Qt.MouseButton.RightButton: "right",
                   Qt.MouseButton.MiddleButton: "middle"}.get(event.button(), "left")
         tool = inputmap.lookup("traces", button, self._mods(event), self.ctx.settings.mousemap)
@@ -817,6 +974,25 @@ class TracesCanvas(QWidget):
         if finish:
             self._drag_t0 = None
 
+    def _annotate_drag(self, event) -> None:
+        """Annotation mode: a drag across the traces marks a bad segment."""
+        event.accept()
+        t = float(self._vb.mapSceneToView(event.scenePos()).x())
+        if event.isStart():
+            self._focus_viewer()
+            self._draft_t0 = float(self._vb.mapSceneToView(event.buttonDownScenePos()).x())
+        if self._draft_t0 is None:
+            return
+        if event.isFinish():
+            t0, self._draft_t0 = self._draft_t0, None
+            self._draw_draft(None, None)
+            try:
+                self.ctx.run("annotate.add", onset=min(t0, t), duration=abs(t - t0))
+            except ValueError as exc:
+                self.ctx.status.emit(str(exc))
+            return
+        self._draw_draft(self._draft_t0, t)
+
     def _on_click(self, event) -> None:
         """A click without a drag places the time cursor (the status line
         reads the channel under it); a click on the cursor removes it."""
@@ -829,6 +1005,9 @@ class TracesCanvas(QWidget):
         pt = self._vb.mapSceneToView(event.scenePos())
         t = float(pt.x())
         tr = self.ctx.scene.traces
+        if tr.annotate and tr.selected_span is not None:
+            self.ctx.run("annotate.select", index=None)
+            return
         per_px = tr.width / max(1.0, float(self._vb.width()))
         current = self.ctx.scene.cursor.time
         if current is not None and abs(current - t) <= 4.0 * per_px:

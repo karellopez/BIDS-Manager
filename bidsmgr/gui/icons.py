@@ -139,7 +139,27 @@ NAMES: dict[str, tuple[str, str]] = {
     "panel_expand":   ("mdi6.chevron-right",          "text"),
     "chevron_left":   ("mdi6.chevron-left",           "text"),
     "detach":         ("mdi6.open-in-new",            "text"),
+    # -- the viewers (bidsmgr.gui.viz) -----------------------------------
+    "restore":        ("mdi6.restore",                "dim"),
+    "layout_single":  ("mdi6.square-outline",         "text"),
+    "layout_multi":   ("mdi6.view-grid-outline",      "text"),
+    "layout_combo":   ("mdi6.view-dashboard-outline", "text"),
+    "layout_3d":      ("mdi6.cube-outline",           "text"),
+    "layout_hero":    ("mdi6.view-split-vertical",    "text"),
+    "layout_mosaic":  ("mdi6.view-comfy-outline",     "text"),
+    "timecourse":     ("mdi6.chart-line",             "text"),
+    "qc":             ("mdi6.clipboard-pulse-outline", "accent"),
+    "save":           ("mdi6.content-save-outline",   "text"),
+    "controls":       ("mdi6.tune-vertical",          "text"),
+    "shortcuts":      ("mdi6.keyboard-outline",       "text"),
+    "play":           ("mdi6.play",                   "text"),
+    "annotate":       ("mdi6.draw",                   "warning"),
+    "zen":            ("mdi6.fullscreen",             "text"),
+    "maximize":       ("mdi6.arrow-expand",           "text"),
+    "camera":         ("mdi6.camera-outline",         "text"),
+    "mosaic_figure":  ("mdi6.image-multiple-outline", "text"),
     "reattach":       ("mdi6.dock-window",            "text"),
+    "dock_right":     ("mdi6.dock-right",             "text"),
 }
 
 

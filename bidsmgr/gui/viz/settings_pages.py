@@ -217,14 +217,18 @@ class ViewerSettingsPage(QWidget):
     def _build_memory_box(self) -> QWidget:
         """Each kind of image remembers its own layout, and panels their
         sizes; this is the one place to make them forget."""
-        box = QGroupBox("Remembered layouts")
+        box = QGroupBox("Remembered views")
         v = QVBoxLayout(box)
         self.memory_text = QLabel("")
         self.memory_text.setObjectName("dlg-hint")
         self.memory_text.setWordWrap(True)
         v.addWidget(self.memory_text)
         row = QHBoxLayout()
-        self.forget_button = QPushButton("Forget remembered layouts and sizes")
+        self.forget_button = QPushButton("Forget every remembered view")
+        self.forget_button.setToolTip(
+            "Layouts per kind of image, panel sizes, the 3-D look, trace and spectrum "
+            "options: all back to their presets when you Save. Shortcuts and saved "
+            "presets are kept.")
         self.forget_button.setObjectName("tb-btn")
         self.forget_button.clicked.connect(self._forget)
         row.addWidget(self.forget_button)
@@ -234,20 +238,31 @@ class ViewerSettingsPage(QWidget):
 
     def _forget(self) -> None:
         self.forget_layouts = True
-        self._show_memory(0, 0)
+        self._show_memory({})
 
-    def _show_memory(self, kinds: int, sizes: int) -> None:
-        if kinds or sizes:
+    def _show_memory(self, counts: Optional[dict] = None) -> None:
+        counts = counts or {}
+        parts = []
+        if counts.get("kinds"):
+            parts.append(f"the layout of {counts['kinds']} kind(s) of image")
+        if counts.get("look"):
+            parts.append("the display and 3-D look")
+        if counts.get("signals"):
+            parts.append(f"trace options for {counts['signals']} kind(s) of signal")
+        if counts.get("spectrum"):
+            parts.append("the spectrum options")
+        if counts.get("sizes"):
+            parts.append(f"{counts['sizes']} panel size(s)")
+        if parts:
             self.memory_text.setText(
-                f"{kinds} kind(s) of image open in the layout you last gave "
-                f"them, and {sizes} panel size(s) are remembered. A kind you "
-                "never arranged opens in its preset: a BOLD run with its graph, "
-                "a T1 without.")
+                "Every view keeps how you left it, in any window: "
+                + ", ".join(parts) + ". A kind you never arranged opens in its preset "
+                "(a BOLD run with its time course, a T1 without).")
         else:
             self.memory_text.setText(
                 "Nothing remembered: every kind of image opens in its preset "
-                "(a BOLD run with its graph, a T1 without).")
-        self.forget_button.setEnabled(bool(kinds or sizes))
+                "(a BOLD run with its time course, a T1 without).")
+        self.forget_button.setEnabled(bool(parts))
 
     #: Set by "Forget": the dialog then saves no layout memory.
     forget_layouts = False
@@ -255,8 +270,10 @@ class ViewerSettingsPage(QWidget):
     def load(self, settings: VizSettings) -> None:
         for (section, name), control in self._controls.items():
             control.put(getattr(getattr(settings, section), name))
+        from ...viz import memory
+
         self.forget_layouts = False
-        self._show_memory(len(settings.layout_state), len(settings.layout_sizes))
+        self._show_memory(memory.remembered_count(settings))
 
     def apply_to(self, settings: VizSettings) -> None:
         """Write the controls into ``settings`` (a copy the dialog owns)."""

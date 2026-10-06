@@ -221,22 +221,106 @@ class TestTheLayersSection:
         v.qstore.flush()
         assert v.scene.base_layer().display.window[1] == pytest.approx(300.0)
 
-    def test_add_asks_the_host_for_a_file(self, qtbot, ds, monkeypatch):
-        from PyQt6.QtWidgets import QFileDialog
+    def test_add_opens_the_dataset_picker(self, qtbot, ds, monkeypatch):
+        from bidsmgr.gui.viz.panels import overlay_picker
 
         v, insp = self._panel(qtbot, ds)
-        monkeypatch.setattr(QFileDialog, "getOpenFileName",
-                            staticmethod(lambda *a, **k: (str(_atlas(ds)), "")))
+        asked = {}
+
+        def fake(parent, root, base, **kwargs):
+            asked.update(root=root, base=base)
+            return _atlas(ds)
+
+        monkeypatch.setattr(overlay_picker, "ask_for_overlay", fake)
         with qtbot.waitSignal(v.overlay_added, timeout=20_000):
             insp.section("layers").add_button.click()
+        assert asked == {"root": ds, "base": _t1(ds)}
+
+
+class TestTheOverlayPicker:
+    @pytest.fixture
+    def two_subjects(self, ds):
+        other = np.zeros((20, 20, 10), dtype=np.float32)
+        _save(ds / "sub-02" / "anat" / "sub-02_T1w.nii.gz", other)
+        _save(ds / "derivatives" / "seg" / "sub-01" / "anat" / "sub-01_desc-brain_mask.nii.gz",
+              (other > -1).astype(np.uint8))
+        return ds
+
+    def _dialog(self, qtbot, root):
+        from bidsmgr.gui.viz.panels.overlay_picker import OverlayPickerDialog
+
+        base = _t1(root)
+        img = nib.load(str(base))
+        dlg = OverlayPickerDialog(root, base, base_affine=img.affine, base_shape=img.shape)
+        qtbot.addWidget(dlg)
+        return dlg
+
+    @staticmethod
+    def _shown(dlg) -> list[str]:
+        from PyQt6.QtCore import Qt
+
+        return sorted(Path(leaf.data(0, Qt.ItemDataRole.UserRole)).name
+                      for leaf in dlg._leaves() if not leaf.isHidden())
+
+    def test_this_subject_first_without_the_open_image(self, qtbot, two_subjects):
+        dlg = self._dialog(qtbot, two_subjects)
+        assert dlg.only_subject.isVisibleTo(dlg) and dlg.only_subject.isChecked()
+        assert self._shown(dlg) == ["sub-01_desc-brain_mask.nii.gz", "sub-01_dseg.nii.gz",
+                                    "sub-01_task-x_bold.nii.gz"]
+        dlg.only_subject.setChecked(False)
+        assert "sub-02_T1w.nii.gz" in self._shown(dlg)
+        assert "sub-01_T1w.nii.gz" not in self._shown(dlg)
+
+    def test_it_says_what_a_choice_would_be(self, qtbot, two_subjects):
+        dlg = self._dialog(qtbot, two_subjects)
+        dlg._select(_atlas(two_subjects))
+        assert "Segmentation" in dlg._status.text()
+        assert "Same voxel grid" in dlg._status.text()
+        dlg._select(_bold(two_subjects))
+        assert "Series of 12 volumes" in dlg._status.text()
+        assert dlg._ok.text() == "Add"
+
+    def test_browse_reaches_outside_the_dataset(self, qtbot, two_subjects, tmp_path,
+                                                monkeypatch):
+        from PyQt6.QtWidgets import QFileDialog
+
+        outside = _save(tmp_path / "elsewhere" / "map.mgz.nii.gz",
+                        np.zeros((4, 4, 4), np.float32))
+        seen = {}
+
+        def fake(parent, title, start, filters):
+            seen["filters"] = filters
+            return str(outside), ""
+
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(fake))
+        dlg = self._dialog(qtbot, two_subjects)
+        dlg._on_browse()
+        assert dlg.chosen() == outside
+        assert "*.mgz" in seen["filters"]
 
 
 class TestQualityMaps:
-    def test_the_tools_menu_offers_them(self, qtbot, ds):
+    def test_the_quality_menu_offers_them(self, qtbot, ds):
         v = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
-        texts = [a.text() for a in v.presenter.tools_button.menu().actions() if a.text()]
-        assert "Add an overlay..." in texts
-        assert "Temporal SNR of the series" in texts
+        tools = [a.text() for a in v.presenter.tools_button.menu().actions() if a.text()]
+        assert "Add an overlay..." in tools
+        quality = [a.text() for a in v.presenter.quality_button.menu().actions() if a.text()]
+        assert quality[:3] == ["Temporal SNR map", "Standard deviation map",
+                               "Mean image of the series"]
+        assert "QC rows under the time course" in quality
+        assert v.presenter.quality_button.isVisibleTo(v)
+
+    def test_quality_is_offered_only_for_a_series(self, qtbot, ds):
+        v = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        assert not v.presenter.quality_button.isVisibleTo(v)
+
+    def test_the_quality_rows_open_the_time_course(self, qtbot, ds):
+        v = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+        v.run("view.graph", value=False)
+        v.qstore.flush()
+        v.presenter._qc_rows_action.trigger()
+        v.qstore.flush()
+        assert v.scene.graph_visible and v.scene.graph.qc
 
     def test_tsnr_is_added_over_the_series(self, qtbot, ds):
         v = _open(qtbot, _viewer(qtbot), _bold(ds), ds)

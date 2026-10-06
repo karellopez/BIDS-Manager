@@ -32,6 +32,7 @@ import numpy as np
 
 from .bids import suffix_of
 from .data import labels as L
+from .compute.shapes import GridBox
 from .data.volume import VolumeSource, open_volume
 from .scene import VolumeDisplay
 
@@ -189,6 +190,9 @@ def mrs_voxel(path: Path) -> Overlay:
     shift[:3, 3] = -1.0
     affine = np.asarray(img.affine, dtype=float) @ shift
     src = array_volume(data, affine, path=Path(path), name="MRS voxel")
+    # The box itself, which the views draw exactly; the array above is what
+    # the readout and a sampled view fall back on.
+    src.box = GridBox(np.asarray(img.affine, dtype=float), shape)
     display = VolumeDisplay(colormap="green", window=(0.5, 1.0), threshold_mode="hide_below",
                             interpolation="nearest", outline_px=2.0, gamma=1.0)
     n = int(np.prod(shape))
@@ -229,11 +233,55 @@ def open_overlay(path, *, budget_bytes: Optional[int] = None, cancel=None) -> Ov
     return Overlay(source=src, display=display, kind=kind, note=note)
 
 
+def candidate_hint(path, base_affine=None, base_shape=None) -> str:
+    """What an image would be drawn as over the open one, from its NAME and
+    HEADER alone (a picker must not read every image): a sentence for the
+    overlay picker. Its content decides in the end (:func:`display_for`)."""
+    import re
+
+    from .data.formats import is_mrs_path
+
+    path = Path(path)
+    name = path.name.lower()
+    if is_mrs_path(path):
+        return "Spectroscopy: drawn as the outline of its voxel, exactly."
+    try:
+        import nibabel as nib
+
+        img = nib.load(str(path))
+        shape = tuple(int(v) for v in img.shape)
+        affine = np.asarray(img.affine, dtype=float)
+    except Exception:  # noqa: BLE001 - a hint must not fail on a header
+        return ""
+    if "_dseg" in name:
+        what = "Segmentation: each label in its own colour, named when a dseg.tsv describes it."
+    elif "_probseg" in name:
+        what = "Probability map: a heat map, faint where the probability is low."
+    elif "_mask" in name:
+        what = "Mask: a translucent region with its outline."
+    elif re.search(r"(^|_)stat-|_statmap|zstat|tstat", name):
+        what = "Statistical map: positive and negative tails in their own colours."
+    elif len(shape) > 3 and shape[3] > 1:
+        what = (f"Series of {shape[3]} volumes: drawn at the volume on screen; its time "
+                "course can be plotted.")
+    else:
+        what = "Image: drawn in a heat colour map at half opacity."
+    grid = ""
+    if base_affine is not None and base_shape is not None:
+        same = (tuple(shape[:3]) == tuple(base_shape[:3])
+                and np.allclose(affine, np.asarray(base_affine, dtype=float), atol=1e-3))
+        grid = (" Same voxel grid as the open image." if same else
+                " Different voxel grid: resampled in scanner space to the open image.")
+    dims = " x ".join(str(v) for v in shape)
+    return f"{dims}. {what}{grid}"
+
+
 def computed_overlay(src: VolumeSource, path: Path) -> Overlay:
     """An overlay for a source built in memory (a QC map)."""
     display, kind, note = display_for(src, path)
     return Overlay(source=src, display=display, kind=kind, note=note)
 
 
-__all__ = ["Kind", "Overlay", "classify", "computed_overlay", "display_for", "mrs_voxel",
+__all__ = ["Kind", "Overlay", "candidate_hint", "classify", "computed_overlay",
+           "display_for", "mrs_voxel",
            "open_overlay", "piecewise_constant"]

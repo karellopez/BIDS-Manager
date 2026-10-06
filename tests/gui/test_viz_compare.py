@@ -437,7 +437,7 @@ def test_a_plane_button_and_a_key_switch_both(qtbot, dialog, tmp_path) -> None:
     dlg.show()
     panes = dlg.panes
     _both_loaded(qtbot, panes)
-    panes.left.button("view.sagittal").click()
+    panes.left.action("view.sagittal").trigger()
     panes.left.qstore.flush()
     assert panes.right.scene.plane == "sagittal" and panes.right.scene.mode == "single"
     panes.left.trigger("view.coronal")
@@ -451,3 +451,73 @@ def test_the_panes_can_be_made_narrow(qtbot, dialog, tmp_path) -> None:
     _both_loaded(qtbot, dlg.panes)
     assert dlg.panes.left.minimumSizeHint().width() < 420
     assert dlg.panes.right.minimumSizeHint().width() < 420
+
+
+# ---------------------------------------------------------------------------
+# Symmetry: neither half is the main one
+# ---------------------------------------------------------------------------
+
+
+def _shown(qtbot, dialog, images):
+    root, a, b = images
+    dlg = dialog(CompareDialog, a, b, root=root)
+    dlg.resize(1300, 760)
+    dlg.show()
+    _both_loaded(qtbot, dlg.panes)
+    return dlg.panes
+
+
+def test_one_toolbar_above_both_and_identical_headers(qtbot, dialog, images) -> None:
+    panes = _shown(qtbot, dialog, images)
+    bar = panes.left._toolbar
+    assert bar.isVisible() and not panes.left.isAncestorOf(bar), "the toolbar sits in one half"
+    assert bar.geometry().width() > panes.left.width(), "it does not span both halves"
+    assert panes._left_head.change.isVisible() and panes._right_head.change.isVisible()
+    assert abs(panes.left.width() - panes.right.width()) <= 3
+    assert abs(panes.left.height() - panes.right.height()) <= 1
+
+
+def test_one_controls_column_beside_both(qtbot, dialog, images) -> None:
+    panes = _shown(qtbot, dialog, images)
+    panes.left.presenter.set_inspector(True)
+    assert panes.column_open()
+    side = panes.left.presenter.side
+    assert not panes.left.isAncestorOf(side), "the column squeezes one image"
+    assert abs(panes.left.width() - panes.right.width()) <= 3
+    # The right image's own key opens and closes the same column.
+    panes.right.trigger("view.inspector")
+    assert not panes.column_open()
+    panes.right.trigger("view.inspector")
+    assert panes.column_open()
+    assert panes.right.presenter.side.isHidden(), "a second column appeared"
+
+
+def test_the_column_shows_either_images_settings(qtbot, dialog, images) -> None:
+    panes = _shown(qtbot, dialog, images)
+    panes.left.presenter.set_inspector(True)
+    panes.whose_buttons["right"].click()
+    assert panes.column_open()
+    assert panes.right.presenter.inspector is not None
+    assert not panes.right.presenter.side.isHidden()
+    assert not panes.right.isAncestorOf(panes.right.presenter.side)
+    assert panes.left.presenter.side.isHidden()
+    panes.whose_buttons["left"].click()
+    assert panes.right.presenter.side.isHidden() and not panes.left.presenter.side.isHidden()
+
+
+def test_unsyncing_gives_each_image_its_own_and_resyncing_takes_them_back(
+        qtbot, dialog, images) -> None:
+    panes = _shown(qtbot, dialog, images)
+    panes.left.presenter.set_inspector(True)
+    panes.link.setChecked(False)
+    for viewer in (panes.left, panes.right):
+        assert viewer.isAncestorOf(viewer._toolbar) and viewer.toolbar_visible()
+        assert viewer.isAncestorOf(viewer.presenter.side)
+        assert not viewer.presenter.side.isHidden(), "the open column was not carried"
+        assert viewer.presenter.side_tab.isVisibleTo(viewer)
+    assert not panes.column_open()
+    panes.link.setChecked(True)
+    assert panes.column_open()
+    assert not panes.left.isAncestorOf(panes.left._toolbar)
+    assert panes.right.presenter.side.isHidden()
+    assert not panes.right.presenter.side_tab.isVisibleTo(panes.right)

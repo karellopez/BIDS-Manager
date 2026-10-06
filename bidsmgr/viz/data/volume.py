@@ -28,9 +28,12 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..compute.shapes import GridBox
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +130,9 @@ class VolumeSource:
     #: b-value of every volume of a diffusion series (from the ``.bval``
     #: beside it), when the dataset gives them and they match the volumes.
     bvals: Optional[np.ndarray] = None
+    #: A source that IS a shape (the MRS voxel): its exact box, which every
+    #: view draws as geometry rather than sampling the array onto pixels.
+    box: Optional["GridBox"] = None
     # -- load state (written by the streaming thread) ---------------------
     _raw: Optional[np.ndarray] = field(default=None, repr=False)
     loaded_raw: int = 0

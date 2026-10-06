@@ -44,6 +44,9 @@ class ActionDef:
     help: str = ""
     #: Where it shows: "toolbar" actions get a button when a layout lists them.
     short: str = ""
+    #: The icon its button and menu entry carry (a logical name of
+    #: ``bidsmgr.gui.icons``), "" for none.
+    icon: str = ""
 
     @property
     def checkable(self) -> bool:
@@ -63,48 +66,85 @@ ACTIONS: tuple[ActionDef, ...] = (
     # -- layout -------------------------------------------------------------
     _a("view.axial", "Axial view", "view.plane", {"plane": "axial", "single": True},
        category="Views", keys=("A",), when="volume", short="Axial",
-       checked="mode=single && plane=axial"),
+       checked="mode=single && plane=axial", icon="layout_single"),
     _a("view.sagittal", "Sagittal view", "view.plane", {"plane": "sagittal", "single": True},
        category="Views", keys=("S",), when="volume", short="Sagittal",
-       checked="mode=single && plane=sagittal"),
+       checked="mode=single && plane=sagittal", icon="layout_single"),
     _a("view.coronal", "Coronal view", "view.plane", {"plane": "coronal", "single": True},
        category="Views", keys=("C",), when="volume", short="Coronal",
-       checked="mode=single && plane=coronal"),
-    _a("view.multi", "Multi-planar (three planes)", "view.toggle_mode", {"mode": "multi"},
-       category="Views", keys=("M",), when="volume", short="Multi-Planar",
-       checked="mode=multi"),
-    _a("view.3d", "3-D volume render", "view.toggle_mode", {"mode": "3d"},
-       category="Views", keys=("D",), when="volume.3d && gpu", short="3D",
-       checked="mode=3d"),
-    _a("view.combo", "Multi-planar with 3-D", "view.toggle_mode", {"mode": "combo"},
-       category="Views", keys=("P",), when="volume.3d && gpu", short="Multi-Planar 3D",
-       checked="mode=combo"),
-    _a("view.hero", "Hero: one large view and the others beside it",
-       "view.toggle_mode", {"mode": "hero"}, category="Views", when="volume",
-       short="Hero", checked="mode=hero"),
-    _a("view.mosaic", "Mosaic of many slices", "view.toggle_mode", {"mode": "mosaic"},
-       category="Views", when="volume", short="Mosaic", checked="mode=mosaic"),
+       checked="mode=single && plane=coronal", icon="layout_single"),
+    _a("view.multi", "Multi-planar view (three planes)", "view.toggle_mode",
+       {"mode": "multi"}, category="Views", keys=("M",), when="volume",
+       short="Multi-planar", checked="mode=multi",
+       help="Sagittal, coronal and axial slices through the crosshair, side by side "
+            "(multi-planar reconstruction, MPR)", icon="layout_multi"),
+    _a("view.3d", "3-D volume rendering", "view.toggle_mode", {"mode": "3d"},
+       category="Views", keys=("D",), when="volume.3d && gpu", short="3-D",
+       checked="mode=3d",
+       help="The whole volume ray-cast on the graphics card: surfaces, projections, "
+            "clip planes", icon="layout_3d"),
+    _a("view.combo", "Multi-planar view with 3-D rendering", "view.toggle_mode",
+       {"mode": "combo"}, category="Views", keys=("P",), when="volume.3d && gpu",
+       short="Planes + 3-D", checked="mode=combo",
+       help="The three slices and the 3-D rendering together, one crosshair", icon="layout_combo"),
+    _a("view.hero", "One large view, the others beside it", "view.toggle_mode",
+       {"mode": "hero"}, category="Views", when="volume", short="Large view",
+       checked="mode=hero",
+       help="The chosen plane (or the 3-D) drawn large, the rest small beside it; drag "
+            "the gap to resize", icon="layout_hero"),
+    _a("view.mosaic", "Mosaic of many slices (lightbox)", "view.toggle_mode",
+       {"mode": "mosaic"}, category="Views", when="volume", short="Mosaic",
+       checked="mode=mosaic",
+       help="Many slices of one plane in a grid, for a quick look through the volume "
+            "or a figure", icon="layout_mosaic"),
     _a("view.graph", "Time-course graph", "view.graph", category="Views",
-       keys=("G",), when="volume.4d && !mode=3d", short="Graph", checked="graph"),
+       keys=("G",), when="volume.4d && !mode=3d", shown="volume.4d", short="Time course",
+       checked="graph",
+       help="The signal over time at the crosshair (4-D images), with the run's events, "
+            "physiology and quality rows when asked", icon="timecourse"),
+    _a("graph.beside", "Time course beside the views", "gui:graph_beside", category="Views",
+       when="graph && !mode=3d", shown="volume.4d", short="Beside", checked="graph.beside",
+       help="Put the time-course panel to the right of the views instead of under them "
+            "(a long run reads better wide, a tall one beside)", icon="dock_right"),
+    _a("graph.maximize", "Maximise the time course", "gui:graph_maximize", category="Views",
+       keys=("Ctrl+G",), when="graph && !graph.detached", shown="volume.4d",
+       short="Maximise", checked="graph.maximized",
+       help="Give the time-course panel the whole viewer (its QC rows and physiology "
+            "too); again to bring the views back", icon="maximize"),
+    _a("graph.detach", "Time course in its own window", "gui:graph_detach", category="Views",
+       keys=("Ctrl+Shift+G",), when="graph", shown="volume.4d", short="Own window",
+       checked="graph.detached",
+       help="Move the time-course panel to a window of its own (a second screen, say); "
+            "closing that window puts it back", icon="detach"),
     # -- display -----------------------------------------------------------
     _a("view.labels", "Orientation labels and cube", "view.flag", {"flag": "labels"},
        category="Display", keys=("O",), when="volume", short="Orientation labels",
-       checked="display.labels"),
-    _a("view.ras", "RAS orientation (off: the file's own storage order)",
-       "view.flag", {"flag": "ras"}, category="Display", when="volume",
-       short="RAS", checked="display.ras"),
-    _a("view.radiological", "Radiological convention (mirror left and right)",
-       "view.flag", {"flag": "radiological"}, category="Display", keys=("L",),
-       when="volume", short="Radiological", checked="display.radiological"),
-    _a("view.world", "World space (draw oblique scans upright)", "view.space",
-       category="Display", keys=("W",), when="volume", short="World space",
-       checked="space=world"),
+       checked="display.labels",
+       help="Letters at the edges of every slice (R/L, A/P, S/I) and the orientation "
+            "cube in 3-D"),
+    _a("view.ras", "RAS orientation", "view.flag", {"flag": "ras"},
+       category="Display", when="volume", short="RAS", checked="display.ras",
+       help="Draw every image Right, Anterior, Superior up the axes, whatever order its "
+            "file stores the voxels in. Off: the file's own storage order"),
+    _a("view.radiological", "Radiological convention", "view.flag",
+       {"flag": "radiological"}, category="Display", keys=("L",), when="volume",
+       short="Radiological", checked="display.radiological",
+       help="Mirror left and right, as radiologists read images: the patient's left on "
+            "the screen's right. Off: neurological convention"),
+    _a("view.world", "World space", "view.space", category="Display", keys=("W",),
+       when="volume", short="World space", checked="space=world",
+       help="Resample slices onto the scanner's axes, so an oblique acquisition is "
+            "drawn upright. Off: slices of the image's own voxel grid"),
     _a("view.colorbar", "Colour bar", "view.flag", {"flag": "colorbar"},
        category="Display", keys=("B",), when="volume", short="Colour bar",
-       checked="display.colorbar"),
-    _a("view.crosshair", "Show the crosshair", "view.flag", {"flag": "crosshair"},
+       checked="display.colorbar",
+       help="A colour bar under the image for every scalar layer, with its window, "
+            "units and threshold"),
+    _a("view.crosshair", "Crosshair", "view.flag", {"flag": "crosshair"},
        category="Display", keys=("X",), when="volume", short="Crosshair",
-       checked="display.crosshair"),
+       checked="display.crosshair",
+       help="The crosshair on every slice and in 3-D (its colour and width in Slice "
+            "views)"),
     _a("view.reset", "Reset zoom and pan", "view.reset", category="Display",
        keys=("R",), when="volume", short="Reset zoom"),
     # -- navigation --------------------------------------------------------
@@ -158,22 +198,26 @@ ACTIONS: tuple[ActionDef, ...] = (
        help="What the defacing engine would blank, drawn in red over the image. "
             "Nothing is changed"),
     _a("frame.play", "Play the series", "gui:play", category="Navigate",
-       keys=("Space",), when="volume.4d", short="Play", checked="playing"),
+       keys=("Space",), when="volume.4d", shown="volume.4d", short="Play", checked="playing", icon="play"),
     _a("cursor.center", "Centre the crosshair", "cursor.center", category="Navigate",
        keys=("Home",), when="volume"),
     # -- window -------------------------------------------------------------
     _a("window.robust", "Window to the robust range", "window.robust",
-       category="Contrast", keys=("F",), when="volume", short="Auto"),
+       category="Contrast", keys=("F",), when="volume", short="Auto",
+       help="The display range from the 1st to the 99th percentile of this volume"),
     _a("window.series", "Window for the whole series", "window.robust",
-       {"series": True}, category="Contrast", keys=("Shift+F",), when="volume.4d"),
+       {"series": True}, category="Contrast", keys=("Shift+F",), when="volume.4d",
+       help="One display range for every volume of the series, so playing it does not "
+            "flicker"),
     _a("window.full", "Window to the full range", "window.full",
-       category="Contrast", when="volume", short="Full"),
+       category="Contrast", when="volume", short="Full",
+       help="The display range from the smallest to the largest value"),
     _a("window.invert", "Invert the colour map", "layer.toggle",
        {"field": "invert"}, category="Contrast", keys=("I",), when="volume",
        checked="layer.invert"),
-    _a("view.nearest", "Blocky pixels (nearest neighbour)", "layer.toggle",
+    _a("view.nearest", "Nearest-neighbour interpolation", "layer.toggle",
        {"field": "nearest"}, category="Display", keys=("N",), when="volume",
-       short="Blocky", checked="layer.nearest",
+       short="Nearest neighbour", checked="layer.nearest",
        help="Draw each voxel as a square, as the data is, instead of smoothing "
             "between voxels"),
     # -- 3-D ----------------------------------------------------------------
@@ -213,19 +257,24 @@ ACTIONS: tuple[ActionDef, ...] = (
        when="volume", short="Add overlay",
        help="Draw another image over this one: a statistical map, an atlas, a "
             "mask, another contrast. Its look follows from what it holds."),
-    _a("qc.mean", "Mean of the series", "gui:qc", {"map": "mean"}, category="Layers",
-       when="volume.4d && volume.loaded", short="Mean image",
-       help="The mean over every volume, as an overlay"),
-    _a("qc.sd", "Standard deviation of the series", "gui:qc", {"map": "sd"},
-       category="Layers", when="volume.4d && volume.loaded", short="Standard deviation",
-       help="Where the signal moves: motion at the edges, vessels, ghosts"),
-    _a("qc.tsnr", "Temporal SNR of the series", "gui:qc", {"map": "tsnr"},
-       category="Layers", when="volume.4d && volume.loaded", short="Temporal SNR",
-       help="Mean over standard deviation per voxel: how much of the signal is signal"),
+    _a("qc.mean", "Mean image of the series", "gui:qc", {"map": "mean"},
+       category="QC", when="volume.4d && volume.loaded", short="Mean image",
+       help="Computed when chosen: the mean over every volume, as an overlay"),
+    _a("qc.sd", "Standard deviation map", "gui:qc", {"map": "sd"},
+       category="QC", when="volume.4d && volume.loaded", short="Standard deviation",
+       help="Computed when chosen: where the signal moves over time (motion at the "
+            "edges, vessels, ghosts), as an overlay"),
+    _a("qc.tsnr", "Temporal SNR map", "gui:qc", {"map": "tsnr"},
+       category="QC", when="volume.4d && volume.loaded", short="Temporal SNR",
+       help="Computed when chosen: each voxel's mean over its standard deviation after "
+            "removing slow drifts, as an overlay with a colour bar and how to read it"),
     _a("view.inspector", "Controls column", "gui:inspector", category="Views",
-       keys=("Ctrl+I",), when="volume", short="Controls", checked="panel.inspector",
-       help="The layers and their look, the view, the layout and the 3-D "
-            "controls, grouped by purpose"),
+       keys=("Ctrl+I",), when="volume || traces || spectrum", short="Controls",
+       checked="panel.inspector",
+       help="Every control, grouped by purpose: for images the layers and their look, "
+            "the view, the layout and the 3-D; for signals the channels, time, filters, "
+            "events, QC and display; for spectra what is shown, the processing, the "
+            "reference marks and QC", icon="controls"),
     # -- signals (MEG, EEG, physio) -------------------------------------------
     _a("time.next", "Next page of time", "time.page", {"n": 1}, category="Signals",
        keys=("Right",), when="traces"),
@@ -255,7 +304,7 @@ ACTIONS: tuple[ActionDef, ...] = (
     _a("traces.smaller", "Smaller amplitude", "traces.scale", {"factor": 0.8},
        category="Signals", keys=("[",), when="traces"),
     _a("traces.normalize", "Normalise each channel", "traces.normalize",
-       category="Signals", keys=("N",), when="traces", short="Normalize",
+       category="Signals", keys=("N",), when="traces", short="Normalise",
        checked="normalize",
        help="Each channel scaled to its own range, so none overlaps; off, "
             "channels of one type share a scale"),
@@ -264,38 +313,59 @@ ACTIONS: tuple[ActionDef, ...] = (
        when="traces", short="Butterfly", checked="traces.butterfly",
        help="Overlay the channels of each type, to see what they share"),
     _a("traces.clip", "Clip traces to their band", "traces.option", {"field": "clip"},
-       category="Signals", when="traces", short="Clip", checked="traces.clip",
+       category="Signals", when="traces", short="Clip traces", checked="traces.clip",
        help="Cut a trace off at one and a half bands, so an artefact cannot "
             "paint over its neighbours"),
     _a("traces.dc", "Remove each channel's mean", "traces.option", {"field": "remove_dc"},
-       category="Signals", keys=("D",), when="traces", short="DC",
+       category="Signals", keys=("D",), when="traces", short="Remove DC",
        checked="traces.remove_dc",
        help="Centre each trace in its band (the mean over the window taken out)"),
     _a("traces.page_scale", "Scale each page to itself", "traces.option",
-       {"field": "page_scale"}, category="Signals", when="traces", short="Page scale",
+       {"field": "page_scale"}, category="Signals", when="traces", short="Scale per page",
        checked="traces.page_scale",
        help="Off: one amplitude per channel type for the whole recording, so a "
             "quiet page and a noisy one compare. On: each page fills its bands."),
-    _a("channels.write_bads", "Write the bad channels to channels.tsv", "gui:write_bads",
-       category="Signals", when="traces && meeg && bads.changed", shown="meeg",
-       short="Save bads",
-       help="Mark the channels you clicked as bad (status) in the recording's "
-            "_channels.tsv; undoable in the Editor's history"),
+    _a("traces.quality", "Quality control (QC)", "traces.quality", category="Signals",
+       keys=("Q",), when="traces && meeg", shown="meeg", short="QC",
+       checked="quality",
+       help="A quick check before a full pipeline, computed when switched on and type by "
+            "type (magnetometers, gradiometers and EEG are never mixed): channels that are "
+            "noisy, flat, uncorrelated or carry line noise, by STD and peak-to-peak; and "
+            "the segments where a type's channels go off or muscle shows. Its parameters "
+            "are in the controls column", icon="qc"),
+    _a("annotate.toggle", "Annotation mode", "annotate.mode", category="Annotation",
+       keys=("A",), when="traces && meeg", shown="meeg", short="Annotate",
+       checked="annotate",
+       help="Mark bad segments: drag across the traces to mark one, drag its edges "
+            "to adjust it, right-click it to relabel or delete it. Channel names "
+            "mark channels bad in any mode.", icon="annotate"),
+    _a("annotate.delete", "Delete the selected bad segment", "annotate.remove",
+       category="Annotation", keys=("Delete", "Backspace"),
+       when="traces && annotate && span.selected", short="Delete segment",
+       help="Click a segment to select it (it is drawn stronger), then Delete"),
+    _a("review.save", "Save the bad channels and segments to the dataset", "gui:save_review",
+       category="Annotation", when="traces && meeg && review.changed", shown="meeg",
+       short="Save to dataset",
+       help="Bad channels into the status column of _channels.tsv, bad segments as "
+            "BAD_ rows of the run's _events.tsv (how mne-bids reads them back as "
+            "annotations); one step in the Editor's history, so it can be undone", icon="save"),
     _a("traces.reset", "Reset the view", "traces.reset", category="Signals",
        keys=("R",), when="traces", short="Reset view",
        help="Back to the opening window, scale, channels and no filter"),
     _a("traces.reset_filters", "Remove the filters", "traces.reset_filters",
        category="Signals", keys=("Shift+R",), when="traces && filtered",
-       short="Reset filters"),
+       short="No filter", help="Back to the unfiltered signal"),
     _a("events.toggle", "Show events", "events.show", category="Signals",
        keys=("E",), when="traces && events", short="Events", checked="events.on",
        help="Event markers from the run's events.tsv, or the stim channel's "
             "triggers; turning them on jumps to the first when none is in view"),
     _a("traces.psd", "Power spectrum", "gui:psd", category="Signals", keys=("P",),
        when="traces", short="PSD",
-       help="Welch spectrum of the channels shown (raw, or filtered)"),
+       help="Power spectral density (Welch) of the channels shown, of the raw or the "
+            "filtered signal", icon="psd"),
     _a("traces.line", "Line thickness and colours", "gui:line", category="Signals",
-       when="traces || spectrum", short="Line"),
+       when="traces || spectrum", short="Line style",
+       help="Trace width, and one colour or a colour per channel type"),
     _a("traces.together", "Every physio file of this run", "gui:together",
        category="Signals", when="physio && relatives", shown="physio",
        short="All of this run",
@@ -305,7 +375,7 @@ ACTIONS: tuple[ActionDef, ...] = (
     _a("view.zen", "Zen mode: only the traces", "gui:zen", category="Signals",
        keys=("Z",), when="traces", short="Zen", checked="zen",
        help="Hide the toolbars and the overview and leave the traces the whole "
-            "pane; Z again brings them back"),
+            "pane; Z again brings them back", icon="zen"),
     _a("signal.close", "Close the signal", "gui:close_signal", category="Signals",
        when="traces && meeg", shown="meeg", short="Close",
        help="Drop the signal and go back to the metadata"),
@@ -316,19 +386,25 @@ ACTIONS: tuple[ActionDef, ...] = (
        help="The time-domain signal the scanner measured, against seconds"),
     _a("spectrum.metabolites", "Metabolite positions", "spectrum.toggle",
        {"field": "metabolites"}, category="Spectrum", keys=("L",),
-       when="spectrum && proton", short="Metabolites", checked="spectrum.metabolites"),
+       when="spectrum && proton", short="Metabolites", checked="spectrum.metabolites",
+       help="Labelled lines where the main metabolites resonate: NAA 2.01, creatine 3.03, "
+            "choline 3.22, myo-inositol 3.56 ppm, and others"),
     _a("spectrum.window", "Standard window (0.2 to 4.2 ppm)", "spectrum.toggle",
        {"field": "standard_window"}, category="Spectrum", keys=("W",), when="spectrum && proton",
-       short="Standard window", checked="spectrum.window"),
+       short="0.2 to 4.2 ppm", checked="spectrum.window",
+       help="Frame the band where the proton metabolites are read"),
     _a("spectrum.reference", "Overlay the water reference", "spectrum.toggle",
        {"field": "reference"}, category="Spectrum", keys=("O",), when="spectrum && reference",
-       short="Reference", checked="spectrum.reference"),
+       short="Water reference", checked="spectrum.reference",
+       help="The unsuppressed water acquisition of the same voxel (_mrsref), over the "
+            "spectrum: its line width and frequency are the reference for quality"),
     _a("spectrum.anatomy", "Show the voxel on the anatomy", "gui:anatomy",
        category="Spectrum", when="spectrum && voxel", short="On anatomy",
        help="Where the spectrum was measured: the voxel outlined on this "
             "subject's anatomical image"),
     _a("spectrum.fit", "Fit the whole band", "gui:spectrum_fit", category="Spectrum",
-       keys=("F",), when="spectrum", short="Fit all"),
+       keys=("F",), when="spectrum", short="Fit all",
+       help="Show the whole frequency range at a height that fits it"),
     _a("spectrum.reset", "Reset the view", "gui:spectrum_reset", category="Spectrum",
        keys=("R",), when="spectrum", short="Reset view"),
     _a("spectrum.reset_processing", "Reset the processing", "spectrum.reset_processing",
@@ -341,33 +417,45 @@ ACTIONS: tuple[ActionDef, ...] = (
        short="Ignore water", checked="spectrum.exclude_water",
        help="Leave the residual water band (4.4 to 5.0 ppm) out of the height, so a "
             "water peak cannot flatten the metabolites; it then runs off the top"),
-    _a("spectrum.gain_up", "Taller (look under the peaks)", "spectrum.gain", {"factor": 1.25},
+    _a("spectrum.gain_up", "Vertical zoom in (look under the peaks)", "spectrum.gain",
+       {"factor": 1.25},
        category="Spectrum", keys=("]",), when="spectrum"),
-    _a("spectrum.gain_down", "Shorter", "spectrum.gain", {"factor": 0.8},
+    _a("spectrum.gain_down", "Vertical zoom out", "spectrum.gain", {"factor": 0.8},
        category="Spectrum", keys=("[",), when="spectrum"),
     # -- saved views ----------------------------------------------------------
-    _a("scene.save", "Save as a scene of this dataset...", "gui:save_scene",
+    _a("scene.save", "Save a scene in this dataset...", "gui:save_scene",
        category="Views", when="volume",
-       help="The image, its overlays in their looks, the crosshair and the layout, "
-            "saved in the dataset (.bidsmgr/viz/scenes) to open again or share"),
+       help="THIS image with its overlays in their looks, the crosshair and the layout, "
+            "saved in the dataset (.bidsmgr/viz/scenes) to open again or share with "
+            "someone who has the dataset"),
+    _a("view.mosaic_figure", "Save a mosaic figure...", "gui:mosaic_figure",
+       category="Views", when="volume && volume.loaded", icon="mosaic_figure",
+       help="The mosaic (built in Controls > Mosaic) as a PNG at screen, print or poster "
+            "resolution"),
     _a("view.command_line", "Show the command line...", "gui:command_line",
        category="Views", when="volume && volume.loaded",
        help="The bidsmgr-view call (or Python) that reproduces this view: to open "
             "it again, or render it to a PNG with no window"),
-    _a("views.save", "Save this view as...", "gui:save_view", category="Views",
-       when="volume", short="Save view",
-       help="Keep the layout, plane, display options, graph and 3-D look under "
-            "a name, to apply to any image later"),
+    _a("views.save", "Save the look as a preset...", "gui:save_view", category="Views",
+       when="volume", short="Save preset",
+       help="How the viewer looks and is arranged (layout, display, time course, 3-D "
+            "look) under a name, to apply to ANY image later from Save > Apply a "
+            "preset. Without saving, the viewer already keeps the look you leave it in"),
     # -- general ------------------------------------------------------------
     _a("edit.undo", "Undo a display change", "gui:undo", category="General",
        keys=("Ctrl+Z",), when="undo"),
     _a("edit.redo", "Redo a display change", "gui:redo", category="General",
        keys=("Ctrl+Shift+Z",), when="redo"),
-    _a("export.screenshot", "Save a screenshot", "gui:screenshot",
+    _a("export.screenshot", "Save a screenshot...", "gui:screenshot",
        category="General", keys=("Ctrl+Shift+S",), when="volume || traces || spectrum",
-       short="Screenshot"),
+       short="Screenshot", icon="camera"),
+    _a("view.restore_defaults", "Restore every viewer default...", "gui:restore_defaults",
+       category="General", when="volume || traces || spectrum", icon="restore",
+       help="Every viewer back as installed: layouts, display and 3-D look, clip planes, "
+            "trace and spectrum options, panel sizes. Shortcuts and saved presets are "
+            "kept"),
     _a("help.shortcuts", "Keyboard and mouse shortcuts", "gui:help",
-       category="General", keys=("F1",), short="Shortcuts"),
+       category="General", keys=("F1",), short="Shortcuts", icon="shortcuts"),
     _a("help.palette", "Find an action", "gui:palette", category="General",
        keys=("Ctrl+Shift+P",)),
 )
@@ -455,7 +543,8 @@ _KIND_ATOMS = {
     "signal": frozenset({"traces", "meeg", "physio", "fit", "filtered", "events",
                          "events.on", "relatives", "normalize", "together",
                          "traces.butterfly", "traces.clip", "traces.remove_dc",
-                         "traces.page_scale", "bads.changed", "zen"}),
+                         "traces.page_scale", "review.changed", "zen", "annotate",
+                         "span.selected", "quality"}),
     "spectrum": frozenset({"spectrum", "spectrum.fid", "spectrum.metabolites",
                            "spectrum.reference", "spectrum.window", "spectrum.exclude_water",
                            "proton", "reference", "voxel"}),

@@ -105,6 +105,38 @@ def series_layer(store: "SceneStore") -> tuple[Optional[VolumeLayer], Optional["
     return None, None
 
 
+def is_shape(src) -> bool:
+    """Whether a source is drawn as geometry (the MRS voxel's box)."""
+    return getattr(src, "box", None) is not None
+
+
+def shape_layers(store: "SceneStore", *, in_3d: bool = False) -> list[tuple[VolumeLayer, "VolumeSource"]]:
+    """The visible layers that are shapes, bottom to top, with their
+    sources; ``in_3d`` keeps only those the render should draw."""
+    out = []
+    for layer in store.scene.layers:
+        if layer.kind != "volume" or not layer.visible or (in_3d and not layer.in_3d):
+            continue
+        src = source_of(store, layer)
+        if is_shape(src):
+            out.append((layer, src))
+    return out
+
+
+def shape_colour(layer: VolumeLayer) -> tuple[int, int, int, int]:
+    """The colour a shape layer is drawn in: its colour map at the top of
+    its window, with its opacity."""
+    from .compute import intensity
+
+    d = layer.display
+    window = d.window or (0.0, 1.0)
+    rgba = intensity.colorize(np.array([[float(window[1])]], dtype=np.float32),
+                              d.model_copy(update={"threshold_mode": "range"}),
+                              is_base=False, window=tuple(window))
+    r, g, b = (int(v) for v in rgba[0, 0, :3])
+    return r, g, b, int(round(255 * float(np.clip(d.opacity, 0.0, 1.0))))
+
+
 def frame_of(store: "SceneStore", layer: VolumeLayer, src: "VolumeSource") -> int:
     return max(0, min(int(layer.frame), src.n_frames - 1))
 

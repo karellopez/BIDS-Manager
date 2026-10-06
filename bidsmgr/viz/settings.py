@@ -67,19 +67,21 @@ class VolumeSettings(_Section):
                     "planes, with the 3-D view where there is a GPU. "
                     "Switching layout in the viewer changes this.",
         **_hint(labels={"": "Automatic", "single": "One plane",
-                        "multi": "Three planes", "3d": "3-D",
-                        "combo": "Three planes and 3-D", "hero": "Hero",
+                        "multi": "Multi-planar", "3d": "3-D",
+                        "combo": "Planes + 3-D", "hero": "Large view",
                         "mosaic": "Mosaic"}))
     plane: Literal["sagittal", "coronal", "axial"] = Field(
-        "axial", title="Plane", description="The plane of the one-plane and hero layouts.")
+        "axial", title="Plane",
+        description="The plane of the one-plane layout, and the large view's.")
     gamma: float = Field(1.25, title="Gamma", **_hint(range=(0.1, 10.0), step=0.05),
                          description="Display gamma of a newly opened image: above 1 "
                                      "lifts the mid-tones.")
     interpolation: Literal["linear", "nearest"] = Field(
-        "linear", title="Pixels",
-        description="Linear smooths between voxels; nearest shows each voxel "
-                    "as a square, as the data is.",
-        **_hint(labels={"linear": "Smooth (linear)", "nearest": "Blocky (nearest)"}))
+        "linear", title="Interpolation",
+        description="Linear blends neighbouring voxels; nearest neighbour shows each "
+                    "voxel as a square, as the data is.",
+        **_hint(labels={"linear": "Linear (smooth)",
+                        "nearest": "Nearest neighbour (voxels)"}))
     colormap: str = Field("gray", title="Colour map", **_hint(kind="colormap"),
                           description="The colour map a newly opened image gets.")
     labels: bool = Field(True, title="Orientation letters and cube")
@@ -126,10 +128,10 @@ class VolumeSettings(_Section):
 class RenderSettings(_Section):
     model_config = ConfigDict(extra="ignore", validate_assignment=True, title="3-D")
 
-    quality: int = Field(QUALITY_DEFAULT, title="Quality",
-                         **_hint(range=(QUALITY_MIN, QUALITY_MAX), step=64, unit="steps"),
-                         description="Ray-march steps of a newly opened render. "
-                                     "Higher is finer and slower.")
+    quality: int = Field(QUALITY_DEFAULT, title="Ray samples",
+                         **_hint(range=(QUALITY_MIN, QUALITY_MAX), step=64, unit="samples"),
+                         description="Samples along each ray of a newly opened rendering. "
+                                     "More shows finer detail and renders slower.")
 
     @field_validator("quality")
     @classmethod
@@ -155,6 +157,9 @@ class TraceSettings(_Section):
                                         "app is light. In the dark theme the canvas is "
                                         "dark already.")
     event_width: int = Field(2, title="Event line width", **_hint(range=(1, 10), unit="px"))
+    controls_open: bool = Field(False, title="Controls column open",
+                                description="The column beside the traces with the channel, "
+                                            "time, filter, event, QC and display controls.")
     event_color: str = Field("", title="Event colour",
                              **_hint(kind="colour", empty="By label"),
                              description="One colour for every event; empty colours "
@@ -172,11 +177,90 @@ class TraceSettings(_Section):
         return max(1, min(int(v), 10))
 
 
+class MeegQcSettings(_Section):
+    """The quick MEG and EEG quality check (``compute.meeg_qc``). Every
+    measure is taken within ONE channel type (magnetometers, gradiometers,
+    EEG): types measure different things in different units, so a channel is
+    only ever compared with channels of its own type."""
+
+    model_config = ConfigDict(extra="ignore", validate_assignment=True,
+                              title="MEG and EEG QC")
+
+    segment_s: float = Field(
+        2.0, title="Segment length", **_hint(range=(0.5, 30.0), step=0.5, unit="s"),
+        description="The recording is checked in segments (epochs) of this length.")
+    highpass_hz: float = Field(
+        1.0, title="Ignore drifts below", **_hint(range=(0.0, 20.0), step=0.1, unit="Hz",
+                                                 zero="Off"),
+        description="A zero-phase high-pass filter applied before measuring: slow drifts "
+                    "(the environment, sweat, electrode settling) differ from sensor to "
+                    "sensor and would otherwise decide which channel looks noisy. 0 "
+                    "measures the raw signal.")
+    apply_proj: bool = Field(
+        True, title="Apply the recording's SSP projectors",
+        description="MEG recordings usually carry projectors that remove the room's "
+                    "magnetic field; applied, a sensor is judged by what is left.")
+    use_std: bool = Field(
+        True, title="Use the standard deviation (STD)",
+        description="Judge channels and segments by their standard deviation.")
+    use_ptp: bool = Field(
+        True, title="Use the peak-to-peak amplitude (PtP)",
+        description="Judge channels and segments by their peak-to-peak range: catches "
+                    "jumps and pops that barely move the standard deviation.")
+    noisy_z: float = Field(
+        3.0, title="Noisy channel above", **_hint(range=(1.0, 10.0), step=0.5,
+                                                  unit="robust SD"),
+        description="A channel is NOISY when its level (log STD or log PtP) is more than "
+                    "this many robust standard deviations above the other channels of "
+                    "its type.")
+    flat_ratio: float = Field(
+        0.01, title="Flat channel below", **_hint(range=(0.001, 0.5), step=0.001,
+                                                 unit="of its type"),
+        description="A channel is FLAT when its level is below this fraction of its "
+                    "type's median (0.01: a hundred times quieter than the rest).")
+    min_correlation: float = Field(
+        0.6, title="Channels follow their type above", **_hint(range=(0.0, 0.99), step=0.05,
+                                                              unit="correlation", zero="Off"),
+        description="How well a channel correlates with the other channels of its type "
+                    "(98th percentile, the PREP pipeline's measure). A loud channel that "
+                    "follows them is picking up real fields and is not called noisy; one "
+                    "below this, at a normal level, is called uncorrelated. 0 judges by "
+                    "level alone.")
+    line_db: float = Field(
+        10.0, title="Line noise above", **_hint(range=(1.0, 40.0), step=1.0, unit="dB"),
+        description="A channel has LINE NOISE when its power at the line frequency is "
+                    "this much above its type's typical. Needs the recording's "
+                    "PowerLineFrequency.")
+    segment_factor: float = Field(
+        4.0, title="Channel off in a segment beyond", **_hint(range=(1.5, 20.0), step=0.5,
+                                                              unit="x its level"),
+        description="In a segment, a channel is OFF when its STD or PtP there is more "
+                    "than this many times its own usual level, or less than its inverse.")
+    segment_share: float = Field(
+        0.2, title="Segment flagged when off on", **_hint(range=(0.01, 1.0), step=0.01,
+                                                         unit="of a type"),
+        description="A segment is flagged when at least this share of the channels of "
+                    "ONE type are off in it.")
+    muscle: bool = Field(
+        True, title="Look for muscle",
+        description="The muscle band's share of the power, z-scored over time per "
+                    "channel and averaged per type (after MNE's annotate_muscle_zscore). "
+                    "Needs a sampling rate above twice the band's top.")
+    muscle_low: float = Field(110.0, title="Muscle band from",
+                              **_hint(range=(20.0, 500.0), step=5.0, unit="Hz"))
+    muscle_high: float = Field(140.0, title="Muscle band to",
+                               **_hint(range=(30.0, 1000.0), step=5.0, unit="Hz"))
+    muscle_z: float = Field(
+        4.0, title="Muscle above", **_hint(range=(1.0, 20.0), step=0.5, unit="z"),
+        description="A segment is flagged for muscle when its type's mean z is above this.")
+
+
 class VizSettings(_Section):
     crosshair: CrosshairSettings = Field(default_factory=CrosshairSettings)
     volume: VolumeSettings = Field(default_factory=VolumeSettings)
     render: RenderSettings = Field(default_factory=RenderSettings)
     traces: TraceSettings = Field(default_factory=TraceSettings)
+    meeg_qc: MeegQcSettings = Field(default_factory=MeegQcSettings)
     #: action id -> key sequences, overriding the defaults (empty list = unbound).
     keymap: dict[str, list[str]] = Field(default_factory=dict)
     #: "<canvas>:<gesture>" -> tool id, overriding the default mouse map.
@@ -191,13 +275,24 @@ class VizSettings(_Section):
     layout_state: dict[str, dict] = Field(default_factory=dict)
     #: Which sections of the controls column are open (section key -> open).
     inspector_sections: dict[str, bool] = Field(default_factory=dict)
+    #: The look every image opens with (display conventions, 3-D effect and
+    #: parameters, clip planes), as last left: ``viz.memory``.
+    volume_look: dict = Field(default_factory=dict)
+    #: Per kind of signal (``meeg``, ``physio``), the trace options and
+    #: filters as last left.
+    traces_state: dict[str, dict] = Field(default_factory=dict)
+    #: The spectrum's processing and display options as last left.
+    spectrum_state: dict = Field(default_factory=dict)
+    #: The spectroscopy viewer's controls column is open (it holds the
+    #: processing, so it opens by default).
+    spectrum_controls: bool = True
 
 
 #: The sections the generated Viewer page shows, in order.
-PAGE_SECTIONS = ("crosshair", "volume", "render", "traces")
+PAGE_SECTIONS = ("crosshair", "volume", "render", "traces", "meeg_qc")
 
 
 __all__ = [
-    "CrosshairSettings", "PAGE_SECTIONS", "RenderSettings", "TraceSettings",
+    "CrosshairSettings", "MeegQcSettings", "PAGE_SECTIONS", "RenderSettings", "TraceSettings",
     "VizSettings", "VolumeSettings",
 ]

@@ -406,6 +406,7 @@ class TestControlsThatSuitTheChannelCount:
         viewer = _visualize(qtbot, _pane(qtbot), one_channel, tmp_path)
         p = viewer.presenter
         assert viewer.source().ch_names == ["cardiac"]
+        p.set_inspector(True)
         assert not p.type_combo.isVisibleTo(viewer)
         assert not p.count_control.isVisibleTo(viewer)
         assert not p.channels_button.isVisibleTo(viewer)
@@ -413,6 +414,7 @@ class TestControlsThatSuitTheChannelCount:
     def test_several_channels_show_them(self, qtbot, recording, tmp_path):
         viewer = _visualize(qtbot, _pane(qtbot), recording, tmp_path)
         p = viewer.presenter
+        p.set_inspector(True)
         assert p.type_combo.isVisibleTo(viewer)
         assert p.count_control.isVisibleTo(viewer)
         assert p.channels_button.isVisibleTo(viewer)
@@ -434,6 +436,7 @@ class TestControlsThatSuitTheChannelCount:
                         and len(viewer.source().ch_names) == 3, timeout=30_000)
         viewer.qstore.flush()
         p = viewer.presenter
+        p.set_inspector(True)
         assert viewer.action("traces.together").isChecked()
         assert viewer.source().start_time == -1.0, "the belt started first"
         assert p.type_combo.isVisibleTo(viewer)
@@ -512,9 +515,11 @@ class TestHowTheTraceIsDrawn:
         """Physio is a channel or four and fits whole; a MEG recording is
         hundreds of millions of samples."""
         physio = _visualize(qtbot, _pane(qtbot), recording, tmp_path)
+        physio.presenter.set_inspector(True)
         assert physio.action("time.fit").isEnabled()
         assert physio.button("time.fit").isVisibleTo(physio)
         meg = _load_signal(qtbot, _open(qtbot, _viewer(qtbot), rec))
+        meg.presenter.set_inspector(True)
         assert not meg.action("time.fit").isEnabled()
         for action in ("time.fit", "traces.together"):
             assert not meg.button(action).isVisibleTo(meg), (
@@ -749,7 +754,8 @@ class TestReviewing:
         viewer.qstore.flush()
         assert viewer.scene.traces.bads == ["Cz"]
         assert 1 in traces._strip.bad_rows, "its name in the error colour"
-        assert viewer.action("channels.write_bads").isEnabled()
+        assert not viewer.action("review.save").isEnabled(), \
+            "no _channels.tsv beside it: nothing could take the change"
         viewer.store.undo()
         assert viewer.scene.traces.bads is None
 
@@ -760,9 +766,9 @@ class TestReviewing:
         viewer, traces = self._meg(qtbot, tmp_path, rec)
         viewer.run("channels.toggle_bad", name="Pz")
         viewer.qstore.flush()
-        viewer.trigger("channels.write_bads")
+        viewer.trigger("review.save")
         assert "Pz\tEEG\tV\tbad" in tsv.read_text()
-        assert not viewer.action("channels.write_bads").isEnabled(), "nothing left to write"
+        assert not viewer.action("review.save").isEnabled(), "nothing left to write"
 
     def test_butterfly_overlays_each_type(self, qtbot, tmp_path, rec):
         viewer, traces = self._meg(qtbot, tmp_path, rec)
@@ -1022,6 +1028,7 @@ class TestTheToolbar:
         page; the toolbar keeps the toggle and the source."""
         viewer = _loaded(qtbot, long_rec)
         assert not hasattr(viewer.presenter, "events_row")
+        viewer.presenter.set_inspector(True)
         assert viewer.presenter.event_source.isVisibleTo(viewer)
 
 
@@ -1053,3 +1060,282 @@ def test_two_events_a_moment_apart_print_one_label(qtbot, long_rec):
     texts = [i for i in canvas._event_texts if i.isVisible()]
     assert len(lines) == 3
     assert len(texts) == 2
+
+
+class TestAnnotating:
+    """Annotation mode: bad segments marked by dragging, edited, and saved
+    with the bad channels into the dataset (mne-bids writes its tables with a
+    byte order mark, which made the old save write nothing)."""
+
+    @pytest.fixture
+    def bids_rec(self, tmp_path):
+        eeg = tmp_path / "sub-01" / "eeg"
+        path = write_fif(eeg, "sub-01_task-rest_eeg.fif", sfreq=200.0, seconds=60.0)
+        (eeg / "sub-01_task-rest_channels.tsv").write_bytes(
+            "﻿name\ttype\tunits\tstatus\nFz\tEEG\tV\tgood\nCz\tEEG\tV\tgood\n"
+            "Pz\tEEG\tV\tgood\nEOG\tEOG\tV\tgood\nSTI\tTRIG\tV\tgood\n".encode("utf-8"))
+        (eeg / "sub-01_task-rest_events.tsv").write_bytes(
+            "﻿onset\tduration\ttrial_type\tsample\n1.0\t0\tgo\t200\n".encode("utf-8"))
+        (tmp_path / "dataset_description.json").write_text('{"Name": "x"}')
+        return path
+
+    def _open(self, qtbot, path):
+        viewer = _load_signal(qtbot, _open(qtbot, _viewer(qtbot), path, path.parents[2]))
+        return viewer, _traces(viewer)
+
+    def _drag(self, traces, t0: float, t1: float) -> None:
+        from PyQt6.QtCore import QPointF, Qt
+        from PyQt6.QtTest import QTest
+
+        vp = traces.plot.viewport()
+        a = traces.plot.mapFromScene(traces._vb.mapViewToScene(QPointF(t0, 0.0)))
+        b = traces.plot.mapFromScene(traces._vb.mapViewToScene(QPointF(t1, 0.0)))
+        QTest.mousePress(vp, Qt.MouseButton.LeftButton, pos=a)
+        for k in range(1, 6):
+            QTest.mouseMove(vp, a + (b - a) * k / 5)
+        QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=b)
+
+    def test_a_drag_marks_a_bad_segment_in_annotation_mode(self, qtbot, bids_rec):
+        from bidsmgr.viz.commands.signal import bad_spans
+
+        viewer, traces = self._open(qtbot, bids_rec)
+        viewer.trigger("annotate.toggle")
+        viewer.qstore.flush()
+        assert viewer.presenter.annotation_bar.isVisibleTo(viewer)
+        self._drag(traces, 2.0, 5.0)
+        viewer.qstore.flush()
+        spans = bad_spans(viewer.store)
+        assert len(spans) == 1
+        assert spans[0].onset == pytest.approx(2.0, abs=0.1)
+        assert spans[0].duration == pytest.approx(3.0, abs=0.15)
+        assert spans[0].label == "BAD_"
+        assert viewer.scene.traces.t0 == 0.0, "the drag marked, it did not scroll"
+        assert len(traces.bad_region_items()) == 1
+        assert "1 bad segment" in viewer.presenter.review_summary.text()
+
+    def test_outside_annotation_mode_a_drag_scrolls(self, qtbot, bids_rec):
+        from bidsmgr.viz.commands.signal import bad_spans
+
+        viewer, traces = self._open(qtbot, bids_rec)
+        self._drag(traces, 5.0, 3.0)
+        viewer.qstore.flush()
+        assert bad_spans(viewer.store) == []
+        assert viewer.scene.traces.t0 > 1.0
+
+    def test_moved_relabelled_deleted_and_undone(self, qtbot, bids_rec):
+        from bidsmgr.viz.commands.signal import bad_spans
+
+        viewer, traces = self._open(qtbot, bids_rec)
+        viewer.trigger("annotate.toggle")
+        viewer.run("annotate.add", onset=2.0, duration=1.0)
+        viewer.qstore.flush()
+        region = traces.bad_region_items()[0]
+        region.setRegion((3.0, 4.5))
+        region.sigRegionChangeFinished.emit(region)
+        viewer.qstore.flush()
+        assert (bad_spans(viewer.store)[0].onset, bad_spans(viewer.store)[0].duration) == (
+            pytest.approx(3.0), pytest.approx(1.5))
+        viewer.run("annotate.set", label="muscle")
+        assert viewer.action("annotate.delete").isEnabled()
+        viewer.trigger("annotate.delete")
+        viewer.qstore.flush()
+        assert bad_spans(viewer.store) == []
+        viewer.store.undo()
+        assert bad_spans(viewer.store)[0].label == "BAD_muscle"
+
+    def test_the_review_is_saved_to_both_tables(self, qtbot, bids_rec):
+        eeg = bids_rec.parent
+        viewer, traces = self._open(qtbot, bids_rec)
+        assert not viewer.action("review.save").isEnabled()
+        traces._on_name_clicked(1)                       # Cz
+        viewer.run("annotate.add", onset=10.0, duration=2.5, label="eye")
+        viewer.qstore.flush()
+        assert viewer.action("review.save").isEnabled()
+        viewer.trigger("review.save")
+        channels = (eeg / "sub-01_task-rest_channels.tsv").read_bytes()
+        events = (eeg / "sub-01_task-rest_events.tsv").read_bytes()
+        assert channels.startswith(b"\xef\xbb\xbf") and b"Cz\tEEG\tV\tbad" in channels
+        assert events.startswith(b"\xef\xbb\xbf")
+        assert b"10\t2.5\tBAD_eye\t2000" in events and b"1.0\t0\tgo\t200" in events
+        assert not viewer.action("review.save").isEnabled(), "nothing left to write"
+        from bidsmgr.project.operations import read_log
+
+        assert read_log(bids_rec.parents[2])[-1]["label"].startswith(
+            "Review of sub-01_task-rest_eeg.fif: 1 bad channel, 1 bad segment")
+
+    def test_the_saved_segments_come_back_when_the_run_is_opened_again(self, qtbot, bids_rec):
+        from bidsmgr.viz.commands.signal import bad_spans
+
+        viewer, traces = self._open(qtbot, bids_rec)
+        viewer.run("annotate.add", onset=10.0, duration=2.5, label="eye")
+        viewer.qstore.flush()
+        viewer.trigger("review.save")
+        again, _t = self._open(qtbot, bids_rec)
+        assert [(s.onset, s.duration, s.label) for s in bad_spans(again.store)] == [
+            (10.0, 2.5, "BAD_eye")]
+
+
+class TestQualityCheck:
+    """Q: the quality check, computed when first switched on, as lanes under
+    the traces, markers beside flagged channels and a report."""
+
+    @pytest.fixture
+    def noisy_rec(self, tmp_path):
+        rng = np.random.default_rng(0)
+        sfreq, seconds = 250.0, 60.0
+        n = int(sfreq * seconds)
+        # Channels as real ones are: a field they share, plus their own noise;
+        # E2's own noise is eight times the field (a bad contact).
+        shared = rng.normal(0, 1, (3, n))
+        data = 10e-6 * (rng.uniform(0.5, 1.0, (8, 3)) @ shared
+                        + 0.3 * rng.normal(0, 1, (8, n)))
+        data[2] += rng.normal(0, 80e-6, n)
+        data[:, int(30 * sfreq):int(34 * sfreq)] *= 4.0
+        names = [f"E{i}" for i in range(8)]
+        info = mne.create_info(names, sfreq, ["eeg"] * 8, verbose=False)
+        path = tmp_path / "sub-01_task-rest_eeg.fif"
+        mne.io.RawArray(data, info, verbose=False).save(str(path), verbose=False)
+        return path
+
+    def _checked(self, qtbot, path):
+        viewer = _load_signal(qtbot, _open(qtbot, _viewer(qtbot), path, path.parent))
+        viewer.trigger("traces.quality")
+        p = viewer.presenter
+        qtbot.waitUntil(lambda: p.quality_row.isVisibleTo(viewer), timeout=20_000)
+        return viewer, p
+
+    def test_it_runs_when_asked_and_shows_its_lanes(self, qtbot, noisy_rec):
+        viewer = _load_signal(qtbot, _open(qtbot, _viewer(qtbot), noisy_rec, noisy_rec.parent))
+        assert not viewer.ctx.jobs.running("quality"), "nothing computed unasked"
+        assert not viewer.presenter.quality_row.isVisibleTo(viewer)
+        viewer.trigger("traces.quality")
+        p = viewer.presenter
+        qtbot.waitUntil(lambda: p.quality_row.isVisibleTo(viewer), timeout=20_000)
+        res = p.quality_strip.result()
+        assert res["suggested_bads"] == ["E2"]
+        assert any(res["flagged"])
+        # One lane per type and measure; at 250 Hz the muscle band (110 to 140
+        # Hz) is above Nyquist, so EEG has its "off" lane alone.
+        assert [lane["name"] for lane in p.quality_strip._lanes] == ["EEG off"]
+        assert p.quality_strip.height() >= p.quality_strip.LANE_PX
+        traces = _traces(viewer)
+        assert traces.quality_flags["E2"][1].startswith("noisy")
+        assert 2 in traces._strip.flags
+        viewer.trigger("traces.quality")
+        viewer.qstore.flush()
+        assert not p.quality_row.isVisibleTo(viewer)
+        assert traces._strip.flags == {}
+
+    def test_flagged_segments_become_bad_segments(self, qtbot, noisy_rec):
+        from bidsmgr.viz.commands.signal import bad_spans
+
+        viewer, p = self._checked(qtbot, noisy_rec)
+        assert p.mark_flagged_segments() >= 1
+        viewer.qstore.flush()
+        spans = bad_spans(viewer.store)
+        assert spans and spans[0].label == "BAD_noise"
+        assert spans[0].onset == pytest.approx(30.0, abs=2.0)
+        viewer.store.undo()
+        assert bad_spans(viewer.store) == []
+
+    def test_the_report_marks_the_suggested_channels(self, qtbot, noisy_rec):
+        viewer, p = self._checked(qtbot, noisy_rec)
+        dlg = p.show_quality_report()
+        qtbot.addWidget(dlg)
+        assert dlg.channels.item(0, 0).text() == "E2"
+        assert "Noisy" in dlg.channels.item(0, 7).text()
+        dlg.mark_suggested.click()
+        viewer.qstore.flush()
+        assert viewer.scene.traces.bads == ["E2"]
+        assert not viewer.action("review.save").isEnabled(), \
+            "no _channels.tsv: nothing to save it into, so not offered"
+
+    def test_a_segment_double_click_goes_there(self, qtbot, noisy_rec):
+        viewer, p = self._checked(qtbot, noisy_rec)
+        dlg = p.show_quality_report()
+        qtbot.addWidget(dlg)
+        dlg.segments.cellDoubleClicked.emit(0, 0)
+        viewer.qstore.flush()
+        tr = viewer.scene.traces
+        assert tr.t0 <= 30.5 <= tr.t0 + tr.width
+
+
+    def test_the_parameters_are_the_users_and_check_again(self, qtbot, noisy_rec):
+        viewer, p = self._checked(qtbot, noisy_rec)
+        controls = p.controls
+        controls._qc_controls["noisy_z"].put(9.5)
+        controls._qc_controls["segment_s"].put(4.0)
+        controls.qc_apply.click()
+        assert viewer.ctx.settings.meeg_qc.noisy_z == 9.5, "remembered"
+        qtbot.waitUntil(lambda: p.quality_result() is not None
+                        and p.quality_result()["settings"]["noisy_z"] == 9.5, timeout=20_000)
+        assert p.quality_result()["segment_s"] == pytest.approx(4.0)
+        # Restore defaults (the section's header button) checks again too.
+        controls.section("signal.qc").restore_defaults()
+        assert viewer.ctx.settings.meeg_qc.noisy_z == 3.0
+        assert controls._qc_controls["segment_s"].get() == pytest.approx(2.0)
+
+    def test_qc_settings_opens_the_column_at_qc(self, qtbot, noisy_rec):
+        viewer, p = self._checked(qtbot, noisy_rec)
+        p.set_inspector(False)
+        p.open_section("signal.qc")
+        assert p.inspector_open() and p.controls.section("signal.qc").is_open()
+        assert viewer.action("view.inspector").isChecked()
+
+
+class TestControlsColumn:
+    """One toolbar row of what is used all the time; everything else in the
+    controls column, by purpose, as in the image viewer."""
+
+    def test_one_toolbar_row_and_sections_by_purpose(self, qtbot, long_rec):
+        viewer = _loaded(qtbot, long_rec)
+        p = viewer.presenter
+        assert len(p.toolbar_rows()) == 1
+        for moved in ("traces.butterfly", "time.fit", "events.toggle", "traces.line"):
+            btn = viewer.button(moved)
+            assert btn is not None and not viewer._toolbar.isAncestorOf(btn), moved
+        assert p.controls.sections() == ["signal.channels", "signal.time", "signal.filters",
+                                         "signal.events", "signal.qc", "signal.display"]
+        assert viewer.button("traces.quality").text() == "QC"
+
+    def test_the_tab_and_the_key_open_it_and_it_is_remembered(self, qtbot, long_rec):
+        viewer = _loaded(qtbot, long_rec)
+        p = viewer.presenter
+        assert not p.inspector_open()
+        p.side_tab.clicked.emit()
+        assert p.inspector_open() and p.side_tab.open
+        assert viewer.ctx.settings.traces.controls_open
+        second = _loaded(qtbot, long_rec)
+        assert second.presenter.inspector_open(), "the next recording opens with it"
+        second.trigger("view.inspector")
+        assert not second.presenter.inspector_open()
+
+    def test_physio_has_no_qc_section(self, qtbot, recording, tmp_path):
+        viewer = _visualize(qtbot, _pane(qtbot), recording, tmp_path)
+        p = viewer.presenter
+        p.set_inspector(True)
+        assert p.controls.section("signal.qc").isHidden()
+        assert not p.controls.section("signal.filters").isHidden()
+
+    def test_numbers_use_a_decimal_point(self, qtbot, long_rec):
+        viewer = _loaded(qtbot, long_rec)
+        spin = viewer.presenter.controls._qc_controls["flat_ratio"].widget
+        assert "," not in spin.text()
+
+class TestRemembered:
+    """Trace options and filters carry to the next recording and window."""
+
+    def test_options_and_filters_persist(self, qtbot, long_rec, tmp_path):
+        first = _loaded(qtbot, long_rec)
+        first.run("traces.count", n=3)
+        first.run("traces.option", field="butterfly", value=True)
+        first.run("traces.filter", hp=1.0, lp=40.0)
+        first.qstore.flush()
+        first.presenter.stop()
+        SettingsHub.reset_instance()
+        other = write_fif(tmp_path / "other", "sub-02_task-rest_eeg.fif", sfreq=200.0,
+                          seconds=60.0)
+        second = _loaded(qtbot, other)
+        tr = second.scene.traces
+        assert (tr.count, tr.butterfly, tr.hp, tr.lp) == (3, True, 1.0, 40.0)
+        assert tr.t0 == 0.0, "where you were is the recording's, not kept"

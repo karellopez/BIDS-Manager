@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Mapping, Optional
 
-from PyQt6.QtCore import QObject, Qt
+from PyQt6.QtCore import QObject, QSize, Qt
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import QPushButton, QWidget
 
@@ -52,7 +52,37 @@ class ActionManager(QObject):
             host.addAction(act)
             self.actions[d.id] = act
             self._defs[d.id] = d
+        #: Buttons with an icon, re-coloured when the theme changes.
+        self._icon_buttons: list = []
+        self.refresh_icons()
+        from .bridge import ThemeHub, connect_while_alive
+
+        connect_while_alive(ThemeHub.instance().changed, self, lambda m, _t: m.refresh_icons())
         self.apply_keymap({})
+
+    def track_icon(self, btn, name: str) -> None:
+        """Keep ``btn``'s icon ``name`` in the theme's colours (a button
+        that is not an action's: a menu button, the layout button)."""
+        self._icon_buttons = [(b, n) for b, n in self._icon_buttons if b is not btn]
+        self._icon_buttons.append((btn, name))
+
+    def refresh_icons(self) -> None:
+        """Every action's icon (and its buttons') in the current theme's
+        colours: an icon drawn for the dark theme vanishes on the light."""
+        from .. import icons
+
+        for action_id, act in self.actions.items():
+            name = self._defs[action_id].icon
+            if name:
+                act.setIcon(icons.icon(name))
+        alive = []
+        for btn, name in self._icon_buttons:
+            try:
+                btn.setIcon(icons.icon(name))
+            except RuntimeError:        # deleted with its toolbar
+                continue
+            alive.append((btn, name))
+        self._icon_buttons = alive
 
     # ------------------------------------------------------------------
     def apply_keymap(self, overrides: Mapping[str, list[str]]) -> None:
@@ -121,6 +151,12 @@ class ActionManager(QObject):
         btn.setObjectName("tb-btn-toggle")
         btn.setCheckable(d.checkable)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if d.icon:
+            from .. import icons
+
+            btn.setIcon(icons.icon(d.icon))
+            btn.setIconSize(QSize(16, 16))
+            self._icon_buttons.append((btn, d.icon))
 
         def sync() -> None:
             btn.setEnabled(act.isEnabled())

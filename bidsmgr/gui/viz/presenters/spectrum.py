@@ -17,8 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-    QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ....viz.data.spectrum import SpectrumSource, read_mrs
@@ -27,11 +26,17 @@ from ..context import ViewerContext
 
 log = logging.getLogger(__name__)
 
+#: Two rows, by purpose: how the signal is PROCESSED (domain, component,
+#: phase, line broadening, which repeats), then what is SHOWN over it and how
+#: the view is framed, with the file's header and its voxel on the anatomy.
+#: ONE row, by purpose: what is shown (the FID) and phasing it; the marks
+#: read against; the view; the file's context (its header, its voxel on
+#: the anatomy). Everything else is in the controls column
+#: (``panels.spectrum_controls``).
 TOOLBAR_ROWS = (
-    ("widget:processing", "spectrum.auto_phase", "stretch", "help.shortcuts"),
-    ("spectrum.metabolites", "spectrum.window", "spectrum.water", "spectrum.reference", "|",
-     "spectrum.fit", "spectrum.reset", "traces.line", "widget:header",
-     "spectrum.anatomy", "stretch"),
+    ("spectrum.fid", "spectrum.auto_phase", "|", "spectrum.metabolites", "spectrum.window",
+     "|", "spectrum.fit", "spectrum.reset", "|", "widget:header", "spectrum.anatomy",
+     "stretch", "help.shortcuts"),
 )
 
 _PARTS = (("magnitude", "Magnitude"), ("real", "Real"), ("imaginary", "Imaginary"),
@@ -53,41 +58,54 @@ class SpectrumPresenter:
         from ..canvases.spectrum import SpectrumCanvas
 
         self.canvas = SpectrumCanvas(ctx)
-        self.content = self.canvas
+        from ..panels.side_column import SideColumn
+        from ..panels.spectrum_controls import SpectrumControls
+
+        self._syncing = False
+        self.controls = SpectrumControls(self)
+
+        def remember(on: bool) -> None:
+            if ctx.settings.spectrum_controls != on:
+                ctx.settings_hub.update(lambda st: setattr(st, "spectrum_controls", on))
+
+        self.column = SideColumn(self.canvas, self.controls, remember=remember,
+                                 changed=viewer.refresh_actions)
+        self.content = self.column.widget
         ctx.jobs.done.connect(self._on_job_done)
         ctx.jobs.failed.connect(self._on_job_failed)
         ctx.qstore.changed.connect(lambda _p: (self.sync_widgets(), viewer.update_footer()))
+        ctx.qstore.changed.connect(self._maybe_remember)
+        self._first_file = True
+        from PyQt6.QtCore import QTimer
+
+        self._memory_timer = QTimer(viewer)
+        self._memory_timer.setSingleShot(True)
+        self._memory_timer.setInterval(400)
+        self._memory_timer.timeout.connect(self._remember)
 
     # ------------------------------------------------------------------
     def toolbar_rows(self):
         return TOOLBAR_ROWS
 
     def make_widget(self, name: str):
-        return {"processing": self._widget_processing,
-                "header": self._widget_header}.get(name, lambda: None)()
+        return {"header": self._widget_header}.get(name, lambda: None)()
 
-    def _labelled(self, text: str, widget: QWidget, tip: str) -> QWidget:
-        box = QWidget()
-        h = QHBoxLayout(box)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(4)
-        lbl = QLabel(text)
-        lbl.setObjectName("sidecar-footer-summary")
-        lbl.setToolTip(tip)
-        widget.setToolTip(tip)
-        h.addWidget(lbl)
-        h.addWidget(widget)
-        return box
+    # -- the controls column ---------------------------------------------------
 
-    def _widget_processing(self) -> list[QWidget]:
+    def inspector_open(self) -> bool:
+        return self.column.is_open()
+
+    def set_inspector(self, on: bool, *, remember: bool = True) -> None:
+        self.column.set_open(on, remember=remember)
+
+    def _make_processing(self) -> None:
+        """The processing controls (placed by the controls column)."""
         self.domain = QComboBox()
-        self.domain.setObjectName("ent-input")
         self.domain.addItem("Spectrum", "spectrum")
         self.domain.addItem("FID (time domain)", "fid")
         self.domain.currentIndexChanged.connect(
             lambda _i: self._run_ui("spectrum.set", domain=self.domain.currentData()))
         self.part = QComboBox()
-        self.part.setObjectName("ent-input")
         for value, text in _PARTS:
             self.part.addItem(text, value)
         self.part.currentIndexChanged.connect(
@@ -108,39 +126,32 @@ class SpectrumPresenter:
         self.phase1 = number(-2.0, 2.0, 0.01, "ms", 0.0, "phase1_ms")
         self.repeat = QSpinBox()
         self.repeat.setRange(0, 0)
-        self.repeat.setSpecialValueText("Average")
+        self.repeat.setSpecialValueText("Averaged")
         self.repeat.setKeyboardTracking(False)
         self.repeat.valueChanged.connect(lambda v: self._run_ui("spectrum.set", repeat=int(v) - 1))
         self.edit = QComboBox()
-        self.edit.setObjectName("ent-input")
         self.edit.currentIndexChanged.connect(
             lambda _i: self._run_ui("spectrum.set", edit=self.edit.currentData()))
-        self.edit_box = self._labelled("Edit", self.edit,
-                                       "MEGA-PRESS and friends acquire two conditions: "
-                                       "the DIFFERENCE is what the scan was run for.")
-        return [
-            self._labelled("Show", self.domain,
-                           "The spectrum is what is read; the FID is what the scanner "
-                           "measured, and is what to look at when a spectrum looks wrong."),
-            self._labelled("Part", self.part,
-                           "The real part, phased, is how every MRS package shows a "
-                           "spectrum. Magnitude needs no phase, but its water tail is "
-                           "about fourteen times the real part's at 4.2 ppm."),
-            self._labelled("Line broadening", self.lb,
-                           "An exponential on the FID, for viewing: resolution traded "
-                           "for a smoother line. Fitting packages apply none in vivo; "
-                           "the SNR and line width in the footer are measured without it."),
-            self._labelled("Phase 0", self.phase0,
-                           "Zero-order phase. Auto phase (P) sets it from NAA, creatine "
-                           "and choline; drag the slider, or Ctrl+drag the spectrum."),
-            self._labelled("Phase 1", self.phase1,
-                           "First-order phase, as the acquisition delay it undoes. "
-                           "Ctrl+Shift+drag the spectrum to set it by eye."),
-            self._labelled("Repeat", self.repeat,
-                           "Averaged, or one repeat at a time: how a corrupted "
-                           "repeat is found."),
-            self.edit_box,
-        ]
+        #: What each control does, shown on hover over it and its label.
+        self.tips = {
+            "domain": "The spectrum is what is read; the FID is what the scanner measured, "
+                      "and is what to look at when a spectrum looks wrong.",
+            "part": "The real part, phased, is how every MRS package shows a spectrum. "
+                    "Magnitude needs no phase, but its water tail is about fourteen times "
+                    "the real part's at 4.2 ppm.",
+            "lb": "An exponential on the FID, for viewing: resolution traded for a smoother "
+                  "line. Fitting packages apply none in vivo; the SNR and line width under "
+                  "QC are measured without it.",
+            "phase0": "Zero-order phase. Auto phase (P) sets it from NAA, creatine and "
+                      "choline; drag the slider, or Ctrl+drag the spectrum.",
+            "phase1": "First-order (frequency-dependent) phase, as the acquisition delay it "
+                      "undoes. Ctrl+Shift+drag the spectrum to set it by eye.",
+            "repeat": "Every repeat (transient) averaged, or one at a time: how a corrupted "
+                      "repeat, a motion or frequency drift, is found.",
+            "edit": "Spectral editing (MEGA-PRESS and similar) acquires an edit-on and an "
+                    "edit-off condition: their DIFFERENCE is what the scan was run for "
+                    "(GABA, GSH).",
+        }
 
     def _widget_header(self) -> QWidget:
         btn = QPushButton("Header")
@@ -152,6 +163,9 @@ class SpectrumPresenter:
 
     # ------------------------------------------------------------------
     def load(self, path: Path, root: Optional[Path]) -> None:
+        if self._memory_timer.isActive():
+            self._memory_timer.stop()
+            self._remember()
         self._generation += 1
         self._path = Path(path)
         self.ctx.jobs.start("read", self._generation, read_mrs, self._path)
@@ -165,7 +179,21 @@ class SpectrumPresenter:
         self.ctx.qstore.flush()
 
     def stop(self) -> None:
-        pass
+        if self._memory_timer.isActive():
+            self._memory_timer.stop()
+            self._remember()
+
+    def _maybe_remember(self, paths) -> None:
+        if self.source is not None and any(p.startswith("spectrum") for p in paths):
+            self._memory_timer.start()
+
+    def _remember(self) -> None:
+        """The processing and display options, for the next file and window
+        (``viz.memory``; never the phase, which is the file's)."""
+        from ....viz import memory
+
+        prefs = memory.spectrum_prefs(self.ctx.scene.spectrum)
+        self.ctx.settings_hub.update(lambda s: setattr(s, "spectrum_state", prefs))
 
     def _on_job_done(self, tag: str, generation: int, result) -> None:
         if generation != self._generation or tag != "read":
@@ -181,6 +209,12 @@ class SpectrumPresenter:
         self.source = result
         store = self.ctx.store
         keep = store.scene.spectrum.model_copy()
+        if self._first_file:
+            # The options as last left, in any window.
+            from ....viz import memory
+
+            keep = memory.restore_spectrum(keep, self.ctx.settings.spectrum_state)
+            self._first_file = False
         scene = Scene()
         scene.sources = {"spec0": SourceRef(id="spec0", path=str(result.path), kind="spectrum")}
         scene.layers = [SpectrumLayer(id="spec", source="spec0", name=result.path.name)]
@@ -236,7 +270,7 @@ class SpectrumPresenter:
                 for value, text in wanted:
                     self.edit.addItem(text, value)
             self.edit.setCurrentIndex(max(0, self.edit.findData(sp.edit)))
-            self.edit_box.setVisible(edits > 1)
+            self.controls.sync(edits)
         finally:
             self._syncing = False
 
@@ -253,9 +287,13 @@ class SpectrumPresenter:
             "spectrum.exclude_water": sp.exclude_water,
             "spectrum.reference": sp.reference,
             "voxel": bool(src and src.affine is not None),
+            "panel.inspector": self.inspector_open(),
         }
 
     def gui_action(self, name: str, params) -> bool:
+        if name == "inspector":
+            self.set_inspector(not self.inspector_open())
+            return True
         if name == "spectrum_fit":
             self.canvas.fit_all()
             return True
@@ -345,7 +383,8 @@ class SpectrumPresenter:
         pass
 
     def restore_panels(self) -> None:
-        pass
+        if self.ctx.settings.spectrum_controls and not self.inspector_open():
+            self.set_inspector(True, remember=False)
 
     def canvases(self, kind: str) -> list:
         return [self.canvas] if kind == "spectrum" and self.canvas.isVisible() else []

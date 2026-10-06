@@ -225,11 +225,99 @@ class TestQcTracesAndZoom:
         qtbot.waitUntil(lambda: g.qc_box.isVisibleTo(g), timeout=20_000)
         v.run("graph.set", qc=True)
         v.qstore.flush()
-        qtbot.waitUntil(lambda: any(lane["name"] == "DVARS jumps" for lane in g.physio_lanes()),
+        qtbot.waitUntil(lambda: any(lane["name"] == "DVARS" for lane in g.physio_lanes()),
                         timeout=20_000)
-        jumps = [lane for lane in g.physio_lanes() if lane["name"] == "DVARS jumps"][0]
-        assert jumps["ticks"] >= 1 and "box-plot" in jumps["note"]
-        assert {lane["name"] for lane in g.physio_lanes()} >= {"global signal", "DVARS"}
+        dvars = [lane for lane in g.physio_lanes() if lane["name"] == "DVARS"][0]
+        assert dvars["ticks"] >= 1 and "box-plot" in dvars["note"]
+        qtbot.waitUntil(lambda: {lane["name"] for lane in g.physio_lanes()} >= {
+            "framewise displacement", "translation", "rotation", "DVARS", "outlier voxels"},
+            timeout=20_000)
+        assert "global signal" not in {lane["name"] for lane in g.physio_lanes()}, \
+            "a row nobody asked for"
+
+    def test_rows_are_chosen_and_computed_only_when_shown(self, qtbot, run):
+        v, g = _graph(qtbot, run, _bold(run))
+        v.run("graph.set", qc=True, qc_rows=["global"])
+        v.qstore.flush()
+        qtbot.waitUntil(lambda: [lane["name"] for lane in g.physio_lanes()]
+                        == ["global signal"], timeout=20_000)
+        assert set(g._qc_src["rows"]) <= {"global", "nss"}, "unasked rows were computed"
+        g._qc_row_actions["carpet"].trigger()
+        v.qstore.flush()
+        assert v.scene.graph.qc_rows == ["global", "carpet"]
+        qtbot.waitUntil(lambda: any(lane["role"] == "image" for lane in g.physio_lanes()),
+                        timeout=20_000)
+        assert g._carpet_item is not None and g._carpet_item.isVisible()
+        g._qc_row_actions["carpet"].trigger()
+        v.qstore.flush()
+        g.repaint()
+        assert not g._carpet_item.isVisible(), "the carpet is pooled, hidden not removed"
+        with pytest.raises(ValueError):
+            v.run("graph.set", qc_rows=["nonsense"])
+
+    def test_motion_is_read_from_the_runs_confounds(self, qtbot, run):
+        func = _bold(run).parent
+        fd = ["n/a"] + ["0.1"] * 18 + ["0.9"]
+        lines = ["trans_x\ttrans_y\ttrans_z\trot_x\trot_y\trot_z\tframewise_displacement"]
+        lines += [f"0\t0\t{i * 0.01:g}\t0\t0\t0\t{fd[i]}" for i in range(20)]
+        (func / "sub-01_task-x_run-1_desc-confounds_timeseries.tsv").write_text(
+            "\n".join(lines) + "\n")
+        v, g = _graph(qtbot, run, _bold(run))
+        v.run("graph.set", qc=True, qc_rows=["motion"])
+        v.qstore.flush()
+        qtbot.waitUntil(lambda: any(lane["name"] == "framewise displacement"
+                                    for lane in g.physio_lanes()), timeout=20_000)
+        fd_lane = [lane for lane in g.physio_lanes()
+                   if lane["name"] == "framewise displacement"][0]
+        assert "desc-confounds_timeseries.tsv" in fd_lane["note"]
+        assert fd_lane["ticks"] == 1, "one volume above 0.5 mm"
+
+
+class TestThePanel:
+    """The time course can sit beside the views, take the whole viewer, or
+    go to a window of its own."""
+
+    def test_beside_and_below(self, qtbot, run):
+        from PyQt6.QtCore import Qt
+
+        v, _g = _graph(qtbot, run, _bold(run))
+        v.trigger("graph.beside")
+        v.qstore.flush()
+        assert v.scene.layout.graph == "right"
+        assert v.presenter.vsplit.orientation() == Qt.Orientation.Horizontal
+        assert v.action("graph.beside").isChecked()
+        v.trigger("graph.beside")
+        v.qstore.flush()
+        assert v.presenter.vsplit.orientation() == Qt.Orientation.Vertical
+
+    def test_maximised_it_has_the_viewer(self, qtbot, run):
+        v, g = _graph(qtbot, run, _bold(run))
+        v.trigger("graph.maximize")
+        assert v.presenter.pages.isHidden() and g.isVisible()
+        assert v.action("graph.maximize").isChecked()
+        v.trigger("graph.maximize")
+        assert not v.presenter.pages.isHidden()
+
+    def test_its_own_window_and_back(self, qtbot, run):
+        v, g = _graph(qtbot, run, _bold(run))
+        v.trigger("graph.detach")
+        win = v.presenter._graph_window
+        assert win is not None and win.isVisible() and win.isAncestorOf(g)
+        assert not v.presenter.graph_host.isVisible()
+        assert not v.action("graph.maximize").isEnabled(), "nothing to maximise into"
+        win.close()
+        assert v.presenter._graph_window is None
+        assert v.presenter.graph_host.isAncestorOf(g) and g.isVisible()
+        # Turning the graph off while it is out brings it home too.
+        v.trigger("graph.detach")
+        v.run("view.graph", value=False)
+        v.qstore.flush()
+        assert v.presenter._graph_window is None
+
+    def test_the_panel_buttons_are_on_the_graph(self, qtbot, run):
+        _v, g = _graph(qtbot, run, _bold(run))
+        ids = {w.property("viz_action") for w in g.controls.findChildren(type(g.export_button))}
+        assert {"graph.beside", "graph.maximize", "graph.detach"} <= ids
 
     def test_ctrl_wheel_zooms_time_and_reads_the_physio_for_it(self, qtbot, run):
         from PyQt6.QtCore import QPoint, QPointF, Qt

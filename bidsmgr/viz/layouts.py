@@ -65,7 +65,8 @@ PRESETS: tuple[LayoutPreset, ...] = (
 PRESET_BY_ID = {p.id: p for p in PRESETS}
 
 #: The keys a layout remembers (the arrangement, not the look).
-LAYOUT_KEYS = ("mode", "plane", "graph_visible", "graph", "layout")
+LAYOUT_KEYS = ("mode", "plane", "graph_visible", "graph", "layout", "mosaic",
+               "mosaic_build")
 
 
 def _matches(preset: LayoutPreset, datatype: str, suffix: str, is_4d: bool) -> bool:

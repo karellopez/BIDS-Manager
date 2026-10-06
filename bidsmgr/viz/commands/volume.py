@@ -264,11 +264,104 @@ def view_graph(store: "SceneStore", value: Optional[bool] = None) -> set[str]:
 @command("view.mosaic_text", "Set the mosaic line", category="View",
          undoable=True)
 def view_mosaic_text(store: "SceneStore", text: str) -> set[str]:
-    """Set the mosaic grammar line (see ``viz.compute.mosaic``)."""
+    """Set the mosaic grammar line by hand (see ``viz.compute.mosaic``): the
+    builder then leaves it alone until it is asked to build again."""
     text = " ".join(str(text).split())
     if store.scene.mosaic == text:
         return set()
     store.scene.mosaic = text
+    store.scene.mosaic_build.custom = True
+    return {"mosaic"}
+
+
+def mosaic_extent(store: "SceneStore", plane: str) -> Optional[tuple[float, float]]:
+    """The head's extent along ``plane``'s world axis (mm), cached on the
+    source; None without an image."""
+    from ..compute import mosaic as M
+
+    _layer, src = views.base(store)
+    if src is None:
+        return None
+    t = views.frame_of(store, _layer, src) if _layer is not None else 0
+    key = ("mosaic-extent", plane, t)
+    cache = getattr(src, "_range_cache", None)
+    if cache is not None and key in cache:
+        return cache[key]
+    raw = src.raw_frame(t)
+    if raw is None:
+        return None
+    try:
+        found = M.head_extent(src.scale(raw), src.affine, PLANE_AXIS[plane])
+    except ValueError:
+        return None
+    if cache is not None:
+        cache[key] = found
+    return found
+
+
+def _built_line(store: "SceneStore") -> Optional[str]:
+    from ..compute import mosaic as M
+
+    b = store.scene.mosaic_build
+    fit = mosaic_extent(store, b.plane)
+    if fit is None and (b.start is None or b.end is None):
+        return None
+    start = b.start if b.start is not None else fit[0]
+    end = b.end if b.end is not None else fit[1]
+    if end <= start:
+        start, end = end, start
+    world = views.cursor_world(store)
+    ref_axis = PLANE_AXIS[M.REFERENCE[b.plane]]
+    ref_mm = float(world[ref_axis]) if world is not None else 0.0
+    return M.build_line(b.plane, b.rows, b.cols, start, end, labels=b.labels,
+                        reference=b.reference, overlap=b.overlap,
+                        reference_mm=round(ref_mm, 1))
+
+
+@command("mosaic.set", "Build the mosaic", category="View", undoable=True)
+def mosaic_set(store: "SceneStore", plane: Optional[Plane] = None, rows: Optional[int] = None,
+               cols: Optional[int] = None, start: Optional[float] = None,
+               end: Optional[float] = None, labels: Optional[bool] = None,
+               reference: Optional[bool] = None, overlap: Optional[float] = None,
+               crop: Optional[bool] = None, fit: bool = False) -> set[str]:
+    """A grid of one plane's slices: ``rows`` x ``cols`` across ``start``
+    to ``end`` mm (``fit``: across the head, found in the image). The
+    builder takes over from a line written by hand."""
+    b = store.scene.mosaic_build
+    before = b.model_copy()
+    if plane is not None and plane != b.plane:
+        b.plane = plane
+        b.start = b.end = None          # another axis: fit it again
+    for name, value in (("rows", rows), ("cols", cols), ("labels", labels),
+                        ("reference", reference), ("overlap", overlap), ("crop", crop)):
+        if value is not None:
+            setattr(b, name, value)
+    if start is not None:
+        b.start = float(start)
+    if end is not None:
+        b.end = float(end)
+    if fit:
+        b.start = b.end = None
+    b.custom = False
+    store.scene.mosaic_build = type(b).model_validate(b.model_dump())
+    line = _built_line(store)
+    changed = set() if store.scene.mosaic_build == before else {"mosaic"}
+    if line is not None and line != store.scene.mosaic:
+        store.scene.mosaic = line
+        changed.add("mosaic")
+    return changed
+
+
+@command("mosaic.refresh", "Fit the mosaic to the image", category="View")
+def mosaic_refresh(store: "SceneStore") -> set[str]:
+    """Build the line again for the image on screen (a new file, a new
+    head), unless it was written by hand."""
+    if store.scene.mosaic_build.custom:
+        return set()
+    line = _built_line(store)
+    if line is None or line == store.scene.mosaic:
+        return set()
+    store.scene.mosaic = line
     return {"mosaic"}
 
 
@@ -300,6 +393,49 @@ def layout_set(store: "SceneStore",
     if graph is not None:
         lay.graph = graph
     return set() if lay == before else {"layout"}
+
+
+@command("layout.reset", "Restore the layout's defaults", category="View", undoable=True)
+def layout_reset(store: "SceneStore") -> set[str]:
+    """Arrangement, planes shown, large view and graph placement as
+    installed."""
+    from ..scene import LayoutState
+
+    if store.scene.layout == LayoutState():
+        return set()
+    store.scene.layout = LayoutState()
+    return {"layout"}
+
+
+@command("display.reset", "Restore the slice views' defaults", category="View",
+         undoable=True)
+def display_reset(store: "SceneStore") -> set[str]:
+    """Orientation labels, RAS, radiological, world space, colour bar and
+    crosshair as installed."""
+    from ..scene import Display
+
+    if store.scene.display == Display():
+        return set()
+    store.scene.display = Display()
+    return {"display.all"}
+
+
+@command("layer.reset", "Restore a layer's look", category="Layers", undoable=True)
+def layer_reset(store: "SceneStore", layer: Optional[str] = None,
+                display: Optional[dict] = None) -> set[str]:
+    """Replace a layer's whole look with ``display`` (the caller's default:
+    the user's defaults for the base image, the look its content calls for
+    for an overlay)."""
+    lay = _layer(store, layer)
+    if lay is None:
+        return set()
+    new = VolumeDisplay.model_validate(display or {})
+    # What the look is ABOUT stays: an atlas keeps its table.
+    new.label_table = lay.display.label_table
+    if new == lay.display:
+        return set()
+    lay.display = new
+    return {"layers", f"layer:{lay.id}", f"layer:{lay.id}.display"}
 
 
 @command("view.zoom", "Zoom a 2-D view", category="View")
@@ -350,9 +486,18 @@ def graph_set(store: "SceneStore", scope: Optional[int] = None,
               scaling: Optional[Literal["raw", "percent", "demean"]] = None,
               x_axis: Optional[Literal["auto", "frames", "seconds"]] = None,
               events: Optional[bool] = None, physio: Optional[bool] = None,
-              qc: Optional[bool] = None, layer: Optional[str] = None) -> set[str]:
+              qc: Optional[bool] = None, layer: Optional[str] = None,
+              qc_rows: Optional[list[str]] = None) -> set[str]:
     g = store.scene.graph
     changed = False
+    if qc_rows is not None:
+        from ..compute.qc import QC_ROW_IDS
+
+        unknown = [r for r in qc_rows if r not in QC_ROW_IDS]
+        if unknown:
+            raise ValueError(f"no QC row called {unknown[0]!r}")
+        # Kept in the fixed order the rows are drawn in.
+        qc_rows = [r for r in QC_ROW_IDS if r in qc_rows]
     if layer:
         found = store.scene.layer(layer)
         if found is None or found.kind != "volume":
@@ -361,7 +506,7 @@ def graph_set(store: "SceneStore", scope: Optional[int] = None,
         ("scope", scope, (1, 4)), ("dot", dot, (1, 20)),
         ("mark_neighbors", mark_neighbors, None), ("scaling", scaling, None),
         ("x_axis", x_axis, None), ("events", events, None), ("physio", physio, None),
-        ("qc", qc, None), ("layer", layer, None),
+        ("qc", qc, None), ("layer", layer, None), ("qc_rows", qc_rows, None),
     ):
         if value is None:
             continue

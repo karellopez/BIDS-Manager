@@ -209,6 +209,12 @@ uniform int   uCrosshair;
 uniform vec3  uCursor;
 uniform vec3  uCrossColor;
 uniform float uCrossWidth;     // box units, the line's full width
+// Shapes (MRS voxels): boxes intersected exactly, each in its unit cube.
+uniform int   uShapeCount;
+uniform mat4  uShapeUnit[4];   // box space -> the shape's [0,1]^3
+uniform vec3  uShapeLen[4];    // its edge lengths, in box units
+uniform vec4  uShapeColor[4];
+uniform float uShapeWidth;     // box units, an edge's full width
 
 bool intersectBox(vec3 ro, vec3 rd, out float tN, out float tF) {
     vec3 inv = 1.0 / rd;
@@ -329,11 +335,56 @@ float crossHit(vec3 ro, vec3 rd, out float tHit) {
     }
     return cover;
 }
-// The ray's colour with the overlay ghost and the crosshair laid over it.
-// ``hidden`` is how much tissue lay in front of the crosshair: the cursor
-// stays findable inside the head, never under half strength.
-vec3 finish(vec3 col, vec4 xacc, float cover, float hidden) {
+// How much of an edge of shape i covers the point q of its unit cube: an
+// edge is where TWO coordinates are at a face, so the second smallest
+// distance to a face (in box units) decides.
+float shapeEdge(int i, vec3 q) {
+    vec3 dist = min(q, 1.0 - q) * uShapeLen[i];
+    float mn = min(dist.x, min(dist.y, dist.z));
+    float mx = max(dist.x, max(dist.y, dist.z));
+    float mid = dist.x + dist.y + dist.z - mn - mx;
+    return 1.0 - smoothstep(uShapeWidth * 0.30, uShapeWidth * 0.55, mid);
+}
+// The nearest shape the ray meets, exactly (a slab test in its unit cube):
+// its colour, and in .a its coverage (crisp edges in front, the edges behind
+// at half strength, a faint face); in tHit, how far along the ray.
+vec4 shapeHit(vec3 ro, vec3 rd, out float tHit) {
+    tHit = 1e9;
+    vec4 best = vec4(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (i >= uShapeCount) break;
+        vec3 o = (uShapeUnit[i] * vec4(ro, 1.0)).xyz;
+        vec3 d = mat3(uShapeUnit[i]) * rd;
+        vec3 inv = vec3(abs(d.x) > 1e-12 ? 1.0 / d.x : 1e12,
+                        abs(d.y) > 1e-12 ? 1.0 / d.y : 1e12,
+                        abs(d.z) > 1e-12 ? 1.0 / d.z : 1e12);
+        vec3 ta = -o * inv;
+        vec3 tb = (vec3(1.0) - o) * inv;
+        vec3 tmin = min(ta, tb), tmax = max(ta, tb);
+        float tn = max(max(tmin.x, tmin.y), tmin.z);
+        float tf = min(min(tmax.x, tmax.y), tmax.z);
+        if (tf < max(tn, 0.0)) continue;
+        float front = tn >= 0.0 ? shapeEdge(i, o + d * tn) : 0.0;
+        float back = shapeEdge(i, o + d * tf);
+        float a = max(max(front, back * 0.55), tn >= 0.0 ? 0.20 : 0.10) * uShapeColor[i].a;
+        float tEnter = max(tn, 0.0);
+        if (tEnter < tHit) { tHit = tEnter; best = vec4(uShapeColor[i].rgb, a); }
+    }
+    return best;
+}
+// A shape over the colour, faded by the tissue in front of it like the
+// crosshair: never under half strength, so a voxel inside the head is found.
+vec3 shapeOver(vec3 col, vec4 shape, float hidden) {
+    if (shape.a <= 0.0) return col;
+    float shown = 1.0 - clamp(hidden, 0.0, 1.0) * (1.0 - max(uSeeThrough, 0.5));
+    return mix(col, shape.rgb, shape.a * shown);
+}
+// The ray's colour with the overlay ghost, the shapes and the crosshair laid
+// over it. ``hidden`` is how much tissue lay in front of the crosshair: the
+// cursor stays findable inside the head, never under half strength.
+vec3 finish(vec3 col, vec4 xacc, float cover, float hidden, vec4 shape, float shapeHidden) {
     col = mix(col, xacc.rgb + (1.0 - xacc.a) * col, uSeeThrough);
+    col = shapeOver(col, shape, shapeHidden);
     float shown = 1.0 - clamp(hidden, 0.0, 1.0) * (1.0 - max(uSeeThrough, 0.5));
     return mix(col, uCrossColor, cover * shown);
 }
@@ -401,6 +452,10 @@ void main() {
     // through the crosshair) is never hidden by that face.
     float crossFront = -1.0;
     float crossAt = crossT - 2.0 * dt;
+    float shapeT;
+    vec4 shape = shapeHit(ro, rd, shapeT);
+    float shapeFront = -1.0;
+    float shapeAt = shapeT - dt;
 
     // ---- MIP ----
     if (uEffect == 4) {
@@ -415,6 +470,7 @@ void main() {
         vec3 col = mix(uBg, tint, w);
         // A projection hides nothing, so its overlays and crosshair are whole.
         col = xacc.rgb + (1.0 - xacc.a) * col;
+        col = shapeOver(col, shape, 0.0);
         FragColor = vec4(mix(col, uCrossColor, cover), 1.0); return;
     }
     // ---- X-ray ----
@@ -431,6 +487,7 @@ void main() {
         vec3 tint = sum > 1e-6 ? csum / sum : vec3(1.0);
         vec3 col = mix(uBg, tint, clamp(a,0.0,1.0));
         col = xacc.rgb + (1.0 - xacc.a) * col;
+        col = shapeOver(col, shape, 0.0);
         FragColor = vec4(mix(col, uCrossColor, cover), 1.0); return;
     }
 
@@ -444,6 +501,7 @@ void main() {
         for (int i=0;i<4096;++i){
             if (t>tF) break;
             if (crossFront < 0.0 && t >= crossAt) crossFront = acc.a;
+            if (shapeFront < 0.0 && t >= shapeAt) shapeFront = acc.a;
             vec3 p = (ro+rd*t+uBoxHalf)/boxSize;
             if (clipped(p)) { t+=dt; continue; }
             float d = samp(p);
@@ -468,7 +526,9 @@ void main() {
             t += dt;
         }
         if (crossFront < 0.0) crossFront = acc.a;
-        FragColor = vec4(finish(acc.rgb + (1.0-acc.a)*uBg, xacc, cover, crossFront), 1.0); return;
+        if (shapeFront < 0.0) shapeFront = acc.a;
+        FragColor = vec4(finish(acc.rgb + (1.0-acc.a)*uBg, xacc, cover, crossFront,
+                                shape, shapeFront), 1.0); return;
     }
 
     bool translucent = (uEffect==2 || uEffect==5 || uEffect==8);   // Glass/Edges/Shell
@@ -483,6 +543,7 @@ void main() {
     for (int i=0;i<4096;++i){
         if (t>tF) break;
         if (crossFront < 0.0 && t >= crossAt) crossFront = acc.a;
+        if (shapeFront < 0.0 && t >= shapeAt) shapeFront = acc.a;
         if (acc.a>0.985 && !translucent && !(ghosts && xacc.a < 0.985)) break;
         vec3 p = (ro+rd*t+uBoxHalf)/boxSize;
         int ci = clipIndex(p);
@@ -624,7 +685,9 @@ void main() {
         t += dt;
     }
     if (crossFront < 0.0) crossFront = acc.a;
-    FragColor = vec4(finish(acc.rgb + (1.0-acc.a)*uBg, xacc, cover, crossFront), 1.0);
+    if (shapeFront < 0.0) shapeFront = acc.a;
+    FragColor = vec4(finish(acc.rgb + (1.0-acc.a)*uBg, xacc, cover, crossFront,
+                            shape, shapeFront), 1.0);
 }
 """
 
@@ -849,7 +912,7 @@ class RenderCanvas(QOpenGLWidget):
                     or not layer.visible or not layer.in_3d):
                 continue
             src = views.source_of(store, layer)
-            if src is None:
+            if src is None or views.is_shape(src):
                 continue
             t = views.frame_of(store, layer, src)
             parts.append((layer.id, layer.source, id(src), t, src.frame_ready(t),
@@ -865,7 +928,7 @@ class RenderCanvas(QOpenGLWidget):
                     or not layer.visible or not layer.in_3d):
                 continue
             src = views.source_of(store, layer)
-            if src is None:
+            if src is None or views.is_shape(src):
                 continue
             t = views.frame_of(store, layer, src)
             raw = src.raw_frame(t)
@@ -1289,6 +1352,14 @@ class RenderCanvas(QOpenGLWidget):
         GL.glUniform3f(u("uCursor"), *(cursor_tex if cursor_tex is not None else (0.0, 0.0, 0.0)))
         GL.glUniform3f(u("uCrossColor"), *cross_rgb)
         GL.glUniform1f(u("uCrossWidth"), cross_width)
+        mats, lens, colours, n_shapes = self._shape_uniforms(values)
+        GL.glUniform1i(u("uShapeCount"), n_shapes)
+        GL.glUniformMatrix4fv(u("uShapeUnit"), render3d.MAX_SHAPES, GL.GL_TRUE,
+                              np.ascontiguousarray(mats, np.float32))
+        GL.glUniform3fv(u("uShapeLen"), render3d.MAX_SHAPES, np.ascontiguousarray(lens, np.float32))
+        GL.glUniform4fv(u("uShapeColor"), render3d.MAX_SHAPES,
+                        np.ascontiguousarray(colours, np.float32))
+        GL.glUniform1f(u("uShapeWidth"), 2.5 * self._box_units_per_px())
         GL.glActiveTexture(GL.GL_TEXTURE0)
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._tex)
         GL.glUniform1i(u("uVol"), 0)
@@ -1363,6 +1434,28 @@ class RenderCanvas(QOpenGLWidget):
             return 45.0
         return float(np.degrees(2.0 * np.arctan(np.tan(np.radians(22.5)) / aspect)))
 
+    def _box_units_per_px(self) -> float:
+        """How long one screen pixel is in box units, at the camera's
+        distance: what keeps a line the same width at any zoom."""
+        dist = float(self.ctx.scene.render.camera.dist)
+        return 2.0 * dist * np.tan(np.radians(self._fovy()) / 2.0) / max(self.height(), 1)
+
+    def _shape_uniforms(self, values):
+        """The shape layers (MRS voxels) drawn in 3-D: their matrices into
+        their unit cubes, edge lengths, colours and count."""
+        n = render3d.MAX_SHAPES
+        colours = np.zeros((n, 4), dtype=np.float32)
+        if self._geom is None or values.get("layers", 1.0) < 0.5:
+            return np.tile(np.eye(4, dtype=np.float32), (n, 1, 1)), np.zeros((n, 3)), colours, 0
+        found = views.shape_layers(self.ctx.store, in_3d=True)[:n]
+        affine, dims, _sp = self._geom
+        mats, lens = render3d.shape_uniforms([src.box for _l, src in found], affine, dims,
+                                             self._box_half)
+        for i, (layer, _src) in enumerate(found):
+            r, g, b, a = views.shape_colour(layer)
+            colours[i] = (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+        return mats, lens, colours, len(found)
+
     def _crosshair_uniforms(self):
         """The cursor as a texture coordinate, the line's width in box units
         and its colour; ``(None, 0, colour)`` when the crosshair is off or
@@ -1377,8 +1470,7 @@ class RenderCanvas(QOpenGLWidget):
         tex = self.cursor_texcoord() if self.ctx.scene.display.crosshair else None
         if tex is None:
             return None, 0.0, rgb
-        dist = float(self.ctx.scene.render.camera.dist)
-        per_px = 2.0 * dist * np.tan(np.radians(self._fovy()) / 2.0) / max(self.height(), 1)
+        per_px = self._box_units_per_px()
         width = (max(1, int(cs.thickness)) + 1.0) * 1.5 * per_px
         return (float(tex[0]), float(tex[1]), float(tex[2])), float(width), rgb
 

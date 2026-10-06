@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 import numpy as np
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout,
     QLabel, QMenu, QPushButton, QScrollArea, QSplitter,
@@ -33,7 +33,8 @@ from ....viz.bids import BidsContext, bids_context
 from ....viz.compute import colormaps
 from ....viz.data.volume import VolumeSource, memory_budget_bytes, open_volume
 from ....viz.scene import (
-    Cursor, GraphState, Scene, SourceRef, VolumeDisplay, VolumeLayer,
+    Cursor, GraphState, LayoutState, MosaicBuild, Scene, SourceRef, VolumeDisplay,
+    VolumeLayer,
 )
 from ..context import ViewerContext
 from ..menus import popup_menu, submenu
@@ -46,12 +47,23 @@ _PROGRESS_INTERVAL = 0.1
 #: ONE row: what you switch while looking (views, slice, volume) and the
 #: menus. Everything you set (the look, the view conventions, the layout, the
 #: 3-D) is in the controls column, by purpose.
+#: One row, by purpose: WHAT is shown (the layout, with the planes inside
+#: it, and the time course); WHERE you are (slice, volume, play); what can be
+#: DONE (quality control, tools); what is KEPT (save); help. The controls
+#: column has its own tab on the right edge of the images.
 TOOLBAR_ROWS = (
-    ("view.sagittal", "view.coronal", "view.axial", "|", "view.multi",
-     "view.3d", "view.combo", "view.hero", "view.graph", "|", "widget:slice",
-     "widget:frame", "frame.play", "stretch", "widget:tools", "widget:views",
-     "view.inspector", "help.shortcuts"),
+    ("widget:layout", "view.graph", "|", "widget:slice", "widget:frame", "frame.play",
+     "stretch", "widget:quality", "widget:tools", "widget:save", "help.shortcuts"),
 )
+
+#: The Layout menu: one plane, then the multi-view layouts.
+PLANE_ACTIONS = ("view.axial", "view.coronal", "view.sagittal")
+LAYOUT_ACTIONS = ("view.multi", "view.combo", "view.3d", "view.hero", "view.mosaic")
+#: What the Layout button says for each mode, and its icon.
+LAYOUT_NAMES = {"single": "One plane", "multi": "Multi-planar", "combo": "Planes + 3-D",
+                "3d": "3-D", "hero": "Large view", "mosaic": "Mosaic"}
+LAYOUT_ICONS = {"single": "layout_single", "multi": "layout_multi", "combo": "layout_combo",
+                "3d": "layout_3d", "hero": "layout_hero", "mosaic": "layout_mosaic"}
 
 
 #: The base layer's look a scene restores.
@@ -90,6 +102,46 @@ def _caption(text: str) -> QLabel:
     return lbl
 
 
+class _SideSplit(QSplitter):
+    """The images-and-controls splitter, saying when it was resized (the
+    controls column gives way when the viewer gets narrow)."""
+
+    resized = pyqtSignal(int, int)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        self.resized.emit(int(event.size().width()), int(event.oldSize().width()))
+
+
+#: Room the images keep when the controls column is open: below it, a
+#: narrowing viewer hides the column rather than squeezing the images away.
+SIDE_GIVES_WAY_PX = 300
+
+
+class _GraphWindow(QWidget):
+    """The time-course panel in a window of its own. A child of the viewer
+    with the Window flag, so it closes with it and stays with its window on
+    every platform; closing it puts the panel back."""
+
+    closed = pyqtSignal()
+
+    def __init__(self, viewer) -> None:
+        super().__init__(viewer, Qt.WindowType.Window)
+        self.setObjectName("pane-dark")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+    def take(self, widget: QWidget) -> None:
+        self.layout().addWidget(widget)
+        widget.setVisible(True)
+        self.show()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().closeEvent(event)
+        self.closed.emit()
+
+
 class VolumePresenter:
     """Volume content for a :class:`Viewer`."""
 
@@ -117,12 +169,24 @@ class VolumePresenter:
         self._sizes_timer.setSingleShot(True)
         self._sizes_timer.setInterval(400)
         self._sizes_timer.timeout.connect(self._flush_sizes)
+        # The arrangement and the look are written after a change settles:
+        # a slider drag is one write, not one a tick.
+        self._view_timer = QTimer(viewer)
+        self._view_timer.setSingleShot(True)
+        self._view_timer.setInterval(400)
+        self._view_timer.timeout.connect(self._remember_view)
         self._mosaic_page = None
         self._render = None
         self._graph = None
+        #: The time course has the whole viewer (the views are hidden).
+        self._graph_maximized = False
+        #: The time course's own window, while it is in one.
+        self._graph_window = None
         #: Each series' run context (repetition time, events, physio), by
         #: source id: the base's, and every 4-D overlay's.
         self._contexts: dict[str, Any] = {}
+        #: Each overlay's look as its content called for (restore defaults).
+        self._original_looks: dict[str, dict] = {}
         self._graph_context_source: Optional[str] = None
         self._play_timer = QTimer(viewer)
         self._play_timer.timeout.connect(self._play_tick)
@@ -186,10 +250,33 @@ class VolumePresenter:
             lambda *_a: self.remember_sizes("volume.graph", self.vsplit))
         # The controls column beside images and graph. Built empty; the
         # inspector is created the first time it is opened.
-        self.hsplit = QSplitter(Qt.Orientation.Horizontal)
+        self.hsplit = _SideSplit(Qt.Orientation.Horizontal)
+        self.hsplit.resized.connect(self._on_split_resized)
+        #: The column was hidden for lack of room (not by the user).
+        self._side_gave_way = False
         self.hsplit.setHandleWidth(2)
         self.hsplit.setChildrenCollapsible(False)
-        self.hsplit.addWidget(self.vsplit)
+        # The images with the controls column's tab on their right edge:
+        # the tab is part of the images' side, so it is never dragged away.
+        from ..panels.side_tab import SideTab
+
+        images = QWidget()
+        row = QHBoxLayout(images)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self.vsplit, 1)
+        self.side_tab = SideTab("Controls", "controls")
+        self.side_tab.setVisible(bool(getattr(self.viewer, "panels", True)))
+        self.side_tab.clicked.connect(lambda: self.set_inspector(not self.inspector_open()))
+        row.addWidget(self.side_tab)
+        self._tab_row = row
+        #: A host showing the column outside these images (two viewers driven
+        #: as one keep ONE column, beside both), else None.
+        self._host = None
+        #: The viewer whose column this one's controls open instead (the
+        #: other half of a synced pair), else None.
+        self._controls_peer = None
+        self.hsplit.addWidget(images)
         self.side = QScrollArea()
         self.side.setObjectName("viz-side-scroll")
         self.side.viewport().setObjectName("viz-side-viewport")
@@ -233,6 +320,14 @@ class VolumePresenter:
             self._graph = TimecourseGraph(self.ctx)
             self._graph.wants_height.connect(self._grow_graph)
             self.graph_host.layout().addWidget(self._graph)
+            am = self.viewer.action_manager
+            buttons = []
+            for action_id in ("graph.beside", "graph.maximize", "graph.detach"):
+                btn = am.button(action_id)
+                # Icons alone: the tooltip names each, with its key.
+                btn.setText("")
+                buttons.append(btn)
+            self._graph.add_panel_buttons(buttons)
             self._graph_context_source = None
             self._sync_graph_context()
         return self._graph
@@ -314,11 +409,54 @@ class VolumePresenter:
                     and self.ctx.scene.mode != "3d")
         if show:
             self._ensure_graph()
-            if not self.graph_host.isVisible():
+            if self._graph_window is not None:
+                self.graph_host.setVisible(False)
+                if self._graph_window.isHidden():
+                    self._graph_window.show()
+            elif not self.graph_host.isVisible():
                 self.graph_host.setVisible(True)
                 self.restore_sizes("volume.graph", self.vsplit, [0.7, 0.3])
         else:
+            if self._graph_window is not None:
+                self.set_graph_detached(False, apply=False)
             self.graph_host.setVisible(False)
+        # Maximised: the views give the panel all the room (never with the
+        # panel in its own window, which would leave the viewer empty).
+        hide_views = bool(show and self._graph_maximized and self._graph_window is None)
+        if self.pages.isHidden() != hide_views:
+            self.pages.setVisible(not hide_views)
+
+    def set_graph_maximized(self, on: bool) -> None:
+        """The time course alone in the viewer, or beside the views again."""
+        self._graph_maximized = bool(on)
+        self.apply_graph()
+        self.viewer.refresh_actions()
+
+    def set_graph_detached(self, on: bool, *, apply: bool = True) -> None:
+        """Move the time-course panel to its own window, or back. Its state
+        is the scene's either way: closing the window loses nothing."""
+        if on and self._graph_window is None:
+            graph = self._ensure_graph()
+            win = _GraphWindow(self.viewer)
+            win.setWindowTitle(f"Time course: {self.source.path.name}"
+                               if self.source is not None else "Time course")
+            size = self.graph_host.size()
+            win.take(graph)
+            win.resize(max(size.width(), 640), max(size.height(), 320))
+            win.closed.connect(lambda: self.set_graph_detached(False))
+            self._graph_window = win
+            self._graph_maximized = False
+        elif not on and self._graph_window is not None:
+            win, self._graph_window = self._graph_window, None
+            if self._graph is not None:
+                self.graph_host.layout().addWidget(self._graph)
+                self._graph.setVisible(True)
+            win.closed.disconnect()
+            win.close()
+            win.deleteLater()
+        if apply:
+            self.apply_graph()
+        self.viewer.refresh_actions()
 
     # ------------------------------------------------------------------
     # Toolbar widgets
@@ -333,8 +471,108 @@ class VolumePresenter:
         return {
             "tools": self._widget_tools,
             "slice": self._widget_slice, "frame": self._widget_frame,
-            "views": self._widget_views,
+            "save": self._widget_save, "layout": self._widget_layout,
+            "quality": self._widget_quality,
         }.get(name, lambda: None)()
+
+    def _widget_layout(self) -> QWidget:
+        """What is shown, in ONE menu: a single plane (axial, coronal,
+        sagittal) or a layout of several views. The button names what is on
+        screen, with its icon; the keys (A, C, S, M, P, D) still switch."""
+        from ... import icons
+
+        btn = QPushButton("Layout")
+        btn.setObjectName("tb-btn-toggle")
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setIconSize(QSize(16, 16))
+        btn.setToolTip("What the viewer shows: one plane, the three planes, the planes "
+                       "with the 3-D, the 3-D alone, one large view, or a mosaic of "
+                       "slices. More in Controls > Layout and Mosaic.")
+        menu = popup_menu(btn)
+        menu.setToolTipsVisible(True)
+        for action_id in PLANE_ACTIONS:
+            menu.addAction(self.viewer.action(action_id))
+        menu.addSeparator()
+        for action_id in LAYOUT_ACTIONS:
+            menu.addAction(self.viewer.action(action_id))
+        menu.addSeparator()
+        options = menu.addAction("Layout and mosaic options...")
+        options.setIcon(icons.icon("controls"))
+        options.setToolTip("The arrangement, the planes shown, the large view, the "
+                           "mosaic: in the controls column")
+        options.triggered.connect(lambda: self.open_section("layout"))
+        btn.setMenu(menu)
+        self.layout_button = btn
+        return btn
+
+    def save_mosaic_figure(self, path: Optional[Path] = None, *, scale: Optional[float] = None,
+                           transparent: Optional[bool] = None) -> Optional[Path]:
+        """The mosaic as a PNG: shown first if it is not, then saved at the
+        chosen resolution (asked unless given)."""
+        if self.source is None:
+            return None
+        if self.ctx.scene.mode != "mosaic":
+            self.ctx.run("view.mode", mode="mosaic")
+            self.ctx.qstore.flush()
+        if scale is None or transparent is None:
+            from PyQt6.QtWidgets import QDialog
+
+            from ..panels.figure_dialog import FigureDialog
+
+            dlg = FigureDialog("Save the mosaic figure", parent=self.viewer)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            scale, transparent = dlg.values()
+        return self.viewer.save_screenshot(path, scale=scale, transparent=transparent)
+
+    def open_section(self, key: str) -> None:
+        """Open the controls column at one of its sections."""
+        self.set_inspector(True)
+        insp = self._inspector
+        if insp is None:
+            return
+        section = insp.section(key)
+        if section is not None:
+            section.set_open(True)
+            QTimer.singleShot(0, lambda: self.side.ensureWidgetVisible(section, 0, 0))
+
+    #: The quality items for a 4-D image, all computed only when chosen.
+    QUALITY = ("qc.tsnr", "qc.sd", "qc.mean")
+
+    def _widget_quality(self) -> QWidget:
+        """Every quality measure of a series in one place, each computed only
+        when chosen."""
+        from ... import icons
+
+        btn = QPushButton("QC")
+        btn.setObjectName("tb-btn-toggle")
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setIcon(icons.icon("qc"))
+        btn.setIconSize(QSize(16, 16))
+        self.viewer.action_manager.track_icon(btn, "qc")
+        btn.setToolTip("Quality control of a 4-D series, computed only when you ask: temporal SNR, "
+                       "standard deviation and mean maps as overlays, and the quality rows "
+                       "(global signal, DVARS, outlier volumes) under the time course.")
+        menu = popup_menu(btn)
+        for action_id in self.QUALITY:
+            menu.addAction(self.viewer.action(action_id))
+        menu.addSeparator()
+        self._qc_rows_action = menu.addAction("QC rows under the time course")
+        self._qc_rows_action.setCheckable(True)
+        self._qc_rows_action.setToolTip(
+            "Global signal and DVARS per volume, with the outlier volumes marked: opens "
+            "the time course if it is closed")
+        self._qc_rows_action.triggered.connect(self._toggle_qc_rows)
+        menu.aboutToShow.connect(
+            lambda: self._qc_rows_action.setChecked(bool(self.ctx.scene.graph.qc)))
+        btn.setMenu(menu)
+        self.quality_button = btn
+        return btn
+
+    def _toggle_qc_rows(self, on: bool) -> None:
+        if on and not self.ctx.scene.graph_visible:
+            self.ctx.run("view.graph", value=True)
+        self.ctx.run("graph.set", qc=bool(on))
 
     def _number_group(self, title: str, tip: str):
         """A titled slider-and-number (slice, volume): typable, and wheel
@@ -349,8 +587,12 @@ class VolumePresenter:
         hdr.setObjectName("sidecar-footer-summary")
         h.addWidget(hdr)
         nc = NumberControl(0, 1, step=1, decimals=0)
-        nc.slider.setMinimumWidth(90)
-        nc.spin.setFixedWidth(96)
+        nc.slider.setMinimumWidth(80)
+        nc.slider.setFixedWidth(84)
+        # As wide as "1128 / 1128" in its own font: a fixed 96 px pushed the
+        # toolbar onto a second row at 1400 px.
+        nc.spin.ensurePolished()
+        nc.spin.setFixedWidth(nc.spin.fontMetrics().horizontalAdvance("0000 / 0000") + 22)
         nc.setToolTip(tip)
         h.addWidget(nc)
         return box, hdr, nc
@@ -364,6 +606,7 @@ class VolumePresenter:
     def _widget_frame(self) -> QWidget:
         box, self._frame_hdr, self.frame_control = self._number_group(
             "Volume", "The volume of the 4-D series shown; type a number, or drag")
+        self._frame_group = box
         self.frame_control.value_changed.connect(
             lambda v: self._run_ui("frame.set", frame=int(v)))
         self.frame_control.pressed.connect(self.ctx.store.begin_gesture)
@@ -372,15 +615,22 @@ class VolumePresenter:
 
     #: The Tools menu, in order ("" is a separator). Each entry is an action,
     #: so it also has a key, a palette entry and a help line.
-    TOOLS = ("header.show", "", "overlay.add", "", "qc.mean", "qc.sd", "qc.tsnr", "",
-             "frame.same_shell", "frame.shell", "frame.shell_prev", "", "deface.preview")
+    TOOLS = ("overlay.add", "header.show", "deface.preview", "",
+             "frame.same_shell", "frame.shell", "frame.shell_prev")
 
     def _widget_tools(self) -> QWidget:
         """What can be done with the open image beyond looking at it."""
+        from ... import icons
+
         btn = QPushButton("Tools")
         btn.setObjectName("tb-btn-toggle")
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn.setToolTip("Overlays, quality maps and the dataset around this image")
+        btn.setIcon(icons.icon("tools"))
+        btn.setIconSize(QSize(16, 16))
+        self.viewer.action_manager.track_icon(btn, "tools")
+        btn.setToolTip("Add an overlay, inspect the header against the sidecar, preview "
+                       "defacing, step through diffusion shells, and go to the same image "
+                       "of another run, session or subject")
         menu = popup_menu(btn)
         self._fill_tools_menu(menu)
         # Rebuilt as it opens: the fieldmap entries depend on the image.
@@ -442,42 +692,61 @@ class VolumePresenter:
         world = self.ctx.scene.cursor.world
         self._carried_cursor = tuple(world) if world is not None else None
 
-    def _widget_views(self) -> QWidget:
-        """Saved views: apply one, save the current one, delete one."""
-        btn = QPushButton("Views")
+    def _widget_save(self) -> QWidget:
+        """What can be KEPT, each saying what and where: a picture (screenshot,
+        mosaic figure), the way the viewer looks under a name (a preset, for
+        any image), this image with its overlays and crosshair (a scene, in
+        the dataset), the command line that reproduces the view."""
+        from ... import icons
+
+        btn = QPushButton("Save")
         btn.setObjectName("tb-btn-toggle")
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn.setToolTip("Views you saved: a layout, plane, display options, graph "
-                       "and 3-D look, applied to whatever image is open.")
+        btn.setIcon(icons.icon("save"))
+        btn.setIconSize(QSize(16, 16))
+        self.viewer.action_manager.track_icon(btn, "save")
+        btn.setToolTip("Save a picture, a preset of how the viewer looks, a scene of this "
+                       "image in the dataset, or the command line of this view. Everything "
+                       "else (layouts, the look, options) is kept by itself.")
         menu = popup_menu(btn)
-        menu.aboutToShow.connect(lambda m=menu: self._fill_views_menu(m))
+        menu.setToolTipsVisible(True)
+        menu.aboutToShow.connect(lambda m=menu: self._fill_save_menu(m))
+        self._fill_save_menu(menu)
         btn.setMenu(menu)
-        self.views_button = btn
+        self.save_button = btn
         return btn
 
-    def _fill_views_menu(self, menu: QMenu) -> None:
+    def _fill_save_menu(self, menu: QMenu) -> None:
         from ....viz import scenes
 
         menu.clear()
+        menu.addAction(self.viewer.action("export.screenshot"))
+        if "view.mosaic_figure" in self.viewer.action_manager.actions:
+            menu.addAction(self.viewer.action("view.mosaic_figure"))
+        menu.addSeparator()
         menu.addAction(self.viewer.action("views.save"))
-        menu.addAction(self.viewer.action("scene.save"))
-        menu.addAction(self.viewer.action("view.command_line"))
-        found = scenes.list_scenes(self.scene_root())
-        if found:
-            sub = submenu(menu, "Scenes of this dataset")
-            for name, path in found:
-                act = sub.addAction(name)
-                act.triggered.connect(lambda _c=False, p=path: self.open_scene(p))
         names = sorted(self.ctx.settings.view_presets, key=str.lower)
         if names:
-            menu.addSeparator()
+            presets = submenu(menu, "Apply a preset")
             for name in names:
-                act = menu.addAction(name)
+                act = presets.addAction(name)
                 act.triggered.connect(lambda _c=False, n=name: self.apply_view(n))
-            delete = submenu(menu, "Delete a saved view")
+            delete = submenu(menu, "Delete a preset")
             for name in names:
                 act = delete.addAction(name)
                 act.triggered.connect(lambda _c=False, n=name: self.delete_view(n))
+        menu.addSeparator()
+        menu.addAction(self.viewer.action("scene.save"))
+        found = scenes.list_scenes(self.scene_root())
+        if found:
+            sub = submenu(menu, "Open a scene of this dataset")
+            for name, path in found:
+                act = sub.addAction(name)
+                act.triggered.connect(lambda _c=False, p=path: self.open_scene(p))
+        menu.addSeparator()
+        menu.addAction(self.viewer.action("view.command_line"))
+        menu.addSeparator()
+        menu.addAction(self.viewer.action("view.restore_defaults"))
 
     # -- saved views (also the scripting surface) ------------------------
 
@@ -640,6 +909,22 @@ class VolumePresenter:
         layer, src = views.base(store)
         self._syncing_widgets = True
         try:
+            if hasattr(self, "layout_button"):
+                from ... import icons
+
+                mode = self.ctx.scene.mode
+                name = (self.ctx.scene.plane.capitalize() if mode == "single"
+                        else LAYOUT_NAMES.get(mode, mode))
+                if self.layout_button.text() != name:
+                    icon_name = LAYOUT_ICONS.get(mode, "layout_multi")
+                    self.layout_button.setText(name)
+                    self.layout_button.setIcon(icons.icon(icon_name))
+                    self.viewer.action_manager.track_icon(self.layout_button, icon_name)
+            if hasattr(self, "quality_button"):
+                series = views.series_layer(store)[1]
+                want = bool(series is not None and getattr(series, "is_4d", False))
+                if self.quality_button.isHidden() == want:    # only on a real change
+                    self.quality_button.setVisible(want)
             if hasattr(self, "slice_control"):
                 plane = self._active_plane()
                 n = views.slice_count(store, plane)
@@ -658,6 +943,10 @@ class VolumePresenter:
                 self.frame_control.set_range(0, max(n - 1, 0))
                 self.frame_control.spin.setSuffix(f" / {max(n - 1, 0)}")
                 self.frame_control.setEnabled(n > 1)
+                # A 3-D image has no volumes to step through: the control
+                # is not there, rather than greyed (only on a real change).
+                if self._frame_group.isHidden() == (n > 1):
+                    self._frame_group.setVisible(n > 1)
                 self.frame_control.set_value(t)
                 title = "Volume"
                 bvals = getattr(src, "bvals", None) if src is not None else None
@@ -694,6 +983,9 @@ class VolumePresenter:
             "display.crosshair": scene.display.crosshair,
             "space": scene.display.space,
             "graph": scene.graph_visible,
+            "graph.beside": scene.layout.graph == "right",
+            "graph.maximized": bool(self._graph_maximized and scene.graph_visible),
+            "graph.detached": self._graph_window is not None,
             "clip.active": bool(clip and clip.active),
             "clip.at_cursor": bool(scene.render.cut_at_cursor),
             "layer.invert": bool(layer.display.invert) if layer else False,
@@ -721,6 +1013,11 @@ class VolumePresenter:
     # ------------------------------------------------------------------
 
     def load(self, path: Path, root: Optional[Path]) -> None:
+        # What was changed on the file on screen is kept under ITS kind
+        # before the next file replaces the scene.
+        if self._view_timer.isActive():
+            self._view_timer.stop()
+            self._remember_view()
         self._generation += 1
         self._pending_overlays = []
         self._pending_header = None
@@ -773,6 +1070,9 @@ class VolumePresenter:
         s.graph = old.graph.model_copy(deep=True)
         s.render = old.render.model_copy(deep=True)
         s.clips = [c.model_copy() for c in old.clips]
+        s.layout = old.layout.model_copy(deep=True)
+        s.mosaic = old.mosaic
+        s.mosaic_build = old.mosaic_build.model_copy()
         return s
 
     def initial_scene(self, src: VolumeSource, path: Path) -> Scene:
@@ -807,6 +1107,11 @@ class VolumePresenter:
             prefs.display.radiological = vs.radiological
             prefs.display.space = vs.space
             prefs.plane = vs.plane
+            # The look as last left, in any window: display conventions, the
+            # 3-D effect and its parameters, the clip planes.
+            from ....viz import memory
+
+            memory.apply_volume_look(prefs, settings.volume_look)
         bids = self.bids
         preset = layouts.match(bids.datatype if bids else "", bids.suffix if bids else "",
                                bool(src.is_4d and not src.is_rgb))
@@ -820,6 +1125,22 @@ class VolumePresenter:
             if view.get("graph"):
                 prefs.graph = GraphState.model_validate(
                     {**prefs.graph.model_dump(), **view["graph"]})
+            # The layout this kind was given (arrangement, planes, large view,
+            # graph placement) and its mosaic: they were remembered and never
+            # read back, so a new window lost every arrangement.
+            if isinstance(view.get("layout"), dict):
+                try:
+                    prefs.layout = LayoutState.model_validate(
+                        {**prefs.layout.model_dump(), **view["layout"]})
+                except ValueError:
+                    pass
+            if isinstance(view.get("mosaic"), str) and view["mosaic"]:
+                prefs.mosaic = view["mosaic"]
+            if isinstance(view.get("mosaic_build"), dict):
+                try:
+                    prefs.mosaic_build = MosaicBuild.model_validate(view["mosaic_build"])
+                except ValueError:
+                    pass
         self._preset_id = preset.id
         return prefs
 
@@ -967,21 +1288,22 @@ class VolumePresenter:
     def _on_changed(self, paths) -> None:
         if paths & {"mode", "scene", "layout", "plane"}:
             self.apply_mode()
-        if self._remembering and self.source is not None and (
-            paths & {"mode", "plane", "graph", "graph_visible"}
-        ):
-            self._remember_arrangement()
-        if any(p.startswith("display.") for p in paths) and self._remembering:
-            d = self.ctx.scene.display
-
-            def keep(s):
-                s.volume.labels = d.labels
-                s.volume.colorbar = d.colorbar
-                s.volume.ras = d.ras
-                s.volume.radiological = d.radiological
-                s.volume.space = d.space
-
-            self.ctx.settings_hub.update(keep)
+        if (paths & {"mode", "scene"} or "layers" in paths) and self.ctx.scene.mode == "mosaic":
+            # A mosaic fitted to the head on screen (a new file, a new head),
+            # unless its line was written by hand.
+            self.ctx.run("mosaic.refresh")
+        if self._remembering and self.source is not None:
+            # A choice (a layout, a plane, a display flag, an effect) is
+            # written at once: the Editor is not always closed cleanly. What
+            # moves continuously (3-D parameters, the camera, clip planes) is
+            # written once it settles.
+            if any(p in ("mode", "plane", "graph", "graph_visible", "layout", "mosaic",
+                         "render.effect") or p.startswith(("display", "graph."))
+                   for p in paths):
+                self._view_timer.stop()
+                self._remember_view()
+            elif any(p.startswith(("render", "clips")) for p in paths):
+                self._view_timer.start()
         if any(p in ("graph_visible", "mode", "scene", "layers", "graph") or p.startswith("sources")
                for p in paths):
             self.apply_graph()
@@ -989,19 +1311,88 @@ class VolumePresenter:
         self.sync_widgets()
         self.viewer.update_footer()
 
-    def _remember_arrangement(self) -> None:
-        """Written as the user switches (the Editor is not always closed
-        cleanly): the arrangement of THIS kind of file, and the mode and
-        plane as the default for kinds never arranged."""
+    def default_look(self, layer) -> dict:
+        """The look ``layer`` opened with: the user's defaults for new images
+        for the base, the look its content called for for an overlay."""
+        base = self.ctx.scene.base_layer()
+        if base is not None and layer.id != base.id and layer.id in self._original_looks:
+            return dict(self._original_looks[layer.id])
+        vs = self.ctx.settings.volume
+        return VolumeDisplay(gamma=vs.gamma, interpolation=vs.interpolation,
+                             colormap=vs.colormap if colormaps.exists(vs.colormap)
+                             else "gray").model_dump()
+
+    def restore_all_defaults(self, *, confirm: bool = True) -> bool:
+        """Every viewer setting as installed (shortcuts, the mouse map and
+        saved presets kept), and the view on screen with it."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        from ....viz import memory
+        from ....viz.scene import RenderState
+        from ..link import apply_view_state
+
+        if confirm:
+            answer = QMessageBox.question(
+                self.viewer, "Restore every viewer default",
+                "Put every viewer back as installed: layouts, the display and 3-D look, "
+                "clip planes, the crosshair, trace and spectrum options, panel sizes "
+                "and the defaults for new images.\n\nYour shortcuts, mouse map and "
+                "saved presets are kept. The view on screen changes at once.")
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        hub = self.ctx.settings_hub
+        hub.replace(memory.defaults(hub.settings))
+        if self.source is None:
+            return True
+        self._remembering = False
+        try:
+            fresh = Scene()
+            preset = layouts.PRESET_BY_ID.get(self._preset_id)
+            view = layouts.opening_view(
+                preset, None, "combo" if self.ctx.gpu_ok else "multi") if preset else {}
+            state = fresh.model_dump(mode="json", include={
+                "display", "graph", "layout", "mosaic", "clips"})
+            state["render"] = RenderState().model_dump(mode="json")
+            state["mode"] = view.get("mode", fresh.mode)
+            state["plane"] = fresh.plane
+            state["graph_visible"] = bool(view.get("graph_visible", False))
+            apply_view_state(self.ctx.store, state)
+            base = self.ctx.scene.base_layer()
+            if base is not None:
+                self.ctx.run("layer.reset", layer=base.id, display=self.default_look(base))
+        finally:
+            self._remembering = True
+        self.set_inspector(self.ctx.settings.volume.inspector)
+        self.viewer.status_message.emit("Every viewer setting restored to its default")
+        return True
+
+    def _remember_view(self) -> None:
+        """Written soon after any change (the Editor is not always closed
+        cleanly): the arrangement of THIS kind of file, the mode and plane
+        as the default for kinds never arranged, and the look every image
+        shares (display conventions, 3-D effect and parameters, clip
+        planes). See :mod:`bidsmgr.viz.memory`."""
+        from ....viz import memory
+
+        if self.source is None:
+            return
         scene = self.ctx.scene
         state = scene.model_dump(mode="json", include=set(layouts.LAYOUT_KEYS))
         kind = self._preset_id
+        look = memory.volume_look(scene)
+        d = scene.display
 
         def keep(s):
             if kind:
                 s.layout_state[kind] = layouts.arrangement(state)
             s.volume.mode = scene.mode
             s.volume.plane = scene.plane
+            s.volume.labels = d.labels
+            s.volume.colorbar = d.colorbar
+            s.volume.ras = d.ras
+            s.volume.radiological = d.radiological
+            s.volume.space = d.space
+            s.volume_look = look
 
         self.ctx.settings_hub.update(keep)
 
@@ -1047,6 +1438,16 @@ class VolumePresenter:
         if name == "save_view":
             self._ask_view_name()
             return True
+        if name == "graph_beside":
+            self.ctx.run("layout.set",
+                         graph="bottom" if self.ctx.scene.layout.graph == "right" else "right")
+            return True
+        if name == "graph_maximize":
+            self.set_graph_maximized(not self._graph_maximized)
+            return True
+        if name == "graph_detach":
+            self.set_graph_detached(self._graph_window is None)
+            return True
         if name == "inspector":
             self.set_inspector(not self.inspector_open())
             return True
@@ -1067,6 +1468,12 @@ class VolumePresenter:
             return True
         if name == "command_line":
             self.show_command_line()
+            return True
+        if name == "restore_defaults":
+            self.restore_all_defaults()
+            return True
+        if name == "mosaic_figure":
+            self.save_mosaic_figure()
             return True
         if name == "navigate":
             self.navigate(str(params.get("entity", "run")), int(params.get("step", 1)))
@@ -1188,6 +1595,9 @@ class VolumePresenter:
         self.ctx.store.sources[sid] = src
         label = name or overlay.name or src.path.name
         look = display if display is not None else overlay.display.model_dump()
+        # What "restore defaults" puts back: the look its CONTENT called for
+        # (an atlas in its labels, a map in heat), not the base's defaults.
+        self._original_looks[lid] = overlay.display.model_dump()
         self.ctx.run("layer.add", id=lid, source=sid, name=label, display=look,
                      path="" if src.in_memory else str(src.path), origin=origin,
                      visible=bool(visible), in_3d=bool(in_3d))
@@ -1202,15 +1612,15 @@ class VolumePresenter:
         self.viewer.overlay_added.emit(lid)
 
     def choose_overlay(self) -> None:
-        """Pick a file to put over the open image."""
-        from PyQt6.QtWidgets import QFileDialog
+        """Pick an image of the dataset (this subject first), or Browse...
+        for one from elsewhere, and put it over the open image."""
+        from ..panels.overlay_picker import ask_for_overlay
 
-        if self.source is None:
+        src = self.source
+        if src is None:
             return
-        start = str(self.source.path.parent)
-        path, _f = QFileDialog.getOpenFileName(
-            self.viewer, "Add an overlay", start,
-            "Images (*.nii *.nii.gz *.mgz *.mgh);;All files (*)")
+        path = ask_for_overlay(self.viewer, self.scene_root(), src.path,
+                               base_affine=src.affine, base_shape=src.spatial)
         if path:
             self.add_overlay(Path(path))
 
@@ -1269,9 +1679,69 @@ class VolumePresenter:
     # -- the side column ----------------------------------------------------
 
     def inspector_open(self) -> bool:
+        if self._controls_peer is not None:
+            return self._controls_peer.inspector_open()
+        if self._host is not None:
+            return not self.side.isHidden()
         return self.side.isVisible()
 
+    def host_controls(self, host=None, *, tab: bool = True) -> None:
+        """Show the controls column and its tab in ``host`` instead of beside
+        these images, or bring them home (``host=None``).
+
+        Two images driven as one keep ONE column, outside both, so the two
+        are the same size. ``host`` provides ``column`` (a layout for the
+        column), ``tab_row`` (a layout for the tab) and ``shown(bool)``
+        (the column opened or closed). ``tab=False`` keeps the tab hidden
+        at home (the column of the other image is the one on screen).
+        """
+        was = self.inspector_open() if self._controls_peer is None else False
+        if self._host is not None:
+            self._host.tab_row.removeWidget(self.side_tab)
+        else:
+            self._tab_row.removeWidget(self.side_tab)
+        self._host = host
+        if host is None:
+            self._tab_row.addWidget(self.side_tab)
+            self.hsplit.addWidget(self.side)
+            self.hsplit.setStretchFactor(1, 0)
+        else:
+            host.tab_row.addWidget(self.side_tab)
+            host.column.addWidget(self.side, 1)
+        self.side_tab.setVisible(bool(tab) and bool(getattr(self.viewer, "panels", True)))
+        self.side.setVisible(was and (host is not None or tab))
+        if host is not None:
+            host.shown(was)
+
+    def share_controls(self, peer) -> None:
+        """Open ``peer``'s controls column instead of this one's (Ctrl+I,
+        the Controls entry): one column serves both halves of a synced
+        pair. None gives this viewer its own again."""
+        self._controls_peer = peer
+
+    def _on_split_resized(self, width: int, old: int) -> None:
+        """A narrowing viewer hides the controls column before squeezing the
+        images away; widening brings it back. Only the user's own choice is
+        remembered, and only a NARROWING hides it, so Ctrl+I always opens it."""
+        if self._host is not None or self._controls_peer is not None:
+            return
+        need = self.side.minimumWidth() + SIDE_GIVES_WAY_PX
+        if self.side.isVisible() and 0 < width < need and 0 < old and width < old:
+            self.side.setVisible(False)
+            self.side_tab.set_open(False)
+            self._side_gave_way = True
+            self.viewer.refresh_actions()
+        elif (self._side_gave_way and width >= need + 40 and self.ctx.settings.volume.inspector
+              and self._inspector is not None):
+            self._side_gave_way = False
+            self.side.setVisible(True)
+            self.side_tab.set_open(True)
+            self.viewer.refresh_actions()
+
     def set_inspector(self, on: bool, *, remember: bool = True) -> None:
+        if self._controls_peer is not None:
+            self._controls_peer.set_inspector(on, remember=remember)
+            return
         if on and self._inspector is None:
             from ..panels.inspector import Inspector
 
@@ -1283,9 +1753,13 @@ class VolumePresenter:
             self.side.setMinimumWidth(
                 self._inspector.minimumSizeHint().width()
                 + self.side.verticalScrollBar().sizeHint().width() + 2)
-        was = self.side.isVisible()
+        was = self.inspector_open()
+        self._side_gave_way = False
         self.side.setVisible(bool(on))
-        if on and not was:
+        self.side_tab.set_open(bool(on))
+        if self._host is not None:
+            self._host.shown(bool(on))
+        elif on and not was:
             self.restore_sizes("volume.side", self.hsplit, [0.76, 0.24])
         if remember and self.ctx.settings.volume.inspector != bool(on):
             self.ctx.settings_hub.update(lambda s: setattr(s.volume, "inspector", bool(on)))
@@ -1342,6 +1816,15 @@ class VolumePresenter:
 
     def stop(self) -> None:
         self.stop_play()
+        if self._graph_window is not None:
+            self.set_graph_detached(False)
+        # A change made just before the window closed is kept.
+        if self._view_timer.isActive():
+            self._view_timer.stop()
+            self._remember_view()
+        if self._sizes_timer.isActive():
+            self._sizes_timer.stop()
+            self._flush_sizes()
 
 
 __all__ = ["VolumePresenter", "open_with_context"]

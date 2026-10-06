@@ -524,3 +524,28 @@ class TestWritingBads:
         assert text[2] == "Cz\tEEG\tuV\tbad" and text[1].endswith("\tgood")
         assert read_log(tmp_path)[-1]["label"] == "Mark 1 channel bad in sub-01_task-x_channels.tsv"
         assert set_bad_channels(tmp_path, tsv, {"Cz"}) == 0, "nothing changes, nothing written"
+
+
+class TestByteOrderMark:
+    """mne-bids writes its TSV tables with a UTF-8 byte order mark. Read as
+    plain UTF-8, the first column was named "\\ufeffonset" (every event row
+    dropped) or "\\ufeffname" (no bad channel ever written)."""
+
+    def test_events_with_a_bom_are_read(self, tmp_path):
+        p = tmp_path / "sub-01_task-x_events.tsv"
+        p.write_bytes("﻿onset\tduration\ttrial_type\n0.0\t4.2\tT0\n4.2\t4.1\tT2\n"
+                      .encode("utf-8"))
+        assert [(e.onset, e.label) for e in read_events_tsv(p)] == [(0.0, "T0"), (4.2, "T2")]
+
+    def test_bad_channels_are_written_and_the_bom_kept(self, tmp_path):
+        from bidsmgr.editor.channels import set_bad_channels
+        from bidsmgr.viz.data.signal import read_bad_channels
+
+        tsv = tmp_path / "sub-01" / "eeg" / "sub-01_task-x_channels.tsv"
+        tsv.parent.mkdir(parents=True)
+        tsv.write_bytes("﻿name\ttype\tstatus\nFz\tEEG\tgood\nCz\tEEG\tgood\n".encode("utf-8"))
+        assert set_bad_channels(tmp_path, tsv, {"Cz"}) == 1
+        raw = tsv.read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbfname\t"), "the mark stays, once"
+        assert raw.count(b"\xef\xbb\xbf") == 1
+        assert read_bad_channels(tsv) == {"Cz"}

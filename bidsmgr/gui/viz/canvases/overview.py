@@ -221,16 +221,17 @@ class OverviewBar(QWidget):
                 for k in np.flatnonzero(gaps):
                     p.fillRect(QRectF(area.left() + k * w, area.top(), max(w, 1.0),
                                       area.height()), brush)
+        # Bad segments: the review's (marked in this session, or the
+        # recording's own), as red bands the full height.
+        bad = _qcolor(theme.token("error", "#f85149"), 80)
+        p.setPen(Qt.PenStyle.NoPen)
+        for sp in sigcmd.bad_spans(self.ctx.store):
+            x0 = self._x_of(sp.onset - offset, dur)
+            x1 = self._x_of(sp.onset - offset + max(sp.duration, 0.0), dur)
+            p.fillRect(QRectF(x0, inner.top(), max(x1 - x0, 1.5), inner.height()), bad)
         events = self._event_list(src)
         if events:
             ts = self.ctx.settings.traces
-            bad = _qcolor(theme.token("error", "#f85149"), 80)
-            p.setPen(Qt.PenStyle.NoPen)
-            for e in events:
-                if getattr(e, "kind", "") == "bad":
-                    x0 = self._x_of(e.onset - offset, dur)
-                    x1 = self._x_of(e.onset - offset + max(e.duration, 0.0), dur)
-                    p.fillRect(QRectF(x0, inner.top(), max(x1 - x0, 1.5), inner.height()), bad)
             by_colour: dict[str, list] = {}
             for e in events:
                 if getattr(e, "kind", "") == "bad":

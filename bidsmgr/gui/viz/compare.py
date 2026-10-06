@@ -16,19 +16,23 @@ through the other's, so a cropped image, another resolution, another storage
 order and another modality all follow to the same anatomy; the note still
 says when the grids differ.
 
-While synced there is ONE toolbar: two identical toolbars driving one state
-is the same control drawn twice. Unsyncing gives the right image its own.
+The two halves are SYMMETRIC. While synced there is one toolbar, above both
+images, and one controls column, beside both (with a switch saying which
+image's own settings it shows); each image has the same header, so neither
+looks like the main one. Unsyncing gives each image its own toolbar and its
+own column, inside its half.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QSplitter, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from ..widgets.primitives import ElidedLabel
@@ -36,6 +40,39 @@ from .link import ViewerLink
 from .viewer import Viewer
 
 log = logging.getLogger(__name__)
+
+#: How much of the window the shared controls column takes when it first opens.
+COLUMN_FRACTION = 0.22
+
+
+class _PaneHead(QFrame):
+    """The same header on both halves: what the image is, and a way to
+    change it when the host allows."""
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self.setObjectName("pathbar")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 6, 8, 6)
+        row.setSpacing(8)
+        self.caption = ElidedLabel(title)
+        self.caption.setObjectName("section-caption")
+        row.addWidget(self.caption, 1)
+        self.change = QPushButton("Change…")
+        self.change.setObjectName("tb-btn-ghost")
+        self.change.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.change.setVisible(False)
+        row.addWidget(self.change)
+
+
+class _ControlsHost:
+    """Where the shared controls column goes (see
+    ``VolumePresenter.host_controls``)."""
+
+    def __init__(self, column, tab_row, shown: Callable[[bool], None]) -> None:
+        self.column = column
+        self.tab_row = tab_row
+        self.shown = shown
 
 
 class ComparePanes(QWidget):
@@ -51,16 +88,40 @@ class ComparePanes(QWidget):
         #: (they always can, through the world); only what the note says.
         self._same_grid = False
         self._loaded: set[str] = set()
+        #: Whose own settings the shared column shows.
+        self._controls_side = "left"
+        self._synced = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        self._left_caption, self.left = self._column(split, left_title)
-        self._right_caption, self.right = self._column(split, right_title)
-        split.setSizes([560, 560])
-        outer.addWidget(split, 1)
+        # The shared toolbar's place: above BOTH images.
+        self._bar_slot = QVBoxLayout()
+        self._bar_slot.setContentsMargins(0, 0, 0, 0)
+        self._bar_slot.setSpacing(0)
+        outer.addLayout(self._bar_slot)
+
+        self._body = QSplitter(Qt.Orientation.Horizontal)
+        self._body.setHandleWidth(2)
+        self._body.setChildrenCollapsible(False)
+        images = QWidget()
+        self._tab_row = QHBoxLayout(images)
+        self._tab_row.setContentsMargins(0, 0, 0, 0)
+        self._tab_row.setSpacing(0)
+        self._split = QSplitter(Qt.Orientation.Horizontal)
+        self._split.setChildrenCollapsible(False)
+        self._left_head, self.left = self._half(left_title)
+        self._right_head, self.right = self._half(right_title)
+        self._split.setSizes([560, 560])
+        self._tab_row.addWidget(self._split, 1)
+        self._body.addWidget(images)
+        self._body.addWidget(self._build_column())
+        self._body.setStretchFactor(0, 1)
+        self._body.setStretchFactor(1, 0)
+        self._body.splitterMoved.connect(
+            lambda *_a: self.left.presenter.remember_sizes("compare.side", self._body))
+        outer.addWidget(self._body, 1)
+        self._host = _ControlsHost(self._column_lay, self._tab_row, self._show_column)
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -68,9 +129,9 @@ class ComparePanes(QWidget):
         self.link.setChecked(True)
         self.link.setEnabled(False)
         self.link.setToolTip(
-            "On: one set of controls drives both images, and the crosshair, "
-            "slice, plane, volume, 3-D camera, effects and cut plane stay "
-            "together.\n\nOff: each image gets its own controls."
+            "On: one toolbar and one controls column drive both images, and the "
+            "crosshair, slice, plane, volume, 3-D camera, effects and cut plane "
+            "stay together.\n\nOff: each image gets its own toolbar and controls."
         )
         self.link.toggled.connect(self._on_link_toggled)
         row.addWidget(self.link)
@@ -94,23 +155,80 @@ class ComparePanes(QWidget):
         self._link.enabled = False
         self.left.loaded.connect(lambda _p: self._on_one_loaded("left"))
         self.right.loaded.connect(lambda _p: self._on_one_loaded("right"))
-        self.right.set_toolbar_visible(False)
+        self._apply_sync(True)
 
-    def _column(self, split: QSplitter, title: str):
+    def _half(self, title: str):
         box = QWidget()
         lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
-        caption = ElidedLabel(title)
-        caption.setObjectName("section-caption")
-        lay.addWidget(caption)
-        viewer = Viewer()
+        head = _PaneHead(title)
+        lay.addWidget(head)
+        viewer = Viewer(header=False)
         # Explicitly shrinkable: the window must not be held wider than the
         # sum of two toolbars, nor grow itself when the images load.
         viewer.setMinimumWidth(260)
         lay.addWidget(viewer, 1)
-        split.addWidget(box)
-        return caption, viewer
+        self._split.addWidget(box)
+        return head, viewer
+
+    def _build_column(self) -> QWidget:
+        """The shared controls column: a switch for whose settings it shows,
+        then that viewer's own column (placed by ``host_controls``)."""
+        self._column = QWidget()
+        lay = QVBoxLayout(self._column)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        bar = QFrame()
+        bar.setObjectName("sidecar-toolbar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(12, 6, 12, 6)
+        row.setSpacing(6)
+        label = QLabel("Settings of")
+        label.setObjectName("dlg-hint")
+        row.addWidget(label)
+        self._whose = QButtonGroup(self)
+        self._whose.setExclusive(True)
+        self.whose_buttons: dict[str, QPushButton] = {}
+        for side, text in (("left", "Left image"), ("right", "Right image")):
+            btn = QPushButton(text)
+            # The header's own segmented look (Converter | Editor): the
+            # chosen side is filled with the accent, in both themes.
+            btn.setObjectName("view-pill")
+            btn.setCheckable(True)
+            btn.setChecked(side == "left")
+            btn.setToolTip(
+                "Which image's own settings the column shows: its window and "
+                "colour map, its overlays, its quality maps. The layout, "
+                "crosshair, 3-D view and cut planes are shared while synced.")
+            btn.clicked.connect(lambda _c=False, s=side: self.show_settings_of(s))
+            self._whose.addButton(btn)
+            self.whose_buttons[side] = btn
+            row.addWidget(btn)
+        row.addStretch(1)
+        lay.addWidget(bar)
+        self._column_lay = lay
+        self._column.setVisible(False)
+        return self._column
+
+    # -- captions -----------------------------------------------------------
+
+    def _head(self, side: str) -> _PaneHead:
+        return self._left_head if side == "left" else self._right_head
+
+    def set_caption(self, side: str, text: str) -> None:
+        self._head(side).caption.setText(text)
+
+    def caption(self, side: str) -> str:
+        return self._head(side).caption.text()
+
+    def add_chooser(self, side: str, slot, tooltip: str = "") -> QPushButton:
+        """Offer a Change button in ``side``'s header, calling ``slot``."""
+        btn = self._head(side).change
+        btn.clicked.connect(slot)
+        btn.setToolTip(tooltip or f"Choose the {side} image")
+        btn.setVisible(True)
+        return btn
 
     # -- loading -----------------------------------------------------------
 
@@ -118,9 +236,9 @@ class ComparePanes(QWidget):
                     left_title: str = "", right_title: str = "") -> None:
         """Open both. Reading happens on each viewer's own worker."""
         if left_title:
-            self._left_caption.setText(left_title)
+            self.set_caption("left", left_title)
         if right_title:
-            self._right_caption.setText(right_title)
+            self.set_caption("right", right_title)
         self._same_grid = False
         self._loaded.clear()
         self._link.enabled = False
@@ -156,10 +274,70 @@ class ComparePanes(QWidget):
             self._link.sync_now(self.left)
         self.both_loaded.emit()
 
+    # -- the shared or separate controls --------------------------------------
+
+    def _apply_sync(self, on: bool) -> None:
+        """One toolbar and one column for both, or one each, inside each half."""
+        if on == self._synced:
+            return
+        self._synced = on
+        if on:
+            self.left.lend_toolbar(self._bar_slot)
+            self.right.set_toolbar_visible(False)
+            self._place_column(self._controls_side, open_=self._any_column_open())
+        else:
+            open_ = self._any_column_open()
+            self.left.lend_toolbar(None)
+            self.right.set_toolbar_visible(True)
+            for viewer in (self.left, self.right):
+                viewer.presenter.share_controls(None)
+                viewer.presenter.host_controls(None)
+            self._column.setVisible(False)
+            if open_:
+                for viewer in (self.left, self.right):
+                    viewer.presenter.set_inspector(True, remember=False)
+
+    def _any_column_open(self) -> bool:
+        if self._synced and not self._column.isHidden():
+            return True
+        return any(not v.presenter.side.isHidden() for v in (self.left, self.right))
+
+    def _place_column(self, side: str, *, open_: bool) -> None:
+        owner = self.left if side == "left" else self.right
+        other = self.right if owner is self.left else self.left
+        for viewer in (other, owner):
+            viewer.presenter.share_controls(None)
+        other.presenter.host_controls(None, tab=False)
+        other.presenter.set_inspector(False, remember=False)
+        owner.presenter.host_controls(self._host)
+        other.presenter.share_controls(owner.presenter)
+        self._controls_side = side
+        self.whose_buttons[side].setChecked(True)
+        if open_:
+            owner.presenter.set_inspector(True, remember=False)
+
+    def show_settings_of(self, side: str) -> None:
+        """Show ``side``'s own settings in the shared column."""
+        if not self._synced:
+            return
+        if side != self._controls_side:
+            self._place_column(side, open_=not self._column.isHidden())
+
+    def _show_column(self, on: bool) -> None:
+        was = not self._column.isHidden()
+        self._column.setVisible(bool(on))
+        if on and not was:
+            self.left.presenter.restore_sizes(
+                "compare.side", self._body, [1.0 - COLUMN_FRACTION, COLUMN_FRACTION])
+
+    def column_open(self) -> bool:
+        """Whether the shared controls column is open."""
+        return not self._column.isHidden()
+
     # -- linking -----------------------------------------------------------
 
     def _on_link_toggled(self, on: bool) -> None:
-        self.right.set_toolbar_visible(not on)
+        self._apply_sync(bool(on))
         self._link.enabled = bool(on) and self._loaded == {"left", "right"}
         if self._link.enabled:
             self._link.sync_now(self.left)
@@ -185,8 +363,31 @@ class ComparePanes(QWidget):
                 pass
 
     def repaint_for_palette(self, pal: dict) -> None:
-        for viewer in (self.left, self.right):
+        viewers = (self.left, self.right)
+        for viewer in viewers:
             viewer.repaint_for_palette(pal)
+        # The shared toolbar and column live HERE while synced, outside both
+        # viewers, so the viewers' own pass does not reach them.
+        from PyQt6.QtWidgets import QComboBox
+
+        from ..converter_panel import _repolish_combo
+
+        def in_a_viewer(w) -> bool:
+            while w is not None and w is not self:
+                if w is viewers[0] or w is viewers[1]:
+                    return True
+                w = w.parentWidget()
+            return False
+
+        style = self.style()
+        for w in [self, *self.findChildren(QWidget)]:
+            if in_a_viewer(w):
+                continue
+            style.unpolish(w)
+            style.polish(w)
+            if isinstance(w, QComboBox):
+                _repolish_combo(w)
+            w.update()
 
 
 __all__ = ["ComparePanes"]

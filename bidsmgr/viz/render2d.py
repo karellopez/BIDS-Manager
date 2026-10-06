@@ -77,6 +77,9 @@ def slice_rgba(store: SceneStore, plane: str, *, transparent: bool = False,
     for layer in store.scene.layers:
         if layer.kind != "volume" or not layer.visible:
             continue
+        if views.is_shape(views.source_of(store, layer)):
+            # Drawn as geometry on top, exactly (see compute.shapes).
+            continue
         values = views.layer_values(store, layer, grid)
         if values is None:
             if first:
@@ -180,6 +183,7 @@ def panel(store: SceneStore, plane: str, *, height_px: Optional[int] = None,
     out_rows = max(1, int(round(h_mm * px_per_mm)))
     out_cols = max(1, int(round(w_mm * px_per_mm)))
     out = _resample(img.rgba, out_rows, out_cols, img.smooth)
+    out = draw_shapes(store, img.grid, out)
     world = store.scene.cursor.world
     if crosshair and world is not None:
         col, row, _d = img.grid.world_to_pixel(world)
@@ -193,6 +197,44 @@ def panel(store: SceneStore, plane: str, *, height_px: Optional[int] = None,
             if 0 <= y < out_rows:
                 out[y, :] = CROSSHAIR
     return out
+
+
+#: How much of a shape's colour fills it (its rim is drawn at full opacity).
+SHAPE_FILL = 0.16
+
+
+def draw_shapes(store: SceneStore, grid: geometry.SliceGrid, out: np.ndarray) -> np.ndarray:
+    """Every visible shape layer (the MRS voxel) over ``out``, which shows
+    ``grid`` at any size: each pixel's world position is tested against the
+    box, so the edge is exact at the output's own resolution."""
+    found = views.shape_layers(store)
+    if not found:
+        return out
+    from .compute.shapes import outline_mask
+
+    out_rows, out_cols = out.shape[:2]
+    rows, cols = grid.shape
+    yy = (np.arange(out_rows) + 0.5) * rows / out_rows - 0.5
+    xx = (np.arange(out_cols) + 0.5) * cols / out_cols - 0.5
+    cc, rr = np.meshgrid(xx, yy)
+    world = (grid.origin[None, None, :] + cc[..., None] * grid.col_vec[None, None, :]
+             + rr[..., None] * grid.row_vec[None, None, :])
+    out = out.astype(np.float32)
+    for layer, src in found:
+        inside = src.box.contains(world)
+        if not inside.any():
+            continue
+        r, g, b, a = views.shape_colour(layer)
+        colour = np.array([r, g, b], dtype=np.float32)
+        alpha = a / 255.0
+        width = max(1, int(round(layer.display.outline_px or 2.0)))
+        rim = outline_mask(inside, width)
+        fill = inside & ~rim
+        for mask, k in ((fill, SHAPE_FILL * alpha), (rim, alpha)):
+            if k > 0 and mask.any():
+                out[mask, :3] = out[mask, :3] * (1.0 - k) + colour * k
+                out[mask, 3] = np.maximum(out[mask, 3], 255.0 * k)
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
 
 def render(store: SceneStore, *, planes: Sequence[str] = ("axial",),
@@ -266,5 +308,6 @@ def render_file(path, out, *, overlays: Iterable = (), planes: Sequence[str] = (
     return write_png(out, rgba)
 
 
-__all__ = ["PLANES", "SliceImage", "encode_png", "open_store", "panel", "render",
+__all__ = ["PLANES", "SliceImage", "draw_shapes", "encode_png", "open_store", "panel",
+           "render",
            "render_file", "slice_rgba", "write_png"]

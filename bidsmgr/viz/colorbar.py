@@ -101,7 +101,7 @@ def bars_for(store) -> list[BarSpec]:
             continue
         d = layer.display
         src = views.source_of(store, layer)
-        if src is None or src.is_rgb or d.label_table is not None:
+        if src is None or src.is_rgb or d.label_table is not None or views.is_shape(src):
             continue
         window = d.window
         if window is None:

@@ -10,6 +10,7 @@ from typing import Literal, Optional, TYPE_CHECKING
 
 from . import command
 from ..compute.filters import FilterSpec, validate
+from ..scene import Span
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..store import SceneStore
@@ -54,7 +55,8 @@ def opening_state(src) -> dict:
                 ch_type="all", picks=None,
                 count=max(1, min(DEFAULT_COUNT, len(src.ch_names))), offset=0,
                 scale=1.0, normalize=False, hp=None, lp=None, notch=None,
-                events=False, event_source="auto", bads=None, butterfly=False)
+                events=False, event_source="auto", bads=None, butterfly=False,
+                bad_spans=None, annotate=False, selected_span=None)
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +249,209 @@ def channels_toggle_bad(store: "SceneStore", name: str) -> set[str]:
     return {"traces.look"}
 
 
+# ---------------------------------------------------------------------------
+# Bad segments (annotation mode)
+# ---------------------------------------------------------------------------
+
+#: Labels offered for a bad segment; any ``BAD_<reason>`` is accepted.
+BAD_LABELS = ("BAD_", "BAD_muscle", "BAD_eye", "BAD_movement", "BAD_flat", "BAD_noise",
+              "BAD_jump")
+
+
+def bad_label(text: str) -> str:
+    """``text`` as a bad-segment label: ``BAD_`` and a reason. Only BAD
+    labels are segments to leave out; anything else is an event."""
+    text = "".join(ch for ch in str(text).strip() if ch.isalnum() or ch in "_-")
+    rest = text[3:].lstrip("_") if text.upper().startswith("BAD") else text
+    return "BAD_" + rest
+
+
+def bad_spans(store: "SceneStore") -> list[Span]:
+    """The bad segments now: this session's list, else the recording's own."""
+    tr = store.scene.traces
+    if tr.bad_spans is not None:
+        return list(tr.bad_spans)
+    src = source(store)
+    if src is None:
+        return []
+    return [Span(onset=float(e.onset), duration=float(e.duration), label=str(e.label) or "BAD_")
+            for e in getattr(src, "bad_spans", [])]
+
+
+def spans_changed(store: "SceneStore") -> bool:
+    """Whether the session's bad segments differ from the recording's."""
+    tr = store.scene.traces
+    if tr.bad_spans is None:
+        return False
+    src = source(store)
+    own = [(round(e.onset, 6), round(e.duration, 6), e.label)
+           for e in getattr(src, "bad_spans", [])] if src is not None else []
+    now = [(round(sp.onset, 6), round(sp.duration, 6), sp.label) for sp in tr.bad_spans]
+    return sorted(own) != sorted(now)
+
+
+def _set_spans(store: "SceneStore", spans: list[Span]) -> None:
+    store.scene.traces.bad_spans = sorted(spans, key=lambda sp: (sp.onset, sp.duration))
+
+
+def _clamp_span(store: "SceneStore", onset: float, duration: float) -> tuple[float, float]:
+    src = source(store)
+    start = float(getattr(src, "start_time", 0.0) or 0.0) if src is not None else 0.0
+    end = start + (float(src.duration) if src is not None else onset + duration)
+    lo = max(start, min(onset, onset + duration))
+    hi = min(end, max(onset, onset + duration))
+    step = 1.0 / float(src.sfreq) if src is not None and src.sfreq else 1e-3
+    if hi - lo < step:
+        raise ValueError("a bad segment needs a duration: drag across the traces")
+    return lo, hi - lo
+
+
+@command("annotate.mode", "Annotation mode", category="Annotation")
+def annotate_mode(store: "SceneStore", value: Optional[bool] = None) -> set[str]:
+    """In annotation mode a drag across the traces marks a bad segment
+    (instead of scrolling), and segments can be moved, resized, relabelled
+    and deleted."""
+    tr = store.scene.traces
+    new = (not tr.annotate) if value is None else bool(value)
+    if new == tr.annotate:
+        return set()
+    tr.annotate = new
+    if not new:
+        tr.selected_span = None
+    return {"traces.annotations"}
+
+
+@command("annotate.label", "Label for new bad segments", category="Annotation")
+def annotate_label(store: "SceneStore", label: str) -> set[str]:
+    new = bad_label(label)
+    if new == store.scene.traces.annotate_label:
+        return set()
+    store.scene.traces.annotate_label = new
+    return {"traces.annotations"}
+
+
+@command("annotate.add", "Mark a bad segment", category="Annotation", undoable=True)
+def annotate_add(store: "SceneStore", onset: float, duration: float,
+                 label: Optional[str] = None) -> set[str]:
+    """A segment ``[onset, onset + duration)`` (seconds of run time) marked
+    bad, with ``label`` (default: the annotation label)."""
+    lo, length = _clamp_span(store, float(onset), float(duration))
+    span = Span(onset=lo, duration=length,
+                label=bad_label(label) if label else store.scene.traces.annotate_label)
+    spans = bad_spans(store)
+    if span not in spans:
+        # The same segment twice says nothing more, and saved twice it is
+        # two identical rows in the table.
+        spans.append(span)
+    _set_spans(store, spans)
+    store.scene.traces.selected_span = store.scene.traces.bad_spans.index(span)
+    return {"traces.annotations"}
+
+
+@command("annotate.add_many", "Mark segments bad", category="Annotation", undoable=True)
+def annotate_add_many(store: "SceneStore", segments: list[tuple[float, float]],
+                      label: str = "BAD_") -> set[str]:
+    """Many segments at once (``(onset, duration)`` pairs; the quality
+    check's suggestions), merged with each other where they touch."""
+    label = bad_label(label)
+    merged: list[list[float]] = []
+    for onset, duration in sorted((float(a), float(b)) for a, b in segments):
+        if merged and onset <= merged[-1][1] + 1e-9:
+            merged[-1][1] = max(merged[-1][1], onset + duration)
+        else:
+            merged.append([onset, onset + duration])
+    added = []
+    for lo, hi in merged:
+        try:
+            a, d = _clamp_span(store, lo, hi - lo)
+        except ValueError:
+            continue
+        added.append(Span(onset=a, duration=d, label=label))
+    have = bad_spans(store)
+    added = [sp for sp in added if sp not in have]
+    if not added:
+        return set()
+    _set_spans(store, have + added)
+    return {"traces.annotations"}
+
+
+def _span_index(store: "SceneStore", index: Optional[int]) -> int:
+    spans = bad_spans(store)
+    i = store.scene.traces.selected_span if index is None else int(index)
+    if i is None or not 0 <= i < len(spans):
+        raise ValueError("no bad segment is selected")
+    return i
+
+
+@command("annotate.set", "Change a bad segment", category="Annotation", undoable=True)
+def annotate_set(store: "SceneStore", index: Optional[int] = None,
+                 onset: Optional[float] = None, duration: Optional[float] = None,
+                 label: Optional[str] = None) -> set[str]:
+    """Move, resize or relabel a segment (the selected one by default)."""
+    i = _span_index(store, index)
+    spans = bad_spans(store)
+    old = spans[i]
+    new_onset = old.onset if onset is None else float(onset)
+    new_duration = old.duration if duration is None else float(duration)
+    lo, length = _clamp_span(store, new_onset, new_duration)
+    new = Span(onset=lo, duration=length, label=bad_label(label) if label else old.label)
+    if new == old:
+        return set()
+    spans[i] = new
+    _set_spans(store, spans)
+    store.scene.traces.selected_span = store.scene.traces.bad_spans.index(new)
+    return {"traces.annotations"}
+
+
+@command("annotate.remove", "Delete a bad segment", category="Annotation", undoable=True)
+def annotate_remove(store: "SceneStore", index: Optional[int] = None) -> set[str]:
+    """Delete a segment (the selected one by default)."""
+    i = _span_index(store, index)
+    spans = bad_spans(store)
+    del spans[i]
+    _set_spans(store, spans)
+    store.scene.traces.selected_span = None
+    return {"traces.annotations"}
+
+
+@command("annotate.select", "Select a bad segment", category="Annotation")
+def annotate_select(store: "SceneStore", index: Optional[int] = None) -> set[str]:
+    spans = bad_spans(store)
+    new = None if index is None or not 0 <= int(index) < len(spans) else int(index)
+    if new == store.scene.traces.selected_span:
+        return set()
+    store.scene.traces.selected_span = new
+    return {"traces.annotations"}
+
+
+@command("channels.set_bad", "Mark channels bad or good", category="Channels",
+         undoable=True)
+def channels_set_bad(store: "SceneStore", names: list[str], bad: bool = True) -> set[str]:
+    """Several channels at once (the quality check's suggestions)."""
+    src = source(store)
+    known = set(src.ch_names) if src is not None else set(names)
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise ValueError(f"no channel called {unknown[0]!r}")
+    bads = bad_channels(store)
+    new = (bads | set(names)) if bad else (bads - set(names))
+    if new == bads:
+        return set()
+    store.scene.traces.bads = sorted(new)
+    return {"traces.look"}
+
+
+@command("traces.quality", "Quality check", category="Channels")
+def traces_quality(store: "SceneStore", value: Optional[bool] = None) -> set[str]:
+    """Show the quality check (computed on a worker the first time)."""
+    tr = store.scene.traces
+    new = (not tr.quality) if value is None else bool(value)
+    if new == tr.quality:
+        return set()
+    tr.quality = new
+    return {"traces.quality"}
+
+
 @command("traces.normalize", "Normalise each channel", category="Channels")
 def traces_normalize(store: "SceneStore", value: Optional[bool] = None) -> set[str]:
     tr = store.scene.traces
@@ -294,6 +499,8 @@ def traces_reset(store: "SceneStore") -> set[str]:
     # Bad channels are a judgement about the data, not a way of looking at
     # it: a reset of the view keeps them.
     state["bads"] = store.scene.traces.bads
+    state["bad_spans"] = store.scene.traces.bad_spans
+    state["annotate"] = store.scene.traces.annotate
     changed = False
     for key, value in state.items():
         if getattr(store.scene.traces, key) != value:

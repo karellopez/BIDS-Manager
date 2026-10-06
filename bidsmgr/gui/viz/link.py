@@ -70,6 +70,22 @@ def apply_view_state(store, state: Mapping[str, Any]) -> None:
     if "mosaic" in state and state["mosaic"] != scene.mosaic:
         scene.mosaic = state["mosaic"]
         changed.add("mosaic")
+    if "mosaic_build" in state:
+        from ...viz.scene import MosaicBuild
+
+        new = MosaicBuild.model_validate(state["mosaic_build"])
+        if new != scene.mosaic_build:
+            scene.mosaic_build = new
+            changed.add("mosaic")
+    if "layout" in state:
+        # Ignored before: a linked viewer and a saved preset both lost the
+        # arrangement, the planes shown and the large view.
+        from ...viz.scene import LayoutState
+
+        new = LayoutState.model_validate(state["layout"])
+        if new != scene.layout:
+            scene.layout = new
+            changed.add("layout")
     cursor = (state.get("cursor") or {}).get("world") if isinstance(state.get("cursor"), Mapping) else None
     if cursor is not None:
         changed |= store.run("cursor.set_world", x=cursor[0], y=cursor[1], z=cursor[2], snap=True)
@@ -107,10 +123,12 @@ class ViewerLink:
             s = src.store.scene
             state: dict[str, Any] = {}
             whole = "scene" in paths
-            if self.view and (whole or paths & {"mode", "plane", "graph", "graph_visible", "mosaic"}
-                              or any(p.startswith(("display", "views:")) for p in paths)):
+            if self.view and (whole or paths & {"mode", "plane", "graph", "graph_visible",
+                                                "mosaic", "layout"}
+                              or any(p.startswith(("display", "views:", "graph.")) for p in paths)):
                 state.update(s.model_dump(mode="json", include={
-                    "mode", "plane", "display", "views", "graph", "graph_visible", "mosaic"}))
+                    "mode", "plane", "display", "views", "graph", "graph_visible", "mosaic",
+                    "layout", "mosaic_build"}))
             if self.render and (whole or any(p.startswith(("render", "clips")) for p in paths)):
                 state.update(s.model_dump(mode="json", include={"render", "clips"}))
             if self.cursor and (whole or "cursor" in paths) and s.cursor.world is not None:
