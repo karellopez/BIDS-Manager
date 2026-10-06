@@ -745,6 +745,10 @@ class MainWindow(QMainWindow):
         # new palette instead of returning a cached previous-theme icon.
         from . import icons
         icons.refresh_for_palette(pal)
+        # Every library viewer, in this window or in any dialog, follows
+        # the theme through one hub (pyqtgraph and GL read no QSS).
+        from .viz.bridge import ThemeHub
+        ThemeHub.instance().publish(pal)
         # Brand logo gradient — rebuilt from the new palette.
         self._header.repaint_for_palette(pal)
         # Cascade into the Converter and Editor panels.

@@ -492,6 +492,23 @@ QLabel#dlg-hint {
     font-size: 11px;
 }
 
+/* Settings > Viewer shortcuts: the line that reports keys used twice. */
+QLabel#viz-conflicts {
+    color: $dim;
+    font-size: 11px;
+}
+QLabel#viz-conflicts[state="error"] {
+    color: $error;
+}
+
+/* The caption above each image of a side-by-side comparison. */
+QLabel#section-caption {
+    color: $text;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 2px;
+}
+
 /* Collapsible / detachable panel-frame header bar. Mirrors the pane-h5
  * look (surface background + bottom rule) but carries a collapse caret on
  * the left and a detach button on the right. The title label inside drops
@@ -1057,7 +1074,6 @@ QPushButton#viewer-section-toggle:hover { color: $text; background: $surface3; }
 QPushButton#viewer-section-toggle:checked { color: $text; }
 /* The fixed-width channel-label strip beside the plot + the horizontal
  * toolbar scroll (lets the viewer shrink without the toolbar forcing width). */
-QScrollArea#viewer-label-strip { background: $bg; border: none; }
 QScrollArea#viewer-toolbar-scroll { background: transparent; border: none; }
 
 /* "Load signal" button on the metadata card - styled like the header project
@@ -1335,15 +1351,28 @@ QWidget#nifti-canvas {
     border: none;
 }
 
-/* 3-D controls column — opaque so the black image canvas behind it never
- * shows through (the scrollbar gutter used to read as a black stripe). The
- * viewport is named from Python because a stylesheet can't select it. */
-QWidget#nifti-ctrl-slot,
-QScrollArea#nifti-ctrl-scroll,
-QWidget#nifti-ctrl-viewport,
-QWidget#nifti-3d-controls {
+/* The viewer's controls column: opaque so the black image canvas behind it
+ * never shows through (a scroll bar gutter used to read as a black stripe).
+ * The viewport is named from Python because a stylesheet can't select it. */
+QScrollArea#viz-side-scroll,
+QWidget#viz-side-viewport,
+QWidget#viz-inspector,
+QWidget#viz-section,
+QWidget#viz-section-body {
     background: $surface2;
     border: none;
+}
+/* One section from the next: a hairline, not a box. */
+QWidget#viz-section {
+    border-bottom: 1px solid $border;
+}
+/* The number beside every slider: compact, right-aligned, no arrows. */
+QDoubleSpinBox#viz-number {
+    padding: 2px 6px;
+    min-height: 20px;
+}
+QListWidget#viz-layer-list {
+    border-radius: 6px;
 }
 
 /* ---------- Editor automation: fix-ups, bulk edit, citation, ignore ----------

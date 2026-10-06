@@ -42,17 +42,12 @@ KEYS = {
     "validate_max_rows": "validate/max_rows",              # TSV rows scanned per table
     "validate_show": "validate/show",                      # which severities the Editor lists
     "validate_flag_todos": "validate/flag_todos",          # flag literal TODO placeholders
-    # Which of the four viewer layouts to open a scan in. "" means the user
-    # has never chosen, so the GPU-dependent default applies.
-    "nifti_view_mode": "editor/nifti_view_mode",                # single|multi|3d|combo
-    "nifti_orientation": "editor/nifti_orientation",           # 0 sag | 1 cor | 2 ax
     # How every signal viewer draws a trace. One preference, not one per
     # viewer: somebody who wants thicker lines wants them everywhere.
-    "trace_line_width": "editor/trace_line_width",
-    "trace_line_color": "editor/trace_line_color",
-    "trace_type_colors": "editor/trace_type_colors",   # JSON, channel type -> hex
-    "nifti_crosshair_color": "editor/nifti_crosshair_color",   # hex string e.g. "#4FC3F7"
-    "nifti_crosshair_thickness": "editor/nifti_crosshair_thickness",  # px, 1..5
+    # Every viewer preference of the visualisation library, one JSON value
+    # (``bidsmgr.viz.settings.VizSettings``): crosshair, defaults, keymap,
+    # mouse map, layout sizes. See ``gui/viz/settings_store.py``.
+    "viz_settings": "viz/settings",
     # Scan defaults
     "scan_n_jobs":        "scan/n_jobs",
     "scan_probe_convert": "scan/probe_convert",
@@ -149,26 +144,6 @@ class AppSettings:
     # Empty on purpose: "no choice made yet" is a different thing from any
     # particular layout, and it is what lets the first run pick the best
     # default this machine can show rather than a stored one.
-    # How a trace is drawn in the signal viewers. ZERO means "decide from
-    # what is on screen": two pixels for a physio channel, one for a wall of
-    # MEG, because Qt strokes a wider pen 7x slower and a 300-channel view
-    # cannot pay it. A width the user picks in the Line popup is stored as
-    # that number and honoured everywhere.
-    trace_line_width: int = 0
-    trace_line_color: str = ""
-    # Per-channel-type trace colours, type -> hex. EMPTY is the shipped
-    # scheme, which is palette TOKENS rather than literals (mag takes the
-    # accent colour, grad the success colour) so it follows the theme and
-    # stays legible in both. A type appears here only when somebody chose
-    # a colour for it, which is what lets Reset defaults be a deletion
-    # rather than a second hardcoded table to keep in step.
-    trace_type_colors: dict = field(default_factory=dict)
-    nifti_view_mode: str = ""
-    # Which plane a single-pane view opens on. Axial by convention when the
-    # user has never chosen.
-    nifti_orientation: int = 2
-    nifti_crosshair_color: str = "#4FC3F7"
-    nifti_crosshair_thickness: int = 1
     # Colour the requirement-level marks in the metadata template. Off, the
     # marks (* required, . recommended) remain, so the information does not
     # depend on being able to see the colour.
@@ -360,51 +335,6 @@ class AppSettings:
         out.validate_flag_todos = _as_bool(
             s.value(KEYS["validate_flag_todos"]), out.validate_flag_todos,
         )
-        try:
-            out.trace_line_width = int(
-                s.value(KEYS["trace_line_width"], out.trace_line_width)
-            )
-        except (TypeError, ValueError):
-            pass
-        # 0 is legal and means automatic; anything outside 1..8 is not.
-        if out.trace_line_width and not (1 <= out.trace_line_width <= 8):
-            out.trace_line_width = 0
-        out.trace_line_color = _as_str(
-            s.value(KEYS["trace_line_color"]), out.trace_line_color,
-        )
-        try:
-            raw = s.value(KEYS["trace_type_colors"], "")
-            parsed = json.loads(raw) if isinstance(raw, str) and raw else {}
-            if isinstance(parsed, dict):
-                out.trace_type_colors = {
-                    str(k): str(v) for k, v in parsed.items() if v
-                }
-        except (TypeError, ValueError):
-            pass
-        out.nifti_view_mode = _as_str(
-            s.value(KEYS["nifti_view_mode"]), out.nifti_view_mode,
-        )
-        if out.nifti_view_mode not in ("", "single", "multi", "3d", "combo"):
-            out.nifti_view_mode = ""
-        try:
-            out.nifti_orientation = int(
-                s.value(KEYS["nifti_orientation"], out.nifti_orientation)
-            )
-        except (TypeError, ValueError):
-            pass
-        if out.nifti_orientation not in (0, 1, 2):
-            out.nifti_orientation = 2
-        out.nifti_crosshair_color = _as_str(
-            s.value(KEYS["nifti_crosshair_color"]),
-            out.nifti_crosshair_color,
-        )
-        out.nifti_crosshair_thickness = _as_int(
-            s.value(KEYS["nifti_crosshair_thickness"]),
-            out.nifti_crosshair_thickness,
-        )
-        out.nifti_crosshair_thickness = max(
-            1, min(out.nifti_crosshair_thickness, 5),
-        )
         out.template_colour_levels = _as_bool(
             s.value(KEYS["template_colour_levels"]),
             out.template_colour_levels,
@@ -560,12 +490,7 @@ class AppSettings:
         # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
-        s.setValue(KEYS["trace_line_width"], int(self.trace_line_width))
-        s.setValue(KEYS["trace_line_color"], self.trace_line_color)
-        s.setValue(KEYS["trace_type_colors"], json.dumps(self.trace_type_colors))
-        s.setValue(KEYS["nifti_view_mode"], self.nifti_view_mode)
         s.setValue(KEYS["scan_index_widths"], json.dumps(self.scan_index_widths))
-        s.setValue(KEYS["nifti_orientation"], int(self.nifti_orientation))
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
         s.setValue(KEYS["validate_show"], self.validate_show)
@@ -669,48 +594,6 @@ class AppSettings:
         from ..classifier import user_rules
         _, excl = user_rules.from_json({"scan_exclusions": self.scan_exclusions})
         return excl
-
-    @classmethod
-    def remember_trace_style(cls, width: int, colour: str) -> None:
-        """Store how a trace is drawn. One preference for every viewer."""
-        cls._settings().setValue(KEYS["trace_line_width"], int(width))
-        cls._settings().setValue(KEYS["trace_line_color"], str(colour))
-
-    @classmethod
-    def remember_type_colors(cls, mapping: dict) -> None:
-        """Store per-channel-type trace colours. Empty restores the defaults."""
-        clean = {str(k): str(v) for k, v in dict(mapping or {}).items() if v}
-        cls._settings().setValue(
-            KEYS["trace_type_colors"], json.dumps(clean),
-        )
-
-    @classmethod
-    def remember_nifti_view_mode(cls, mode: str) -> None:
-        """Store the layout the user is in, so the next scan opens in it.
-
-        Written as the user switches rather than at shut-down: the Editor is
-        not always closed cleanly, and a preference that only survives a
-        graceful exit is one that mostly does not survive.
-        """
-        if mode not in ("single", "multi", "3d", "combo"):
-            return
-        cls._settings().setValue(KEYS["nifti_view_mode"], str(mode))
-
-    @classmethod
-    def remember_nifti_orientation(cls, axis: int) -> None:
-        """Store the plane, so a single-pane view opens on the same one."""
-        if int(axis) not in (0, 1, 2):
-            return
-        cls._settings().setValue(KEYS["nifti_orientation"], int(axis))
-
-    @classmethod
-    def remember_nifti_crosshair(cls, color: str, thickness: int) -> None:
-        s = cls._settings()
-        s.setValue(KEYS["nifti_crosshair_color"], str(color))
-        s.setValue(
-            KEYS["nifti_crosshair_thickness"],
-            int(max(1, min(thickness, 5))),
-        )
 
 
 __all__ = ["AppSettings", "KEYS"]

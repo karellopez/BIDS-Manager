@@ -99,6 +99,17 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_scan_rules_tab(), "Scan rules")
         tabs.addTab(self._build_convert_tab(), "Convert + post-convert")
         tabs.addTab(self._build_validation_tab(), "Validation")
+        # The viewer's own pages, generated from its settings model. They edit
+        # a copy; Save hands it to the hub, which every open viewer follows.
+        from .viz.bridge import SettingsHub
+        from .viz.settings_pages import ShortcutsPage, ViewerSettingsPage
+
+        self._viz_settings = SettingsHub.instance().settings.model_copy(deep=True)
+        self._viewer_page = ViewerSettingsPage()
+        self._shortcuts_page = ShortcutsPage()
+        tabs.addTab(self._viewer_page, "Viewer")
+        tabs.addTab(self._shortcuts_page, "Viewer shortcuts")
+        self._tabs = tabs
         v.addWidget(tabs, 1)
 
         # Save / Cancel / Restore defaults.
@@ -116,6 +127,8 @@ class SettingsDialog(QDialog):
 
         # Populate every widget from the current settings.
         self._load_into_widgets(self._settings)
+        self._viewer_page.load(self._viz_settings)
+        self._shortcuts_page.load(self._viz_settings)
 
     # ------------------------------------------------------------------
     # Tabs
@@ -1107,6 +1120,10 @@ class SettingsDialog(QDialog):
         """Reset all widgets to the AppSettings field defaults (not saved
         until the user clicks Save)."""
         self._load_into_widgets(AppSettings())
+        from ..viz.settings import VizSettings
+
+        self._viewer_page.load(VizSettings())
+        self._shortcuts_page.load(VizSettings())
 
     def _on_save(self) -> None:
         # Validate the scan rules first so an invalid hint blocks the save
@@ -1172,11 +1189,35 @@ class SettingsDialog(QDialog):
         s.validate_flag_todos = self._validate_flag_todos.isChecked()
 
         s.save()
+        self._save_viewer_settings()
         # Adopt the chosen version now rather than at the next launch: every
         # schema answer in the process is memoised, so this also drops the
         # answers about the old one.
         schema.set_active_version(s.validate_schema_version)
         self.accept()
+
+
+    def _save_viewer_settings(self) -> None:
+        """Hand the edited copy to the hub: stored once, and every open
+        viewer (the Editor's, a comparison's, a defacing preview's) follows
+        at once."""
+        from .viz.bridge import SettingsHub
+
+        new = self._viz_settings.model_copy(deep=True)
+        self._viewer_page.apply_to(new)
+        self._shortcuts_page.apply_to(new)
+        # Layout memory, sizes and saved views are not edited here: they
+        # survive a Save untouched, unless the page was asked to forget the
+        # first two.
+        current = SettingsHub.instance().settings
+        new.view_presets = dict(current.view_presets)
+        if self._viewer_page.forget_layouts:
+            new.layout_state = {}
+            new.layout_sizes = {}
+        else:
+            new.layout_state = dict(current.layout_state)
+            new.layout_sizes = dict(current.layout_sizes)
+        SettingsHub.instance().replace(new)
 
 
 __all__ = ["SettingsDialog"]

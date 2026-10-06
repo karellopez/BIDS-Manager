@@ -43,22 +43,19 @@ from . import icons
 from .combo_popup import menu_section, round_menu
 from .widgets.bidsignore_pane import BidsIgnorePane
 from .widgets.citation_pane import CitationPane
+from .viz import Viewer
 from .widgets import (
     BidsTreePane,
     BusySpinner,
     Chip,
-    NiftiViewerPane,
     PanelFrame,
     PathBar,
-    MrsViewerPane,
-    RecordingViewerPane,
     SidecarFormPane,
     TsvViewerPane,
     ValidationPane,
     VSep,
-    is_recording_path,
 )
-from .widgets.mrs_spectrum import is_mrs_path
+from ..viz.data.formats import is_mrs_path, is_recording_path
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +109,12 @@ class EditorPanel(QWidget):
         self._tree_pane.strip_requested.connect(self._on_strip)
         self._tree_pane.compare_requested.connect(self._on_compare_images)
         self._tree_pane.links_requested.connect(self._on_links)
+        self._tree_pane.overlay_requested.connect(self._on_overlay_requested)
+        self._tree_pane.overlay_base = self._overlay_base
+        #: The last two images shown in the volume viewer, newest last: what a
+        #: right-clicked image would be drawn over (the right-click itself
+        #: selects, and so shows, the clicked one).
+        self._images_shown: list[Path] = []
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -123,9 +126,19 @@ class EditorPanel(QWidget):
         # Index 1 = TSV table. Index 2 = NIfTI 2-D slice viewer.
         self._sidecar_form = SidecarFormPane()
         self._tsv_viewer = TsvViewerPane()
-        self._nifti_viewer = NiftiViewerPane()
-        self._recording_viewer = RecordingViewerPane()
-        self._mrs_viewer = MrsViewerPane()
+        # Volumes (MRI, PET, any NIfTI) go to the visualisation library's
+        # viewer: commands, configurable keys, layouts, links.
+        # Signals (MEG, EEG, iEEG) and spectra (MRS) through the same
+        # library, each its own Viewer: a viewer is one kind at a time.
+        self._nifti_viewer = Viewer(kind="volume")
+        self._signal_viewer = Viewer(kind="signal")
+        self._spectrum_viewer = Viewer(kind="spectrum")
+        for viewer in (self._nifti_viewer, self._signal_viewer, self._spectrum_viewer):
+            viewer.loading_changed.connect(self._on_pane_loading)
+            viewer.status_message.connect(self.log_message)
+            # Moving to the next run (or a fieldmap's target) goes through the
+            # tree, so the tree, the sidecar and the validation pane follow.
+            viewer.navigator = self.select_file_in_tree
         self._center_stack = QStackedWidget()
         self._sidecar_form.apply_to_others_requested.connect(
             self._on_apply_field_to_others
@@ -134,16 +147,15 @@ class EditorPanel(QWidget):
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
-        self._center_stack.addWidget(self._recording_viewer)
-        self._center_stack.addWidget(self._mrs_viewer)
+        self._center_stack.addWidget(self._signal_viewer)
+        self._center_stack.addWidget(self._spectrum_viewer)
         self._bidsignore_pane = BidsIgnorePane()
         self._center_stack.addWidget(self._bidsignore_pane)
         self._citation_pane = CitationPane()
         self._center_stack.addWidget(self._citation_pane)
         # Threaded panes drive the toolbar busy spinner + status bar.
         self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
-        self._recording_viewer.loading_changed.connect(self._on_pane_loading)
-        self._recording_viewer.status_message.connect(self.log_message)
+        self._tsv_viewer.status_message.connect(self.log_message)
         # Undo/redo toolbar buttons follow the active editable pane.
         self._sidecar_form.history_changed.connect(self._sync_undo_redo)
         self._tsv_viewer.history_changed.connect(self._sync_undo_redo)
@@ -159,6 +171,7 @@ class EditorPanel(QWidget):
         self._validation_pane.highlight_all_requested.connect(
             self._on_highlight_all_requested
         )
+        self._validation_pane.header_requested.connect(self._on_header_requested)
         # The BIDS tree folds to the left, the validation pane to the right,
         # and the center viewer grows into the freed space. The viewer is
         # not collapsible (it's the main surface) but IS detachable so the
@@ -671,11 +684,7 @@ class EditorPanel(QWidget):
         self._path_bar.set_value(str(path), ok=True)
         # Switching roots invalidates any stored report + form state.
         self._report = None
-        self._sidecar_form.set_file(None, None, None)
-        self._tsv_viewer.set_file(None, None)
-        self._nifti_viewer.set_file(None, None)
-        self._recording_viewer.set_file(None, None)
-        self._center_stack.setCurrentWidget(self._sidecar_form)
+        self._show_pane(self._sidecar_form)
         self._validation_pane.set_report(None)
         self._validation_pane.set_current_file(None, None)
         self._hide_chips()
@@ -922,100 +931,113 @@ class EditorPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_file_selected(self, path: Path) -> None:
-        """User picked a row in the BIDS tree.
+        """User picked a row in the BIDS tree; route it to its viewer.
 
-        Routes to a viewer based on the file extension:
-
-        * ``.tsv`` / ``.tsv.gz`` → :class:`TsvViewerPane` (table).
-        * ``.nii`` / ``.nii.gz`` → :class:`NiftiViewerPane` (2-D slice
-          viewer with orientation buttons + brightness/contrast).
+        * ``.tsv`` / ``.tsv.gz`` -> :class:`TsvViewerPane` (table; a
+          continuous recording also offers Visualize);
+        * a NIfTI-MRS file in ``mrs/`` -> the spectrum viewer;
+        * any other NIfTI -> the volume viewer;
         * EEG / MEG / iEEG recordings (``.fif``, ``.edf``, ``.set``,
-          ``.vhdr``, ``.cnt``, CTF ``.ds``, …) →
-          :class:`RecordingViewerPane` (metadata card + threaded
-          time-series viewer).
-        * everything else (JSON sidecars, …) → :class:`SidecarFormPane`.
+          ``.vhdr``, ``.cnt``, CTF ``.ds``, ...) -> the signal viewer;
+        * everything else (JSON sidecars, ...) -> :class:`SidecarFormPane`.
+
+        Routed from the NAME and the folder, never by reading the file
+        (``viz.data.formats``). Every pane but the one shown is cleared, so
+        none keeps a stale file (the MRS pane used to, after any selection
+        but a NIfTI).
         """
+        root = self.current_root()
         if path.is_dir():
-            # CTF .ds / EGI .mff are directory-shaped recordings — route
-            # them to the recording viewer instead of the dir-clear path.
             if is_recording_path(path):
-                self._show_recording(path)
-                self._validation_pane.set_current_file(path, self.current_root())
-                return
-            # Plain directories don't carry sidecars. We still push the
-            # folder down to the validation panel so its "Folder"
-            # section can reflect the user's focus.
-            self._sidecar_form.set_file(None, None, None)
-            self._tsv_viewer.set_file(None, None)
-            self._nifti_viewer.set_file(None, None)
-            self._recording_viewer.set_file(None, None)
-            self._center_stack.setCurrentWidget(self._sidecar_form)
-            self._validation_pane.set_current_file(path, self.current_root())
+                # CTF .ds / EGI .mff are directory-shaped recordings.
+                self._show_pane(self._signal_viewer, path, root)
+            else:
+                # A folder carries no sidecar; the validation pane still
+                # follows the focus.
+                self._show_pane(self._sidecar_form)
+            self._validation_pane.set_current_file(path, root)
             return
         name = path.name.lower()
-        root = self.current_root()
         if name == "citation.cff":
             # YAML rather than JSON, so the sidecar form cannot render it.
-            # It was the one dataset-level file that sent the user to a text
-            # editor.
             self._citation_pane.set_file(path, root)
             self._center_stack.setCurrentWidget(self._citation_pane)
             self._validation_pane.set_current_file(path, root)
             return
         if name == ".bidsignore":
-            # Not a text file as far as a user is concerned: what matters is
-            # which files each pattern is hiding, which a text editor cannot
-            # say.
+            # What matters is which files each pattern hides, which a text
+            # editor cannot say.
             self._bidsignore_pane.set_root(root)
             self._bidsignore_pane.set_report(self._report)
             self._center_stack.setCurrentWidget(self._bidsignore_pane)
             self._validation_pane.set_current_file(path, root)
             return
         if name.endswith(".tsv") or name.endswith(".tsv.gz"):
-            self._tsv_viewer.set_file(path, root)
-            # Other panes get cleared so a future toggle back doesn't
-            # show stale state for a different file.
-            self._sidecar_form.set_file(None, None, None)
-            self._nifti_viewer.set_file(None, None)
-            self._recording_viewer.set_file(None, None)
-            self._center_stack.setCurrentWidget(self._tsv_viewer)
+            self._show_pane(self._tsv_viewer, path, root)
         elif is_mrs_path(path):
-            # An MRS file is a NIfTI by container only: the data block is a
-            # complex free induction decay, and showing it as slices would
-            # show nothing. Routed on the DATATYPE folder and the schema's
-            # own suffix list, never by opening the file, because routing a
-            # click must not read a volume off disk.
-            self._mrs_viewer.set_file(path, root)
-            self._sidecar_form.set_file(None, None, None)
-            self._tsv_viewer.set_file(None, None)
-            self._nifti_viewer.set_file(None, None)
-            self._recording_viewer.set_file(None, None)
-            self._center_stack.setCurrentWidget(self._mrs_viewer)
+            # A NIfTI by container only: the data block is a complex FID.
+            self._note_image(path)
+            self._show_pane(self._spectrum_viewer, path, root)
         elif name.endswith(".nii") or name.endswith(".nii.gz"):
-            self._nifti_viewer.set_file(path, root)
-            self._sidecar_form.set_file(None, None, None)
-            self._tsv_viewer.set_file(None, None)
-            self._recording_viewer.set_file(None, None)
-            self._mrs_viewer.set_file(None, None)
-            self._center_stack.setCurrentWidget(self._nifti_viewer)
+            self._note_image(path)
+            self._show_pane(self._nifti_viewer, path, root)
         elif is_recording_path(path):
-            self._show_recording(path)
+            self._show_pane(self._signal_viewer, path, root)
         else:
-            self._sidecar_form.set_file(path, root, self._report)
-            self._tsv_viewer.set_file(None, None)
-            self._nifti_viewer.set_file(None, None)
-            self._recording_viewer.set_file(None, None)
-            self._center_stack.setCurrentWidget(self._sidecar_form)
+            self._show_pane(self._sidecar_form, path, root)
         self._validation_pane.set_current_file(path, root)
 
-    def _show_recording(self, path: Path) -> None:
-        """Route an EEG/MEG/iEEG recording to the recording viewer."""
-        root = self.current_root()
-        self._recording_viewer.set_file(path, root)
-        self._sidecar_form.set_file(None, None, None)
-        self._tsv_viewer.set_file(None, None)
-        self._nifti_viewer.set_file(None, None)
-        self._center_stack.setCurrentWidget(self._recording_viewer)
+    def _note_image(self, path: Path) -> None:
+        path = Path(path)
+        self._images_shown = [p for p in self._images_shown if p != path][-1:] + [path]
+
+    def _overlay_base(self, clicked: Path) -> Optional[Path]:
+        """The image a right-clicked one would be drawn over: the last other
+        image shown in the volume viewer (never a spectrum)."""
+        clicked = Path(clicked)
+        for p in reversed(self._images_shown):
+            if p != clicked and p.is_file() and not is_mrs_path(p):
+                return p
+        return None
+
+    def _on_header_requested(self, path, rule: str) -> None:
+        """A header finding: show the image, with the header inspector open
+        on the row that is the evidence for it."""
+        if path is None:
+            return
+        path = Path(path)
+        if self._nifti_viewer.current_file() != path:
+            self.select_file_in_tree(path)
+        self._nifti_viewer.show_header(rule)
+
+    def _on_overlay_requested(self, overlay, base) -> None:
+        """Show ``base`` again and draw ``overlay`` over it once it is open."""
+        self.select_file_in_tree(Path(base))
+        if self._nifti_viewer.current_file() != Path(base):
+            self._show_pane(self._nifti_viewer, Path(base), self.current_root())
+        self._nifti_viewer.add_overlay(Path(overlay))
+
+    def _viewer_panes(self) -> tuple:
+        return (self._sidecar_form, self._tsv_viewer, self._nifti_viewer,
+                self._signal_viewer, self._spectrum_viewer)
+
+    def _show_pane(self, pane, path: Optional[Path] = None,
+                   root: Optional[Path] = None) -> None:
+        """Bind ``pane`` to ``path`` and show it; clear every other one."""
+        for other in self._viewer_panes():
+            if other is not pane:
+                self._clear_pane(other)
+        if pane is self._sidecar_form:
+            self._sidecar_form.set_file(path, root, self._report)
+        elif path is not None:
+            pane.set_file(path, root)
+        self._center_stack.setCurrentWidget(pane)
+
+    def _clear_pane(self, pane) -> None:
+        if pane is self._sidecar_form:
+            self._sidecar_form.set_file(None, None, None)
+        else:
+            pane.set_file(None, None)
 
     def _on_pane_loading(self, busy: bool, message: str) -> None:
         """Mirror a center pane's threaded load onto the toolbar spinner.
@@ -1958,8 +1980,8 @@ class EditorPanel(QWidget):
         self._nifti_viewer.repaint_for_palette(pal)
         self._bidsignore_pane.repaint_for_palette(pal)
         self._citation_pane.repaint_for_palette(pal)
-        self._recording_viewer.repaint_for_palette(pal)
-        self._mrs_viewer.repaint_for_palette(pal)
+        self._signal_viewer.repaint_for_palette(pal)
+        self._spectrum_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
         for frame in getattr(self, "_panel_frames", []):
             frame._refresh_icons()

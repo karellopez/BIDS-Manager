@@ -199,6 +199,16 @@ class _EntityRow(QWidget):
         return self.edit.text().strip()
 
 
+
+def _row_spectrum(path) -> dict:
+    """Worker side: read a source recording and take its spectrum."""
+    from ..viz.compute.spectral import psd
+    from ..viz.data.signal import SignalSource, read_recording
+
+    src = SignalSource(path=Path(path), raw=read_recording(path, preload=True))
+    return psd(src)
+
+
 class PropertiesPanel(QWidget):
     """Right pane of the Converter view.
 
@@ -222,12 +232,17 @@ class PropertiesPanel(QWidget):
         # absolute recording path for the in-panel PSD compute (set by the
         # ConverterPanel whenever the scanned root changes).
         self._raw_root: Optional[Path] = None
-        # Background PSD computation state. Only one runs at a time; the worker
-        # is parented to this panel so it survives body rebuilds, and
-        # ``_psd_row_id`` identifies which recording is computing so the button
-        # renders its busy state even across a re-render.
-        self._psd_worker = None
+        # Background PSD computation. Only one runs at a time, on the viewer
+        # library's job runner (a QThread: it ends in an FFT), and
+        # ``_psd_row_id`` identifies which recording is computing so the
+        # button renders its busy state even across a re-render.
+        self._jobs = None
         self._psd_row_id: Optional[str] = None
+        self._psd_generation = 0
+        # The DICOM series preview: one at a time, on its own job.
+        self._preview_row_id: Optional[str] = None
+        self._preview_generation = 0
+        self._preview_dir: Optional[Path] = None
         # Whether the schema-driven sidecar section is open. Folded by default:
         # it offers everything the file may carry, which is the right answer to
         # "what can I state about this recording" and the wrong thing to greet
@@ -421,6 +436,8 @@ class PropertiesPanel(QWidget):
         sec.setStyleSheet(f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; font-weight: 600;")
         self._body_layout.addWidget(sec)
         self._body_layout.addWidget(self._build_path_preview(row, datatype, suffix, entities))
+        if self._cell(row, "series_uid").strip():
+            self._body_layout.addWidget(self._build_image_preview_row(row))
 
         # 4. Row-state notice (from the scanner's issues) +
         # schema validation. Two distinct sources of "what's wrong with
@@ -1045,7 +1062,7 @@ class PropertiesPanel(QWidget):
         h.setSpacing(8)
 
         is_computing = (
-            self._psd_worker is not None
+            self._psd_row_id is not None
             and self._model is not None
             and self._psd_row_id is not None
             and self._psd_row_id == self._model.row_id(row)
@@ -1102,8 +1119,111 @@ class PropertiesPanel(QWidget):
                 return c
         return None
 
+    def _runner(self):
+        """The panel's job runner (PSD and series previews), made on first use."""
+        if self._jobs is None:
+            from .viz.bridge import JobRunner
+
+            self._jobs = JobRunner(self)
+            self._jobs.done.connect(self._on_job_done)
+            self._jobs.failed.connect(self._on_job_failed)
+        return self._jobs
+
+    def _series_folder(self, row: int) -> Optional[Path]:
+        """The folder holding this row's DICOMs (``source_folder`` under the
+        raw root), when it exists."""
+        rel = self._cell(row, "source_folder").strip()
+        if not rel or self._raw_root is None:
+            return None
+        folder = Path(rel) if Path(rel).is_absolute() else self._raw_root / rel
+        return folder if folder.is_dir() else None
+
+    def _build_image_preview_row(self, row: int) -> QWidget:
+        """``[Preview the image] [spinner]``: convert this one series now and
+        look at it, before converting anything for real."""
+        row_w = QWidget()
+        row_w.setObjectName("meta-row")
+        row_w.setStyleSheet("#meta-row { background: transparent; }")
+        h = QHBoxLayout(row_w)
+        h.setContentsMargins(0, 4, 0, 2)
+        h.setSpacing(8)
+        busy = (self._preview_row_id is not None and self._model is not None
+                and self._preview_row_id == self._model.row_id(row))
+        btn = QPushButton("Preview the image")
+        btn.setObjectName("tb-btn")
+        btn.setToolTip("Convert this series now, the way the conversion will, into a "
+                       "temporary folder, and look at it. Nothing is written to the "
+                       "dataset.")
+        if busy:
+            btn.setText("Converting for a preview...")
+            btn.setEnabled(False)
+        elif self._series_folder(row) is None:
+            btn.setEnabled(False)
+            btn.setToolTip("The folder this series came from cannot be found.")
+        elif self._preview_row_id is not None:
+            btn.setEnabled(False)
+        else:
+            btn.clicked.connect(lambda _=False, r=row: self._on_preview_image(r))
+        self.preview_button = btn
+        h.addWidget(btn)
+        spinner = BusySpinner()
+        if busy:
+            spinner.set_busy(True, message="")
+        h.addWidget(spinner)
+        h.addStretch(1)
+        return row_w
+
+    def _on_preview_image(self, row: int) -> None:
+        import tempfile
+
+        from ..inventory.probe_convert import preview_series
+
+        folder = self._series_folder(row)
+        uid = self._cell(row, "series_uid").strip()
+        if self._model is None or folder is None or not uid or self._preview_row_id:
+            return
+        self._preview_dir = Path(tempfile.mkdtemp(prefix="bidsmgr-preview-"))
+        self._preview_row_id = self._model.row_id(row)
+        self._preview_generation += 1
+        self._preview_title = (self._cell(row, "SeriesDescription").strip()
+                               or self._cell(row, "bids_name").strip() or uid)
+        self._runner().start("image-preview", self._preview_generation, preview_series,
+                             folder, uid, self._preview_dir)
+        self.set_selected_row(row)
+
+    def _on_preview_ready(self, generation: int, images) -> None:
+        if generation != self._preview_generation:
+            return
+        from .series_preview_dialog import SeriesPreviewDialog
+
+        self._preview_row_id = None
+        dlg = SeriesPreviewDialog(images, self._preview_dir, self._preview_title, parent=self)
+        self._preview_dir = None
+        self.preview_dialog = dlg
+        dlg.show()
+        if self._row is not None:
+            self.set_selected_row(self._row)
+
+    def _on_preview_failed(self, generation: int, msg: str) -> None:
+        if generation != self._preview_generation:
+            return
+        import shutil
+
+        self._preview_row_id = None
+        if self._preview_dir is not None:
+            shutil.rmtree(self._preview_dir, ignore_errors=True)
+            self._preview_dir = None
+        QMessageBox.warning(self, "Preview", f"The series could not be converted: {msg}")
+        if self._row is not None:
+            self.set_selected_row(self._row)
+
     def _on_compute_psd(self, row: int) -> None:
-        if self._model is None or self._psd_worker is not None:
+        """The spectrum of this row's recording: THE spectrum the Editor's
+        viewer computes (``viz.compute.spectral.psd``, Welch over every
+        channel's samples), so the same file gives the same answer in both
+        places. It used to be ``Raw.compute_psd`` here, which drops stim and
+        misc channels, and Welch in the viewer."""
+        if self._model is None or self._psd_row_id is not None:
             return
         path = self._resolve_source_path(row)
         if path is None:
@@ -1111,62 +1231,34 @@ class PropertiesPanel(QWidget):
                 self, "PSD", "No readable source recording found for this row."
             )
             return
-        from ..workers import RecordingComputeWorker
 
         self._psd_row_id = self._model.row_id(row)
-
-        def _compute(p=path):
-            import mne
-            import numpy as np
-
-            from .widgets.recording_viewer_pane import _read_raw
-
-            raw = _read_raw(p, preload=True)
-            sfreq = float(raw.info["sfreq"])
-            fmax = min(sfreq / 2.0, 150.0)
-            psd = raw.compute_psd(fmin=0.1, fmax=fmax, verbose=False)
-            data = np.asarray(psd.get_data())
-            freqs = np.asarray(psd.freqs)
-            # compute_psd returns only data channels, in its own order - rows
-            # align with psd.ch_names, not the raw channel list. Derive types
-            # from the raw info by name so labels/types stay correct.
-            names = list(psd.ch_names)
-            raw_names = list(raw.ch_names)
-            types = []
-            for ch in names:
-                try:
-                    types.append(mne.channel_type(raw.info, raw_names.index(ch)))
-                except ValueError:
-                    types.append("misc")
-            n = min(data.shape[0], len(names), len(types))
-            return {
-                "freqs": freqs,
-                "data": data[:n],
-                "ch_names": names[:n],
-                "ch_types": types[:n],
-            }
-
-        worker = RecordingComputeWorker(_compute, parent=self)
-        worker.finished_with_result.connect(self._on_psd_ready)
-        worker.failed.connect(self._on_psd_failed)
-        worker.finished.connect(worker.deleteLater)
-        self._psd_worker = worker
-        worker.start()
+        self._psd_generation += 1
+        self._runner().start("psd", self._psd_generation, _row_spectrum, path)
         # Re-render so the button shows its busy state (spinner + disabled).
         self.set_selected_row(row)
 
-    def _on_psd_ready(self, result) -> None:
-        self._psd_worker = None
+    def _on_job_done(self, tag: str, generation: int, result) -> None:
+        if tag == "image-preview":
+            self._on_preview_ready(generation, result)
+            return
+        if generation != self._psd_generation:
+            return
         self._psd_row_id = None
-        from .widgets.psd_dialog import PsdDialog
+        from .viz.canvases.psd import PsdWindow
 
-        dlg = PsdDialog(result, parent=self)
-        dlg.show()
+        win = PsdWindow(result, parent=self)
+        win.show()
+        self._psd_window = win
         if self._row is not None:
             self.set_selected_row(self._row)
 
-    def _on_psd_failed(self, msg) -> None:
-        self._psd_worker = None
+    def _on_job_failed(self, tag: str, generation: int, msg: str) -> None:
+        if tag == "image-preview":
+            self._on_preview_failed(generation, msg)
+            return
+        if generation != self._psd_generation:
+            return
         self._psd_row_id = None
         QMessageBox.warning(self, "PSD error", str(msg))
         if self._row is not None:

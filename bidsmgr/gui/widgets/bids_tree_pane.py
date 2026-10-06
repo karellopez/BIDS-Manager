@@ -379,9 +379,14 @@ class BidsTreePane(QWidget):
     compare_requested = pyqtSignal(list)
     #: Open the references tool on the clicked file. ``list[Path]``, one file.
     links_requested = pyqtSignal(list)
+    #: Draw the clicked image over another: ``(overlay, base)`` paths.
+    overlay_requested = pyqtSignal(object, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        #: The host's answer to "which image would the clicked one go over",
+        #: ``fn(clicked) -> Optional[Path]``. None: no overlay entry.
+        self.overlay_base = None
         self.setObjectName("pane")
         self._root: Optional[Path] = None
         # Remember the last severity badges so a live (watcher-driven) refresh
@@ -1121,6 +1126,17 @@ class BidsTreePane(QWidget):
             compare_images.triggered.connect(
                 lambda _c=False, s=images[:2]: self.compare_requested.emit(s)
             )
+            base = self.overlay_base(images[0]) if (
+                self.overlay_base is not None and not pair) else None
+            if base is not None:
+                over = menu.addAction(f"Draw over {base.name}")
+                over.setToolTip(
+                    "Put this image over the one you were looking at: an atlas, "
+                    "a mask or a statistical map, resliced onto its grid."
+                )
+                over.triggered.connect(
+                    lambda _c=False, o=images[0], b=base: self.overlay_requested.emit(o, b)
+                )
 
         # References, offered only where a link field is worth having: on a
         # fieldmap, an MEG recording, a derivative. Offering it on every

@@ -415,6 +415,67 @@ def _enrich_pet_probe(stats: "ProbeFileStats", staging_dir: Path) -> None:
         stats.sidecar_fields.setdefault(key, value)
 
 
+def series_files(folder: Path, series_uid: str, cancel=None) -> list[str]:
+    """Every DICOM under ``folder`` whose SeriesInstanceUID is ``series_uid``.
+
+    Reads only that one tag of each candidate file (``specific_tags``), so a
+    folder of a few thousand files is seconds, on a worker. For the series
+    preview, which has no scan result to look the files up in.
+    """
+    import pydicom
+
+    from .mri_dicom import is_dicom_file
+
+    out: list[str] = []
+    for dirpath, _dirs, names in os.walk(folder):
+        for name in names:
+            if cancel is not None and cancel():
+                raise RuntimeError("cancelled")
+            path = os.path.join(dirpath, name)
+            if not is_dicom_file(path):
+                continue
+            try:
+                ds = pydicom.dcmread(path, stop_before_pixels=True, force=True,
+                                     specific_tags=["SeriesInstanceUID"])
+            except Exception:  # noqa: BLE001 - not every file is readable DICOM
+                continue
+            if str(getattr(ds, "SeriesInstanceUID", "")) == series_uid:
+                out.append(path)
+    return sorted(out)
+
+
+def preview_series(
+    folder: Path,
+    series_uid: str,
+    work_dir: Path,
+    *,
+    dcm2niix_bin: Optional[Path] = None,
+    cancel=None,
+) -> list[Path]:
+    """Convert ONE series for a look before the real conversion.
+
+    The same staging and the same dcm2niix call as the probe, into
+    ``work_dir`` (which the caller removes). Returns the images dcm2niix
+    made, several when the series splits (echoes, magnitude and phase).
+    """
+    files = series_files(Path(folder), series_uid, cancel)
+    if not files:
+        raise ValueError(f"no DICOM of this series was found under {folder}")
+    work_dir = Path(work_dir)
+    staging = work_dir / "_dicoms"
+    _stage_series(series_uid, files, staging)
+    output = work_dir / "out"
+    output.mkdir(parents=True, exist_ok=True)
+    proc = _run_dcm2niix_full(staging, output, dcm2niix_bin=dcm2niix_bin)
+    images = sorted(output.glob("*.nii.gz")) + sorted(output.glob("*.nii"))
+    if not images:
+        detail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        raise RuntimeError(
+            f"dcm2niix made no image of this series (exit {proc.returncode})"
+            + (f": {detail}" if detail else ""))
+    return images
+
+
 def probe_rows(
     rows: Iterable[InventoryRow],
     work_root: Path,

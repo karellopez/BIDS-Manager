@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .deface_compare import size_to_screen
-from .widgets.compare_panes import ComparePanes
+from .viz.compare import ComparePanes
 from .widgets.nifti_picker import ask_for_image, is_nifti
 from .widgets.primitives import ElidedLabel
 
@@ -166,6 +166,20 @@ class CompareDialog(QDialog):
             left_title=f"Left: {self._describe(self._left)}",
             right_title=f"Right: {self._describe(self._right)}",
         )
+
+    @property
+    def panes(self) -> ComparePanes:
+        """The two linked viewers."""
+        return self._panes
+
+    @property
+    def chosen(self) -> tuple[Optional[Path], Optional[Path]]:
+        """The left and right image, as picked so far."""
+        return self._left, self._right
+
+    def captions(self) -> tuple[str, str]:
+        """What the two pickers say."""
+        return self._left_label.text(), self._right_label.text()
 
     # -- closing ----------------------------------------------------------
 

@@ -1,0 +1,1181 @@
+"""The volume viewer, driven the way the Editor and a user drive it.
+
+Replaces the tests of the old ``NiftiViewerPane`` (2-D slices, the
+multi-planar view, the 4-D graph, the crosshair preferences, the remembered
+layout, PET time axes). Everything here goes through the public surface:
+``Viewer`` methods and signals, its actions (what a button, a key or a menu
+entry does), its canvases, and the library's ``views`` queries, never a
+private attribute of a widget.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+nib = pytest.importorskip("nibabel")
+pytest.importorskip("pyqtgraph")
+
+from PyQt6.QtCore import QPoint, QPointF, Qt  # noqa: E402
+
+from bidsmgr.gui.viz import Viewer  # noqa: E402
+from bidsmgr.gui.viz.bridge import SettingsHub  # noqa: E402
+from bidsmgr.viz import views  # noqa: E402
+
+pytestmark = pytest.mark.gui
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+
+def _write(path: Path, arr: np.ndarray, affine=None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(nib.Nifti1Image(arr, np.eye(4) if affine is None else affine), str(path))
+    return path
+
+
+@pytest.fixture
+def ds(tmp_path: Path) -> Path:
+    root = tmp_path / "Studyname"
+    anat = root / "sub-01" / "ses-01" / "anat"
+    # A gradient, so every voxel has its own value: data[i, j, k] = i*96 + j*8 + k.
+    _write(anat / "sub-01_ses-01_T1w.nii.gz",
+           np.arange(10 * 12 * 8, dtype=np.float32).reshape(10, 12, 8))
+    _write(anat / "sub-01_ses-01_T2w.nii", np.ones((4, 4, 4), dtype=np.float32))
+    _write(root / "sub-01" / "ses-01" / "func" / "sub-01_ses-01_task-rest_bold.nii.gz",
+           np.random.default_rng(42).random((6, 6, 4, 3), dtype=np.float32))
+    return root
+
+
+def _t1(root: Path) -> Path:
+    return root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.nii.gz"
+
+
+def _t2(root: Path) -> Path:
+    return root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T2w.nii"
+
+
+def _bold(root: Path) -> Path:
+    return root / "sub-01" / "ses-01" / "func" / "sub-01_ses-01_task-rest_bold.nii.gz"
+
+
+@pytest.fixture
+def no_gpu(monkeypatch):
+    """The host's GPU must not decide what a 2-D test measures."""
+    from bidsmgr.gui.viz.canvases import render
+
+    monkeypatch.setattr(render, "gpu_available", lambda: False)
+
+
+def _viewer(qtbot, *, show: bool = True, size=(1000, 640)) -> Viewer:
+    viewer = Viewer(kind="volume")
+    qtbot.addWidget(viewer)
+    if show:
+        viewer.resize(*size)
+        viewer.show()
+        qtbot.waitExposed(viewer)
+    return viewer
+
+
+def _open(qtbot, viewer: Viewer, path: Path, root=None, timeout=20_000) -> Viewer:
+    with qtbot.waitSignal(viewer.loaded, timeout=timeout):
+        viewer.set_file(path, root)
+    viewer.qstore.flush()
+    return viewer
+
+
+def _settle(qtbot, viewer: Viewer) -> None:
+    viewer.qstore.flush()
+    qtbot.wait(5)
+    for canvas in viewer.canvases("slice"):
+        canvas.repaint()
+
+
+def _click(qtbot, canvas, col: float, row: float, button=Qt.MouseButton.LeftButton) -> None:
+    canvas.repaint()
+    pt = canvas.grid_to_screen(col, row).toPoint()
+    qtbot.mouseClick(canvas, button, pos=pt)
+
+
+def _canvas(viewer: Viewer, plane: str):
+    for c in viewer.canvases("slice"):
+        if c.plane == plane:
+            return c
+    raise AssertionError(f"no {plane} canvas on screen")
+
+
+# ---------------------------------------------------------------------------
+# Opening and closing
+# ---------------------------------------------------------------------------
+
+
+def test_it_starts_with_a_hint(qtbot, no_gpu) -> None:
+    viewer = _viewer(qtbot)
+    assert viewer.current_file() is None
+    assert viewer.page() == "hint"
+    assert not viewer.toolbar_visible()
+
+
+def test_a_volume_opens_on_its_centre(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.current_file() == _t1(ds)
+    assert viewer.page() == "content" and viewer.toolbar_visible()
+    assert views.cursor_voxel(viewer.store) == (5, 6, 4)
+    # data[5, 6, 4] = 5*96 + 6*8 + 4 = 532, shown in the readout with its
+    # millimetres and the FILE's own voxel indices.
+    text = viewer.readout_text()
+    assert "(5, 6, 4) = 532" in text and "mm" in text
+
+
+def test_the_footer_names_the_file_and_its_shape(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.path_text() == "sub-01/ses-01/anat/sub-01_ses-01_T1w.nii.gz"
+    assert "10x12x8" in viewer.summary_text()
+    assert "float32" in viewer.summary_text()
+
+
+def test_an_uncompressed_nifti_opens(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t2(ds), ds)
+    assert viewer.source().spatial == (4, 4, 4)
+
+
+def test_a_series_offers_its_volumes(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    src = viewer.source()
+    assert src.n_frames == 3 and src.fully_loaded
+    assert viewer.action("frame.next").isEnabled()
+    viewer.trigger("frame.last")
+    assert viewer.scene.base_layer().frame == 2
+
+
+def test_a_single_volume_offers_no_volume_stepping(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert not viewer.action("frame.next").isEnabled()
+    assert not viewer.action("view.graph").isEnabled()
+
+
+def test_set_file_none_clears(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.set_file(None, None)
+    assert viewer.current_file() is None
+    assert viewer.source() is None
+    assert viewer.page() == "hint"
+    assert viewer.store.sources == {}
+
+
+def test_a_bad_file_says_so(qtbot, tmp_path, no_gpu) -> None:
+    viewer = _viewer(qtbot)
+    bad = tmp_path / "not_a_nifti.nii.gz"
+    bad.write_bytes(b"garbage bytes")
+    with qtbot.waitSignal(viewer.load_failed, timeout=5000):
+        viewer.set_file(bad, tmp_path)
+    assert viewer.source() is None
+    assert viewer.page() == "hint"
+    assert "not_a_nifti" in viewer.hint_text()
+
+
+def test_the_loading_page_shows_at_once(qtbot, ds, no_gpu) -> None:
+    """The spinner appears the moment the file is chosen, before any read."""
+    viewer = _viewer(qtbot)
+    with qtbot.waitSignal(viewer.loaded, timeout=20_000):
+        viewer.set_file(_t1(ds), ds)
+        assert viewer.page() == "loading"
+        assert not viewer.toolbar_visible()
+    assert viewer.page() == "content"
+
+
+def test_a_quick_second_choice_wins(qtbot, ds, no_gpu) -> None:
+    """A stale read for the first file must not land on the second."""
+    viewer = _viewer(qtbot)
+    with qtbot.waitSignal(viewer.loaded, timeout=20_000) as blocker:
+        viewer.set_file(_t1(ds), ds)
+        viewer.set_file(_bold(ds), ds)
+    assert blocker.args == [_bold(ds)]
+    qtbot.wait(100)
+    assert viewer.current_file() == _bold(ds)
+    assert viewer.source().n_frames == 3
+
+
+def test_reopening_the_same_file_twice_is_clean(qtbot, ds, no_gpu) -> None:
+    """The generation number, not the path, decides staleness."""
+    viewer = _viewer(qtbot)
+    viewer.set_file(_t1(ds), ds)
+    _open(qtbot, viewer, _t1(ds), ds)
+    qtbot.wait(100)
+    assert viewer.source().fully_loaded
+    assert views.cursor_voxel(viewer.store) == (5, 6, 4)
+
+
+# ---------------------------------------------------------------------------
+# The Editor routes volumes here
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("which", [_t1, _t2])
+def test_the_editor_shows_a_volume_in_the_viewer(qtbot, ds, no_gpu, which) -> None:
+    from bidsmgr.gui.editor_panel import EditorPanel
+
+    panel = EditorPanel()
+    qtbot.addWidget(panel)
+    panel._set_root(ds, persist=False)
+    viewer = panel._nifti_viewer
+    with qtbot.waitSignal(viewer.loaded, timeout=20_000):
+        panel._on_file_selected(which(ds))
+    assert panel._center_stack.currentWidget() is viewer
+    assert viewer.current_file() == which(ds)
+
+
+def test_the_editor_clears_the_viewer_for_a_sidecar(qtbot, ds, no_gpu) -> None:
+    from bidsmgr.gui.editor_panel import EditorPanel
+
+    panel = EditorPanel()
+    qtbot.addWidget(panel)
+    panel._set_root(ds, persist=False)
+    sidecar = _t1(ds).with_name("sub-01_ses-01_T1w.json")
+    sidecar.write_text('{"Manufacturer": "Siemens"}')
+    with qtbot.waitSignal(panel._nifti_viewer.loaded, timeout=20_000):
+        panel._on_file_selected(_t1(ds))
+    panel._on_file_selected(sidecar)
+    assert panel._center_stack.currentWidget() is panel._sidecar_form
+    assert panel._nifti_viewer.current_file() is None
+
+
+# ---------------------------------------------------------------------------
+# One plane
+# ---------------------------------------------------------------------------
+
+
+def test_the_plane_buttons_size_the_slice_slider(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    for action, plane, depth in (("view.axial", "axial", 8),
+                                 ("view.sagittal", "sagittal", 10),
+                                 ("view.coronal", "coronal", 12)):
+        viewer.button(action).click()
+        viewer.qstore.flush()
+        assert viewer.scene.mode == "single" and viewer.scene.plane == plane
+        assert views.slice_count(viewer.store, plane) == depth
+        assert viewer.presenter.slice_control.maximum() == depth - 1
+
+
+def test_the_slice_slider_moves_the_crosshair(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.axial")
+    viewer.qstore.flush()
+    viewer.presenter.slice_control.type_value(1)
+    assert views.cursor_voxel(viewer.store)[2] == 1
+
+
+def test_a_click_moves_the_crosshair_to_the_voxel_under_it(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.axial")
+    _settle(qtbot, viewer)
+    canvas = _canvas(viewer, "axial")
+    grid = views.grid(viewer.store, "axial")
+    # Axial: columns run toward +x (i), rows down from +y (j).
+    want_i, want_j = 2, 9
+    col = want_i
+    row = grid.shape[0] - 1 - want_j
+    _click(qtbot, canvas, col, row)
+    assert views.cursor_voxel(viewer.store) == (want_i, want_j, 4)
+    viewer.qstore.flush()   # notifications are coalesced to one per event-loop turn
+    assert f"({want_i}, {want_j}, 4)" in viewer.readout_text()
+
+
+def test_dragging_moves_the_crosshair_continuously(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.axial")
+    _settle(qtbot, viewer)
+    canvas = _canvas(viewer, "axial")
+    a = canvas.grid_to_screen(1, 1).toPoint()
+    b = canvas.grid_to_screen(7, 9).toPoint()
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=a)
+    first = views.cursor_voxel(viewer.store)
+    qtbot.mouseMove(canvas, pos=b)
+    # QTest.mouseMove carries no button state on every platform; send the
+    # move a held button produces.
+    from PyQt6.QtGui import QMouseEvent
+
+    canvas.mouseMoveEvent(QMouseEvent(
+        QMouseEvent.Type.MouseMove, QPointF(b), QPointF(b),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    second = views.cursor_voxel(viewer.store)
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=b)
+    assert first != second
+
+
+def test_the_wheel_steps_slices(qtbot, ds, no_gpu) -> None:
+    from PyQt6.QtGui import QWheelEvent
+
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.axial")
+    _settle(qtbot, viewer)
+    canvas = _canvas(viewer, "axial")
+    before = views.slice_index(viewer.store, "axial")
+    ev = QWheelEvent(QPointF(20, 20), QPointF(20, 20), QPoint(0, 0), QPoint(0, -120),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    canvas.wheelEvent(ev)
+    assert views.slice_index(viewer.store, "axial") == before + 1
+
+
+def test_a_horizontal_scroll_steps_volumes(qtbot, ds, no_gpu) -> None:
+    """Shift+wheel arrives as a horizontal scroll on X11 and macOS."""
+    from PyQt6.QtGui import QWheelEvent
+
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    viewer.trigger("view.axial")
+    _settle(qtbot, viewer)
+    canvas = _canvas(viewer, "axial")
+    ev = QWheelEvent(QPointF(20, 20), QPointF(20, 20), QPoint(0, 0), QPoint(120, 0),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    canvas.wheelEvent(ev)
+    assert viewer.scene.base_layer().frame == 1
+
+
+# ---------------------------------------------------------------------------
+# Three planes
+# ---------------------------------------------------------------------------
+
+
+def test_multi_planar_shows_three_planes(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.mode", mode="single")
+    viewer.button("view.multi").click()
+    _settle(qtbot, viewer)
+    assert viewer.scene.mode == "multi"
+    assert sorted(c.plane for c in viewer.canvases("slice")) == ["axial", "coronal", "sagittal"]
+    for canvas in viewer.canvases("slice"):
+        image = canvas.grab_image()
+        assert not image.isNull()
+    # Toggling again returns to one plane.
+    viewer.button("view.multi").click()
+    viewer.qstore.flush()
+    assert viewer.scene.mode == "single"
+
+
+def test_a_click_on_the_coronal_plane_keeps_its_slice(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.mode", mode="multi")
+    _settle(qtbot, viewer)
+    before = views.cursor_voxel(viewer.store)
+    canvas = _canvas(viewer, "coronal")
+    _click(qtbot, canvas, 1, 1)
+    after = views.cursor_voxel(viewer.store)
+    assert after[1] == before[1]            # j is the coronal slice
+    assert after != before
+    for axis, dim in enumerate((10, 12, 8)):
+        assert 0 <= after[axis] < dim
+
+
+def _thick(root: Path) -> Path:
+    """A thick-slice scan: 1 x 1 mm in plane, 5 mm between slices."""
+    return _write(root / "sub-01" / "anat" / "sub-01_FLAIR.nii.gz",
+                  np.arange(40 * 40 * 8, dtype=np.float32).reshape(40, 40, 8),
+                  affine=np.diag([1.0, 1.0, 5.0, 1.0]))
+
+
+def test_thick_slices_are_drawn_to_scale(qtbot, tmp_path, no_gpu) -> None:
+    """Fitted by millimetres, not voxels: a 5 mm slice is five times taller."""
+    viewer = _open(qtbot, _viewer(qtbot, size=(1200, 520)), _thick(tmp_path), tmp_path)
+    viewer.run("view.mode", mode="multi")
+    _settle(qtbot, viewer)
+    for canvas in viewer.canvases("slice"):
+        grid = views.grid(viewer.store, canvas.plane)
+        rows, cols = grid.shape
+        a = canvas.grid_to_screen(0, 0)
+        b = canvas.grid_to_screen(cols - 1, rows - 1)
+        px_per_mm_across = (b.x() - a.x()) / ((cols - 1) * grid.pixel_mm[0])
+        px_per_mm_down = (b.y() - a.y()) / ((rows - 1) * grid.pixel_mm[1])
+        assert px_per_mm_down == pytest.approx(px_per_mm_across, rel=0.03), canvas.plane
+    coronal = _canvas(viewer, "coronal")
+    grid = views.grid(viewer.store, "coronal")
+    a, b = coronal.grid_to_screen(0, 0), coronal.grid_to_screen(1, 1)
+    assert (b.y() - a.y()) / (b.x() - a.x()) == pytest.approx(5.0, rel=0.03)
+
+
+def test_a_click_on_a_thick_slice_lands_on_its_voxel(qtbot, tmp_path, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot, size=(1200, 520)), _thick(tmp_path), tmp_path)
+    viewer.run("view.mode", mode="multi")
+    _settle(qtbot, viewer)
+    coronal = _canvas(viewer, "coronal")
+    grid = views.grid(viewer.store, "coronal")
+    j = views.cursor_voxel(viewer.store)[1]
+    want = (30, j, 6)
+    # Coronal: columns toward +x (i), rows down from +z (k).
+    _click(qtbot, coronal, want[0], grid.shape[0] - 1 - want[2])
+    assert views.cursor_voxel(viewer.store) == want
+
+
+# ---------------------------------------------------------------------------
+# The time-course graph
+# ---------------------------------------------------------------------------
+
+
+def _with_graph(qtbot, ds, path=None, root=None):
+    viewer = _open(qtbot, _viewer(qtbot), path or _bold(ds), root or ds)
+    viewer.run("view.graph", value=True)
+    viewer.qstore.flush()
+    qtbot.waitUntil(lambda: bool(viewer.canvases("graph")), timeout=5000)
+    graph = viewer.canvases("graph")[0]
+    graph.refresh()
+    return viewer, graph
+
+
+def test_the_graph_plots_the_voxel_under_the_crosshair(qtbot, ds, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    assert viewer.scene.graph_visible
+    i, j, k = views.cursor_voxel(viewer.store)
+    expected = nib.load(str(_bold(ds))).get_fdata()[i, j, k, :]
+    assert np.allclose(graph.center_series(), expected)
+
+
+def test_the_graph_follows_the_crosshair(qtbot, ds, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    viewer.run("cursor.set_voxel", i=1, j=2, k=3)
+    viewer.qstore.flush()
+    expected = nib.load(str(_bold(ds))).get_fdata()[1, 2, 3, :]
+    assert np.allclose(graph.center_series(), expected)
+
+
+def test_the_graph_marker_follows_the_volume(qtbot, ds, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    viewer.presenter.frame_control.type_value(2)
+    viewer.qstore.flush()
+    x, y = graph.marker_points()[0]
+    assert x == 2.0 and y == pytest.approx(graph.center_series()[2])
+
+
+def test_scope_builds_a_neighbour_grid(qtbot, ds, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    graph.scope_spin.setValue(2)
+    viewer.qstore.flush()
+    assert graph.cell_count() == 9
+    assert len(graph.marker_points()) == 9
+    graph.marks_box.setChecked(False)
+    viewer.qstore.flush()
+    assert len(graph.marker_points()) == 1
+    graph.dot_spin.setValue(16)
+    viewer.qstore.flush()
+    assert graph.marker_size() == 16
+    graph.scope_spin.setValue(1)
+    viewer.qstore.flush()
+    assert graph.cell_count() == 1
+
+
+def test_a_neighbourhood_at_the_edge_skips_what_is_outside(qtbot, ds, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    viewer.run("cursor.set_voxel", i=0, j=0, k=0)
+    graph.scope_spin.setValue(2)
+    viewer.qstore.flush()
+    assert graph.cell_count() == 4      # a corner keeps 2 x 2 of its 3 x 3
+
+
+def test_the_graph_cannot_be_dragged_away(qtbot, ds, no_gpu) -> None:
+    _viewer_, graph = _with_graph(qtbot, ds)
+    assert graph.mouse_locked()
+
+
+def test_percent_change_scaling(qtbot, ds, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    raw = graph.center_series().copy()
+    graph.scaling_combo.setCurrentIndex(graph.scaling_combo.findData("percent"))
+    viewer.qstore.flush()
+    assert viewer.scene.graph.scaling == "percent"
+    expected = (raw - raw.mean()) / raw.mean() * 100.0
+    assert np.allclose(graph.center_series(), expected)
+
+
+@pytest.mark.parametrize("scope", [1, 2])
+def test_clicking_the_graph_jumps_to_that_volume(qtbot, ds, no_gpu, scope) -> None:
+    viewer, graph = _with_graph(qtbot, ds)
+    viewer.run("graph.set", scope=scope)
+    viewer.run("frame.set", frame=0)
+    viewer.qstore.flush()
+    pos = graph.view_to_scene(2.0, float(np.mean(graph.center_series())))
+
+    class _Click:
+        def scenePos(self):
+            return pos
+
+        def double(self):
+            return False
+
+        def accept(self):
+            pass
+
+    graph._on_click(_Click())
+    assert viewer.scene.base_layer().frame == 2
+
+
+def test_the_graph_closes_for_a_single_volume(qtbot, ds, no_gpu) -> None:
+    viewer, _graph = _with_graph(qtbot, ds)
+    _open(qtbot, viewer, _t1(ds), ds)
+    assert not viewer.action("view.graph").isEnabled()
+    assert viewer.canvases("graph") == []
+    viewer.button("view.graph").click()   # disabled: does nothing
+    assert viewer.canvases("graph") == []
+
+
+def test_the_graph_toggle_hides_it(qtbot, ds, no_gpu) -> None:
+    viewer, _graph = _with_graph(qtbot, ds)
+    viewer.button("view.graph").click()
+    viewer.qstore.flush()
+    assert not viewer.scene.graph_visible
+    assert viewer.canvases("graph") == []
+
+
+# -- PET: a time axis in real seconds -----------------------------------
+
+DURATIONS = [10] * 6 + [30] * 4 + [60] * 5 + [300] * 5
+
+
+def _starts() -> list[float]:
+    out, t = [], 0.0
+    for d in DURATIONS:
+        out.append(t)
+        t += d
+    return out
+
+
+def _pet(tmp_path: Path, *, name="sub-001_pet", sidecar=None) -> Path:
+    d = tmp_path / "sub-001" / ("pet" if name.endswith("_pet") else "func")
+    n = len(DURATIONS)
+    mid = np.asarray(_starts()) + np.asarray(DURATIONS) / 2
+    data = np.zeros((6, 6, 3, n), dtype=np.float32)
+    data[:] = (40 * np.exp(-mid / 200) + 12 * (1 - np.exp(-mid / 60)))[None, None, None, :]
+    img = _write(d / f"{name}.nii.gz", data)
+    payload = {"FrameTimesStart": _starts(), "FrameDuration": DURATIONS}
+    (d / f"{name}.json").write_text(json.dumps(payload if sidecar is None else sidecar))
+    return img
+
+
+def test_pet_is_graphed_against_mid_frame_seconds(qtbot, tmp_path, no_gpu) -> None:
+    """Uneven frames: 10 s early, 300 s late. An index axis flattens the
+    uptake, exactly where the kinetics are."""
+    viewer, graph = _with_graph(qtbot, None, _pet(tmp_path), tmp_path)
+    x = graph.x_values()
+    mids = np.asarray(_starts()) + np.asarray(DURATIONS) / 2
+    assert graph.x_is_time()
+    assert np.allclose(x, mids)
+    assert x[1] - x[0] == pytest.approx(10.0)
+    assert x[-1] - x[-2] == pytest.approx(300.0)
+    # The marker lands on the frame's real time, not its index.
+    viewer.trigger("frame.last")
+    viewer.qstore.flush()
+    assert graph.marker_points()[0][0] == pytest.approx(mids[-1])
+
+
+def test_a_series_without_timing_keeps_the_volume_axis(qtbot, tmp_path, no_gpu) -> None:
+    """A BOLD file carrying a stray PET key keeps the volume number."""
+    img = _pet(tmp_path, name="sub-001_task-rest_bold")
+    _viewer_, graph = _with_graph(qtbot, None, img, tmp_path)
+    assert not graph.x_is_time()
+    assert list(graph.x_values()) == list(range(len(DURATIONS)))
+
+
+def test_the_time_axis_can_be_forced_to_volumes(qtbot, tmp_path, no_gpu) -> None:
+    viewer, graph = _with_graph(qtbot, None, _pet(tmp_path), tmp_path)
+    graph.x_combo.setCurrentIndex(graph.x_combo.findData("frames"))
+    viewer.qstore.flush()
+    assert not graph.x_is_time()
+
+
+@pytest.mark.parametrize("sidecar", [
+    {"FrameTimesStart": [0], "FrameDuration": [300]},
+    {"FrameTimesStart": ["early", "late"]},
+])
+def test_unusable_pet_timing_falls_back_to_volumes(qtbot, tmp_path, no_gpu, sidecar) -> None:
+    _viewer_, graph = _with_graph(qtbot, None, _pet(tmp_path, sidecar=sidecar), tmp_path)
+    assert not graph.x_is_time()
+
+
+# ---------------------------------------------------------------------------
+# Crosshair preferences
+# ---------------------------------------------------------------------------
+
+
+def test_crosshair_thickness_is_remembered(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    _column(viewer).view.cross_width.type_value(4)
+    assert SettingsHub.instance().settings.crosshair.thickness == 4
+    # A new session reads it back from disk.
+    SettingsHub.reset_instance()
+    again = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert _column(again).view.cross_width.value() == 4
+
+
+def test_crosshair_colour_is_remembered(qtbot, ds, no_gpu) -> None:
+    SettingsHub.instance().update(lambda s: setattr(s.crosshair, "color", "#ff8800"))
+    SettingsHub.reset_instance()
+    assert SettingsHub.instance().settings.crosshair.color.lower() == "#ff8800"
+
+
+def test_a_preference_reaches_an_open_viewer_at_once(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    SettingsHub.instance().update(lambda s: setattr(s.crosshair, "thickness", 3))
+    assert _column(viewer).view.cross_width.value() == 3
+
+
+# ---------------------------------------------------------------------------
+# The layout a volume opens in
+# ---------------------------------------------------------------------------
+
+
+def _remember(mode: str = "", plane: str = "axial") -> None:
+    def keep(s):
+        s.volume.mode = mode
+        s.volume.plane = plane
+    SettingsHub.instance().update(keep)
+    SettingsHub.reset_instance()
+
+
+def test_the_first_volume_opens_multi_planar_without_a_gpu(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.scene.mode == "multi"
+    assert viewer.scene.plane == "axial"
+
+
+@pytest.mark.parametrize("mode", ["single", "multi", "hero", "mosaic"])
+def test_the_remembered_layout_is_what_opens(qtbot, ds, no_gpu, mode) -> None:
+    _remember(mode)
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.scene.mode == mode
+
+
+@pytest.mark.parametrize("mode", ["3d", "combo"])
+def test_a_remembered_3d_layout_falls_back_to_the_planes(qtbot, ds, no_gpu, mode) -> None:
+    """It used to land on a single axial slice."""
+    _remember(mode)
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.scene.mode == "multi"
+
+
+def test_a_junk_setting_is_ignored(qtbot, ds, no_gpu) -> None:
+    from bidsmgr.gui.app_settings import AppSettings, KEYS
+
+    AppSettings._settings().setValue(KEYS["viz_settings"], json.dumps(
+        {"volume": {"mode": "sideways", "plane": "diagonal"}}))
+    SettingsHub.reset_instance()
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.scene.mode == "multi" and viewer.scene.plane == "axial"
+
+
+def test_switching_layout_is_remembered_at_once(qtbot, ds, no_gpu) -> None:
+    """Written as the user switches: the Editor is not always closed cleanly."""
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.button("view.sagittal").click()
+    viewer.qstore.flush()
+    s = SettingsHub.instance().settings.volume
+    assert (s.mode, s.plane) == ("single", "sagittal")
+    viewer.button("view.multi").click()
+    viewer.qstore.flush()
+    assert SettingsHub.instance().settings.volume.mode == "multi"
+
+
+def test_the_next_file_of_the_same_kind_keeps_the_current_view(qtbot, ds, no_gpu) -> None:
+    """Only a new KIND of file changes the arrangement; then you are driving."""
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.coronal")
+    viewer.set_file(None, None)          # the Editor shows a sidecar in between
+    _open(qtbot, viewer, _t2(ds), ds)
+    assert (viewer.scene.mode, viewer.scene.plane) == ("single", "coronal")
+
+
+def test_each_kind_of_file_opens_in_its_own_layout(qtbot, ds, no_gpu) -> None:
+    """A BOLD run opens with its graph and a T1 without."""
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.presenter.layout_id == "mri.anat" and not viewer.scene.graph_visible
+    _open(qtbot, viewer, _bold(ds), ds)
+    assert viewer.presenter.layout_id == "mri.func"
+    assert viewer.scene.graph_visible and viewer.scene.mode == "multi"
+    _open(qtbot, viewer, _t1(ds), ds)
+    assert not viewer.scene.graph_visible
+
+
+def test_each_kind_remembers_the_layout_you_gave_it(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    viewer.run("view.graph", value=False)
+    viewer.trigger("view.sagittal")
+    viewer.qstore.flush()
+    _open(qtbot, viewer, _t1(ds), ds)
+    viewer.run("view.mode", mode="hero")
+    viewer.qstore.flush()
+    _open(qtbot, viewer, _bold(ds), ds)
+    assert (viewer.scene.mode, viewer.scene.plane, viewer.scene.graph_visible) == \
+        ("single", "sagittal", False)
+    _open(qtbot, viewer, _t1(ds), ds)
+    assert viewer.scene.mode == "hero"
+    # And on disk, per kind.
+    state = SettingsHub.instance().settings.layout_state
+    assert state["mri.func"]["mode"] == "single" and state["mri.anat"]["mode"] == "hero"
+
+
+def test_the_graph_height_is_remembered(qtbot, ds, no_gpu) -> None:
+    viewer, _graph = _with_graph(qtbot, ds)
+    split = viewer.presenter.vsplit
+    total = sum(split.sizes())
+    split.setSizes([int(total * 0.5), total - int(total * 0.5)])
+    viewer.presenter.remember_sizes("volume.graph", split)
+    qtbot.waitUntil(lambda: "volume.graph" in SettingsHub.instance().settings.layout_sizes,
+                    timeout=3000)
+    fresh = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    fresh.qstore.flush()
+    qtbot.waitUntil(lambda: bool(fresh.canvases("graph")), timeout=5000)
+    a, b = fresh.presenter.vsplit.sizes()
+    assert a / (a + b) == pytest.approx(0.5, abs=0.05)
+
+
+def test_a_saved_view_applies_to_another_image(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.mode", mode="hero")
+    viewer.run("view.plane", plane="coronal")
+    viewer.run("view.flag", flag="colorbar", value=True)
+    viewer.presenter.save_view("Coronal hero")
+    assert "Coronal hero" in SettingsHub.instance().settings.view_presets
+    viewer.run("view.mode", mode="multi")
+    viewer.run("view.flag", flag="colorbar", value=False)
+    _open(qtbot, viewer, _bold(ds), ds)
+    assert viewer.presenter.apply_view("Coronal hero")
+    assert (viewer.scene.mode, viewer.scene.plane, viewer.scene.display.colorbar) == \
+        ("hero", "coronal", True)
+    # The view is an arrangement and a look, never a position.
+    assert "cursor" not in SettingsHub.instance().settings.view_presets["Coronal hero"]
+    viewer.presenter.delete_view("Coronal hero")
+    assert "Coronal hero" not in SettingsHub.instance().settings.view_presets
+
+
+def test_the_views_menu_lists_the_saved_views(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.presenter.save_view("Mine")
+    menu = viewer.presenter.views_button.menu()
+    viewer.presenter._fill_views_menu(menu)
+    texts = [a.text() for a in menu.actions()]
+    assert "Save this view as..." in texts and "Mine" in texts
+
+
+def test_a_second_viewer_opens_the_way_the_first_was_left(qtbot, ds, no_gpu) -> None:
+    first = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    first.trigger("view.coronal")
+    first.qstore.flush()
+    SettingsHub.reset_instance()        # a new Editor session, in effect
+    second = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert (second.scene.mode, second.scene.plane) == ("single", "coronal")
+
+
+def test_display_options_survive_the_next_file(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.radiological")
+    viewer.trigger("view.colorbar")
+    _open(qtbot, viewer, _bold(ds), ds)
+    assert viewer.scene.display.radiological and viewer.scene.display.colorbar
+
+
+# ---------------------------------------------------------------------------
+# Contrast
+# ---------------------------------------------------------------------------
+
+
+def test_the_window_is_in_data_units(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    rc = _column(viewer).control("window").range
+    src = viewer.source()
+    exact = viewer.scene.base_layer().display.window
+    assert exact == pytest.approx(src.robust_range(0))
+    # The fields show it to a sensible number of decimals for its size...
+    assert (rc.lo_spin.value(), rc.hi_spin.value()) == pytest.approx(exact, abs=0.05)
+    assert rc.hi_spin.decimals() == 1
+    # ...and editing one end leaves the other EXACTLY as it was.
+    rc.hi_spin.setValue(400.0)
+    assert viewer.scene.base_layer().display.window == (exact[0], 400.0)
+    viewer.trigger("window.robust")
+    assert viewer.scene.base_layer().display.window == pytest.approx(src.robust_range(0))
+
+
+def test_the_opening_window_is_written_once_and_holds_through_frames(qtbot, ds, no_gpu) -> None:
+    """Recomputed per frame, the contrast flickered during playback."""
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    qtbot.waitUntil(lambda: not viewer.jobs.busy(), timeout=10_000)
+    viewer.qstore.flush()
+    w0 = viewer.scene.base_layer().display.window
+    assert w0 is not None
+    viewer.trigger("frame.last")
+    viewer.qstore.flush()
+    assert viewer.scene.base_layer().display.window == w0
+
+
+def test_pet_opens_with_a_window_for_the_whole_series(qtbot, tmp_path, no_gpu) -> None:
+    """PET's first frame holds almost no counts: a window from it alone
+    saturates every later frame."""
+    data = np.zeros((10, 10, 10, 6), dtype=np.float32)
+    data[..., 0] = np.random.default_rng(6).random((10, 10, 10))
+    for t in range(1, 6):
+        data[..., t] = np.random.default_rng(t).random((10, 10, 10)) * 100
+    path = _write(tmp_path / "sub-01" / "pet" / "sub-01_pet.nii.gz", data)
+    viewer = _open(qtbot, _viewer(qtbot), path, tmp_path)
+    qtbot.waitUntil(lambda: viewer.scene.base_layer().display.window[1] > 10, timeout=10_000)
+
+
+def test_a_window_the_user_chose_is_never_replaced(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    qtbot.waitUntil(lambda: not viewer.jobs.busy(), timeout=10_000)
+    viewer.run("layer.set", window=(0.2, 0.3))
+    viewer.presenter._apply_series_window((0.0, 9.0))
+    assert viewer.scene.base_layer().display.window == (0.2, 0.3)
+
+
+def test_a_colour_map_changes_what_is_drawn(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.axial")
+    _settle(qtbot, viewer)
+    canvas = _canvas(viewer, "axial")
+    pt = canvas.grid_to_screen(2, 2).toPoint()    # away from the crosshair
+    gray = canvas.grab_image().pixelColor(pt)
+    combo = _column(viewer).control("colormap")
+    combo.setCurrentIndex(combo.findData("hot"))
+    _settle(qtbot, viewer)
+    hot = canvas.grab_image().pixelColor(pt)
+    assert viewer.scene.base_layer().display.colormap == "hot"
+    assert gray.red() == gray.green() == gray.blue()
+    assert hot.red() > hot.blue()
+
+
+def test_display_changes_can_be_undone(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("layer.set", colormap="viridis")
+    viewer.qstore.flush()
+    assert viewer.action("edit.undo").isEnabled()
+    viewer.trigger("edit.undo")
+    viewer.qstore.flush()
+    assert viewer.scene.base_layer().display.colormap == "gray"
+    viewer.trigger("edit.redo")
+    assert viewer.scene.base_layer().display.colormap == "viridis"
+
+
+# ---------------------------------------------------------------------------
+# Other layouts, the screenshot, keys, theme
+# ---------------------------------------------------------------------------
+
+
+def test_hero_shows_one_large_plane_and_two_small(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.mode", mode="hero")
+    _settle(qtbot, viewer)
+    canvases = viewer.canvases("slice")
+    assert sorted(c.plane for c in canvases) == ["axial", "coronal", "sagittal"]
+    hero = max(canvases, key=lambda c: c.width() * c.height())
+    assert hero.plane == viewer.scene.plane
+    assert hero.width() > 1.5 * min(c.width() for c in canvases)
+
+
+def test_the_mosaic_draws_its_line(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.mode", mode="mosaic")
+    viewer.run("view.mosaic_text", text="A 1 3 5 ; S 4")
+    viewer.qstore.flush()
+    (canvas,) = viewer.canvases("mosaic")
+    image = canvas.grab().toImage()
+    lit = sum(image.pixelColor(x, y).lightness() > 30
+              for x in range(0, image.width(), 6) for y in range(0, image.height(), 6))
+    assert lit > 20
+
+
+def test_a_screenshot_is_a_png_of_the_view(qtbot, ds, no_gpu, tmp_path) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    out = viewer.save_screenshot(tmp_path / "shot.png")
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_a_key_switches_the_plane_once_the_viewer_has_focus(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.activateWindow()
+    viewer.setFocus()
+    qtbot.waitUntil(viewer.hasFocus, timeout=2000)
+    qtbot.keyClick(viewer, Qt.Key.Key_S)
+    viewer.qstore.flush()
+    assert (viewer.scene.mode, viewer.scene.plane) == ("single", "sagittal")
+
+
+def test_a_rebound_key_applies_to_an_open_viewer(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    SettingsHub.instance().update(lambda s: s.keymap.__setitem__("view.sagittal", ["Shift+Q"]))
+    assert viewer.action_manager.keys_for("view.sagittal") == ["Shift+Q"]
+    assert "Shift+Q" in viewer.action("view.sagittal").toolTip()
+
+
+def test_the_help_lists_the_live_keys(qtbot, ds, no_gpu) -> None:
+    from bidsmgr.gui.viz.help import help_html
+
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    SettingsHub.instance().update(lambda s: s.keymap.__setitem__("view.graph", ["Shift+G"]))
+    html = help_html(viewer.action_manager, {})
+    assert "Shift+G" in html and "Scroll" in html
+
+
+def test_the_theme_reaches_the_plots_but_not_the_image(qtbot, ds, no_gpu) -> None:
+    from bidsmgr.gui import theme_manager
+    from bidsmgr.gui.viz.bridge import ThemeHub
+
+    viewer, graph = _with_graph(qtbot, ds)
+    try:
+        viewer.repaint_for_palette(theme_manager.LIGHT)
+        assert graph.plot.backgroundBrush().color().name().lower() == \
+            theme_manager.LIGHT["bg"].lower()
+        viewer.trigger("view.axial")
+        _settle(qtbot, viewer)
+        corner = _canvas(viewer, "axial").grab_image().pixelColor(1, 1)
+        assert (corner.red(), corner.green(), corner.blue()) == (0, 0, 0)
+    finally:
+        ThemeHub.instance().publish(theme_manager.DARK)
+
+
+def test_a_closed_viewer_neither_breaks_a_theme_swap_nor_stays_in_memory(qtbot, ds, no_gpu) -> None:
+    """The hubs live for the process; a viewer in a closed dialog does not.
+
+    A lambda on a hub kept the dead viewer alive and called into its deleted
+    canvases on the next theme swap; a callable on ``destroyed`` segfaulted
+    inside the C++ destructor. Both are guarded here.
+    """
+    import gc
+    import weakref
+
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from PyQt6.QtWidgets import QApplication
+
+    from bidsmgr.gui import theme_manager
+    from bidsmgr.gui.viz.bridge import ThemeHub
+
+    viewer = Viewer(kind="volume")
+    viewer.resize(800, 500)
+    viewer.show()
+    with qtbot.waitSignal(viewer.loaded, timeout=20_000):
+        viewer.set_file(_bold(ds), ds)
+    viewer.trigger("view.graph")
+    viewer.qstore.flush()
+    ref = weakref.ref(viewer)
+    viewer.close()
+    viewer.deleteLater()
+    del viewer
+    # PyQt deletes its slot proxies with deleteLater once their sender is
+    # gone, so the deferred deletes take more than one round.
+    for _ in range(4):
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        QApplication.processEvents()
+    try:
+        ThemeHub.instance().publish(theme_manager.LIGHT)
+        SettingsHub.instance().update(lambda s: setattr(s.crosshair, "thickness", 2))
+    finally:
+        ThemeHub.instance().publish(theme_manager.DARK)
+    gc.collect()
+    assert ref() is None
+
+
+def test_without_a_gpu_there_is_no_3d_to_offer(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.presenter.render_canvas is None
+    assert not viewer.action("view.3d").isEnabled()
+    assert not viewer.action("view.combo").isEnabled()
+    # A state from a machine WITH a GPU is applied harmlessly: the nearest
+    # layout this one can show is the three planes, not one slice.
+    viewer.apply_state({"mode": "combo", "render": {"effect": "Glass"},
+                        "clips": [{"active": True, "flip": True}]})
+    viewer.qstore.flush()
+    assert viewer.scene.mode == "multi"
+    assert viewer.presenter.render_canvas is None
+
+
+def test_a_viewer_destroyed_mid_read_neither_aborts_nor_leaves_work(qtbot, tmp_path, no_gpu) -> None:
+    """Nobody calls stop_loading here, as nobody does when a parent widget
+    is closed: the viewer never sees a close event. A running QThread
+    destroyed with its owner used to abort the process."""
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from PyQt6.QtWidgets import QApplication
+
+    from bidsmgr.workers.viz import live_jobs
+
+    big = _write(tmp_path / "sub-01_task-a_bold.nii.gz",
+                 np.random.default_rng(1).random((48, 48, 32, 160)).astype(np.float32))
+    viewer = Viewer(kind="volume")
+    viewer.set_file(big, tmp_path)
+    qtbot.waitUntil(lambda v=viewer: v.jobs.running("stream") or v.is_loaded(),
+                    timeout=20_000)
+    viewer.deleteLater()
+    del viewer
+    for _ in range(4):
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        QApplication.processEvents()
+    # The orphaned read notices its owner is gone and stops at the next chunk.
+    qtbot.waitUntil(lambda: live_jobs() == 0, timeout=20_000)
+
+
+# ---------------------------------------------------------------------------
+# The controls column (generated from viz.props and render3d.PARAMS)
+# ---------------------------------------------------------------------------
+
+
+class _Column:
+    """The controls column, by what the tests reach for."""
+
+    def __init__(self, viewer) -> None:
+        if not viewer.presenter.inspector_open():
+            viewer.trigger("view.inspector")
+            viewer.qstore.flush()
+        self.insp = viewer.presenter.inspector
+        assert self.insp is not None and self.insp.isVisible()
+        self.list = self.insp.section("layers").list
+        self.view = self.insp.section("view")
+
+    def control(self, key):
+        for name in ("display", "overlay"):
+            found = self.insp.section(name).control(key)
+            if found is not None:
+                return found
+        raise KeyError(key)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.insp.minimumSizeHint()
+
+
+def _column(viewer) -> _Column:
+    return _Column(viewer)
+
+
+def _with_layers(qtbot, ds, path=None):
+    viewer = _open(qtbot, _viewer(qtbot), path or _t1(ds), ds)
+    return viewer, _column(viewer)
+
+
+def test_the_column_edits_through_commands(qtbot, ds, no_gpu) -> None:
+    viewer, panel = _with_layers(qtbot, ds)
+    assert viewer.action("view.inspector").isChecked()
+    combo = panel.control("colormap")
+    combo.setCurrentIndex(combo.findData("hot"))
+    panel.control("opacity").type_value(0.5)
+    panel.control("invert").setChecked(True)
+    d = viewer.scene.base_layer().display
+    assert (d.colormap, d.opacity, d.invert) == ("hot", 0.5, True)
+    # Each change is a command: undoable.
+    viewer.qstore.flush()
+    viewer.trigger("edit.undo")
+    viewer.qstore.flush()
+    assert viewer.scene.base_layer().display.invert is False
+
+
+def test_the_column_follows_the_scene(qtbot, ds, no_gpu) -> None:
+    viewer, panel = _with_layers(qtbot, ds)
+    viewer.run("layer.set", colormap="viridis", gamma=2.0)
+    viewer.qstore.flush()
+    assert panel.control("colormap").currentData() == "viridis"
+    assert panel.control("gamma").value() == 2.0
+
+
+def test_the_negative_window_appears_with_a_negative_map(qtbot, ds, no_gpu) -> None:
+    viewer, panel = _with_layers(qtbot, ds)
+    assert not panel.control("window_negative").isVisible()
+    panel.control("colormap_negative").setCurrentIndex(
+        panel.control("colormap_negative").findData("winter"))
+    viewer.qstore.flush()
+    assert panel.control("window_negative").isVisible()
+
+
+def test_hiding_a_layer_from_the_list(qtbot, ds, no_gpu) -> None:
+    from PyQt6.QtCore import Qt as _Qt
+
+    viewer, panel = _with_layers(qtbot, ds)
+    panel.list.item(0).setCheckState(_Qt.CheckState.Unchecked)
+    assert viewer.scene.base_layer().visible is False
+
+
+def test_the_column_opens_by_default_and_remembers_being_closed(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert viewer.presenter.inspector_open()
+    viewer.trigger("view.inspector")
+    assert not SettingsHub.instance().settings.volume.inspector
+    SettingsHub.reset_instance()
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    assert not viewer.presenter.inspector_open()
+
+
+def test_sections_fold_and_remember_it(qtbot, ds, no_gpu) -> None:
+    viewer, panel = _with_layers(qtbot, ds)
+    view = panel.insp.section("view")
+    assert view.is_open()
+    view.header.clicked.emit()
+    assert not view.is_open() and not view.body.isVisible()
+    assert SettingsHub.instance().settings.inspector_sections["view"] is False
+    SettingsHub.reset_instance()
+    again = _column(_open(qtbot, _viewer(qtbot), _t1(ds), ds))
+    assert not again.insp.section("view").is_open()
+
+
+def test_a_screenshot_leaves_the_panel_out(qtbot, ds, no_gpu) -> None:
+    viewer, panel = _with_layers(qtbot, ds)
+    side = viewer.presenter.side
+    figure = viewer.grab_figure()
+    assert figure.width() + side.width() <= viewer.presenter.content.width() + 4
+
+
+def test_a_viewer_made_only_to_render_has_no_column(qtbot, ds, no_gpu) -> None:
+    viewer = Viewer(kind="volume", panels=False)
+    qtbot.addWidget(viewer)
+    viewer.resize(800, 500)
+    viewer.show()
+    qtbot.waitExposed(viewer)
+    with qtbot.waitSignal(viewer.loaded, timeout=20_000):
+        viewer.set_file(_t1(ds), ds)
+    assert not viewer.presenter.inspector_open()
+
+
+def test_an_unchosen_negative_window_shows_what_is_drawn(qtbot, ds, no_gpu) -> None:
+    viewer, panel = _with_layers(qtbot, ds)
+    viewer.run("layer.set", window=(10.0, 500.0), colormap_negative="winter")
+    viewer.qstore.flush()
+    rc = panel.control("window_negative")
+    assert (rc.lo_spin.value(), rc.hi_spin.value()) == (10.0, 500.0)
+    assert rc.window == (10.0, 500.0)
+
+
+def test_the_graph_exports_its_series_as_csv(qtbot, ds, no_gpu, tmp_path) -> None:
+    import csv
+
+    viewer, graph = _with_graph(qtbot, ds)
+    viewer.run("graph.set", scope=2, scaling="percent")
+    viewer.qstore.flush()
+    out = tmp_path / "tc.csv"
+    graph.export_csv(out)
+    rows = list(csv.reader(out.open()))
+    i, j, k = views.cursor_voxel(viewer.store)
+    assert rows[0][0] == "volume" and rows[0][1] == f"voxel {i} {j} {k} (percent change)"
+    assert len(rows[0]) == 1 + graph.cell_count() and len(rows) == 1 + 3
+    assert float(rows[3][1]) == pytest.approx(graph.center_series()[2], rel=1e-4)
+
+
+def test_blocky_pixels_toggle(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.nearest")
+    viewer.qstore.flush()
+    assert viewer.scene.base_layer().display.interpolation == "nearest"
+    assert viewer.action("view.nearest").isChecked()
+    viewer.trigger("view.nearest")
+    assert viewer.scene.base_layer().display.interpolation == "linear"
+
+
+def test_a_transparent_figure_has_no_surround(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.trigger("view.axial")
+    _settle(qtbot, viewer)
+    opaque = viewer.grab_figure(scale=1.0)
+    clear = viewer.grab_figure(scale=1.0, transparent=True)
+    assert opaque.pixelColor(2, 2).alpha() == 255
+    assert clear.pixelColor(2, 2).alpha() == 0
+    # The image itself is still drawn.
+    canvas = _canvas(viewer, "axial")
+    centre = canvas.mapTo(viewer.presenter.figure_widget(), canvas.grid_to_screen(3, 3).toPoint())
+    assert clear.pixelColor(centre).alpha() == 255

@@ -521,6 +521,28 @@ def test_compute_psd_button_enabled_when_source_resolvable(qtbot, tmp_path) -> N
     assert panel._resolve_source_path(0) == rec
 
 
+def test_compute_psd_runs_the_shared_spectrum(qtbot, tmp_path) -> None:
+    """The button reads the recording on a worker and opens the SAME
+    spectrum the Editor's viewer computes. It used to be ``Raw.compute_psd``
+    here, which drops the stim channel, so one file gave two answers."""
+    pytest.importorskip("mne")
+    from tests.fixtures.signals import write_fif
+
+    write_fif(tmp_path / "sub-001", "rec.fif", stim_at=(64,))
+    panel, _m = _build_panel_with_model(qtbot, _eeg_row(source_file="sub-001/rec.fif"))
+    panel.set_raw_root(tmp_path)
+    (btn,) = _psd_buttons(panel)
+    btn.click()
+    qtbot.waitUntil(lambda: getattr(panel, "_psd_window", None) is not None, timeout=30_000)
+    win = panel._psd_window
+    qtbot.addWidget(win)
+    assert win._names == ["Fz", "Cz", "Pz", "EOG", "STI"], "stim kept, as in the viewer"
+    assert win.tabs.count() == 2
+    assert "raw signal" in win.what.text()
+    (btn,) = _psd_buttons(panel)
+    assert btn.isEnabled(), "the busy state ends with the result"
+
+
 def test_meg_and_ieeg_rows_have_psd_button(qtbot) -> None:
     for dt in ("meg", "ieeg"):
         row = _eeg_row(
@@ -654,3 +676,35 @@ def test_removing_a_plain_companion_matches_by_value(qtbot, tmp_path) -> None:
 
     stored = json.loads(model.dataframe().iloc[0]["companion_files"])
     assert [s["suffix"] for s in stored] == ["blood:plasma:manual"]
+
+
+# ---------------------------------------------------------------------------
+# Preview a DICOM series before converting it
+# ---------------------------------------------------------------------------
+
+
+def test_a_dicom_row_previews_its_series(qtbot, tmp_path) -> None:
+    pytest.importorskip("pydicom")
+    from tests.fixtures.dicoms import write_mr_series
+
+    write_mr_series(tmp_path / "raw" / "s1", "1.2.3.77", description="rest")
+    panel, _m = _build_panel_with_model(
+        qtbot, _func_row(series_uid="1.2.3.77", source_folder="s1"))
+    assert not panel.preview_button.isEnabled(), "no raw root yet"
+    panel.set_raw_root(tmp_path / "raw")
+    assert panel.preview_button.isEnabled()
+    panel.preview_button.click()
+    qtbot.waitUntil(lambda: getattr(panel, "preview_dialog", None) is not None, timeout=60_000)
+    dlg = panel.preview_dialog
+    qtbot.addWidget(dlg)
+    qtbot.waitUntil(lambda: dlg.viewer.is_loaded(), timeout=20_000)
+    work = dlg.images[0].parents[1]
+    assert work.is_dir()
+    dlg.close()
+    assert not work.exists(), "the temporary conversion is removed with the window"
+    assert panel.preview_button.isEnabled(), "ready for another"
+
+
+def test_a_row_without_a_series_has_no_preview(qtbot) -> None:
+    panel, _m = _build_panel_with_model(qtbot, _func_row(series_uid=""))
+    assert not hasattr(panel, "preview_button") or not panel.preview_button.isVisible()

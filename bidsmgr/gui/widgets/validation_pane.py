@@ -179,6 +179,9 @@ class ValidationPane(QWidget):
     # Emitted by the File section's "Highlight in editor" button: highlight
     # every shown error/warning field (JSON) or column (TSV) for this file.
     highlight_all_requested = pyqtSignal(object)  # (Path | None)
+    # A finding about an image's header: show the image with the header
+    # inspector open on the row that is the evidence. ``(Path, rule_id)``.
+    header_requested = pyqtSignal(object, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -529,6 +532,10 @@ class ValidationPane(QWidget):
             empty.setWordWrap(True)
             sl.addWidget(empty)
         else:
+            from ...viz.inspect import HEADER_RULES
+
+            is_image = target_file is not None and str(target_file).lower().endswith(
+                (".nii", ".nii.gz"))
             for issue in issues:
                 msg = ValMessage(
                     severity=(
@@ -541,6 +548,11 @@ class ValidationPane(QWidget):
                     fix_label=issue.fix_label,
                     field=issue.field,
                     schema_rule=issue.schema_rule,
+                    view_label=("Show in the header"
+                                if is_image and issue.rule_id in HEADER_RULES else None),
+                )
+                msg.view_requested.connect(
+                    lambda rule, p=target_file: self.header_requested.emit(p, rule)
                 )
                 # Re-emit fix clicks with the file context so the host
                 # panel can jump to the right place.

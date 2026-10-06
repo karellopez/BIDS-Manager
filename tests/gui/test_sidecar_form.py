@@ -398,7 +398,7 @@ def test_tree_click_only_opens_clicked_file(
     auto-opened peers (no tab strip, no peer signals).
 
     Since the NIfTI viewer landed, clicking a ``.nii.gz`` routes to
-    :class:`NiftiViewerPane` instead of binding the sidecar form to
+    the volume viewer instead of binding the sidecar form to
     the volume. The "no peer auto-loaded" invariant still holds — the
     sibling JSON stays untouched.
     """

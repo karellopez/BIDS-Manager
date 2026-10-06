@@ -338,10 +338,8 @@ def test_the_open_image_is_re_read_after_it_changes(
     )
     panel._set_root(dataset, persist=False)
     panel._nifti_viewer.set_file(image, dataset)
-    qtbot.waitUntil(
-        lambda: panel._nifti_viewer._data is not None, timeout=20_000
-    )
-    assert float(np.asarray(panel._nifti_viewer._data).max()) == 1.0
+    qtbot.waitUntil(lambda: panel._nifti_viewer.is_loaded(), timeout=20_000)
+    assert float(panel._nifti_viewer.source().frame(0).max()) == 1.0
 
     # Something rewrites it, the way a deface does.
     nifti.save(
@@ -350,8 +348,8 @@ def test_the_open_image_is_re_read_after_it_changes(
     )
     panel._reload_open_image()
     qtbot.waitUntil(
-        lambda: panel._nifti_viewer._data is not None
-        and float(np.asarray(panel._nifti_viewer._data).max()) == 7.0,
+        lambda: panel._nifti_viewer.is_loaded()
+        and float(panel._nifti_viewer.source().frame(0).max()) == 7.0,
         timeout=20_000,
     )
 
@@ -370,9 +368,7 @@ def test_reloading_an_image_that_went_away_clears_the_viewer(
     )
     panel._set_root(dataset, persist=False)
     panel._nifti_viewer.set_file(image, dataset)
-    qtbot.waitUntil(
-        lambda: panel._nifti_viewer._data is not None, timeout=20_000
-    )
+    qtbot.waitUntil(lambda: panel._nifti_viewer.is_loaded(), timeout=20_000)
 
     image.unlink()
     panel._reload_open_image()
