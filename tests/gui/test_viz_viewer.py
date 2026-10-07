@@ -23,7 +23,7 @@ from PyQt6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 
 from bidsmgr.gui.viz import Viewer  # noqa: E402
 from bidsmgr.gui.viz.bridge import SettingsHub  # noqa: E402
-from bidsmgr.viz import views  # noqa: E402
+from bidsmgr.viz import keynames, views  # noqa: E402
 
 pytestmark = pytest.mark.gui
 
@@ -413,6 +413,88 @@ def test_a_click_on_a_thick_slice_lands_on_its_voxel(qtbot, tmp_path, no_gpu) ->
     # Coronal: columns toward +x (i), rows down from +z (k).
     _click(qtbot, coronal, want[0], grid.shape[0] - 1 - want[2])
     assert views.cursor_voxel(viewer.store) == want
+
+
+def _letters_clear_of_the_image(viewer: Viewer) -> int:
+    """Every orientation letter of every slice on screen lies outside the
+    part of the image that is drawn, and inside the widget. Returns how
+    many letters were checked."""
+    checked = 0
+    for canvas in viewer.canvases("slice"):
+        canvas.repaint()
+        drawn = canvas._image_rect.intersected(canvas._image_area())
+        assert not drawn.isEmpty(), canvas.plane
+        boxes = canvas.letter_boxes()
+        if not canvas.letters_shown():     # a thumbnail: none at all
+            assert boxes == {}, canvas.plane
+            continue
+        assert set(boxes) == {"left", "right", "top", "bottom"}, canvas.plane
+        inside = canvas.rect().toRectF()
+        for side, box in boxes.items():
+            assert not box.intersects(drawn), (canvas.plane, side, box, drawn)
+            assert inside.contains(box), (canvas.plane, side, box, inside)
+            checked += 1
+    return checked
+
+
+@pytest.mark.parametrize("size", [(1000, 640), (1400, 360), (720, 900), (600, 560)])
+def test_the_orientation_letters_are_never_on_the_image(qtbot, ds, no_gpu, size) -> None:
+    """Wide, tall and tiny, one plane and three, with the colour bar and
+    the captions: the letters sit beside the image, never on it."""
+    viewer = _open(qtbot, _viewer(qtbot, size=size), _t1(ds), ds)
+    viewer.presenter.set_inspector(False, remember=False)
+    viewer.run("view.flag", flag="labels", value=True)
+    viewer.run("view.flag", flag="colorbar", value=True)
+    for mode in ("hero", "multi"):
+        viewer.run("view.mode", mode=mode)
+        _settle(qtbot, viewer)
+        qtbot.waitUntil(lambda: any(c.letters_shown() for c in viewer.canvases("slice")))
+        assert _letters_clear_of_the_image(viewer) >= 4
+
+
+def test_a_zoomed_image_stops_short_of_the_letters(qtbot, ds, no_gpu) -> None:
+    """Zoomed past the canvas and panned, the image is cut at its area and
+    the letters keep their band."""
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.flag", flag="labels", value=True)
+    viewer.run("view.mode", mode="multi")
+    for plane in ("axial", "coronal", "sagittal"):
+        viewer.run("view.zoom", plane=plane, factor=6.0)
+        viewer.run("view.pan", plane=plane, dx=1.5, dy=-1.0)
+    _settle(qtbot, viewer)
+    for canvas in viewer.canvases("slice"):
+        area = canvas._image_area()
+        assert canvas._image_rect.width() > area.width(), canvas.plane
+    assert _letters_clear_of_the_image(viewer) == 12
+
+
+def test_a_thumbnail_slice_drops_its_letters(qtbot, ds, no_gpu) -> None:
+    """Too small for the letters' bands to leave a usable image: no letters,
+    and the image keeps the room."""
+    viewer = _open(qtbot, _viewer(qtbot, size=(1000, 640)), _t1(ds), ds)
+    viewer.run("view.flag", flag="labels", value=True)
+    viewer.run("view.mode", mode="multi")
+    _settle(qtbot, viewer)
+    canvas = viewer.canvases("slice")[0]
+    assert canvas.letters_shown()
+    canvas.setFixedSize(60, 60)
+    canvas.repaint()
+    assert not canvas.letters_shown()
+    assert canvas.letter_boxes() == {}
+    assert canvas._image_area().width() >= 50
+
+
+def test_without_letters_the_image_takes_their_room(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot, size=(1000, 300)), _t1(ds), ds)
+    viewer.run("view.mode", mode="hero")
+    viewer.run("view.flag", flag="labels", value=True)
+    _settle(qtbot, viewer)
+    canvas = viewer.canvases("slice")[0]
+    with_letters = canvas._image_rect.height()
+    viewer.run("view.flag", flag="labels", value=False)
+    _settle(qtbot, viewer)
+    assert canvas._image_rect.height() > with_letters
+    assert canvas.letter_boxes() == {}
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +1032,7 @@ def test_a_rebound_key_applies_to_an_open_viewer(qtbot, ds, no_gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     SettingsHub.instance().update(lambda s: s.keymap.__setitem__("view.sagittal", ["Shift+Q"]))
     assert viewer.action_manager.keys_for("view.sagittal") == ["Shift+Q"]
-    assert "Shift+Q" in viewer.action("view.sagittal").toolTip()
+    assert keynames.key("Shift+Q") in viewer.action("view.sagittal").toolTip()
 
 
 def test_the_help_lists_the_live_keys(qtbot, ds, no_gpu) -> None:
@@ -959,7 +1041,51 @@ def test_the_help_lists_the_live_keys(qtbot, ds, no_gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     SettingsHub.instance().update(lambda s: s.keymap.__setitem__("view.graph", ["Shift+G"]))
     html = help_html(viewer.action_manager, {})
-    assert "Shift+G" in html and "Scroll" in html
+    assert keynames.key("Shift+G") in html and "Scroll" in html
+
+
+@pytest.mark.parametrize("mac", [True, False])
+def test_keys_are_named_as_the_os_names_them(qtbot, ds, no_gpu, monkeypatch, mac) -> None:
+    """Qt binds Ctrl to Command on a Mac: there the help, the tooltips, the
+    settings table and the side tab say Command, and nowhere "Ctrl"."""
+    from bidsmgr.gui.viz.help import help_html
+    from bidsmgr.gui.viz.settings_pages import ShortcutsPage
+
+    monkeypatch.setattr(keynames, "is_mac", lambda: mac)
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.action_manager.apply_keymap({})
+    html = help_html(viewer.action_manager, {})
+    tip = viewer.action("view.inspector").toolTip()
+    page = ShortcutsPage()
+    qtbot.addWidget(page)
+    page.load(SettingsHub.instance().settings)
+    table = " ".join(page.table.item(r, 2).text() for r in range(page.table.rowCount()))
+    gestures = " ".join(page.mouse_table.item(r, 1).text()
+                        for r in range(page.mouse_table.rowCount()))
+    side = viewer.presenter.side_tab
+    side._sync_tip()
+    if mac:
+        for text in (html, tip, table, gestures, side.toolTip()):
+            assert "Ctrl" not in text
+        assert "⌘I" in tip and "⌘I" in side.toolTip()
+        assert "⇧⌘Z" in table and "⌘ + Click / drag" in gestures
+        assert "⌘" in html
+    else:
+        assert "Ctrl+I" in tip and "Ctrl+I" in side.toolTip()
+        assert "Ctrl+Shift+Z" in table and "Ctrl + Click / drag" in gestures
+        assert "⌘" not in html + tip + table + gestures
+
+
+def test_a_search_for_a_key_name_finds_its_symbol(qtbot, ds, no_gpu, monkeypatch) -> None:
+    from bidsmgr.gui.viz.help import ShortcutsDialog
+
+    monkeypatch.setattr(keynames, "is_mac", lambda: True)
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    dlg = ShortcutsDialog(viewer, viewer.action_manager, {}, "volume")
+    qtbot.addWidget(dlg)
+    dlg.search.setText("cmd")
+    rows = [w for card in dlg.cards if card.matches for w, _k in card.shown_rows]
+    assert "Undo a display change" in rows
 
 
 def test_the_theme_reaches_the_plots_but_not_the_image(qtbot, ds, no_gpu) -> None:

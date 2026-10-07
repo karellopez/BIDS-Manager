@@ -19,14 +19,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ...viz import actions as A
-from ...viz import inputmap
+from ...viz import inputmap, keynames
 from .bridge import ThemeHub
-
-_GESTURE_TEXT = {
-    "left": "Click / drag", "right": "Right-drag", "middle": "Middle-drag",
-    "wheel": "Scroll", "hwheel": "Horizontal scroll",
-}
-
 
 #: Plain clicks, which no mouse-map entry rebinds (a click is not a drag):
 #: listed so the help names every gesture a canvas answers.
@@ -35,13 +29,6 @@ _CLICKS = {
     "traces": (("Place the time cursor (click it again to remove it)", "Click"),
                ("Mark a channel bad, or good again", "Click its name")),
 }
-
-
-def _gesture_label(gesture: str) -> str:
-    parts = gesture.split("+")
-    base = _GESTURE_TEXT.get(parts[-1], parts[-1])
-    mods = [p.capitalize() if p != "h" else "Hold H" for p in parts[:-1]]
-    return " + ".join(mods + [base])
 
 
 def shortcut_sections(manager, mousemap_overrides, kind: str = "volume",
@@ -65,7 +52,7 @@ def shortcut_sections(manager, mousemap_overrides, kind: str = "volume",
         for key, tool in table.items():
             if key.startswith(canvas + ":") and tool != "none":
                 rows.setdefault(tools.get(tool, tool), []).append(
-                    _gesture_label(key.split(":", 1)[1]))
+                    keynames.gesture(key.split(":", 1)[1]))
         for what, gesture in _CLICKS.get(canvas, ()):
             rows.setdefault(what, []).append(gesture)
         if rows:
@@ -74,9 +61,9 @@ def shortcut_sections(manager, mousemap_overrides, kind: str = "volume",
     for d in A.ACTIONS:
         if kind not in A.kinds_of(d):
             continue
-        keys = manager.keys_for(d.id)
+        keys = keynames.keys(manager.keys_for(d.id))
         if keys:
-            by_category.setdefault(d.category, []).append((d.title, list(keys)))
+            by_category.setdefault(d.category, []).append((d.title, keys))
     sections.extend(by_category.items())
     return sections
 
@@ -120,7 +107,8 @@ class _Card(QWidget):
             self.shown_rows = self.rows
         else:
             self.shown_rows = [(w, k) for w, k in self.rows
-                               if needle in w.lower() or any(needle in x.lower() for x in k)]
+                               if needle in w.lower()
+                               or any(needle in keynames.search_words(x) for x in k)]
         self.matches = bool(self.shown_rows)
         self.setFixedHeight(self._height())
         self.update()
@@ -376,7 +364,7 @@ class CommandPalette(QDialog):
                 continue
             if not A.evaluate(d.when, ctx):
                 continue
-            keys = ", ".join(self._manager.keys_for(d.id))
+            keys = ", ".join(self._manager.key_labels(d.id))
             item = QListWidgetItem(f"{d.title}" + (f"    {keys}" if keys else ""))
             item.setData(Qt.ItemDataRole.UserRole, d.id)
             self.list.addItem(item)

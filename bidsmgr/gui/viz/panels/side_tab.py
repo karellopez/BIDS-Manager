@@ -4,18 +4,28 @@ A "Controls" button among a toolbar's buttons was easy to miss, and once the
 column was closed nothing on screen said there was one. This is the drawer's
 handle: a slim tab on the right edge of the images, the column's name written
 down it with its icon, an arrow saying which way it opens. Click to open,
-click again to close (Ctrl+I as before).
+click again to close (or its key, Ctrl+I; Cmd+I on a Mac).
 
 ONE painted widget, in the theme's colours, rounded on its outer side.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPolygonF
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
+from ....viz import actions as A
+from ....viz import keynames
 from ....viz.theme import parse_colour
+
+
+def _live_keys(action_id: str) -> list[str]:
+    """The keys ``action_id`` has in the user's keymap (stored spelling)."""
+    from ..bridge import SettingsHub
+
+    keymap = A.effective_keymap(SettingsHub.instance().settings.keymap)
+    return keymap.get(action_id, [])
 
 
 def _qcolor(value: str, alpha=None) -> QColor:
@@ -32,10 +42,12 @@ class SideTab(QWidget):
     WIDTH = 24
 
     def __init__(self, text: str = "Advanced controls", icon: str = "controls",
-                 parent=None) -> None:
+                 parent=None, *, action_id: str = "view.inspector") -> None:
         super().__init__(parent)
         self.text = text
         self.icon_name = icon
+        #: The action the tab stands for; its key is named in the tooltip.
+        self.action_id = action_id
         #: Whether the column it opens is open (the arrow points to close).
         self.open = False
         self.setFixedWidth(self.WIDTH)
@@ -52,8 +64,15 @@ class SideTab(QWidget):
             self.update()
 
     def _sync_tip(self) -> None:
-        self.setToolTip(f"{'Close' if self.open else 'Open'} the {self.text.lower()} "
-                        "(Ctrl+I): every control, grouped by purpose")
+        keys = ", ".join(keynames.keys(_live_keys(self.action_id)))
+        key = f" ({keys})" if keys else ""
+        self.setToolTip(f"{'Close' if self.open else 'Open'} the {self.text.lower()}"
+                        f"{key}: every control, grouped by purpose")
+
+    def event(self, event) -> bool:  # noqa: N802 - Qt signature
+        if event.type() == QEvent.Type.ToolTip:
+            self._sync_tip()            # the key as bound NOW, as this OS names it
+        return super().event(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:

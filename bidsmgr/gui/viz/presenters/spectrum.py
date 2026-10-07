@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from ....viz import keynames
 from ....viz.data.spectrum import SpectrumSource, read_mrs
 from ....viz.scene import Scene, SourceRef, SpectrumLayer
 from ..context import ViewerContext
@@ -143,9 +144,11 @@ class SpectrumPresenter:
                   "line. Fitting packages apply none in vivo; the SNR and line width under "
                   "QC are measured without it.",
             "phase0": "Zero-order phase. Auto phase (P) sets it from NAA, creatine and "
-                      "choline; drag the slider, or Ctrl+drag the spectrum.",
+                      f"choline; drag the slider, or {keynames.mouse(['ctrl'], 'drag')} "
+                      "the spectrum.",
             "phase1": "First-order (frequency-dependent) phase, as the acquisition delay it "
-                      "undoes. Ctrl+Shift+drag the spectrum to set it by eye.",
+                      f"undoes. {keynames.mouse(['ctrl', 'shift'], 'drag')} the spectrum "
+                      "to set it by eye.",
             "repeat": "Every repeat (transient) averaged, or one at a time: how a corrupted "
                       "repeat, a motion or frequency drift, is found.",
             "edit": "Spectral editing (MEGA-PRESS and similar) acquires an edit-on and an "

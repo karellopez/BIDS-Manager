@@ -22,6 +22,7 @@ from bidsmgr.gui.settings_dialog import SettingsDialog  # noqa: E402
 from bidsmgr.gui.viz import Viewer  # noqa: E402
 from bidsmgr.gui.viz.bridge import SettingsHub  # noqa: E402
 from bidsmgr.gui.viz.settings_pages import ShortcutsPage, ViewerSettingsPage  # noqa: E402
+from bidsmgr.viz import keynames  # noqa: E402
 from bidsmgr.viz.settings import PAGE_SECTIONS, VizSettings  # noqa: E402
 
 pytestmark = pytest.mark.gui
@@ -108,10 +109,10 @@ def test_recording_and_setting_a_key(qtbot) -> None:
     _select(page, "Axial view")
     page.recorder.setKeySequence(QKeySequence("Shift+Q"))
     page._set_key()
-    assert _keys(page, "Axial view") == "Shift+Q"
+    assert _keys(page, "Axial view") == keynames.key("Shift+Q")
     page.recorder.setKeySequence(QKeySequence("Q"))
     page._add_key()
-    assert _keys(page, "Axial view") == "Shift+Q, Q"
+    assert _keys(page, "Axial view") == ", ".join(keynames.keys(["Shift+Q", "Q"]))
     out = VizSettings()
     page.apply_to(out)
     assert out.keymap == {"view.axial": ["Shift+Q", "Q"]}
@@ -183,7 +184,7 @@ def test_export_and_import(qtbot, tmp_path) -> None:
     qtbot.addWidget(other)
     other.load(VizSettings())
     other.import_from(out)
-    assert _keys(other, "Axial view") == "Shift+Q"
+    assert _keys(other, "Axial view") == keynames.key("Shift+Q")
     s = VizSettings()
     other.apply_to(s)
     assert s.mousemap == {"slice:right": "pan"}

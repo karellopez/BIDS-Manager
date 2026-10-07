@@ -48,6 +48,8 @@ _HALO = QColor(0, 0, 0, 160)
 
 #: Height of one colour bar's strip (title, bar, tick labels).
 BAR_PX = 40
+#: Space between an orientation letter and the image's edge.
+_LETTER_GAP = 3.0
 
 
 class SliceCanvas(QWidget):
@@ -70,6 +72,7 @@ class SliceCanvas(QWidget):
         self._image_buf: Optional[np.ndarray] = None
         self._grid: Optional[geometry.SliceGrid] = None
         self._image_rect = QRectF()
+        self._letter_boxes: dict[str, QRectF] = {}
         self._smooth = True
         self._loading = False
         # -- gesture state ---------------------------------------------
@@ -163,17 +166,62 @@ class SliceCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _margins(self) -> tuple[float, float, float, float]:
-        """(left, top, right, bottom) reserved around the image: the caption
-        and the colour bars. The orientation letters reserve nothing: they
-        sit against the image (outside it where there is room, just inside
-        its edge where there is not), as NiiVue places them."""
-        side = 2.0
+        """(left, top, right, bottom) reserved around the image: the caption,
+        the colour bars and, when they are shown, a band on every side for
+        the orientation letters. The image is fitted inside and CLIPPED to
+        what is left (``_image_area``), so a letter is never drawn on the
+        image, at any size, zoom or pan."""
+        side, top, bottom = self._frame()
+        if self._letters_fit(side, top, bottom):
+            band_w, band_h = self._letter_band()
+            side += band_w
+            top += band_h
+            bottom += band_h
+        return side, top, side, bottom
+
+    def _frame(self) -> tuple[float, float, float]:
+        """(each side, top, bottom) before the letters: the caption above
+        and the colour bars below."""
         top = float(fonts.px(16)) if self._show_caption else 2.0
         bottom = 2.0
         if self.ctx.scene.display.colorbar:
             # Each bar its own strip BELOW the image, never over it.
             bottom += self._bar_px() * max(1, len(colorbar.bars_for(self.ctx.store)))
-        return side, top, side, bottom
+        return 2.0, top, bottom
+
+    def _letters_fit(self, side: float, top: float, bottom: float) -> bool:
+        """Whether the orientation letters are shown: asked for, and the
+        canvas big enough that their bands leave the image at least twice
+        their size each way (a thumbnail-sized slice drops them rather than
+        shrink to a sliver between them)."""
+        if not self.ctx.scene.display.labels:
+            return False
+        band_w, band_h = self._letter_band()
+        return (self.width() - 2.0 * side >= 4.0 * band_w
+                and self.height() - top - bottom >= 4.0 * band_h)
+
+    def letters_shown(self) -> bool:
+        return self._letters_fit(*self._frame())
+
+    @staticmethod
+    def _letter_band() -> tuple[float, float]:
+        """(width, height) of the band an orientation letter needs beside
+        and above or below the image: the widest letter any plane can show,
+        so the image does not move when the orientation changes, plus a gap
+        on both sides."""
+        from PyQt6.QtGui import QFontMetricsF
+
+        fm = QFontMetricsF(fonts.font(fonts.LETTER_PX, bold=True))
+        widest = max(fm.horizontalAdvance(ch) for ch in "RLAPSI")
+        return widest + 2.0 * _LETTER_GAP, fm.height() + 2.0 * _LETTER_GAP
+
+    def _image_area(self) -> QRectF:
+        """The part of the canvas the image may cover: the widget less the
+        margins. Zoomed in, the image is larger than this and is cut at its
+        edge, which keeps the letters' band clear."""
+        left, top, right, bottom = self._margins()
+        return QRectF(left, top, max(1.0, self.width() - left - right),
+                      max(1.0, self.height() - top - bottom))
 
     @staticmethod
     def _bar_px() -> float:
@@ -189,9 +237,7 @@ class SliceCanvas(QWidget):
         grid = self._grid
         if grid is None:
             return QRectF()
-        left, top, right, bottom = self._margins()
-        avail = QRectF(left, top, max(1.0, self.width() - left - right),
-                       max(1.0, self.height() - top - bottom))
+        avail = self._image_area()
         w_mm, h_mm = grid.extent_mm
         if w_mm <= 0 or h_mm <= 0:
             return QRectF()
@@ -233,6 +279,7 @@ class SliceCanvas(QWidget):
     def paintEvent(self, _event) -> None:  # noqa: N802 - Qt signature
         p = QPainter(self)
         theme = self.ctx.theme
+        self._letter_boxes = {}
         if not self.ctx.transparent:
             p.fillRect(self.rect(), QColor(theme.background))
         try:
@@ -249,6 +296,9 @@ class SliceCanvas(QWidget):
             p.end()
             return
         self._image_rect = self._place()
+        # Everything drawn ON the image stays inside its area, so a zoomed
+        # image never reaches the letters, the caption or the colour bars.
+        p.setClipRect(self._image_area())
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._smooth)
         p.drawImage(self._image_rect, self._image)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
@@ -256,7 +306,8 @@ class SliceCanvas(QWidget):
         display = self.ctx.scene.display
         if display.crosshair:
             self._paint_crosshair(p)
-        if display.labels:
+        p.setClipping(False)
+        if self.letters_shown():
             self._paint_labels(p)
         if self._show_caption:
             self._paint_caption(p)
@@ -357,61 +408,43 @@ class SliceCanvas(QWidget):
         lines(pen)
 
     def _paint_labels(self, p: QPainter) -> None:
-        """The four orientation letters, each centred on its side of the
-        IMAGE and as close to it as the room allows: just outside the edge
-        when the image leaves room there (it is letterboxed on two sides),
-        just inside it otherwise, with a dark halo so it reads on any
-        anatomy. Never on the colour bars' strip, never off screen."""
+        """The four orientation letters, each in its band OUTSIDE the image
+        (``_margins`` reserves it), centred on the part of the image that is
+        on screen and set against its edge, or against the edge of the image
+        area when the image is zoomed past it. Never on the image, never on
+        the caption or the colour bars."""
         grid = self._grid
         if grid is None:
             return
         letters = geometry.plane_labels(self.plane, grid)
-        rect = self._image_rect
-        font = fonts.font(fonts.LETTER_PX, bold=True)
-        p.setFont(font)
+        area = self._image_area()
+        shown = self._image_rect.intersected(area)
+        if shown.isEmpty():
+            return
+        p.setFont(fonts.font(fonts.LETTER_PX, bold=True))
         fm = p.fontMetrics()
         th = float(fm.height())
-        gap = 3.0
-        left_lim, top_lim, right_lim, bottom_lim = self._margins()
-        area = QRectF(left_lim, top_lim, self.width() - left_lim - right_lim,
-                      self.height() - top_lim - bottom_lim)
-        cx = min(max(rect.center().x(), area.left() + th), area.right() - th)
-        cy = min(max(rect.center().y(), area.top() + th), area.bottom() - th)
-        colour = QColor(self.ctx.theme.label)
-
-        def place(text: str, side: str) -> None:
+        gap = _LETTER_GAP
+        cx, cy = shown.center().x(), shown.center().y()
+        p.setPen(QColor(self.ctx.theme.label))
+        for side in ("left", "right", "top", "bottom"):
+            text = letters[side]
             tw = float(fm.horizontalAdvance(text))
             if side == "left":
-                room = rect.left() - area.left()
-                x = rect.left() - gap - tw if room >= tw + 2 * gap else max(
-                    rect.left(), area.left()) + gap
-                box = QRectF(x, cy - th / 2.0, tw, th)
+                box = QRectF(shown.left() - gap - tw, cy - th / 2.0, tw, th)
             elif side == "right":
-                room = area.right() - rect.right()
-                x = rect.right() + gap if room >= tw + 2 * gap else min(
-                    rect.right(), area.right()) - gap - tw
-                box = QRectF(x, cy - th / 2.0, tw, th)
+                box = QRectF(shown.right() + gap, cy - th / 2.0, tw, th)
             elif side == "top":
-                room = rect.top() - area.top()
-                y = rect.top() - gap - th if room >= th + gap else max(
-                    rect.top(), area.top()) + gap
-                box = QRectF(cx - tw / 2.0, y, tw, th)
+                box = QRectF(cx - tw / 2.0, shown.top() - gap - th, tw, th)
             else:
-                room = area.bottom() - rect.bottom()
-                y = rect.bottom() + gap if room >= th + gap else min(
-                    rect.bottom(), area.bottom()) - gap - th
-                box = QRectF(cx - tw / 2.0, y, tw, th)
-            inside = rect.contains(box.center())
-            if inside:
-                # On the image: a dark halo, so it reads on bright tissue.
-                p.setPen(QColor(0, 0, 0, 200))
-                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    p.drawText(box.translated(dx, dy), Qt.AlignmentFlag.AlignCenter, text)
-            p.setPen(colour)
+                box = QRectF(cx - tw / 2.0, shown.bottom() + gap, tw, th)
+            self._letter_boxes[side] = box
             p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
-        for side in ("left", "right", "top", "bottom"):
-            place(letters[side], side)
+    def letter_boxes(self) -> dict[str, QRectF]:
+        """Where the orientation letters were last drawn, by side (for
+        tests: none of them may touch the image)."""
+        return dict(self._letter_boxes)
 
     def _paint_caption(self, p: QPainter) -> None:
         p.setPen(QColor(self.ctx.theme.caption))
@@ -643,9 +676,8 @@ class SliceCanvas(QWidget):
         event.accept()
 
     def _screen_mm_from_center(self, pos: QPointF) -> tuple[float, float]:
-        left, top, right, bottom = self._margins()
-        cx = left + (self.width() - left - right) / 2.0
-        cy = top + (self.height() - top - bottom) / 2.0
+        centre = self._image_area().center()
+        cx, cy = centre.x(), centre.y()
         ppm = max(self.pixels_per_mm(), 1e-6)
         state = self.ctx.scene.views.get(self.plane)
         zoom = state.zoom if state else 1.0

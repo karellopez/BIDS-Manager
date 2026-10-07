@@ -1534,7 +1534,7 @@ class SignalPresenter:
         self.viewer._sync_toolbar()
         self.viewer.refresh_actions()
         if self.zen:
-            key = ", ".join(self.viewer.action_manager.keys_for("view.zen")) or "Z"
+            key = ", ".join(self.viewer.action_manager.key_labels("view.zen")) or "Z"
             self.viewer.status_message.emit(f"Zen mode: {key} brings the controls back")
 
     def _bads_changed(self) -> bool:

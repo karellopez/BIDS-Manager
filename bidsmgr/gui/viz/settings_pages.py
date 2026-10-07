@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ...viz import actions as A
-from ...viz import inputmap
+from ...viz import inputmap, keynames
 from ...viz.compute import colormaps
 from ...viz.settings import PAGE_SECTIONS, VizSettings
 
@@ -293,9 +293,10 @@ class ViewerSettingsPage(QWidget):
 
 
 def _key_text(seq: QKeySequence) -> str:
-    """Our spelling of the recorded key. Qt's portable text ("Shift+A",
-    "Ctrl+Shift+Z", "PgUp") is the spelling the keymap uses; ``Ctrl`` is the
-    Command key on macOS, there and here."""
+    """Our spelling of the recorded key, for the keymap. Qt's portable text
+    ("Shift+A", "Ctrl+Shift+Z", "PgUp") is the spelling the keymap stores on
+    every OS; ``Ctrl`` is the Command key on macOS, and ``keynames.key``
+    writes it as one there."""
     if seq.isEmpty():
         return ""
     return A.normalise_key(seq.toString(QKeySequence.SequenceFormat.PortableText))
@@ -444,14 +445,15 @@ class ShortcutsPage(QWidget):
         for row in range(self.table.rowCount()):
             action_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
             item = self.table.item(row, 2)
-            item.setText(", ".join(keymap.get(action_id, [])))
+            item.setText(", ".join(keynames.keys(keymap.get(action_id, []))))
             changed = action_id in self._keymap
             font = item.font()
             font.setBold(changed)
             item.setFont(font)
             item.setForeground(error if action_id in clashing else self.table.palette().text())
         if clash:
-            lines = [f"{key}: {A.ACTION_BY_ID[a].title} and {A.ACTION_BY_ID[b].title}"
+            lines = [f"{keynames.key(key)}: {A.ACTION_BY_ID[a].title} and "
+                     f"{A.ACTION_BY_ID[b].title}"
                      for key, a, b in clash]
             self.conflicts.setText("Used twice where both apply (neither will work "
                                    "until one is changed):\n" + "\n".join(lines))
@@ -467,7 +469,8 @@ class ShortcutsPage(QWidget):
     def _filter(self, text: str) -> None:
         needle = text.strip().lower()
         for row in range(self.table.rowCount()):
-            hay = " ".join(self.table.item(row, c).text().lower() for c in range(3))
+            hay = " ".join(keynames.search_words(self.table.item(row, c).text())
+                           for c in range(3))
             self.table.setRowHidden(row, bool(needle) and needle not in hay)
 
     def _export(self) -> None:
@@ -518,7 +521,6 @@ class ShortcutsPage(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        from .help import _gesture_label
 
         self._mouse_combos: dict[str, QComboBox] = {}
         for canvas, where in (("slice", "A slice"), ("render", "The 3-D view"),
@@ -527,7 +529,7 @@ class ShortcutsPage(QWidget):
                 row = self.mouse_table.rowCount()
                 self.mouse_table.insertRow(row)
                 self.mouse_table.setItem(row, 0, QTableWidgetItem(where))
-                self.mouse_table.setItem(row, 1, QTableWidgetItem(_gesture_label(gesture)))
+                self.mouse_table.setItem(row, 1, QTableWidgetItem(keynames.gesture(gesture)))
                 combo = QComboBox()
                 combo.setObjectName("ent-input")
                 for tool, text in inputmap.tools_for(canvas, gesture).items():

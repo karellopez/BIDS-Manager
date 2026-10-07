@@ -21,6 +21,7 @@ from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import QPushButton, QWidget
 
 from ...viz import actions as A
+from ...viz import keynames
 
 log = logging.getLogger(__name__)
 
@@ -95,14 +96,20 @@ class ActionManager(QObject):
             d = self._defs[action_id]
             tip = d.help or d.title
             if keys:
-                tip = f"{tip}.  Shortcut: {', '.join(keys)}"
+                tip = f"{tip}.  Shortcut: {', '.join(keynames.keys(keys))}"
             act.setToolTip(tip)
 
     def keys_for(self, action_id: str) -> list[str]:
+        """The action's keys in the STORED spelling (``Ctrl+G``): data, for
+        comparing and saving. To show one, ``key_labels``."""
         act = self.actions.get(action_id)
         if act is None:
             return []
         return [s.toString() for s in act.shortcuts()]
+
+    def key_labels(self, action_id: str) -> list[str]:
+        """The action's keys as this OS writes them (``⌘G`` on a Mac)."""
+        return keynames.keys(self.keys_for(action_id))
 
     def trigger(self, action_id: str) -> None:
         d = self._defs.get(action_id)
