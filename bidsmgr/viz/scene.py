@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Vec3 = tuple[float, float, float]
 Plane = Literal["sagittal", "coronal", "axial"]
@@ -189,9 +189,25 @@ class GraphState(_Model):
     #: Per-volume quality control under the graph (computed once per
     #: series, each row only when it is shown).
     qc: bool = False
-    #: Which QC rows (ids of ``compute.qc.QC_ROWS``): head motion, DVARS,
+    #: Which QC rows (ids of ``compute.qc.QC_ROWS``), IN THE ORDER the user
+    #: put them: framewise displacement, translation, rotation, DVARS,
     #: outlier voxels, slice spikes, the global signal, the carpet.
-    qc_rows: list[str] = Field(default_factory=lambda: ["motion", "dvars", "outliers"])
+    qc_rows: list[str] = Field(default_factory=lambda: ["fd", "translation", "rotation",
+                                                        "dvars", "outliers"])
+    #: The plots under the graph share its room (``fit``) or each has a
+    #: readable height in a scrolling column (``scroll``).
+    tracks_mode: Literal["fit", "scroll"] = "fit"
+
+    @field_validator("qc_rows")
+    @classmethod
+    def _known_rows(cls, rows: list[str]) -> list[str]:
+        """Only rows that exist, each once: a view saved by an earlier
+        version names rows that no longer do (``motion``, which is now
+        ``fd``, ``translation`` and ``rotation``), and one unknown id made
+        every change to the rows fail."""
+        from .compute.qc import QC_ROW_IDS
+
+        return [r for r in dict.fromkeys(rows) if r in QC_ROW_IDS]
     #: The 4-D layer the graph and the volume controls follow ("" =
     #: automatic: the base image when it is a series, else the top-most
     #: 4-D overlay, so a BOLD drawn over a T1 has its time course).
@@ -325,8 +341,19 @@ class TracesState(_Model):
     annotate_label: str = "BAD_"
     #: The segment selected for editing (an index into the bad segments).
     selected_span: Optional[int] = None
-    #: The quality check shown (computed when first switched on).
+    #: QC shown (computed when first switched on).
     quality: bool = False
+    #: The QC plots under the traces: which measures (``meeg_qc.METRICS``),
+    #: for which channel types (empty: every type checked), in the user's
+    #: order (track ids), which the user hid, and whether they scroll at a
+    #: readable height.
+    qc_metrics: list[str] = Field(default_factory=lambda: ["off", "muscle"])
+    qc_types: list[str] = Field(default_factory=list)
+    qc_order: list[str] = Field(default_factory=list)
+    qc_hidden: list[str] = Field(default_factory=list)
+    qc_scroll: bool = False
+    #: The QC plots to the right of the traces instead of under them.
+    qc_beside: bool = False
 
 
 class SpectrumState(_Model):

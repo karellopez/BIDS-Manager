@@ -1374,6 +1374,65 @@ QDoubleSpinBox#viz-number {
 QListWidget#viz-layer-list {
     border-radius: 6px;
 }
+/* Tracks (QC and physiology under a time axis): a rounded card each, the
+ * title and readout in a header ABOVE the plot so neither covers the signal. */
+QScrollArea#viz-tracks-scroll,
+QWidget#viz-tracks-viewport,
+QWidget#viz-tracks-body,
+QWidget#viz-tracks {
+    background: $surface;
+    border: none;
+}
+QFrame#viz-track {
+    background: $surface2;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QLabel#viz-track-title {
+    color: $text;
+    font-size: 11px;
+    font-weight: 600;
+    background: transparent;
+}
+QLabel#viz-track-readout {
+    color: $dim;
+    font-size: 11px;
+    background: transparent;
+}
+QPushButton#viz-track-btn {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 0px;
+}
+QPushButton#viz-track-btn:hover { background: $surface3; }
+QPushButton#viz-track-btn:disabled { background: transparent; }
+/* A panel's header inside a viewer (time course, QC plots): its controls on
+ * the left, its window controls as icons in the upper-right corner. */
+QWidget#viz-panel-header {
+    background: transparent;
+    border: none;
+}
+QPushButton#viz-corner-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0px;
+}
+QPushButton#viz-corner-btn:hover { background: $surface3; border: 1px solid $border; }
+QPushButton#viz-corner-btn:checked {
+    background: $accent_bg;
+    border: 1px solid $accent_border;
+}
+QPushButton#viz-corner-btn:disabled { background: transparent; }
+QPushButton#viz-corner-btn::menu-indicator { image: none; width: 0px; }
+/* The header above a set of tracks (a PanelHeader: what to show, how, what
+ * to do; the panel's own controls in its corner). */
+QWidget#viz-tracks-bar {
+    background: $surface;
+    border: none;
+    border-bottom: 1px solid $border;
+}
 
 /* ---------- Editor automation: fix-ups, bulk edit, citation, ignore ----------
    Same QSS-only pattern as the sidecar rows above: every colour is a palette

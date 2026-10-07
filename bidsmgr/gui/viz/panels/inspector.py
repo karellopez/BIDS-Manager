@@ -81,13 +81,26 @@ class _Header(QWidget):
         self.open = True
         #: Whether the restore button is shown.
         self.resettable = False
-        self.setFixedHeight(28)
+        self._fit_height()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setMouseTracking(True)
+        from ..bridge import ThemeHub, connect_while_alive
+
+        # A font-size change re-applies the theme: the bar grows with its title.
+        connect_while_alive(ThemeHub.instance().changed, self, lambda w, _t: w._fit_height())
+
+    def _fit_height(self) -> None:
+        from .. import fonts
+
+        height = max(28, fonts.px(28))
+        if self.height() != height:
+            self.setFixedHeight(height)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(200, 28)
+        from .. import fonts
+
+        return QSize(200, max(28, fonts.px(28)))
 
     def reset_rect(self) -> QRectF:
         w = self.RESET_PX
@@ -139,9 +152,9 @@ class _Header(QWidget):
         else:
             tri = [QPointF(cx - 2, cy - 4), QPointF(cx - 2, cy + 4), QPointF(cx + 3, cy)]
         p.drawPolygon(QPolygonF(tri))
-        font = QFont(self.font())
-        font.setPixelSize(11)
-        font.setBold(True)
+        from .. import fonts
+
+        font = fonts.font(11, bold=True)
         font.setCapitalization(QFont.Capitalization.AllUppercase)
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
         p.setFont(font)

@@ -33,7 +33,8 @@ from .scene import ClipPlane, Display, RenderState, Scene, SpectrumState, Traces
 VOLUME_LOOK_KEYS = ("display", "render", "clips")
 #: The trace options a signal viewer keeps for the next recording.
 TRACE_KEYS = ("ch_type", "count", "scale", "width", "normalize", "page_scale", "remove_dc",
-              "clip", "butterfly", "events", "event_source", "hp", "lp", "notch", "quality")
+              "clip", "butterfly", "events", "event_source", "hp", "lp", "notch", "quality",
+              "qc_metrics", "qc_types", "qc_order", "qc_hidden", "qc_scroll", "qc_beside")
 #: The spectrum options kept for the next file (never its phase: that is
 #: the file's).
 SPECTRUM_KEYS = ("domain", "part", "lb_hz", "exclude_water", "metabolites",
@@ -77,15 +78,19 @@ def trace_prefs(traces: TracesState) -> dict:
 
 
 def restore_traces(opening: Mapping[str, Any], remembered: Optional[Mapping[str, Any]],
-                   src) -> dict:
+                   src, *, qc_on_open: bool = False) -> dict:
     """The traces state a recording opens in: ``opening`` (its own
-    defaults) with the remembered options that suit it."""
+    defaults) with the remembered options that suit it. QC is carried over
+    only when the user asked for QC on opening (``QcSettings.on_open``):
+    otherwise every recording opens with it off."""
     state = dict(opening)
     if not remembered:
         return state
     for key in TRACE_KEYS:
         if key in remembered:
             state[key] = remembered[key]
+    if not qc_on_open:
+        state["quality"] = opening.get("quality", False)
     duration = float(getattr(src, "duration", 0.0) or 0.0)
     if duration > 0:
         state["width"] = min(float(state.get("width") or opening["width"]), max(0.1, duration))

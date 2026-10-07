@@ -74,6 +74,11 @@ class VizTheme:
     crosshair: str           # default crosshair colour (user setting wins)
     caption: str
     tokens: dict[str, str] = field(default_factory=dict)
+    #: Text drawn ON the image surround, which is black in both themes: light
+    #: in both themes too. The app's text colour is dark in the light theme
+    #: and read as nothing on black (colour bar titles, captions, letters).
+    canvas_text: str = "#e6edf3"
+    canvas_dim: str = "#a7b0ba"
 
     @classmethod
     def from_palette(cls, palette: dict[str, str], name: str = "dark") -> "VizTheme":
@@ -89,9 +94,11 @@ class VizTheme:
             text=p.get("text", "#e6edf3"),
             dim=p.get("dim", "#8b949e"),
             accent=p.get("accent", "#58a6ff"),
-            label=p.get("accent", "#58a6ff"),
+            # On the black surround: the dark theme's own blue and grey,
+            # whatever the app's theme.
+            label="#58a6ff",
             crosshair="#4FC3F7",
-            caption=p.get("dim", "#8b949e"),
+            caption="#a7b0ba",
             tokens=p,
         )
 

@@ -98,12 +98,12 @@ ACTIONS: tuple[ActionDef, ...] = (
        help="Many slices of one plane in a grid, for a quick look through the volume "
             "or a figure", icon="layout_mosaic"),
     _a("view.graph", "Time-course graph", "view.graph", category="Views",
-       keys=("G",), when="volume.4d && !mode=3d", shown="volume.4d", short="Time course",
+       keys=("G",), when="volume.4d", shown="volume.4d", short="Time course",
        checked="graph",
        help="The signal over time at the crosshair (4-D images), with the run's events, "
             "physiology and quality rows when asked", icon="timecourse"),
     _a("graph.beside", "Time course beside the views", "gui:graph_beside", category="Views",
-       when="graph && !mode=3d", shown="volume.4d", short="Beside", checked="graph.beside",
+       when="graph", shown="volume.4d", short="Beside", checked="graph.beside",
        help="Put the time-course panel to the right of the views instead of under them "
             "(a long run reads better wide, a tall one beside)", icon="dock_right"),
     _a("graph.maximize", "Maximise the time course", "gui:graph_maximize", category="Views",
@@ -268,8 +268,8 @@ ACTIONS: tuple[ActionDef, ...] = (
        category="QC", when="volume.4d && volume.loaded", short="Temporal SNR",
        help="Computed when chosen: each voxel's mean over its standard deviation after "
             "removing slow drifts, as an overlay with a colour bar and how to read it"),
-    _a("view.inspector", "Controls column", "gui:inspector", category="Views",
-       keys=("Ctrl+I",), when="volume || traces || spectrum", short="Controls",
+    _a("view.inspector", "Advanced controls", "gui:inspector", category="Views",
+       keys=("Ctrl+I",), when="volume || traces || spectrum", short="Advanced controls",
        checked="panel.inspector",
        help="Every control, grouped by purpose: for images the layers and their look, "
             "the view, the layout and the 3-D; for signals the channels, time, filters, "
@@ -332,7 +332,7 @@ ACTIONS: tuple[ActionDef, ...] = (
             "type (magnetometers, gradiometers and EEG are never mixed): channels that are "
             "noisy, flat, uncorrelated or carry line noise, by STD and peak-to-peak; and "
             "the segments where a type's channels go off or muscle shows. Its parameters "
-            "are in the controls column", icon="qc"),
+            "are in the advanced controls", icon="qc"),
     _a("annotate.toggle", "Annotation mode", "annotate.mode", category="Annotation",
        keys=("A",), when="traces && meeg", shown="meeg", short="Annotate",
        checked="annotate",
@@ -351,7 +351,7 @@ ACTIONS: tuple[ActionDef, ...] = (
             "annotations); one step in the Editor's history, so it can be undone", icon="save"),
     _a("traces.reset", "Reset the view", "traces.reset", category="Signals",
        keys=("R",), when="traces", short="Reset view",
-       help="Back to the opening window, scale, channels and no filter"),
+       help="Back to the opening window, scale, channels and no filter", icon="restore"),
     _a("traces.reset_filters", "Remove the filters", "traces.reset_filters",
        category="Signals", keys=("Shift+R",), when="traces && filtered",
        short="No filter", help="Back to the unfiltered signal"),
@@ -377,7 +377,7 @@ ACTIONS: tuple[ActionDef, ...] = (
        help="Hide the toolbars and the overview and leave the traces the whole "
             "pane; Z again brings them back", icon="zen"),
     _a("signal.close", "Close the signal", "gui:close_signal", category="Signals",
-       when="traces && meeg", shown="meeg", short="Close",
+       when="traces && meeg", shown="meeg", short="Close", icon="close",
        help="Drop the signal and go back to the metadata"),
     # -- spectra (MRS) ------------------------------------------------------
     _a("spectrum.fid", "Show the FID", "spectrum.toggle", {"field": "fid"},

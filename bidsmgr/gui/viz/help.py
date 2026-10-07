@@ -127,17 +127,13 @@ class _Card(QWidget):
         return self.matches
 
     def _fonts(self) -> tuple[QFont, QFont, QFont]:
-        base = QFont(self.font())
-        title = QFont(base)
-        title.setPixelSize(11)
-        title.setBold(True)
+        from . import fonts
+
+        title = fonts.font(11, bold=True)
         title.setCapitalization(QFont.Capitalization.AllUppercase)
         title.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
-        row = QFont(base)
-        row.setPixelSize(12)
-        key = QFont(base)
-        key.setPixelSize(11)
-        key.setBold(True)
+        row = fonts.font(12)
+        key = fonts.font(11, bold=True)
         return title, row, key
 
     def _two_lines(self, what: str, keys: list[str]) -> bool:

@@ -90,17 +90,14 @@ class SignalControls(QWidget):
     def _channels(self) -> Section:
         p = self.presenter
         s = Section(self, "signal.channels", "Channels")
-        _combo, pick_button, _count = p._widget_channels()
+        _combo, pick_button = p._widget_channels()
         s.add_row("type", "Type", p.type_combo,
                   "Which channel type is drawn. Types are never mixed on one scale: "
                   "magnetometers, gradiometers and EEG are in different units.")
         s.add_row("pick", None, pick_button, span=True)
-        s.add_row("count", "Traces at once", p.count_control,
-                  "How many channels are drawn at once (PgUp and PgDown page through the "
-                  "rest; the wheel scrolls one at a time).")
-        # The type, picker and count are hidden together for one channel.
-        p._multi_channel_widgets = [p.type_combo, pick_button, p.count_control,
-                                    s._rows["type"][0], s._rows["count"][0]]
+        # Hidden together for a one-channel recording (with the toolbar's
+        # Displayed channels, added when the toolbar is built).
+        p._multi_channel_widgets = [p.type_combo, pick_button, s._rows["type"][0]]
         s.add_row("drawing", None, _pills(self._button(a) for a in (
             "traces.butterfly", "traces.normalize", "traces.page_scale", "traces.clip",
             "traces.dc")), span=True)
@@ -109,7 +106,7 @@ class SignalControls(QWidget):
     def _time(self) -> Section:
         s = Section(self, "signal.time", "Time")
         s.add_row("moves", None, _pills(self._button(a) for a in (
-            "time.fit", "traces.together", "traces.reset")), span=True)
+            "time.fit", "traces.together")), span=True)
         return s
 
     def _filters(self) -> Section:
@@ -141,6 +138,16 @@ class SignalControls(QWidget):
         p = self.presenter
         s = _QcSection(self, "signal.qc", "Quality control (QC)")
         s.add_row("toggle", None, _pills([self._button("traces.quality")]), span=True)
+        from PyQt6.QtWidgets import QCheckBox
+
+        self.qc_on_open = QCheckBox("Run QC when a file opens")
+        self.qc_on_open.setChecked(self.ctx.settings.qc.on_open)
+        self.qc_on_open.toggled.connect(
+            lambda on: self.ctx.settings_hub.update(
+                lambda st: setattr(st.qc, "on_open", bool(on))))
+        s.add_row("on_open", None, self.qc_on_open,
+                  "On: QC stays on from one recording to the next and runs as soon as one "
+                  "opens. Off: every recording opens with QC off.", span=True)
         self.qc_summary = QLabel("Switch QC on to check every channel, type by type, and "
                                  "every segment of the recording.")
         self.qc_summary.setObjectName("sidecar-footer-summary")
@@ -156,17 +163,23 @@ class SignalControls(QWidget):
         self.qc_mark_channels.setToolTip("The noisy, flat and uncorrelated channels become "
                                          "bad channels: undoable, saved only with Save to "
                                          "dataset.")
-        self.qc_mark_channels.clicked.connect(p.mark_suggested_channels)
+        self.qc_mark_channels.clicked.connect(lambda _c=False: p.mark_channels())
         self.qc_mark_segments = QPushButton("Mark flagged segments bad")
         self.qc_mark_segments.setObjectName("tb-btn")
         self.qc_mark_segments.setToolTip("Every flagged segment becomes a bad segment, "
                                          "labelled by why (BAD_muscle, BAD_jump, BAD_noise).")
-        self.qc_mark_segments.clicked.connect(p.mark_flagged_segments)
+        self.qc_mark_segments.clicked.connect(lambda _c=False: p.mark_segments())
         s.add_row("act", None, _pills([self.qc_report_button, self.qc_mark_channels,
                                        self.qc_mark_segments]), span=True)
         heading = QLabel("Parameters")
         heading.setObjectName("viewer-meta-section")
         s.add_row("params", None, heading, span=True)
+        # Which channel types QC runs on: one box per type in THIS recording.
+        self.qc_types_bar = FlowBar(h_spacing=10, v_spacing=4)
+        self._qc_type_boxes: dict[str, Any] = {}
+        s.add_row("qc.types", "Channel types", self.qc_types_bar,
+                  "The channel types QC runs on. Each is checked against its own type "
+                  "only; untick a type to leave it out.")
         from PyQt6.QtWidgets import QAbstractSpinBox
 
         for name, info in MeegQcSettings.model_fields.items():
@@ -184,7 +197,7 @@ class SignalControls(QWidget):
         self.qc_apply.setObjectName("tb-btn-primary")
         self.qc_apply.setToolTip("Save the parameters (they are remembered) and run the "
                                  "check again.")
-        self.qc_apply.clicked.connect(self.apply_qc_settings)
+        self.qc_apply.clicked.connect(lambda: self.apply_qc_settings())
         s.add_row("qc.apply", None, self.qc_apply, span=True)
         self.put_qc_settings(self.ctx.settings.meeg_qc)
         return s
@@ -202,22 +215,78 @@ class SignalControls(QWidget):
         try:
             for name, control in self._qc_controls.items():
                 control.put(getattr(settings, name))
+            chosen = set(settings.types)
+            for t, box in self._qc_type_boxes.items():
+                box.setChecked(not chosen or t in chosen)
         finally:
             self._syncing = False
 
+    def chosen_types(self) -> list[str]:
+        """The ticked channel types; empty when every type is ticked."""
+        ticked = [t for t, box in self._qc_type_boxes.items() if box.isChecked()]
+        return [] if len(ticked) == len(self._qc_type_boxes) else ticked
+
+    def _sync_type_boxes(self) -> None:
+        """One box per data channel type of the recording on screen."""
+        from PyQt6.QtWidgets import QCheckBox
+
+        from ....viz.compute.meeg_qc import DATA_TYPES, type_label
+
+        src = self.presenter.source
+        # In the recording's channel order, as QC's own plots are.
+        types = ([t for t in dict.fromkeys(getattr(src, "ch_types", None) or [])
+                  if t in DATA_TYPES] if src is not None else [])
+        if types == list(self._qc_type_boxes):
+            return
+        for box in self._qc_type_boxes.values():
+            self.qc_types_bar.removeWidget(box)
+            box.deleteLater()
+        self._qc_type_boxes = {}
+        chosen = set(self.ctx.settings.meeg_qc.types)
+        self._syncing = True
+        try:
+            for t in types:
+                box = QCheckBox(type_label(t))
+                box.setChecked(not chosen or t in chosen)
+                box.toggled.connect(lambda _on, ty=t: self._on_type_box(ty))
+                self.qc_types_bar.addWidget(box)
+                self._qc_type_boxes[t] = box
+        finally:
+            self._syncing = False
+
+    def _on_type_box(self, ch_type: str) -> None:
+        if self._syncing:
+            return
+        if not any(box.isChecked() for box in self._qc_type_boxes.values()):
+            # At least one type: QC on nothing is not a check.
+            box = self._qc_type_boxes[ch_type]
+            box.blockSignals(True)
+            box.setChecked(True)
+            box.blockSignals(False)
+            return
+        # Saved at once; QC runs again by itself if it is on (the parameters
+        # it was computed with changed), and is not switched on by a tick.
+        self.apply_qc_settings(run=False)
+
     def qc_settings(self) -> MeegQcSettings:
-        values = {name: control.get() for name, control in self._qc_controls.items()}
+        """The parameters as the form shows them, on top of what is saved (the
+        channel types are chosen elsewhere and must survive)."""
+        values = self.ctx.settings.meeg_qc.model_dump()
+        values.update({name: control.get() for name, control in self._qc_controls.items()})
+        values["types"] = self.chosen_types()
         return MeegQcSettings(**values)
 
-    def apply_qc_settings(self) -> None:
-        """Remember the parameters and check again (when QC is on)."""
+    def apply_qc_settings(self, *, run: bool = True) -> None:
+        """Remember the parameters; with ``run``, check again (switching QC
+        on: that is what the button asks for)."""
         try:
             new = self.qc_settings()
         except ValueError as exc:
             self.presenter.viewer.status_message.emit(str(exc))
             return
         self.ctx.settings_hub.update(lambda s: setattr(s, "meeg_qc", new))
-        self.presenter.recheck_quality()
+        if run:
+            self.presenter.recheck_quality()
 
     # -- state ---------------------------------------------------------------
 
@@ -226,9 +295,22 @@ class SignalControls(QWidget):
         EEG only; 'all of this run' is physio only), and what QC found."""
         p = self.presenter
         meeg = p._file_kind == "meeg"
+        if self.qc_on_open.isChecked() != self.ctx.settings.qc.on_open:
+            self.qc_on_open.blockSignals(True)
+            self.qc_on_open.setChecked(self.ctx.settings.qc.on_open)
+            self.qc_on_open.blockSignals(False)
         qc = self._sections["signal.qc"]
         if qc.isHidden() == meeg:
             qc.setVisible(meeg)
+        if meeg:
+            self._sync_type_boxes()
+        # Events only where the recording has a source of them (the label
+        # "From" must not stand alone).
+        src = p.source
+        has_events = bool(src is not None and src.event_sources())
+        events = self._sections["signal.events"]
+        if events.isHidden() == has_events:
+            events.setVisible(has_events)
         res = p.quality_result()
         on = bool(self.ctx.scene.traces.quality)
         if not on:

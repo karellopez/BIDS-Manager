@@ -53,7 +53,7 @@ _PROGRESS_INTERVAL = 0.1
 #: column has its own tab on the right edge of the images.
 TOOLBAR_ROWS = (
     ("widget:layout", "view.graph", "|", "widget:slice", "widget:frame", "frame.play",
-     "stretch", "widget:quality", "widget:tools", "widget:save", "help.shortcuts"),
+     "|", "widget:quality", "widget:tools", "widget:save", "stretch", "help.shortcuts"),
 )
 
 #: The Layout menu: one plane, then the multi-view layouts.
@@ -159,6 +159,8 @@ class VolumePresenter:
         self._generation = 0
         self._last_progress = 0.0
         self._first_frame_shown = False
+        #: A series read whole waits for its series-wide window to be shown.
+        self._show_when_windowed = False
         #: The window the viewer chose by itself (None once the user picks).
         self._auto_window: Optional[tuple[float, float]] = None
         #: The kind of file on screen (a layout preset id); survives a clear,
@@ -265,7 +267,7 @@ class VolumePresenter:
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
         row.addWidget(self.vsplit, 1)
-        self.side_tab = SideTab("Controls", "controls")
+        self.side_tab = SideTab("Advanced controls", "controls")
         self.side_tab.setVisible(bool(getattr(self.viewer, "panels", True)))
         self.side_tab.clicked.connect(lambda: self.set_inspector(not self.inspector_open()))
         row.addWidget(self.side_tab)
@@ -321,13 +323,9 @@ class VolumePresenter:
             self._graph.wants_height.connect(self._grow_graph)
             self.graph_host.layout().addWidget(self._graph)
             am = self.viewer.action_manager
-            buttons = []
-            for action_id in ("graph.beside", "graph.maximize", "graph.detach"):
-                btn = am.button(action_id)
-                # Icons alone: the tooltip names each, with its key.
-                btn.setText("")
-                buttons.append(btn)
-            self._graph.add_panel_buttons(buttons)
+            # Icons in the graph's corner: the tooltip names each, with its key.
+            self._graph.add_panel_buttons(
+                [am.button(a) for a in ("graph.beside", "graph.maximize", "graph.detach")])
             self._graph_context_source = None
             self._sync_graph_context()
         return self._graph
@@ -405,8 +403,9 @@ class VolumePresenter:
 
     def apply_graph(self) -> None:
         series, _src = views.series_layer(self.ctx.store)
-        show = bool(self.ctx.scene.graph_visible and series is not None
-                    and self.ctx.scene.mode != "3d")
+        # In every layout, the 3-D one included: the time course is the
+        # crosshair's voxel, and the crosshair is in the rendering too.
+        show = bool(self.ctx.scene.graph_visible and series is not None)
         if show:
             self._ensure_graph()
             if self._graph_window is not None:
@@ -499,7 +498,7 @@ class VolumePresenter:
         options = menu.addAction("Layout and mosaic options...")
         options.setIcon(icons.icon("controls"))
         options.setToolTip("The arrangement, the planes shown, the large view, the "
-                           "mosaic: in the controls column")
+                           "mosaic: in the advanced controls")
         options.triggered.connect(lambda: self.open_section("layout"))
         btn.setMenu(menu)
         self.layout_button = btn
@@ -550,21 +549,35 @@ class VolumePresenter:
         btn.setIcon(icons.icon("qc"))
         btn.setIconSize(QSize(16, 16))
         self.viewer.action_manager.track_icon(btn, "qc")
-        btn.setToolTip("Quality control of a 4-D series, computed only when you ask: temporal SNR, "
-                       "standard deviation and mean maps as overlays, and the quality rows "
-                       "(global signal, DVARS, outlier volumes) under the time course.")
+        btn.setToolTip("Quality control of a 4-D series, computed only when you ask: temporal "
+                       "SNR, standard deviation and mean maps as overlays, and QC plots under "
+                       "the time course (head motion, DVARS, outlier voxels, slice spikes, "
+                       "a carpet plot).")
         menu = popup_menu(btn)
+        menu.setToolTipsVisible(True)
         for action_id in self.QUALITY:
             menu.addAction(self.viewer.action(action_id))
         menu.addSeparator()
-        self._qc_rows_action = menu.addAction("QC rows under the time course")
+        self._qc_rows_action = menu.addAction("QC plots under the time course")
         self._qc_rows_action.setCheckable(True)
         self._qc_rows_action.setToolTip(
-            "Global signal and DVARS per volume, with the outlier volumes marked: opens "
-            "the time course if it is closed")
+            "Framewise displacement, the motion parameters, DVARS and outlier voxels per "
+            "volume (choose more with Rows): opens the time course if it is closed")
         self._qc_rows_action.triggered.connect(self._toggle_qc_rows)
-        menu.aboutToShow.connect(
-            lambda: self._qc_rows_action.setChecked(bool(self.ctx.scene.graph.qc)))
+        self._qc_on_open_action = menu.addAction("Run QC when a file opens")
+        self._qc_on_open_action.setCheckable(True)
+        self._qc_on_open_action.setToolTip(
+            "On: QC stays on from one file to the next and is computed as soon as a file "
+            "opens. Off: every file opens with QC off.")
+        self._qc_on_open_action.triggered.connect(
+            lambda on: self.ctx.settings_hub.update(
+                lambda st: setattr(st.qc, "on_open", bool(on))))
+
+        def sync_menu() -> None:
+            self._qc_rows_action.setChecked(bool(self.ctx.scene.graph.qc))
+            self._qc_on_open_action.setChecked(bool(self.ctx.settings.qc.on_open))
+
+        menu.aboutToShow.connect(sync_menu)
         btn.setMenu(menu)
         self.quality_button = btn
         return btn
@@ -1026,6 +1039,7 @@ class VolumePresenter:
         self.stop_play()
         self._release()
         self._first_frame_shown = False
+        self._show_when_windowed = False
         self._auto_window = None
         self.ctx.jobs.start("open", self._generation, open_with_context, path, root)
 
@@ -1141,6 +1155,9 @@ class VolumePresenter:
                     prefs.mosaic_build = MosaicBuild.model_validate(view["mosaic_build"])
                 except ValueError:
                     pass
+        if not settings.qc.on_open:
+            # QC is computed when asked, not because the last file had it on.
+            prefs.graph.qc = False
         self._preset_id = preset.id
         return prefs
 
@@ -1198,21 +1215,26 @@ class VolumePresenter:
                 data, self._pending_scene = self._pending_scene, None
                 self._apply_scene(data)
         elif tag == "stream":
-            pending_qc, self._pending_qc = self._pending_qc, []
+            src = self.source
+            held = self._holding()
             self._auto_window_from_frame()
             self.ctx.store.changed({"sources:vol0"})
             self.ctx.qstore.flush()
-            self.viewer.on_loaded(self.source.path if self.source else None)
-            src = self.source
             if src is not None and src.is_4d and not src.is_rgb:
                 # The whole series, sampled, on a worker: PET's first frames
                 # hold almost no counts, so a window taken from frame 0 alone
                 # saturates every later one.
                 self.ctx.jobs.start("series-window", self._generation, src.series_range)
-            for item in pending_qc:
-                self.add_quality_map(item["which"], **item["look"])
+            if held and src is not None and not src.is_rgb:
+                # Shown once its contrast is the series', not frame 0's.
+                self._show_when_windowed = True
+                self.viewer.set_loading_message(f"Preparing {src.path.name}")
+                return
+            self._show_read()
         elif tag == "series-window":
             self._apply_series_window(result)
+            if self._show_when_windowed:
+                self._show_read()
 
     # ------------------------------------------------------------------
     # The window a volume opens with
@@ -1255,7 +1277,21 @@ class VolumePresenter:
         store.changed({f"layer:{layer.id}.display"})
         self.ctx.qstore.flush()
 
+    def _show_read(self) -> None:
+        """The file is read (and a series windowed): on screen, whole."""
+        self._show_when_windowed = False
+        self._first_frame_shown = True
+        pending_qc, self._pending_qc = self._pending_qc, []
+        self.viewer.on_loaded(self.source.path if self.source else None)
+        for item in pending_qc:
+            self.add_quality_map(item["which"], **item["look"])
+
     def _on_job_failed(self, tag: str, generation: int, message: str) -> None:
+        if (generation == self._generation and tag == "series-window"
+                and self._show_when_windowed):
+            # The contrast stays frame 0's; the series is shown all the same.
+            self._show_read()
+            return
         if generation == self._generation and tag in self._overlay_tags:
             self._overlay_tags.remove(tag)
             self._overlay_looks.pop(tag, None)
@@ -1268,10 +1304,26 @@ class VolumePresenter:
         self._release()
         self.viewer.on_load_failed(path, message)
 
+    def _holding(self) -> bool:
+        """A series stays behind the loading page until it is read whole:
+        volumes appearing one by one, the graph growing and the contrast
+        changing as they arrive, read as something going wrong."""
+        src = self.source
+        return bool(src is not None and src.is_4d and src.n_frames > 1
+                    and not self._first_frame_shown)
+
     def _on_job_progress(self, tag: str, generation: int, done: int, total: int) -> None:
         if tag != "stream" or generation != self._generation or self.source is None:
             return
         now = time.monotonic()
+        if self._holding():
+            if done >= total or now - self._last_progress >= _PROGRESS_INTERVAL:
+                self._last_progress = now
+                n = self.source.n_frames
+                got = min(self.source.loaded_frames, n)
+                self.viewer.set_loading_message(
+                    f"Loading {self.source.path.name}: {got} of {n} volumes")
+            return
         first = not self._first_frame_shown and self.source.loaded_frames > 0
         if first:
             self._first_frame_shown = True

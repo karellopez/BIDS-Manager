@@ -129,7 +129,7 @@ class ComparePanes(QWidget):
         self.link.setChecked(True)
         self.link.setEnabled(False)
         self.link.setToolTip(
-            "On: one toolbar and one controls column drive both images, and the "
+            "On: one toolbar and one column of advanced controls drive both images, and the "
             "crosshair, slice, plane, volume, 3-D camera, effects and cut plane "
             "stay together.\n\nOff: each image gets its own toolbar and controls."
         )

@@ -72,6 +72,10 @@ class FlowBar(QWidget):
         self.updateGeometry()
 
     def addWidget(self, widget: QWidget) -> None:  # noqa: N802
+        self.insertWidget(len(self._children), widget)
+
+    def insertWidget(self, index: int, widget: QWidget) -> None:  # noqa: N802
+        """``widget`` at position ``index`` (``QBoxLayout.insertWidget``)."""
         # A widget the caller has already hidden ON PURPOSE stays hidden.
         # Reparenting hides a widget, so it has to be shown again, and
         # showing it unconditionally revealed the chips and buttons that
@@ -83,10 +87,23 @@ class FlowBar(QWidget):
                 Qt.WidgetAttribute.WA_WState_ExplicitShowHide
             )
         )
+        if widget in self._children:
+            self._children.remove(widget)
         widget.setParent(self)
         if not hidden_on_purpose:
             widget.show()
-        self._children.append(widget)
+        index = len(self._children) if index < 0 else min(index, len(self._children))
+        self._children.insert(index, widget)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        """Place the children again now (a child added to a bar already on
+        screen otherwise sat at the origin, over the first one, until
+        something else asked for a layout: two checkboxes painted over each
+        other)."""
+        if self.isVisible():
+            height = self._arrange(self.width(), apply=True)
+            self._rows_height = height
         self.updateGeometry()
 
     def addLayout(self, layout: QLayout) -> None:  # noqa: N802
@@ -123,14 +140,26 @@ class FlowBar(QWidget):
     def count(self) -> int:
         return len(self._children)
 
+    def indexOf(self, widget: QWidget) -> int:  # noqa: N802
+        return self._children.index(widget) if widget in self._children else -1
+
+    def widgets(self) -> list[QWidget]:
+        """The children, in order (hidden ones too)."""
+        return list(self._children)
+
     def takeAt(self, index: int) -> Optional[QWidget]:  # noqa: N802
         """Remove and return a child, for a bar that is rebuilt in place."""
         if 0 <= index < len(self._children):
             widget = self._children.pop(index)
             widget.setParent(None)
-            self.updateGeometry()
+            self._relayout()
             return widget
         return None
+
+    def removeWidget(self, widget: QWidget) -> None:  # noqa: N802
+        """Take ``widget`` out of the bar (it is not deleted)."""
+        if widget in self._children:
+            self.takeAt(self._children.index(widget))
 
     def clear(self) -> None:
         while self.takeAt(0) is not None:
@@ -200,28 +229,41 @@ class FlowBar(QWidget):
             if height != self._rows_height:
                 self._rows_height = height
             self.updateGeometry()
+        elif event.type() == QEvent.Type.ChildRemoved:
+            # A child reparented or deleted elsewhere leaves the bar: kept in
+            # the list, it held its place (or pointed at a deleted widget).
+            child = event.child()
+            if child in self._children:
+                self._children.remove(child)
+                self._relayout()
         return super().event(event)
 
     def _arrange(self, width: int, *, apply: bool) -> int:
-        """Place the children across ``width``; return the height they need."""
+        """Place the children across ``width``; return the height they need.
+
+        Each child is centred in its row's height: a label beside a combo
+        box, or a plain button beside a taller menu button, otherwise sits
+        at the top of the row and reads as misaligned."""
         left, top, right, bottom = self._margins
         usable = max(width - left - right, 1)
+        rows: list[list] = [[]]
         x = left
-        y = top
-        row_height = 0
-
         for child in self._visible():
             hint = child.sizeHint()
-            if row_height and x - left + hint.width() > usable:
+            if rows[-1] and x - left + hint.width() > usable:
+                rows.append([])
                 x = left
-                y += row_height + self._v
-                row_height = 0
-            if apply:
-                child.setGeometry(QRect(x, y, hint.width(), hint.height()))
+            rows[-1].append((child, x, hint))
             x += hint.width() + self._h
-            row_height = max(row_height, hint.height())
-
-        return y + row_height + bottom
+        y = top
+        for row in rows:
+            row_height = max((hint.height() for _c, _x, hint in row), default=0)
+            if apply:
+                for child, cx, hint in row:
+                    dy = (row_height - hint.height()) // 2
+                    child.setGeometry(QRect(cx, y + dy, hint.width(), hint.height()))
+            y += row_height + self._v
+        return y - self._v + bottom if rows[-1] else top + bottom
 
 
 def flow(parent: QWidget, **kwargs) -> FlowBar:

@@ -119,7 +119,10 @@ class NumberControl(QWidget):
         self.spin.setDecimals(decimals if decimals is not None else decimals_for(step))
         if unit:
             self.spin.setSuffix(f" {unit}")
-        self.spin.setFixedWidth(78 if not unit else 92)
+        # Wide enough for its numbers at the app's font size.
+        from . import fonts
+
+        self.spin.setFixedWidth(fonts.px(78 if not unit else 92))
         self.spin.valueChanged.connect(self._from_spin)
         row.addWidget(self.spin)
         if default is not None:
@@ -366,9 +369,11 @@ class RangeControl(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         self.lo_spin, self.hi_spin = _Spin(), _Spin()
+        from . import fonts
+
         for spin in (self.lo_spin, self.hi_spin):
             spin.setRange(-1e12, 1e12)
-            spin.setFixedWidth(90)
+            spin.setFixedWidth(fonts.px(90))
         self.lo_spin.valueChanged.connect(lambda x: self._from_spin(0, x))
         self.hi_spin.valueChanged.connect(lambda x: self._from_spin(1, x))
         row.addWidget(self.lo_spin)

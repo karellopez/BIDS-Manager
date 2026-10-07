@@ -487,7 +487,8 @@ def graph_set(store: "SceneStore", scope: Optional[int] = None,
               x_axis: Optional[Literal["auto", "frames", "seconds"]] = None,
               events: Optional[bool] = None, physio: Optional[bool] = None,
               qc: Optional[bool] = None, layer: Optional[str] = None,
-              qc_rows: Optional[list[str]] = None) -> set[str]:
+              qc_rows: Optional[list[str]] = None,
+              tracks_mode: Optional[Literal["fit", "scroll"]] = None) -> set[str]:
     g = store.scene.graph
     changed = False
     if qc_rows is not None:
@@ -496,8 +497,8 @@ def graph_set(store: "SceneStore", scope: Optional[int] = None,
         unknown = [r for r in qc_rows if r not in QC_ROW_IDS]
         if unknown:
             raise ValueError(f"no QC row called {unknown[0]!r}")
-        # Kept in the fixed order the rows are drawn in.
-        qc_rows = [r for r in QC_ROW_IDS if r in qc_rows]
+        # In the user's order, each once.
+        qc_rows = list(dict.fromkeys(qc_rows))
     if layer:
         found = store.scene.layer(layer)
         if found is None or found.kind != "volume":
@@ -507,6 +508,7 @@ def graph_set(store: "SceneStore", scope: Optional[int] = None,
         ("mark_neighbors", mark_neighbors, None), ("scaling", scaling, None),
         ("x_axis", x_axis, None), ("events", events, None), ("physio", physio, None),
         ("qc", qc, None), ("layer", layer, None), ("qc_rows", qc_rows, None),
+        ("tracks_mode", tracks_mode, None),
     ):
         if value is None:
             continue

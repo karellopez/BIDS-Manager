@@ -30,7 +30,6 @@ from PyQt6.QtWidgets import (
 )
 
 from ...viz.commands.render import PLANE_COMMANDS
-from ..widgets.flow_layout import flow
 from ..widgets.primitives import ElidedLabel, PaneHeader
 from ..widgets.spinner import BusySpinner
 from .actions import ActionManager
@@ -166,27 +165,39 @@ class Viewer(QWidget):
         raise ValueError(f"no presenter for {kind!r}")
 
     def _build_toolbar(self) -> QFrame:
+        """One row per presenter spec, each a panel header: the controls
+        wrap on the left, and what follows ``"stretch"`` (help, close) sits
+        in the upper-right corner as icons, where a window keeps its own.
+        A stretch cannot push anything right in a row that wraps, so before
+        this the last button trailed the others and, at 1500 px, wrapped
+        onto a row of its own."""
+        from .panels.panel_header import PanelHeader
+
         bar = QFrame()
         bar.setObjectName("sidecar-toolbar")
         outer = QVBoxLayout(bar)
-        outer.setContentsMargins(14, 6, 14, 6)
+        outer.setContentsMargins(14, 6, 10, 6)
         outer.setSpacing(6)
         for spec in self.presenter.toolbar_rows():
-            holder = QWidget()
-            row = flow(holder, h_spacing=8, v_spacing=6)
-            outer.addWidget(holder)
+            header = PanelHeader(margins=(0, 0, 0, 0), h_spacing=8, v_spacing=6)
+            row = header.controls
+            outer.addWidget(header)
+            corner = []
             for item in spec:
-                if item == "|":
+                if item == "stretch":
+                    corner = [None]          # what follows goes to the corner
+                elif item == "|":
                     row.addSpacing(8)
-                elif item == "stretch":
-                    row.addStretch(1)
                 elif item.startswith("widget:"):
                     made = self.presenter.make_widget(item.split(":", 1)[1])
                     for w in (made if isinstance(made, list) else [made]):
                         if w is not None:
                             row.addWidget(w)
+                elif corner:
+                    corner.append(self.action_manager.button(item))
                 else:
                     row.addWidget(self.action_manager.button(item))
+            header.insert_corner([b for b in corner if b is not None])
         return bar
 
     def _build_loading_panel(self) -> QWidget:
@@ -382,6 +393,11 @@ class Viewer(QWidget):
         self._toolbar.setVisible(
             self._toolbar_wanted and wanted and self._current_file is not None
             and self._stack.currentWidget() is self.presenter.content)
+
+    def set_loading_message(self, message: str) -> None:
+        """What the loading page says (a series' progress)."""
+        if self._loading_label.text() != message:
+            self._loading_label.setText(message)
 
     def show_loading(self, message: str) -> None:
         """The spinner page, for a presenter's second read (Load signal)."""

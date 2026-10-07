@@ -8,7 +8,7 @@ render it to a PNG with no window, or the same from Python.
 
 from __future__ import annotations
 
-from PyQt6.QtGui import QFont, QFontDatabase, QGuiApplication
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout,
 )
@@ -35,7 +35,9 @@ class CommandLineDialog(QDialog):
         note.setWordWrap(True)
         lay.addWidget(note)
         self.tabs = QTabWidget()
-        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        from .. import fonts
+
+        mono = fonts.font(12, mono=True)   # at the app's font size
         self.texts: dict[str, str] = {
             "Open": reproduce.shell(store),
             "Render": reproduce.shell(store, render="figure.png"),
@@ -45,7 +47,7 @@ class CommandLineDialog(QDialog):
             box = QPlainTextEdit(text)
             box.setReadOnly(True)
             box.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            box.setFont(QFont(mono))
+            box.setFont(mono)
             self.tabs.addTab(box, title)
         lay.addWidget(self.tabs, 1)
         row = QHBoxLayout()

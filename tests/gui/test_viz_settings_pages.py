@@ -60,8 +60,11 @@ def test_every_scalar_preference_has_a_control(qtbot) -> None:
     for section in PAGE_SECTIONS:
         model = VizSettings.model_fields[section].annotation
         for name, info in model.model_fields.items():
-            is_dict = getattr(info.annotation, "__origin__", None) is dict
-            assert (page.control(f"{section}.{name}") is None) == is_dict, f"{section}.{name}"
+            # Collections have their own editors (the keymap page, the QC
+            # section's channel-type boxes), not a field here.
+            collection = getattr(info.annotation, "__origin__", None) in (dict, list)
+            assert (page.control(f"{section}.{name}") is None) == collection, \
+                f"{section}.{name}"
 
 
 def test_controls_carry_the_model_s_range_unit_and_help(qtbot) -> None:

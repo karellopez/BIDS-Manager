@@ -25,13 +25,14 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from ....viz import colorbar, inputmap, render2d, views
 from ....viz.compute import colormaps, geometry
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
+from .. import fonts
 
 log = logging.getLogger(__name__)
 
@@ -47,15 +48,6 @@ _HALO = QColor(0, 0, 0, 160)
 
 #: Height of one colour bar's strip (title, bar, tick labels).
 BAR_PX = 40
-
-
-def _font(px: int, bold: bool = False) -> QFont:
-    from ...theme_manager import scaled_px
-
-    f = QFont()
-    f.setPixelSize(scaled_px(px))
-    f.setBold(bold)
-    return f
 
 
 class SliceCanvas(QWidget):
@@ -171,17 +163,26 @@ class SliceCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _margins(self) -> tuple[float, float, float, float]:
-        """(left, top, right, bottom) reserved for letters and the caption."""
-        labels = self.ctx.scene.display.labels
-        side = 16.0 if labels else 2.0
-        top = 16.0 if (labels or self._show_caption) else 2.0
-        if self._show_caption and labels:
-            top = 30.0
-        bottom = 16.0 if labels else 2.0
+        """(left, top, right, bottom) reserved around the image: the caption
+        and the colour bars. The orientation letters reserve nothing: they
+        sit against the image (outside it where there is room, just inside
+        its edge where there is not), as NiiVue places them."""
+        side = 2.0
+        top = float(fonts.px(16)) if self._show_caption else 2.0
+        bottom = 2.0
         if self.ctx.scene.display.colorbar:
             # Each bar its own strip BELOW the image, never over it.
-            bottom += BAR_PX * max(1, len(colorbar.bars_for(self.ctx.store)))
+            bottom += self._bar_px() * max(1, len(colorbar.bars_for(self.ctx.store)))
         return side, top, side, bottom
+
+    @staticmethod
+    def _bar_px() -> float:
+        """One colour bar's strip: its title, the bar, its numbers, at the
+        app's font size (a fixed 40 px cut larger numbers off)."""
+        from PyQt6.QtGui import QFontMetricsF
+
+        th = QFontMetricsF(fonts.font(10)).height()
+        return max(float(BAR_PX), 2.0 * th + 13.0)
 
     def _place(self) -> QRectF:
         """Where the image goes on screen (zoom and pan applied)."""
@@ -242,8 +243,8 @@ class SliceCanvas(QWidget):
         if not have:
             self._image_rect = QRectF()
             if self._loading:
-                p.setPen(QColor(theme.dim))
-                p.setFont(_font(12))
+                p.setPen(QColor(theme.canvas_dim))
+                p.setFont(fonts.font(12))
                 p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Loading...")
             p.end()
             return
@@ -356,34 +357,67 @@ class SliceCanvas(QWidget):
         lines(pen)
 
     def _paint_labels(self, p: QPainter) -> None:
+        """The four orientation letters, each centred on its side of the
+        IMAGE and as close to it as the room allows: just outside the edge
+        when the image leaves room there (it is letterboxed on two sides),
+        just inside it otherwise, with a dark halo so it reads on any
+        anatomy. Never on the colour bars' strip, never off screen."""
         grid = self._grid
         if grid is None:
             return
         letters = geometry.plane_labels(self.plane, grid)
         rect = self._image_rect
-        p.setPen(QColor(self.ctx.theme.label))
-        p.setFont(_font(12, bold=True))
-        # The bottom letter sits directly under the image, ABOVE the colour
-        # bar's band, never on its row of numbers.
-        left, top, right, bottom = self._margins()
-        h = self.height()
-        w = self.width()
-        mid_y = min(max(rect.center().y(), top), h - bottom)
-        mid_x = min(max(rect.center().x(), left), w - right)
-        p.drawText(QRectF(0, mid_y - 10, left, 20), Qt.AlignmentFlag.AlignCenter, letters["left"])
-        p.drawText(QRectF(w - right, mid_y - 10, right, 20), Qt.AlignmentFlag.AlignCenter,
-                   letters["right"])
-        cap = 14.0 if self._show_caption else 0.0
-        p.drawText(QRectF(mid_x - 20, cap, 40, top - cap), Qt.AlignmentFlag.AlignCenter,
-                   letters["top"])
-        p.drawText(QRectF(mid_x - 20, h - bottom, 40, 16), Qt.AlignmentFlag.AlignCenter,
-                   letters["bottom"])
+        font = fonts.font(fonts.LETTER_PX, bold=True)
+        p.setFont(font)
+        fm = p.fontMetrics()
+        th = float(fm.height())
+        gap = 3.0
+        left_lim, top_lim, right_lim, bottom_lim = self._margins()
+        area = QRectF(left_lim, top_lim, self.width() - left_lim - right_lim,
+                      self.height() - top_lim - bottom_lim)
+        cx = min(max(rect.center().x(), area.left() + th), area.right() - th)
+        cy = min(max(rect.center().y(), area.top() + th), area.bottom() - th)
+        colour = QColor(self.ctx.theme.label)
+
+        def place(text: str, side: str) -> None:
+            tw = float(fm.horizontalAdvance(text))
+            if side == "left":
+                room = rect.left() - area.left()
+                x = rect.left() - gap - tw if room >= tw + 2 * gap else max(
+                    rect.left(), area.left()) + gap
+                box = QRectF(x, cy - th / 2.0, tw, th)
+            elif side == "right":
+                room = area.right() - rect.right()
+                x = rect.right() + gap if room >= tw + 2 * gap else min(
+                    rect.right(), area.right()) - gap - tw
+                box = QRectF(x, cy - th / 2.0, tw, th)
+            elif side == "top":
+                room = rect.top() - area.top()
+                y = rect.top() - gap - th if room >= th + gap else max(
+                    rect.top(), area.top()) + gap
+                box = QRectF(cx - tw / 2.0, y, tw, th)
+            else:
+                room = area.bottom() - rect.bottom()
+                y = rect.bottom() + gap if room >= th + gap else min(
+                    rect.bottom(), area.bottom()) - gap - th
+                box = QRectF(cx - tw / 2.0, y, tw, th)
+            inside = rect.contains(box.center())
+            if inside:
+                # On the image: a dark halo, so it reads on bright tissue.
+                p.setPen(QColor(0, 0, 0, 200))
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    p.drawText(box.translated(dx, dy), Qt.AlignmentFlag.AlignCenter, text)
+            p.setPen(colour)
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+
+        for side in ("left", "right", "top", "bottom"):
+            place(letters[side], side)
 
     def _paint_caption(self, p: QPainter) -> None:
         p.setPen(QColor(self.ctx.theme.caption))
-        p.setFont(_font(11))
-        p.drawText(QRectF(0, 0, self.width(), 15), Qt.AlignmentFlag.AlignCenter,
-                   self.plane.capitalize())
+        p.setFont(fonts.font(11))
+        p.drawText(QRectF(0, 0, self.width(), float(fonts.px(15))),
+                   Qt.AlignmentFlag.AlignCenter, self.plane.capitalize())
 
     def _paint_colorbar(self, p: QPainter) -> None:
         """One bar per visible scalar layer (``viz.colorbar``), stacked under
@@ -393,19 +427,22 @@ class SliceCanvas(QWidget):
         if not bars:
             return
         theme = self.ctx.theme
-        dim = QColor(theme.dim)
-        text = QColor(theme.text)
+        # On the black surround in both themes: always light.
+        dim = QColor(theme.canvas_dim)
+        text = QColor(theme.canvas_text)
         width = max(40.0, min(self.width() - 32.0, 520.0))
         x0 = (self.width() - width) / 2.0
-        y = self.height() - BAR_PX * len(bars) - 2
+        strip = self._bar_px()
+        y = self.height() - strip * len(bars) - 2
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         for spec in bars:
-            p.setFont(_font(10))
+            p.setFont(fonts.font(10))
             p.setPen(text)
             fm = p.fontMetrics()
-            p.drawText(QRectF(x0, y, width, 13), Qt.AlignmentFlag.AlignLeft,
+            th = float(fm.height())
+            p.drawText(QRectF(x0, y, width, th), Qt.AlignmentFlag.AlignLeft,
                        fm.elidedText(spec.title, Qt.TextElideMode.ElideMiddle, int(width)))
-            bar = QRectF(x0, y + 14, width, 7)
+            bar = QRectF(x0, y + th + 1, width, 7)
             pos = bar
             if spec.negative is not None:
                 half = (width - 6) / 2.0
@@ -413,9 +450,10 @@ class SliceCanvas(QWidget):
                 pos = QRectF(x0 + half + 6, bar.top(), half, bar.height())
                 self._draw_gradient(p, neg, spec.negative[0], spec.invert, reverse=True)
                 p.setPen(dim)
-                p.drawText(QRectF(neg.left(), neg.bottom() + 1, 60, 12),
+                wide = float(fm.horizontalAdvance("-000000")) + 8
+                p.drawText(QRectF(neg.left(), neg.bottom() + 1, wide, th),
                            Qt.AlignmentFlag.AlignLeft, f"-{colorbar.fmt(spec.negative[2], 0.01)}")
-                p.drawText(QRectF(neg.right() - 60, neg.bottom() + 1, 60, 12),
+                p.drawText(QRectF(neg.right() - wide, neg.bottom() + 1, wide, th),
                            Qt.AlignmentFlag.AlignRight, f"-{colorbar.fmt(spec.negative[1], 0.01)}")
             self._draw_gradient(p, pos, spec.colormap, spec.invert)
             p.setPen(QPen(dim, 1))
@@ -427,7 +465,7 @@ class SliceCanvas(QWidget):
                 w = fm.horizontalAdvance(label) + 4
                 left = min(max(tx - w / 2, pos.left() - 4), pos.right() - w + 4)
                 if left > last_right + 4:
-                    p.drawText(QRectF(left, pos.bottom() + 2, w, 12),
+                    p.drawText(QRectF(left, pos.bottom() + 2, w, th),
                                Qt.AlignmentFlag.AlignHCenter, label)
                     last_right = left + w
             if spec.threshold is not None:
@@ -439,7 +477,7 @@ class SliceCanvas(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawPolygon(tri)
                 p.setBrush(Qt.BrushStyle.NoBrush)
-            y += BAR_PX
+            y += strip
 
     def _draw_gradient(self, p: QPainter, rect: QRectF, cmap: str, invert: bool,
                        reverse: bool = False) -> None:

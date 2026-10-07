@@ -460,10 +460,10 @@ def test_scope_builds_a_neighbour_grid(qtbot, ds, no_gpu) -> None:
     viewer.qstore.flush()
     assert graph.cell_count() == 9
     assert len(graph.marker_points()) == 9
-    graph.marks_box.setChecked(False)
+    graph.marks_action.setChecked(False)
     viewer.qstore.flush()
     assert len(graph.marker_points()) == 1
-    graph.dot_spin.setValue(16)
+    graph._marker_actions[16].trigger()
     viewer.qstore.flush()
     assert graph.marker_size() == 16
     graph.scope_combo.setCurrentIndex(graph.scope_combo.findData(1))
@@ -1191,6 +1191,9 @@ class TestShrinking:
     def test_the_graph_does_not_pin_the_viewer_wide(self, qtbot, ds, no_gpu):
         viewer, graph = _with_graph(qtbot, ds)
         viewer.presenter.set_inspector(False, remember=False)
+        # The layout settles on the next turn of the event loop (a hidden
+        # column's room is given back then, not at once).
+        qtbot.wait(20)
         hint = viewer.minimumSizeHint()
         assert hint.width() < 420 and hint.height() < 360
 
@@ -1439,3 +1442,27 @@ class TestMosaicCrop:
         assert canvas.crops(canvas.tile_rows())["axial"] == (0.0, 0.0, 1.0, 1.0)
         canvas.repaint()
         assert not canvas.grab().isNull()
+
+
+def test_a_series_is_shown_only_once_it_is_read(qtbot, ds, no_gpu) -> None:
+    """Volumes appearing one by one, the graph growing and the contrast
+    changing as they arrived read as something going wrong."""
+    viewer = _viewer(qtbot)
+    pages = []
+    viewer.ctx.jobs.progressed.connect(
+        lambda tag, _gen, done, total: pages.append(viewer.page()) if tag == "stream" else None)
+    _open(qtbot, viewer, _bold(ds), ds)
+    assert viewer.is_loaded() and viewer.page() == "content"
+    assert pages and set(pages) == {"loading"}, "the series showed before it was read"
+
+
+def test_a_saved_view_with_rows_that_no_longer_exist_still_works(qtbot, ds, no_gpu) -> None:
+    """A view saved by round 4 named the row ``motion``; one unknown id made
+    every change to the rows fail, so FD and motion could not be shown."""
+    SettingsHub.instance().update(lambda s: s.layout_state.update(
+        {"mri.func": {"mode": "multi", "graph_visible": True,
+                      "graph": {"qc": True, "qc_rows": ["motion", "dvars"]}}}))
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    assert viewer.scene.graph.qc_rows == ["dvars"]
+    viewer.run("graph.set", qc_rows=["fd", "dvars", "rotation"])
+    assert viewer.scene.graph.qc_rows == ["fd", "dvars", "rotation"]

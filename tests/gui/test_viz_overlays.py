@@ -307,7 +307,8 @@ class TestQualityMaps:
         quality = [a.text() for a in v.presenter.quality_button.menu().actions() if a.text()]
         assert quality[:3] == ["Temporal SNR map", "Standard deviation map",
                                "Mean image of the series"]
-        assert "QC rows under the time course" in quality
+        assert "QC plots under the time course" in quality
+        assert "Run QC when a file opens" in quality
         assert v.presenter.quality_button.isVisibleTo(v)
 
     def test_quality_is_offered_only_for_a_series(self, qtbot, ds):

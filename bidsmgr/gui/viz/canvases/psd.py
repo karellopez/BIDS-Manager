@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ....viz.compute.spectral import to_db
+from .. import fonts
 from ..bridge import SettingsHub, ThemeHub, connect_while_alive
 
 
@@ -90,7 +91,6 @@ class PsdWindow(QDialog):
         pg = self._pg
         plot = pg.PlotWidget()
         plot.showGrid(x=True, y=True, alpha=0.15)
-        plot.setLabel("bottom", "Frequency", units="Hz")
         plot.getPlotItem().getAxis("bottom").enableAutoSIPrefix(False)
         return plot
 
@@ -200,9 +200,11 @@ class PsdWindow(QDialog):
         for plot in (self.channel_plot, self.average_plot):
             plot.setBackground(theme.plot_background)
             for name in ("left", "bottom"):
-                ax = plot.getPlotItem().getAxis(name)
-                ax.setPen(self._pg.mkPen(color=theme.plot_foreground))
-                ax.setTextPen(self._pg.mkPen(color=theme.plot_foreground))
+                plot.getPlotItem().getAxis(name).setPen(
+                    self._pg.mkPen(color=theme.plot_foreground))
+            fonts.style_axes(plot.getPlotItem(), theme.plot_foreground)
+            fonts.axis_title(plot.getPlotItem(), "bottom", "Frequency",
+                             theme.plot_foreground, units="Hz")
         pen = self._pg.mkPen(color=theme.dim, width=1, style=Qt.PenStyle.DashLine)
         for cross in (self._channel_cross, self._average_cross):
             cross["v"].setPen(pen)
@@ -229,7 +231,8 @@ class PsdWindow(QDialog):
         if hi is not None and hi >= 0:
             self._plot_curve(plot, self._scale(self._data[hi]),
                              pen=pg.mkPen(color=ThemeHub.instance().theme.text, width=2))
-        plot.setLabel("left", "Power (dB)" if self._db else "Power")
+        fonts.axis_title(plot.getPlotItem(), "left", "Power (dB)" if self._db else "Power",
+                         ThemeHub.instance().theme.plot_foreground)
 
     def _redraw_average(self) -> None:
         pg = self._pg
@@ -252,7 +255,8 @@ class PsdWindow(QDialog):
                 plot.addItem(fill)
                 self._drawn.setdefault(id(plot), []).append(fill)
             self._plot_curve(plot, mean, pen=pg.mkPen(color=colour, width=2), name=t)
-        plot.setLabel("left", "Power (dB)" if self._db else "Power")
+        fonts.axis_title(plot.getPlotItem(), "left", "Power (dB)" if self._db else "Power",
+                         ThemeHub.instance().theme.plot_foreground)
 
 
 __all__ = ["PsdWindow"]

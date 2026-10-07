@@ -160,8 +160,10 @@ class TestTypesNeverMix:
         assert r["flagged"][25]
         assert r["segment_reasons"][25] == ["MEG grad: 40 % of channels off"]
         assert not r["types"]["eeg"]["flagged"][25] and not r["types"]["mag"]["flagged"][25]
-        lanes = [(lane["type"], lane["key"]) for lane in r["lanes"]]
-        assert ("grad", "off") in lanes and ("eeg", "off") in lanes
+        from bidsmgr.viz.compute.meeg_qc import tracks
+
+        ids = [t["id"] for t in tracks(r, ["off"])]
+        assert ids == ["off:mag", "off:grad", "off:eeg"]
 
 
 class TestSettings:
@@ -220,3 +222,30 @@ class TestCorrelation:
         src.raw.add_proj([proj])
         assert quality(src)["projected"]
         assert not quality(src, settings=MeegQcSettings(apply_proj=False))["projected"]
+
+
+class TestTracksAndTypes:
+    def test_qc_on_chosen_types_only(self):
+        data, types = _meg_eeg()
+        r = quality(_src(data, types), settings=MeegQcSettings(types=["grad"]))
+        assert set(r["types"]) == {"grad"}
+        assert {c["type"] for c in r["channels"]} == {"grad"}
+        # A type this recording does not have: every type, not nothing.
+        r = quality(_src(data, types), settings=MeegQcSettings(types=["seeg"]))
+        assert set(r["types"]) == {"mag", "grad", "eeg"}
+
+    def test_tracks_never_put_two_types_on_one_axis(self):
+        from bidsmgr.viz.compute.meeg_qc import tracks
+
+        data, types = _meg_eeg()
+        r = quality(_src(data, types))
+        made = tracks(r, ["off", "std", "map"], ["mag", "eeg"])
+        assert [t["id"] for t in made] == ["off:mag", "off:eeg", "std:mag", "std:eeg",
+                                           "map:mag", "map:eeg"]
+        off = made[0]
+        assert off["unit"] == "%" and off["rule"] == pytest.approx(20.0)
+        assert off["x"][0] == pytest.approx(1.0), "segment centres, from the start"
+        channel_map = made[-1]
+        assert channel_map["kind"] == "image"
+        assert channel_map["image"].shape == (8, len(r["times"]))
+        assert channel_map["rows"][0] == "E18"

@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from ....viz import views
@@ -21,16 +21,9 @@ from ....viz.compute import geometry, mosaic
 from ....viz.scene import PLANE_AXIS
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
+from .. import fonts
 
 log = logging.getLogger(__name__)
-
-
-def _font(px: int) -> QFont:
-    from ...theme_manager import scaled_px
-
-    f = QFont()
-    f.setPixelSize(scaled_px(px))
-    return f
 
 
 #: A pixel is part of the head when any channel is brighter than this.
@@ -146,9 +139,9 @@ class MosaicCanvas(QWidget):
         spec = mosaic.parse(self.ctx.scene.mosaic)
         rows = self.tile_rows(spec)
         if not rows:
-            p.setPen(QColor(theme.dim))
+            p.setPen(QColor(theme.canvas_dim))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "Build a mosaic in the controls column (Mosaic section)")
+                       "Build a mosaic in the advanced controls (Mosaic section)")
             p.end()
             return
         overlap = spec.overlap
@@ -197,8 +190,8 @@ class MosaicCanvas(QWidget):
                     self._paint_cross(p, full, grid, tile, every)
                 p.restore()
                 if spec.labels:
-                    p.setPen(QColor(theme.dim))
-                    p.setFont(_font(10))
+                    p.setPen(QColor(theme.canvas_dim))
+                    p.setFont(fonts.font(10))
                     axis = "xyz"[PLANE_AXIS[tile.plane]]
                     p.drawText(QRectF(rect.left(), rect.bottom() + 1, rect.width(), label_h),
                                Qt.AlignmentFlag.AlignCenter,

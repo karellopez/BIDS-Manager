@@ -103,9 +103,13 @@ class TestPhysio:
         v.run("graph.set", physio=True)
         v.qstore.flush()
         qtbot.waitUntil(lambda: g.physio_channels() == ["cardiac"], timeout=20_000)
-        x, _y = g._physio_curves[0].getData()
+        card = g.tracks.card("physio:cardiac")
+        x, _y = card._curves[0].getData()
         assert x.min() >= 0.0 - 1e-6, "cut to the run (it started 3 s before it)"
         assert x.max() <= 38.0 + 0.02
+        # Its own values on its own axis, its name in the header, not on the trace.
+        assert card.title.text() == "cardiac"
+        assert not card.up.isVisibleTo(card) and not card.hide_button.isVisibleTo(card)
 
     def test_it_is_shown_for_a_neighbourhood_too(self, qtbot, run):
         """It used to vanish at any scope but one voxel, with its box still
@@ -132,12 +136,12 @@ class TestPhysio:
         v, g = _graph(qtbot, run, _bold(run))
         v.run("graph.set", physio=True)
         v.qstore.flush()
-        qtbot.waitUntil(lambda: len(g.physio_lanes()) == 2, timeout=20_000)
-        lanes = {lane["name"]: lane for lane in g.physio_lanes()}
-        assert lanes["cardiac"]["role"] == "waveform"
-        assert lanes["trigger"]["role"] == "events"
-        assert lanes["trigger"]["ticks"] == 10
-        assert "10 marks" in lanes["trigger"]["note"]
+        qtbot.waitUntil(lambda: len(g.shown_tracks()) == 2, timeout=20_000)
+        tracks = {t["title"]: t for t in g.shown_tracks()}
+        assert tracks["cardiac"]["kind"] == "line"
+        assert tracks["trigger"]["kind"] == "events"
+        assert tracks["trigger"]["ticks"] == 10
+        assert "10 marks" in tracks["trigger"]["summary"]
 
     def test_moving_the_crosshair_does_not_read_it_again(self, qtbot, run, monkeypatch):
         from bidsmgr.gui.viz.canvases import graph as G
@@ -225,33 +229,36 @@ class TestQcTracesAndZoom:
         qtbot.waitUntil(lambda: g.qc_box.isVisibleTo(g), timeout=20_000)
         v.run("graph.set", qc=True)
         v.qstore.flush()
-        qtbot.waitUntil(lambda: any(lane["name"] == "DVARS" for lane in g.physio_lanes()),
+        qtbot.waitUntil(lambda: "dvars" in [t["id"] for t in g.shown_tracks()],
                         timeout=20_000)
-        dvars = [lane for lane in g.physio_lanes() if lane["name"] == "DVARS"][0]
+        dvars = [t for t in g.shown_tracks() if t["id"] == "dvars"][0]
         assert dvars["ticks"] >= 1 and "box-plot" in dvars["note"]
-        qtbot.waitUntil(lambda: {lane["name"] for lane in g.physio_lanes()} >= {
-            "framewise displacement", "translation", "rotation", "DVARS", "outlier voxels"},
-            timeout=20_000)
-        assert "global signal" not in {lane["name"] for lane in g.physio_lanes()}, \
-            "a row nobody asked for"
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == [
+            "fd", "translation", "rotation", "dvars", "outliers"], timeout=20_000)
+        titles = [t["title"] for t in g.shown_tracks()]
+        assert titles[:3] == ["Framewise displacement", "Translation", "Rotation"], \
+            "framewise displacement is its own plot, apart from the parameters"
+        assert g.tracks.card("rotation").track["legend"] == ["pitch", "roll", "yaw"]
+        assert g.tracks.card("translation").track["legend"] == ["x", "y", "z"]
 
     def test_rows_are_chosen_and_computed_only_when_shown(self, qtbot, run):
         v, g = _graph(qtbot, run, _bold(run))
         v.run("graph.set", qc=True, qc_rows=["global"])
         v.qstore.flush()
-        qtbot.waitUntil(lambda: [lane["name"] for lane in g.physio_lanes()]
-                        == ["global signal"], timeout=20_000)
-        assert set(g._qc_src["rows"]) <= {"global", "nss"}, "unasked rows were computed"
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == ["global"],
+                        timeout=20_000)
+        assert set(g._qc_src["rows"]) == {"global"}, "unasked rows were computed"
         g._qc_row_actions["carpet"].trigger()
         v.qstore.flush()
         assert v.scene.graph.qc_rows == ["global", "carpet"]
-        qtbot.waitUntil(lambda: any(lane["role"] == "image" for lane in g.physio_lanes()),
+        qtbot.waitUntil(lambda: any(t["kind"] == "image" for t in g.shown_tracks()),
                         timeout=20_000)
-        assert g._carpet_item is not None and g._carpet_item.isVisible()
+        carpet = g.tracks.card("carpet")
+        assert carpet._image is not None and carpet._image.isVisible()
         g._qc_row_actions["carpet"].trigger()
         v.qstore.flush()
-        g.repaint()
-        assert not g._carpet_item.isVisible(), "the carpet is pooled, hidden not removed"
+        assert g.tracks.card("carpet") is None and carpet.isHidden(), \
+            "the card is kept for later, hidden, never destroyed"
         with pytest.raises(ValueError):
             v.run("graph.set", qc_rows=["nonsense"])
 
@@ -263,14 +270,13 @@ class TestQcTracesAndZoom:
         (func / "sub-01_task-x_run-1_desc-confounds_timeseries.tsv").write_text(
             "\n".join(lines) + "\n")
         v, g = _graph(qtbot, run, _bold(run))
-        v.run("graph.set", qc=True, qc_rows=["motion"])
+        v.run("graph.set", qc=True, qc_rows=["fd"])
         v.qstore.flush()
-        qtbot.waitUntil(lambda: any(lane["name"] == "framewise displacement"
-                                    for lane in g.physio_lanes()), timeout=20_000)
-        fd_lane = [lane for lane in g.physio_lanes()
-                   if lane["name"] == "framewise displacement"][0]
-        assert "desc-confounds_timeseries.tsv" in fd_lane["note"]
-        assert fd_lane["ticks"] == 1, "one volume above 0.5 mm"
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == ["fd"], timeout=20_000)
+        fd_track = g.shown_tracks()[0]
+        assert "desc-confounds_timeseries.tsv" in fd_track["note"]
+        assert fd_track["ticks"] == 1, "one volume above 0.5 mm"
+        assert g.tracks.card("fd").track["rule"] == 0.5
 
 
 class TestThePanel:
@@ -314,10 +320,24 @@ class TestThePanel:
         v.qstore.flush()
         assert v.presenter._graph_window is None
 
-    def test_the_panel_buttons_are_on_the_graph(self, qtbot, run):
+    def test_the_panel_buttons_are_in_the_graph_corner(self, qtbot, run):
+        from PyQt6.QtWidgets import QPushButton
+
         _v, g = _graph(qtbot, run, _bold(run))
-        ids = {w.property("viz_action") for w in g.controls.findChildren(type(g.export_button))}
-        assert {"graph.beside", "graph.maximize", "graph.detach"} <= ids
+        corner = g.header.corner_buttons()
+        ids = [w.property("viz_action") for w in corner]
+        assert {"graph.beside", "graph.maximize", "graph.detach"} <= set(ids)
+        # Icons in the corner, More last; the controls keep the left side.
+        assert all(w.text() == "" for w in corner)
+        assert corner[-1] is g.more_button
+        assert not g.controls.findChildren(QPushButton, "viz-corner-btn")
+
+    def test_more_holds_the_marker_and_the_export(self, qtbot, run):
+        _v, g = _graph(qtbot, run, _bold(run))
+        texts = [a.text() for a in g.more_button.menu().actions()]
+        assert "Marker size" in texts
+        assert "Marker on every voxel" in texts
+        assert "Export CSV..." in texts
 
     def test_ctrl_wheel_zooms_time_and_reads_the_physio_for_it(self, qtbot, run):
         from PyQt6.QtCore import QPoint, QPointF, Qt
@@ -331,7 +351,11 @@ class TestThePanel:
         assert g.time_view() == (10.0, 20.0)
         assert g.plot.getPlotItem().getViewBox().viewRange()[0] == pytest.approx([10.0, 20.0])
         qtbot.waitUntil(lambda: g._physio_src is not None
-                        and float(g._physio_src["lanes"][0]["x"].min()) >= 9.9, timeout=20_000)
+                        and float(g._physio_src["tracks"][0]["x"].min()) >= 9.9, timeout=20_000)
+        qtbot.waitUntil(lambda: g.tracks.card("physio:cardiac") is not None, timeout=20_000)
+        card = g.tracks.card("physio:cardiac")
+        assert card.plot.getPlotItem().getViewBox().viewRange()[0] == pytest.approx(
+            [10.0, 20.0]), "the plots under the graph follow its zoom"
         ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120),
                          Qt.MouseButton.NoButton, Qt.KeyboardModifier.ShiftModifier,
                          Qt.ScrollPhase.NoScrollPhase, False)
@@ -340,3 +364,91 @@ class TestThePanel:
         assert hi - lo == pytest.approx(10.0) and lo < 10.0, "Shift+wheel pans"
         g.set_time_view(None)
         assert g.time_view() is None
+
+
+
+class TestTracks:
+    """Each plot under the graph is its own: ordered, hidden, read and
+    clicked independently, fitted or scrolled, in the theme's colours."""
+
+    def _qc(self, qtbot, run, rows):
+        v, g = _graph(qtbot, run, _bold(run))
+        v.run("graph.set", qc=True, qc_rows=rows)
+        v.qstore.flush()
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == rows, timeout=20_000)
+        return v, g
+
+    def test_the_user_orders_and_hides_them(self, qtbot, run):
+        v, g = self._qc(qtbot, run, ["fd", "dvars", "global"])
+        g.tracks.card("global").up.click()
+        v.qstore.flush()
+        assert v.scene.graph.qc_rows == ["fd", "global", "dvars"]
+        qtbot.waitUntil(lambda: g.tracks.track_ids() == ["fd", "global", "dvars"],
+                        timeout=5000)
+        assert not g.tracks.card("fd").up.isEnabled(), "the first cannot go higher"
+        g.tracks.card("dvars").hide_button.click()
+        v.qstore.flush()
+        assert v.scene.graph.qc_rows == ["fd", "global"]
+        assert not g._qc_row_actions["dvars"].isChecked()
+
+    def test_the_title_is_never_on_the_signal(self, qtbot, run):
+        _v, g = self._qc(qtbot, run, ["dvars"])
+        card = g.tracks.card("dvars")
+        assert card.title.geometry().bottom() < card.plot.geometry().top(), \
+            "the header sits above the plot"
+        assert card.title.text() == "DVARS (% of mean)"
+
+    def test_hover_reads_every_track_at_one_moment_and_click_goes_there(self, qtbot, run):
+        v, g = self._qc(qtbot, run, ["dvars", "global"])
+        v.run("graph.set", x_axis="frames")
+        v.qstore.flush()
+        g.tracks._hover_at(7.2, g.tracks.card("dvars"), None)
+        for card in g.tracks.cards():
+            assert card.readout.text().startswith("volume 7"), card.readout.text()
+        assert "%" in g.tracks.card("dvars").readout.text()
+        g.tracks._hover_at(None, None)
+        assert g.tracks.card("dvars").readout.text().startswith("median")
+        g.tracks.clicked.emit(12.0)
+        assert v.scene.base_layer().frame == 12
+
+    def test_scroll_mode_gives_each_a_readable_height(self, qtbot, run):
+        from bidsmgr.gui.viz.canvases.tracks import SCROLL_PX
+
+        v, g = self._qc(qtbot, run, ["fd", "dvars", "outliers"])
+        g.expand_button.click()
+        v.qstore.flush()
+        assert v.scene.graph.tracks_mode == "scroll"
+        assert g.tracks.mode() == "scroll"
+        assert g.tracks.card("fd").height() >= SCROLL_PX
+
+    def test_they_follow_the_theme(self, qtbot, run):
+        from PyQt6.QtGui import QColor
+
+        from bidsmgr.gui.viz.bridge import ThemeHub
+        from bidsmgr.gui.theme_manager import DARK, LIGHT
+
+        _v, g = self._qc(qtbot, run, ["dvars"])
+        card = g.tracks.card("dvars")
+        ThemeHub.instance().publish(LIGHT)
+        light = card.plot.backgroundBrush().color().name()
+        ThemeHub.instance().publish(DARK)
+        dark = card.plot.backgroundBrush().color().name()
+        assert light != dark
+        assert QColor(dark).lightness() < QColor(light).lightness()
+
+    def test_qc_is_off_on_opening_unless_asked(self, qtbot, run):
+        from bidsmgr.gui.viz.bridge import SettingsHub
+
+        v, g = self._qc(qtbot, run, ["global"])
+        assert not v.ctx.settings.qc.on_open
+        _open_again = Viewer(kind="volume")
+        qtbot.addWidget(_open_again)
+        with qtbot.waitSignal(_open_again.loaded, timeout=20_000):
+            _open_again.set_file(_bold(run), run)
+        assert not _open_again.scene.graph.qc, "QC ran again without being asked"
+        SettingsHub.instance().update(lambda st: setattr(st.qc, "on_open", True))
+        third = Viewer(kind="volume")
+        qtbot.addWidget(third)
+        with qtbot.waitSignal(third.loaded, timeout=20_000):
+            third.set_file(_bold(run), run)
+        assert third.scene.graph.qc, "asked to run QC on opening"

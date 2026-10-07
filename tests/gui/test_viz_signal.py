@@ -18,6 +18,8 @@ import pytest
 
 mne = pytest.importorskip("mne")
 
+from PyQt6.QtWidgets import QLabel, QPushButton  # noqa: E402
+
 from bidsmgr.gui.viz import Viewer  # noqa: E402
 from bidsmgr.gui.viz.bridge import SettingsHub  # noqa: E402
 from tests.fixtures.signals import write_fif, write_physio  # noqa: E402
@@ -410,14 +412,19 @@ class TestControlsThatSuitTheChannelCount:
         assert not p.type_combo.isVisibleTo(viewer)
         assert not p.count_control.isVisibleTo(viewer)
         assert not p.channels_button.isVisibleTo(viewer)
+        assert viewer._toolbar.isAncestorOf(p.count_control), \
+            "Displayed channels belongs in the main toolbar"
 
-    def test_several_channels_show_them(self, qtbot, recording, tmp_path):
+    def test_physio_shows_every_channel_and_asks_no_count(self, qtbot, recording, tmp_path):
+        """A run's physio is a handful of channels: all of them are drawn,
+        and there is no count to set."""
         viewer = _visualize(qtbot, _pane(qtbot), recording, tmp_path)
         p = viewer.presenter
         p.set_inspector(True)
         assert p.type_combo.isVisibleTo(viewer)
-        assert p.count_control.isVisibleTo(viewer)
         assert p.channels_button.isVisibleTo(viewer)
+        assert not p.count_control.isVisibleTo(viewer)
+        assert viewer.scene.traces.count == len(viewer.source().ch_names)
 
     def test_together_is_offered_only_with_relatives(
         self, qtbot, one_runs_relatives, tmp_path,
@@ -429,9 +436,10 @@ class TestControlsThatSuitTheChannelCount:
         viewer = _visualize(qtbot, _pane(qtbot), one_channel, tmp_path)
         assert not viewer.action("traces.together").isEnabled()
 
-    def test_together_brings_the_controls_back(self, qtbot, one_runs_relatives, tmp_path):
+    def test_a_runs_physio_opens_together(self, qtbot, one_runs_relatives, tmp_path):
+        """The cardiac, breathing and trigger files of one run belong
+        together: they open as one, every channel shown."""
         viewer = _visualize(qtbot, _pane(qtbot), one_runs_relatives, tmp_path)
-        viewer.trigger("traces.together")
         qtbot.waitUntil(lambda: viewer.source() is not None
                         and len(viewer.source().ch_names) == 3, timeout=30_000)
         viewer.qstore.flush()
@@ -439,8 +447,12 @@ class TestControlsThatSuitTheChannelCount:
         p.set_inspector(True)
         assert viewer.action("traces.together").isChecked()
         assert viewer.source().start_time == -1.0, "the belt started first"
+        assert viewer.scene.traces.count == 3
         assert p.type_combo.isVisibleTo(viewer)
-        assert p.count_control.isVisibleTo(viewer)
+        viewer.trigger("traces.together")
+        qtbot.waitUntil(lambda: viewer.source() is not None
+                        and len(viewer.source().ch_names) == 1, timeout=30_000)
+        assert not viewer.action("traces.together").isChecked()
 
     def test_physio_has_no_close_button_and_meg_has(self, qtbot, recording, tmp_path, rec):
         """Physio is closed by its pane's Visualize toggle; MEG goes back to
@@ -1211,13 +1223,13 @@ class TestQualityCheck:
         viewer.trigger("traces.quality")
         p = viewer.presenter
         qtbot.waitUntil(lambda: p.quality_row.isVisibleTo(viewer), timeout=20_000)
-        res = p.quality_strip.result()
+        res = p.quality_result()
         assert res["suggested_bads"] == ["E2"]
         assert any(res["flagged"])
-        # One lane per type and measure; at 250 Hz the muscle band (110 to 140
-        # Hz) is above Nyquist, so EEG has its "off" lane alone.
-        assert [lane["name"] for lane in p.quality_strip._lanes] == ["EEG off"]
-        assert p.quality_strip.height() >= p.quality_strip.LANE_PX
+        # One plot per type and measure; at 250 Hz the muscle band (110 to 140
+        # Hz) is above Nyquist, so EEG has its "channels off" plot alone.
+        assert p.qc_tracks.track_ids() == ["off:eeg"]
+        assert p.qc_tracks.card("off:eeg").title.text() == "EEG: channels off (%)"
         traces = _traces(viewer)
         assert traces.quality_flags["E2"][1].startswith("noisy")
         assert 2 in traces._strip.flags
@@ -1230,13 +1242,41 @@ class TestQualityCheck:
         from bidsmgr.viz.commands.signal import bad_spans
 
         viewer, p = self._checked(qtbot, noisy_rec)
-        assert p.mark_flagged_segments() >= 1
+        assert p.mark_segments() >= 1
         viewer.qstore.flush()
         spans = bad_spans(viewer.store)
         assert spans and spans[0].label == "BAD_noise"
         assert spans[0].onset == pytest.approx(30.0, abs=2.0)
         viewer.store.undo()
         assert bad_spans(viewer.store) == []
+
+    def test_mark_as_bad_offers_channels_and_segments(self, qtbot, noisy_rec):
+        from bidsmgr.viz.commands.signal import bad_spans
+
+        viewer, p = self._checked(qtbot, noisy_rec)
+        menu = p.qc_mark_button.menu()
+
+        def entry(target, start):
+            target.aboutToShow.emit()
+            return next(a for a in target.actions() if a.text().startswith(start))
+
+        assert entry(menu, "Suggested channels").text() == "Suggested channels (1)"
+        assert entry(menu, "Flagged segments").isEnabled()
+        by_reason = entry(menu, "Channels by reason").menu()
+        assert [a.text().split(" (")[0] for a in by_reason.actions()] == [
+            "Flat", "Noisy", "Uncorrelated", "Line noise"]
+        entry(menu, "Suggested channels").trigger()
+        viewer.qstore.flush()
+        assert viewer.scene.traces.bads == ["E2"]
+        done = entry(menu, "Suggested channels")
+        assert done.text() == "Suggested channels (0)" and not done.isEnabled(), \
+            "a channel already marked is not offered again"
+        by_why = entry(menu, "Segments by why").menu()
+        noise = next(a for a in by_why.actions() if "BAD_noise" in a.text())
+        assert noise.isEnabled()
+        noise.trigger()
+        viewer.qstore.flush()
+        assert bad_spans(viewer.store) and bad_spans(viewer.store)[0].label == "BAD_noise"
 
     def test_the_report_marks_the_suggested_channels(self, qtbot, noisy_rec):
         viewer, p = self._checked(qtbot, noisy_rec)
@@ -1283,6 +1323,145 @@ class TestQualityCheck:
         assert viewer.action("view.inspector").isChecked()
 
 
+class TestQcPlots:
+    """QC under the traces: one plot per measure and channel type, chosen,
+    ordered, hidden, maximised; QC run on the types asked for."""
+
+    @pytest.fixture
+    def mixed_rec(self, tmp_path):
+        rng = np.random.default_rng(3)
+        sfreq, seconds = 500.0, 40.0
+        n = int(sfreq * seconds)
+
+        def block(k, scale):
+            shared = rng.normal(0, 1, (3, n))
+            return scale * (rng.uniform(0.5, 1.0, (k, 3)) @ shared
+                            + 0.3 * rng.normal(0, 1, (k, n)))
+
+        data = np.vstack([block(6, 2e-13), block(6, 4e-12), block(6, 10e-6)])
+        names = [f"MEG{i:03d}" for i in range(12)] + [f"EEG{i:03d}" for i in range(6)]
+        types = ["mag"] * 6 + ["grad"] * 6 + ["eeg"] * 6
+        info = mne.create_info(names, sfreq, types, verbose=False)
+        path = tmp_path / "sub-01_task-rest_meg.fif"
+        mne.io.RawArray(data, info, verbose=False).save(str(path), verbose=False)
+        return path
+
+    def _qc(self, qtbot, path):
+        viewer = _load_signal(qtbot, _open(qtbot, _viewer(qtbot, size=(1100, 800)), path,
+                                           path.parent))
+        viewer.trigger("traces.quality")
+        p = viewer.presenter
+        qtbot.waitUntil(lambda: p.quality_result() is not None, timeout=30_000)
+        viewer.qstore.flush()
+        return viewer, p
+
+    def test_one_plot_per_measure_and_type(self, qtbot, mixed_rec):
+        viewer, p = self._qc(qtbot, mixed_rec)
+        assert p.qc_tracks.track_ids() == ["off:mag", "off:grad", "off:eeg",
+                                           "muscle:mag", "muscle:grad", "muscle:eeg"]
+        p._qc_metric_actions["std"].trigger()
+        viewer.qstore.flush()
+        assert "std:grad" in p.qc_tracks.track_ids()
+        card = p.qc_tracks.card("std:grad")
+        assert card.title.text() == "MEG grad: STD (x its level)"
+
+    def test_the_types_shown_are_the_users(self, qtbot, mixed_rec):
+        viewer, p = self._qc(qtbot, mixed_rec)
+        p._fill_qc_types_menu()
+        labels = [a.text() for a in p._qc_types_menu.actions() if a.text()]
+        assert labels == ["All types", "MEG mag", "MEG grad", "EEG"]
+        p._toggle_qc_type("mag", False)
+        p._toggle_qc_type("grad", False)
+        viewer.qstore.flush()
+        assert viewer.scene.traces.qc_types == ["eeg"]
+        assert p.qc_tracks.track_ids() == ["off:eeg", "muscle:eeg"]
+        p._toggle_qc_type("eeg", False)
+        viewer.qstore.flush()
+        assert viewer.scene.traces.qc_types == ["eeg"], "never an empty panel"
+
+    def test_qc_runs_on_the_chosen_types_only(self, qtbot, mixed_rec):
+        viewer, p = self._qc(qtbot, mixed_rec)
+        p.set_inspector(True)
+        boxes = p.controls._qc_type_boxes
+        assert list(boxes) == ["mag", "grad", "eeg"]
+        boxes["mag"].setChecked(False)
+        boxes["grad"].setChecked(False)
+        assert viewer.ctx.settings.meeg_qc.types == ["eeg"]
+        qtbot.waitUntil(lambda: p.quality_result() is not None
+                        and set(p.quality_result()["types"]) == {"eeg"}, timeout=30_000)
+        assert all(c["type"] == "eeg" for c in p.quality_result()["channels"])
+
+    def test_ordered_hidden_and_maximised(self, qtbot, mixed_rec):
+        viewer, p = self._qc(qtbot, mixed_rec)
+        p.qc_tracks.card("off:eeg").up.click()
+        viewer.qstore.flush()
+        assert p.qc_tracks.track_ids()[:3] == ["off:mag", "off:eeg", "off:grad"]
+        p.qc_tracks.card("muscle:mag").hide_button.click()
+        viewer.qstore.flush()
+        assert "muscle:mag" not in p.qc_tracks.track_ids()
+        p._toggle_qc_metric("muscle", False)
+        p._toggle_qc_metric("muscle", True)
+        viewer.qstore.flush()
+        assert "muscle:mag" in p.qc_tracks.track_ids(), "asking for it again brings it back"
+        p.qc_max_button.click()
+        assert p._traces_holder.isHidden()
+        p.qc_max_button.click()
+        assert not p._traces_holder.isHidden()
+
+    def test_hover_reads_the_segment_and_a_click_goes_there(self, qtbot, mixed_rec):
+        viewer, p = self._qc(qtbot, mixed_rec)
+        p.qc_tracks._hover_at(13.0, p.qc_tracks.card("off:grad"))
+        assert p.qc_tracks.card("off:mag").readout.text().startswith("12.0 to 14.0 s")
+        p.qc_tracks.clicked.emit(30.0)
+        viewer.qstore.flush()
+        assert viewer.scene.traces.t0 == pytest.approx(30.0 - 0.4 * viewer.scene.traces.width)
+
+    def test_the_qc_plots_open_with_a_share_of_the_room(self, qtbot, mixed_rec):
+        _viewer, p = self._qc(qtbot, mixed_rec)
+        traces, qc = p.qc_split.sizes()
+        assert qc >= 0.3 * (traces + qc), "not squeezed to one clipped plot"
+
+    def test_the_panel_controls_sit_in_the_corner(self, qtbot, mixed_rec):
+        _viewer, p = self._qc(qtbot, mixed_rec)
+        corner = p.qc_header.corner_buttons()
+        assert corner == [p.qc_expand_button, p.qc_beside_button, p.qc_max_button]
+        assert all(b.text() == "" and b.toolTip() for b in corner)
+        texts = [b.text() for b in p.qc_header.controls.findChildren(QPushButton)]
+        assert texts == ["Plots", "Types", "Mark as bad", "Report...", "Settings..."]
+
+    def test_the_qc_plots_can_sit_beside_the_traces(self, qtbot, mixed_rec):
+        from PyQt6.QtCore import Qt
+
+        viewer, p = self._qc(qtbot, mixed_rec)
+        assert p.qc_split.orientation() == Qt.Orientation.Vertical
+        p.qc_beside_button.click()
+        viewer.qstore.flush()
+        assert viewer.scene.traces.qc_beside
+        assert p.qc_split.orientation() == Qt.Orientation.Horizontal
+        p.qc_beside_button.click()
+        viewer.qstore.flush()
+        assert p.qc_split.orientation() == Qt.Orientation.Vertical
+
+    def test_the_toolbar_names(self, qtbot, mixed_rec):
+        viewer = _load_signal(qtbot, _open(qtbot, _viewer(qtbot), mixed_rec, mixed_rec.parent))
+        texts = [w.text() for w in viewer._toolbar.findChildren(QLabel)]
+        assert "Scaling" in texts and "Displayed channels" in texts
+        assert "Amplitude" not in texts and "Traces" not in texts
+        reset = viewer.button("traces.reset")
+        assert reset is not None and viewer._toolbar.isAncestorOf(reset), \
+            "Reset view belongs in the main toolbar"
+        assert viewer.presenter.side_tab.text == "Advanced controls"
+
+    def test_help_and_close_sit_in_the_toolbar_corner(self, qtbot, mixed_rec):
+        viewer = _load_signal(qtbot, _open(qtbot, _viewer(qtbot), mixed_rec, mixed_rec.parent))
+        from bidsmgr.gui.viz.panels.panel_header import PanelHeader
+
+        header = viewer._toolbar.findChild(PanelHeader)
+        corner = [b.property("viz_action") for b in header.corner_buttons()]
+        assert corner == ["help.shortcuts", "signal.close"], "close last, as a window's is"
+        assert all(b.text() == "" and not b.icon().isNull() for b in header.corner_buttons())
+
+
 class TestControlsColumn:
     """One toolbar row of what is used all the time; everything else in the
     controls column, by purpose, as in the image viewer."""
@@ -1291,7 +1470,7 @@ class TestControlsColumn:
         viewer = _loaded(qtbot, long_rec)
         p = viewer.presenter
         assert len(p.toolbar_rows()) == 1
-        for moved in ("traces.butterfly", "time.fit", "events.toggle", "traces.line"):
+        for moved in ("traces.butterfly", "time.fit", "traces.line"):
             btn = viewer.button(moved)
             assert btn is not None and not viewer._toolbar.isAncestorOf(btn), moved
         assert p.controls.sections() == ["signal.channels", "signal.time", "signal.filters",

@@ -34,7 +34,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QEvent, QPointF, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter
+from PyQt6.QtGui import QColor, QCursor, QFontMetrics, QPainter
 from PyQt6.QtWidgets import QHBoxLayout, QScrollBar, QSplitter, QToolTip, QWidget
 
 from ....viz import inputmap
@@ -43,6 +43,7 @@ from ....viz.compute.decimate import peak_decimate
 from ....viz import colorbar
 from ....viz.compute.filters import FilterSpec, filter_recording, fits_in_memory, segment
 from ....viz.theme import parse_colour
+from .. import fonts
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
 
@@ -108,7 +109,7 @@ class _LabelStrip(QWidget):
     """
 
     WIDTH = 68
-    _PIXEL_SIZE = 9
+    _PIXEL_SIZE = 10
 
     #: A name was clicked (its band's index).
     clicked = pyqtSignal(int)
@@ -127,10 +128,11 @@ class _LabelStrip(QWidget):
         self._edges: list[int] = []
         self._bg = QColor("#000000")
         self._fg = QColor("#cccccc")
-        self._font = QFont(self.font())
-        self._font.setPixelSize(self._PIXEL_SIZE)
+        self._font = fonts.font(self._PIXEL_SIZE)
 
     def set_colours(self, bg: QColor, fg: QColor, bad: Optional[QColor] = None) -> None:
+        # Re-made with the colours: a font-size change re-applies the theme.
+        self._font = fonts.font(self._PIXEL_SIZE)
         if bad is not None:
             self._bad = bad
         if bg != self._bg or fg != self._fg:
@@ -265,7 +267,6 @@ class TracesCanvas(QWidget):
         self.plot = pg.PlotWidget()
         self.plot.setMinimumWidth(60)
         self.plot.showGrid(x=True, y=False, alpha=0.15)
-        self.plot.setLabel("bottom", "Time", units="s")
         pi = self.plot.getPlotItem()
         pi.getAxis("bottom").enableAutoSIPrefix(False)
         pi.getAxis("left").setWidth(0)
@@ -340,10 +341,19 @@ class TracesCanvas(QWidget):
         else:
             bg, fg = theme.plot_background, theme.plot_foreground
         self.plot.setBackground(bg)
+        pi = self.plot.getPlotItem()
         for name in ("bottom", "left"):
-            ax = self.plot.getPlotItem().getAxis(name)
-            ax.setPen(self._pg.mkPen(color=fg))
-            ax.setTextPen(self._pg.mkPen(color=fg))
+            pi.getAxis(name).setPen(self._pg.mkPen(color=fg))
+        fonts.style_axes(pi, fg)
+        fonts.axis_title(pi, "bottom", "Time", fg, units="s")
+        # Labels drawn earlier keep the font they were made with: re-made at
+        # the app's size now (a font-size change re-applies the theme).
+        small = fonts.font(fonts.SMALL_PX)
+        for txt in (*self._event_texts, *self._bad_texts):
+            txt.setFont(small)
+        for txt in self._bar_texts:
+            txt.setFont(fonts.font(fonts.LABEL_PX))
+        self._label_metrics = None
 
     def max_pen_width(self, n_shown: Optional[int] = None) -> int:
         """The widest pen this view draws at: a CAP, applied to a chosen
@@ -508,8 +518,12 @@ class TracesCanvas(QWidget):
             labels.append((x, row, f"{colorbar.fmt(value, value)} {unit}"))
         self._bars.setData(np.asarray(xs, float), np.asarray(ys, float))
         self._bars.setPen(pg.mkPen(color=self.ctx.theme.text, width=2))
-        texts = self._pooled(self._bar_texts, lambda: pg.TextItem("", anchor=(1.0, 0.5)),
-                             len(labels))
+        def bar_text():
+            item = pg.TextItem("", anchor=(1.0, 0.5))
+            item.setFont(fonts.font(fonts.LABEL_PX))
+            return item
+
+        texts = self._pooled(self._bar_texts, bar_text, len(labels))
         fill = _qcolor(self.ctx.theme.plot_background)
         fill.setAlpha(210)
         for txt, (x, row, text) in zip(texts, labels):
@@ -647,9 +661,7 @@ class TracesCanvas(QWidget):
     def _new_text(self):
         # Hung from the top edge, into the room the redraw keeps for it.
         txt = self._pg.TextItem("", anchor=(0.5, 0.0))
-        font = txt.textItem.font()
-        font.setPixelSize(10)
-        txt.setFont(font)
+        txt.setFont(fonts.font(fonts.SMALL_PX))
         return txt
 
     def _draw_events(self, x0: float, x1: float, top: float) -> None:
@@ -809,9 +821,7 @@ class TracesCanvas(QWidget):
             return []
         fm = getattr(self, "_label_metrics", None)
         if fm is None:
-            font = QFont(self.font())
-            font.setPixelSize(10)
-            fm = self._label_metrics = QFontMetrics(font)
+            fm = self._label_metrics = QFontMetrics(fonts.font(fonts.SMALL_PX))
         px_per_s = max(1.0, float(self._vb.width())) / max(x1 - x0, 1e-9)
         kept, right = [], -math.inf
         for e in sorted(events, key=lambda ev: ev.onset):

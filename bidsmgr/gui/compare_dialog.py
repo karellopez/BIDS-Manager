@@ -67,7 +67,7 @@ class CompareDialog(QDialog):
         outer.addWidget(header)
 
         subtitle = QLabel(
-            "One toolbar and one controls column drive both: crosshair, slice, "
+            "One toolbar and one column of advanced controls drive both: crosshair, slice, "
             "plane, volume, 4-D graph, 3-D camera, effects and the cut plane. "
             "Images of different sizes work too: the crosshair is matched by "
             "position in the scanner, not by voxel."

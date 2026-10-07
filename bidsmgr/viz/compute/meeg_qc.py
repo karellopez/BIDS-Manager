@@ -200,6 +200,10 @@ def quality(src, *, settings: Optional[MeegQcSettings] = None,
              if t in DATA_TYPES and src.ch_names[i] not in exclude]
     if not picks:
         raise ValueError("no MEG or EEG channel to check")
+    # Only the types asked for (none of them in this recording: all of them,
+    # rather than nothing).
+    wanted = [i for i in picks if src.ch_types[i] in set(s.types)] if s.types else []
+    picks = wanted or picks
     sfreq = float(src.sfreq)
     seg = max(8, int(round(s.segment_s * sfreq)))
     n_seg = int(src.n_times // seg)
@@ -357,8 +361,16 @@ def quality(src, *, settings: Optional[MeegQcSettings] = None,
                 kinds_seg[i].add("muscle")
             t_flag = t_flag | m_flag
         flagged |= t_flag
+        with np.errstate(invalid="ignore", divide="ignore"):
+            std_rel = (np.nanmedian(std[live] / own_std[live], axis=0) if live.size
+                       else np.full(n_seg, np.nan))
+            ptp_rel = (np.nanmedian(ptp[live] / own_ptp[live], axis=0) if live.size
+                       else np.full(n_seg, np.nan))
+            channel_map = np.clip(np.log2(std[rows] / own_std[rows]), -3.0, 3.0)
         per_type[t] = {"label": label, "n": int(rows.size), "share": share,
-                       "muscle": muscle_t, "flagged": t_flag}
+                       "muscle": muscle_t, "flagged": t_flag, "std": std_rel,
+                       "ptp": ptp_rel, "map": channel_map.astype(np.float32),
+                       "names": [names[k] for k in rows]}
 
     channels = []
     for k in range(n):
@@ -388,18 +400,6 @@ def quality(src, *, settings: Optional[MeegQcSettings] = None,
             "reasons": reasons,
         })
 
-    lanes = []
-    for t, info in per_type.items():
-        lanes.append({"key": "off", "type": t, "name": f"{info['label']} off",
-                      "values": info["share"], "typical": 0.0,
-                      "reach": max(0.3, s.segment_share * 1.5), "line": s.segment_share,
-                      "percent": True})
-        if info["muscle"] is not None:
-            lanes.append({"key": "muscle", "type": t, "name": f"{info['label']} muscle",
-                          "values": info["muscle"], "typical": 0.0,
-                          "reach": max(6.0, s.muscle_z * 1.5), "line": s.muscle_z,
-                          "percent": False})
-
     times = src.start_time + np.arange(n_seg) * (seg / sfreq)
     parts = []
     for t, info in per_type.items():
@@ -415,14 +415,94 @@ def quality(src, *, settings: Optional[MeegQcSettings] = None,
     return {
         "segment_s": seg / sfreq, "times": times, "flagged": flagged,
         "segment_reasons": reasons_seg, "segment_kinds": kinds_seg, "types": per_type,
-        "lanes": lanes, "channels": channels,
+        "channels": channels,
         "suggested_bads": [c["name"] for c in channels
                            if {"noisy", "flat", "uncorrelated"} & set(c["reasons"])],
         "projected": projector is not None,
         "summary": summary, "help": HELP,
         "line_freq": float(line_freq) if line is not None else None,
         "muscle_checked": muscle_ok, "settings": s.model_dump(),
+        "start_time": float(src.start_time),
     }
+
+
+#: The plots the QC panel can show, per channel type, in their default
+#: order: (id, title, unit, what it shows).
+METRICS: tuple[tuple[str, str, str, str], ...] = (
+    ("off", "channels off", "%",
+     "The share of this type's channels whose STD or peak-to-peak range in each segment "
+     "is beyond their usual level by the factor set. The dashed line is the share that "
+     "flags a segment."),
+    ("muscle", "muscle", "z",
+     "The muscle band's share of the power, z-scored over time per channel and averaged "
+     "over the type. Above the dashed line is likely muscle."),
+    ("std", "STD", "x its level",
+     "The median, over this type's channels, of each segment's standard deviation over "
+     "the channel's own usual level: 1 is typical, the dashed line the factor that marks "
+     "a channel off."),
+    ("ptp", "peak-to-peak", "x its level",
+     "The same for the peak-to-peak range, which a jump or a pop moves far more than the "
+     "standard deviation."),
+    ("map", "channel map", "",
+     "Every channel of this type (rows) in every segment (columns): its STD over its own "
+     "level, on a log2 scale from a quarter (dark) to four times (light). A bright row is "
+     "a channel that is often off; a bright column, a moment many channels were."),
+)
+METRIC_IDS = tuple(m[0] for m in METRICS)
+
+
+def tracks(result: dict, metrics=("off", "muscle"), types=None) -> list[dict]:
+    """The QC as tracks (``gui.viz.canvases.tracks``) on the recording's own
+    time axis (seconds from its start): one per chosen metric and channel
+    type, never a metric of two types on one axis. ``types`` None: all."""
+    s = result.get("settings") or {}
+    step = float(result["segment_s"])
+    start = float(result.get("start_time", 0.0))
+    x = np.asarray(result["times"], dtype=float) - start + step / 2.0
+    meta = {m[0]: m for m in METRICS}
+    out = []
+    for metric in metrics:
+        if metric not in meta:
+            continue
+        _mid, name, unit, note = meta[metric]
+        for t, info in result["types"].items():
+            if types and t not in types:
+                continue
+            label = info["label"]
+            flagged = x[np.asarray(info["flagged"], dtype=bool)]
+            track = {"id": f"{metric}:{t}", "title": f"{label}: {name}", "unit": unit,
+                     "kind": "line", "x": x, "ticks": flagged, "colour": t,
+                     "movable": True, "closable": True, "note": note, "near": step / 2.0,
+                     "fmt": "{:.3g}"}
+            if metric == "off":
+                share = np.asarray(info["share"], dtype=float) * 100.0
+                limit = float(s.get("segment_share", 0.2)) * 100.0
+                track.update(ys=[share], rule=limit,
+                             y_range=(0.0, max(float(np.nanmax(share)) if share.size else 0.0,
+                                               limit * 1.2) * 1.05),
+                             summary=(f"{flagged.size} segments flagged, at most "
+                                      f"{float(np.nanmax(share)) if share.size else 0:.0f} % "
+                                      f"of {info['n']} channels off"))
+            elif metric == "muscle":
+                if info["muscle"] is None:
+                    continue
+                m = np.asarray(info["muscle"], dtype=float)
+                track.update(ys=[m], rule=float(s.get("muscle_z", 4.0)),
+                             summary=f"highest {float(np.nanmax(m)):.1f} z")
+            elif metric in ("std", "ptp"):
+                v = np.asarray(info[metric], dtype=float)
+                track.update(ys=[v], rule=float(s.get("segment_factor", 4.0)),
+                             summary=f"highest {float(np.nanmax(v)):.2f} x")
+            else:
+                image = np.asarray(info["map"], dtype=np.float32)
+                track.update(kind="image", image=image,
+                             image_x=(float(x[0] - step / 2.0), float(x[-1] + step / 2.0)),
+                             levels=(-2.0, 2.0), rows=list(info["names"]),
+                             value_name="log2 of STD over its level", fmt="{:+.2f}",
+                             height=2.5, ticks=np.empty(0),
+                             summary=f"{info['n']} channels, light = louder than usual")
+            out.append(track)
+    return out
 
 
 def bad_label(kinds: set) -> str:
@@ -448,5 +528,5 @@ def flagged_segments(result: dict) -> list[tuple[float, float]]:
     return [(a, b) for a, b in out]
 
 
-__all__ = ["DATA_TYPES", "HELP", "TYPE_LABELS", "bad_label", "flagged_segments", "quality",
-           "type_label"]
+__all__ = ["DATA_TYPES", "HELP", "METRICS", "METRIC_IDS", "TYPE_LABELS", "bad_label",
+           "flagged_segments", "quality", "tracks", "type_label"]

@@ -44,7 +44,10 @@ def test_trace_options_carry_and_are_made_to_fit():
                   "ch_type": "mag", "hp": 1.0, "lp": 40.0, "quality": True}
     opening = {"t0": 0.0, "width": 10.0, "count": 3, "ch_type": "all"}
     state = memory.restore_traces(opening, remembered, src)
-    assert state["butterfly"] and state["scale"] == 2.5 and state["quality"]
+    assert state["butterfly"] and state["scale"] == 2.5
+    assert not state.get("quality"), "QC runs on opening only when the user asked for that"
+    asked = memory.restore_traces(opening, remembered, src, qc_on_open=True)
+    assert asked["quality"]
     assert state["count"] == 3, "no more traces than channels"
     assert state["width"] == pytest.approx(src.duration), "no longer than the recording"
     assert state["ch_type"] == "all", "this recording has no magnetometers"

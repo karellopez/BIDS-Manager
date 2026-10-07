@@ -31,7 +31,8 @@ class SideTab(QWidget):
     clicked = pyqtSignal()
     WIDTH = 24
 
-    def __init__(self, text: str = "Controls", icon: str = "controls", parent=None) -> None:
+    def __init__(self, text: str = "Advanced controls", icon: str = "controls",
+                 parent=None) -> None:
         super().__init__(parent)
         self.text = text
         self.icon_name = icon
@@ -51,9 +52,8 @@ class SideTab(QWidget):
             self.update()
 
     def _sync_tip(self) -> None:
-        self.setToolTip(f"{'Close' if self.open else 'Open'} the {self.text.lower()} column "
-                        "(Ctrl+I): the layers and their look, the views, the layout, the "
-                        "mosaic and the 3-D, by purpose")
+        self.setToolTip(f"{'Close' if self.open else 'Open'} the {self.text.lower()} "
+                        "(Ctrl+I): every control, grouped by purpose")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -75,10 +75,22 @@ class SideTab(QWidget):
         p.drawPath(path)
         cx = r.center().x()
         ink = _qcolor(theme.text, 255 if hover else 215)
+        from .. import fonts
+
+        font = fonts.font(11, bold=True)
+        font.setCapitalization(QFont.Capitalization.AllUppercase)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
+        from PyQt6.QtGui import QFontMetricsF
+
+        text_len = QFontMetricsF(font).horizontalAdvance(self.text.upper())
+        # Arrow, icon and name as ONE group, centred on the tab's height
+        # (pinned to the top when the tab is too short to centre it).
+        group = 10.0 + 12.0 + 16.0 + 10.0 + text_len
+        top = max(r.top() + 6.0, r.center().y() - group / 2.0)
         # The arrow: pointing left (open it out) or right (put it away).
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(ink)
-        y = r.top() + 14.0
+        y = top + 5.0
         if self.open:
             tri = [QPointF(cx - 3, y - 5), QPointF(cx - 3, y + 5), QPointF(cx + 3, y)]
         else:
@@ -87,17 +99,12 @@ class SideTab(QWidget):
         pix = icons.icon(self.icon_name, theme.accent).pixmap(16, 16)
         p.drawPixmap(int(cx - 8), int(y + 12), pix)
         # The name, written down the tab.
-        font = QFont(self.font())
-        font.setPixelSize(11)
-        font.setBold(True)
-        font.setCapitalization(QFont.Capitalization.AllUppercase)
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
         p.setFont(font)
         p.setPen(ink)
         p.save()
-        p.translate(cx, y + 36.0)
+        p.translate(cx, y + 5.0 + 12.0 + 16.0 + 10.0)
         p.rotate(90)
-        p.drawText(QRectF(0, -9, max(40.0, r.height() - 60.0), 18),
+        p.drawText(QRectF(0, -9, text_len + 4.0, 18),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.text)
         p.restore()
         p.end()

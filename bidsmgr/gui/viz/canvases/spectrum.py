@@ -139,13 +139,24 @@ class SpectrumCanvas(QWidget):
         theme = self.ctx.theme
         pg = self._pg
         self.plot.setBackground(theme.plot_background)
+        pi = self.plot.getPlotItem()
         for name in ("left", "bottom"):
-            ax = self.plot.getPlotItem().getAxis(name)
-            ax.setPen(theme.grid)
-            ax.setTextPen(theme.dim)
+            pi.getAxis(name).setPen(theme.grid)
+        from .. import fonts
+
+        fonts.style_axes(pi, theme.dim)
         pen = pg.mkPen(theme.dim, width=1, style=Qt.PenStyle.DashLine)
         self._vline.setPen(pen)
         self._hline.setPen(pen)
+
+    def _titles(self, bottom: str, units: str, left: str) -> None:
+        """The axes' titles at the app's font size."""
+        from .. import fonts
+
+        pi = self.plot.getPlotItem()
+        colour = self.ctx.theme.dim
+        fonts.axis_title(pi, "bottom", bottom, colour, units=units)
+        fonts.axis_title(pi, "left", left, colour)
 
     def redraw(self) -> None:
         if not self.isVisible():
@@ -164,7 +175,6 @@ class SpectrumCanvas(QWidget):
         fid = src.select(dynamic=sp.repeat, edit=sp.edit)
         colour = self.ctx.settings.traces.line_color or theme.accent
         self.curve.setPen(pg.mkPen(colour, width=self._line_width()))
-        pi = self.plot.getPlotItem()
         if sp.domain == "fid":
             t = np.arange(fid.shape[0]) * src.dwell
             yt = M.part(fid, sp.part)
@@ -173,8 +183,7 @@ class SpectrumCanvas(QWidget):
             self.ref_curve.setData([], [])
             self._vb.invertX(False)
             self._limit_pan(float(t.min()), float(t.max()) if t.size else 1.0)
-            pi.setLabel("bottom", "Time", units="s")
-            pi.setLabel("left", self._y_label(sp.part))
+            self._titles("Time", "s", self._y_label(sp.part))
             self._ppm_range = None
             return
         ppm, _hz, spec = M.spectrum(fid, src.dwell, src.spectrometer_mhz, src.nucleus,
@@ -185,8 +194,7 @@ class SpectrumCanvas(QWidget):
         self._xy = (np.asarray(ppm, dtype=float), np.asarray(y, dtype=float))
         self._draw_reference(sp, ppm, y, src)
         self._vb.invertX(True)
-        pi.setLabel("bottom", "Chemical shift", units="ppm")
-        pi.setLabel("left", self._y_label(sp.part))
+        self._titles("Chemical shift", "ppm", self._y_label(sp.part))
         if sp.metabolites:
             self._show_metabolites(M.metabolites_for(src.nucleus))
         lo, hi = M.default_ppm_range(src.nucleus, ppm)
@@ -285,6 +293,9 @@ class SpectrumCanvas(QWidget):
             line.setPen(pen)
             line.label.setFormat(name)
             line.label.setColor(theme.text)
+            from .. import fonts
+
+            line.label.setFont(fonts.font(fonts.LABEL_PX))
             # The plot's own background behind the name, so the dashed line
             # does not run through the text.
             line.label.fill = pg.mkBrush(theme.plot_background)

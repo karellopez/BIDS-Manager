@@ -304,9 +304,18 @@ def quality_overlay(src, which: Map, *, cancel=None, progress=None):
 #: The QC rows under the time course, in the order they are drawn, with what
 #: each is for. ``motion`` is FD and the six parameters (``compute.motion``).
 QC_ROWS: tuple[tuple[str, str, str], ...] = (
-    ("motion", "Head motion",
-     "Framewise displacement (Power 2012) and the six rigid parameters: from "
-     "fMRIPrep's confounds when the run has them, else estimated here."),
+    ("fd", "Framewise displacement",
+     "How far the head moved from one volume to the next, in mm (Power 2012): "
+     "the sum of the changes of the three translations and of the three "
+     "rotations as arcs on a 50 mm sphere. From fMRIPrep's confounds when the "
+     "run has them, else estimated here."),
+    ("translation", "Translation (x, y, z)",
+     "Where the head is, in mm, along x (left-right), y (back-front) and z "
+     "(down-up), relative to the reference volume."),
+    ("rotation", "Rotation (pitch, roll, yaw)",
+     "How the head is turned, in degrees: pitch about the left-right axis "
+     "(nodding), roll about the back-front axis (tilting to a shoulder), yaw "
+     "about the vertical axis (shaking the head)."),
     ("dvars", "DVARS",
      "How much the whole image changes from one volume to the next, with the "
      "volumes above the box-plot fence marked."),
@@ -314,8 +323,8 @@ QC_ROWS: tuple[tuple[str, str, str], ...] = (
      "The share of the head's voxels that are outliers in each volume "
      "(AFNI's 3dToutcount rule, on a sample of voxels)."),
     ("spikes", "Slice spikes",
-     "Volumes where one slice jumps on its own: a spike or a slice dropped "
-     "by motion during the volume."),
+     "The largest robust z of any slice against its own course, per volume: "
+     "a spike, or a slice dropped by motion during the volume, stands out."),
     ("global", "Global signal", "The mean over the head, per volume."),
     ("carpet", "Carpet plot",
      "Every sampled voxel's signal over time, one row each, from the edge of "

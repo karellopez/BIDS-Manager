@@ -441,7 +441,39 @@ def channels_set_bad(store: "SceneStore", names: list[str], bad: bool = True) ->
     return {"traces.look"}
 
 
-@command("traces.quality", "Quality check", category="Channels")
+@command("traces.qc_view", "QC plots", category="Channels")
+def traces_qc_view(store: "SceneStore", metrics: Optional[list[str]] = None,
+                   types: Optional[list[str]] = None, order: Optional[list[str]] = None,
+                   hidden: Optional[list[str]] = None,
+                   scroll: Optional[bool] = None,
+                   beside: Optional[bool] = None) -> set[str]:
+    """Which QC plots are shown under the traces, for which channel types, in
+    what order, and how tall."""
+    from ..compute.meeg_qc import METRIC_IDS
+
+    tr = store.scene.traces
+    changed = False
+    if metrics is not None:
+        unknown = [m for m in metrics if m not in METRIC_IDS]
+        if unknown:
+            raise ValueError(f"no QC plot called {unknown[0]!r}")
+    for name, value in (("qc_metrics", metrics), ("qc_types", types), ("qc_order", order),
+                        ("qc_hidden", hidden)):
+        if value is not None:
+            value = list(dict.fromkeys(str(v) for v in value))
+            if getattr(tr, name) != value:
+                setattr(tr, name, value)
+                changed = True
+    if scroll is not None and tr.qc_scroll != bool(scroll):
+        tr.qc_scroll = bool(scroll)
+        changed = True
+    if beside is not None and tr.qc_beside != bool(beside):
+        tr.qc_beside = bool(beside)
+        changed = True
+    return {"traces.qc_view"} if changed else set()
+
+
+@command("traces.quality", "QC", category="Channels")
 def traces_quality(store: "SceneStore", value: Optional[bool] = None) -> set[str]:
     """Show the quality check (computed on a worker the first time)."""
     tr = store.scene.traces

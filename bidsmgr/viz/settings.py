@@ -104,7 +104,7 @@ class VolumeSettings(_Section):
     #: Playback speed, frames per second.
     fps: float = Field(8.0, title="Playback speed", **_hint(range=(0.5, 60.0), step=0.5,
                                                             unit="volumes/s"))
-    inspector: bool = Field(True, title="Controls column open",
+    inspector: bool = Field(True, title="Advanced controls open",
                             description="The column beside the images with the layers, "
                                         "their look, the view, the layout and the 3-D "
                                         "controls.")
@@ -157,7 +157,7 @@ class TraceSettings(_Section):
                                         "app is light. In the dark theme the canvas is "
                                         "dark already.")
     event_width: int = Field(2, title="Event line width", **_hint(range=(1, 10), unit="px"))
-    controls_open: bool = Field(False, title="Controls column open",
+    controls_open: bool = Field(False, title="Advanced controls open",
                                 description="The column beside the traces with the channel, "
                                             "time, filter, event, QC and display controls.")
     event_color: str = Field("", title="Event colour",
@@ -177,6 +177,20 @@ class TraceSettings(_Section):
         return max(1, min(int(v), 10))
 
 
+class QcSettings(_Section):
+    """Quality control in every viewer."""
+
+    model_config = ConfigDict(extra="ignore", validate_assignment=True,
+                              title="Quality control (QC)")
+
+    on_open: bool = Field(
+        False, title="Run QC when a file opens",
+        description="On: QC that was on stays on for the next file and is computed as "
+                    "soon as it opens (the rows under a BOLD's time course, the MEG and "
+                    "EEG check). Off: every file opens with QC off, and QC is computed "
+                    "when you switch it on.")
+
+
 class MeegQcSettings(_Section):
     """The quick MEG and EEG quality check (``compute.meeg_qc``). Every
     measure is taken within ONE channel type (magnetometers, gradiometers,
@@ -186,6 +200,10 @@ class MeegQcSettings(_Section):
     model_config = ConfigDict(extra="ignore", validate_assignment=True,
                               title="MEG and EEG QC")
 
+    types: list[str] = Field(
+        default_factory=list, title="Channel types checked",
+        description="The channel types QC runs on (mag, grad, eeg, ...); empty: all of "
+                    "them. Chosen per recording in the QC section.")
     segment_s: float = Field(
         2.0, title="Segment length", **_hint(range=(0.5, 30.0), step=0.5, unit="s"),
         description="The recording is checked in segments (epochs) of this length.")
@@ -260,6 +278,7 @@ class VizSettings(_Section):
     volume: VolumeSettings = Field(default_factory=VolumeSettings)
     render: RenderSettings = Field(default_factory=RenderSettings)
     traces: TraceSettings = Field(default_factory=TraceSettings)
+    qc: QcSettings = Field(default_factory=QcSettings)
     meeg_qc: MeegQcSettings = Field(default_factory=MeegQcSettings)
     #: action id -> key sequences, overriding the defaults (empty list = unbound).
     keymap: dict[str, list[str]] = Field(default_factory=dict)
@@ -289,10 +308,11 @@ class VizSettings(_Section):
 
 
 #: The sections the generated Viewer page shows, in order.
-PAGE_SECTIONS = ("crosshair", "volume", "render", "traces", "meeg_qc")
+PAGE_SECTIONS = ("crosshair", "volume", "render", "traces", "qc", "meeg_qc")
 
 
 __all__ = [
-    "CrosshairSettings", "MeegQcSettings", "PAGE_SECTIONS", "RenderSettings", "TraceSettings",
+    "CrosshairSettings", "MeegQcSettings", "PAGE_SECTIONS", "QcSettings", "RenderSettings",
+    "TraceSettings",
     "VizSettings", "VolumeSettings",
 ]

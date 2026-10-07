@@ -1,6 +1,6 @@
 """A view with its controls column on the right, as every viewer has it.
 
-The content (traces, a spectrum) with a painted "Controls" tab on its right
+The content (traces, a spectrum) with a painted "Advanced controls" tab on its right
 edge, and the column itself in a splitter beyond the tab: the tab belongs to
 the content's side, so it is never dragged away, and the column opens where
 the tab says. The image viewer builds the same arrangement itself (its
@@ -36,7 +36,7 @@ class SideColumn:
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
         row.addWidget(content, 1)
-        self.tab = SideTab("Controls", "controls")
+        self.tab = SideTab("Advanced controls", "controls")
         self.tab.clicked.connect(lambda: self.set_open(not self.is_open()))
         row.addWidget(self.tab)
         split.addWidget(left)

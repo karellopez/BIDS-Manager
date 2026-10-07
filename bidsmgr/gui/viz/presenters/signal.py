@@ -50,8 +50,9 @@ _DECIMALS = 3
 #: spectrum; then leaving it. Everything else is in the controls column
 #: (``panels.signal_controls``), grouped the same way.
 TOOLBAR_ROWS = (
-    ("widget:scale", "|", "widget:preset", "|", "traces.quality", "annotate.toggle",
-     "review.save", "|", "widget:psd", "stretch", "signal.close", "help.shortcuts"),
+    ("widget:count", "widget:scale", "traces.reset", "|", "widget:preset", "|",
+     "traces.quality", "annotate.toggle", "review.save", "|", "widget:psd", "stretch",
+     "help.shortcuts", "signal.close"),
 )
 
 #: The width of a slider in the toolbar: enough to aim, not so much that
@@ -104,7 +105,9 @@ class SignalPresenter:
         self._path: Optional[Path] = None
         self._root: Optional[Path] = None
         self._file_kind = "meeg"
-        self.together = False
+        #: Physio: every physio file of the run together (the default: the
+        #: cardiac, breathing and trigger files of one run belong together).
+        self.together = True
         from PyQt6.QtCore import QTimer
 
         self._memory_timer = QTimer(viewer)
@@ -140,11 +143,27 @@ class SignalPresenter:
         v = QVBoxLayout(traces)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        self._traces_slot = v
         self.annotation_bar = self._build_annotation_bar()
         v.addWidget(self.annotation_bar)
+        # The traces and, under them, the QC plots: a splitter, so the QC can
+        # be given room (or all of it: Maximise).
+        from PyQt6.QtWidgets import QSplitter
+
+        self.qc_split = QSplitter(Qt.Orientation.Vertical)
+        self.qc_split.setChildrenCollapsible(False)
+        self.qc_split.setHandleWidth(6)
+        holder = QWidget()
+        holder.setObjectName("pane-dark")
+        self._traces_slot = QVBoxLayout(holder)
+        self._traces_slot.setContentsMargins(0, 0, 0, 0)
+        self._traces_slot.setSpacing(0)
+        self._traces_holder = holder
+        self.qc_split.addWidget(holder)
         self.quality_row = self._build_quality_row()
-        v.addWidget(self.quality_row)
+        self.qc_split.addWidget(self.quality_row)
+        self.qc_split.setStretchFactor(0, 3)
+        self.qc_split.setStretchFactor(1, 2)
+        v.addWidget(self.qc_split, 1)
         self.navigation = self._build_navigation()
         v.addWidget(self.navigation)
         self.traces_page = self._beside_controls(traces)
@@ -189,8 +208,9 @@ class SignalPresenter:
             from ..canvases.traces import TracesCanvas
 
             self._traces = TracesCanvas(self.ctx)
-            # Under the annotation bar, above the navigation.
-            self._traces_slot.insertWidget(1, self._traces, 1)
+            # Under the annotation bar, above the QC and the navigation.
+            self._traces_slot.addWidget(self._traces, 1)
+            self.qc_tracks.follow(self._traces.plot)
         return self._traces
 
     @property
@@ -275,49 +295,277 @@ class SignalPresenter:
         return bar
 
     def _build_quality_row(self) -> QWidget:
-        """The quality check under the traces: its lanes over the whole
-        recording, and what to do with what it found."""
-        from ..canvases.quality_strip import QualityStrip
+        """QC under the traces: a bar (what to plot, for which channel types,
+        how tall, and what to do with what QC found) over its plots, one per
+        measure and channel type (``canvases.tracks``)."""
+        from ... import icons
+        from ..canvases.tracks import TracksPanel
+        from ..menus import popup_menu
 
-        row = QFrame()
-        row.setObjectName("toolbar")
-        h = QHBoxLayout(row)
-        h.setContentsMargins(10, 4, 10, 4)
-        h.setSpacing(8)
-        self.quality_strip = QualityStrip(self.ctx)
-        h.addWidget(self.quality_strip, 1)
-        buttons = QVBoxLayout()
-        buttons.setSpacing(4)
-        self.mark_flagged_button = QPushButton("Mark flagged segments bad")
-        self.mark_flagged_button.setObjectName("tb-btn")
-        self.mark_flagged_button.setToolTip(
-            "Every segment QC flagged becomes a bad segment, labelled by why "
-            "(BAD_muscle, BAD_jump, BAD_noise): undoable, and saved only with Save to "
+        from ..panels.panel_header import PanelHeader, corner_button
+
+        row = QWidget()
+        row.setObjectName("viz-tracks")
+        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        v = QVBoxLayout(row)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        # The same header as the image viewer's time course: what to plot and
+        # what to do with what QC found on the left, the panel as a panel
+        # (expand its plots, beside, maximise) in the upper-right corner.
+        header = PanelHeader()
+        header.setObjectName("viz-tracks-bar")
+        bar = header.controls
+        title = QLabel("QC")
+        title.setObjectName("viewer-meta-section")
+        bar.addWidget(title)
+
+        def menu_button(text: str, icon: str, tip: str):
+            btn = QPushButton(text)
+            btn.setObjectName("tb-btn")
+            btn.setIcon(icons.icon(icon))
+            btn.setProperty("viz_icon", icon)   # re-coloured by the header
+            btn.setToolTip(tip)
+            menu = popup_menu(btn)
+            menu.setToolTipsVisible(True)
+            btn.setMenu(menu)
+            bar.addWidget(btn)
+            return btn, menu
+
+        from ....viz.compute.meeg_qc import METRICS
+
+        self.qc_plots_button, plots = menu_button(
+            "Plots", "plots", "Which QC measures are plotted, one plot per channel type")
+        self._qc_metric_actions = {}
+        for mid, name, _unit, note in METRICS:
+            act = plots.addAction(name[:1].upper() + name[1:])
+            act.setCheckable(True)
+            act.setToolTip(note)
+            act.toggled.connect(lambda on, m=mid: self._toggle_qc_metric(m, on))
+            self._qc_metric_actions[mid] = act
+        self.qc_types_button, self._qc_types_menu = menu_button(
+            "Types", "channel_types",
+            "Which channel types are plotted (QC never mixes types: each has its own plots)")
+        self._qc_types_menu.aboutToShow.connect(self._fill_qc_types_menu)
+        self.qc_mark_button, self._qc_mark_menu = menu_button(
+            "Mark as bad", "mark_bad",
+            "Mark what QC found as bad: channels (all it suggests, or by reason) and "
+            "segments (all it flagged, or by why). Undoable; saved only with Save to "
             "dataset.")
-        self.mark_flagged_button.clicked.connect(self.mark_flagged_segments)
-        buttons.addWidget(self.mark_flagged_button)
+        self._qc_mark_menu.aboutToShow.connect(self._fill_qc_mark_menu)
         report = QPushButton("Report...")
         report.setObjectName("tb-btn")
         report.setToolTip("Every channel and every flagged segment, with the reasons, and "
                           "how to read them")
         report.clicked.connect(self.show_quality_report)
-        buttons.addWidget(report)
-        settings = QPushButton("QC settings...")
+        bar.addWidget(report)
+        settings = QPushButton("Settings...")
         settings.setObjectName("tb-btn")
-        settings.setToolTip("The check's parameters (segment length, thresholds, which "
-                            "measures), in the controls column")
+        settings.setToolTip("The check's parameters (channel types, segment length, "
+                            "thresholds, measures), in the advanced controls")
         settings.clicked.connect(lambda: self.open_section("signal.qc"))
-        buttons.addWidget(settings)
-        h.addLayout(buttons)
+        bar.addWidget(settings)
+
+        self.qc_expand_button = header.add_corner(corner_button(
+            "tracks_scroll", "Expand plots: each QC plot at a readable height, in a "
+            "scrolling column (off: they share the room)", checkable=True))
+        self.qc_expand_button.toggled.connect(
+            lambda on: self._run_ui("traces.qc_view", scroll=bool(on)))
+        self.qc_beside_button = header.add_corner(corner_button(
+            "dock_right", "Beside: the QC plots to the right of the traces instead of "
+            "under them", checkable=True))
+        self.qc_beside_button.toggled.connect(
+            lambda on: self._run_ui("traces.qc_view", beside=bool(on)))
+        self.qc_max_button = header.add_corner(corner_button(
+            "maximize", "Maximise: the QC plots take the traces' room too; again to bring "
+            "the traces back", checkable=True))
+        self.qc_max_button.toggled.connect(self._maximise_qc)
+        self.qc_header = header
+        v.addWidget(header)
+        self.qc_tracks = TracksPanel(self.ctx, left_axis_px=56)
+        self.qc_tracks.describe_x = self._describe_qc_x
+        self.qc_tracks.clicked.connect(self._qc_go_to)
+        self.qc_tracks.order_changed.connect(
+            lambda order: self._run_ui("traces.qc_view", order=order))
+        self.qc_tracks.hide_requested.connect(self._hide_qc_track)
+        self.qc_tracks.align_source = self._qc_area
+        v.addWidget(self.qc_tracks, 1)
         row.setVisible(False)
+        self._qc_tracks_key = None
         self._quality: Optional[dict] = None
         #: (recording, parameters) the QC on screen was computed for.
         self._quality_of: Optional[tuple] = None
         return row
 
+    # -- the QC plots ----------------------------------------------------------
+
+    def _qc_track_list(self) -> list[dict]:
+        """The plots to show, in the user's order, without the hidden ones."""
+        from ....viz.compute.meeg_qc import tracks as qc_tracks
+
+        res = self.quality_result()
+        if res is None:
+            return []
+        tr = self.ctx.scene.traces
+        made = qc_tracks(res, tr.qc_metrics, tr.qc_types or None)
+        made = [t for t in made if t["id"] not in tr.qc_hidden]
+        rank = {tid: k for k, tid in enumerate(tr.qc_order)}
+        # Tracks the user never moved keep their default place, after those
+        # the user did.
+        return sorted(made, key=lambda t: (rank.get(t["id"], len(rank)),
+                                           [m["id"] for m in made].index(t["id"])))
+
+    def _sync_qc_tracks(self) -> None:
+        tr = self.ctx.scene.traces
+        # Rebuilt only when what they show changes; moving through the
+        # recording only moves the window drawn on them.
+        key = (id(self._quality), tuple(tr.qc_metrics), tuple(tr.qc_types),
+               tuple(tr.qc_order), tuple(tr.qc_hidden), tr.qc_scroll)
+        tracks = self._qc_track_list() if key != self._qc_tracks_key else None
+        if tracks is not None:
+            self._qc_tracks_key = key
+            self.qc_tracks.set_mode("scroll" if tr.qc_scroll else "fit")
+            self.qc_tracks.set_tracks(tracks, x_label="Time (s)")
+        if self.qc_tracks.cards():
+            src = self.source
+            if src is not None:
+                self.qc_tracks.set_x_range(0.0, float(src.duration))
+                res = self.quality_result()
+                step = float(res["segment_s"])
+                start = float(res.get("start_time", 0.0))
+                spans = [(float(t) - start, float(t) - start + step)
+                         for t, bad in zip(res["times"], res["flagged"]) if bad]
+                self.qc_tracks.set_regions(spans)
+                self.qc_tracks.set_window((tr.t0, min(tr.t0 + tr.width, src.duration)))
+                cursor = self.ctx.scene.cursor.time
+                self.qc_tracks.set_marker(None if cursor is None
+                                          else float(cursor) - float(src.start_time))
+        for mid, act in self._qc_metric_actions.items():
+            if act.isChecked() != (mid in tr.qc_metrics):
+                act.blockSignals(True)
+                act.setChecked(mid in tr.qc_metrics)
+                act.blockSignals(False)
+        if self.qc_expand_button.isChecked() != tr.qc_scroll:
+            self.qc_expand_button.blockSignals(True)
+            self.qc_expand_button.setChecked(tr.qc_scroll)
+            self.qc_expand_button.blockSignals(False)
+        if self.qc_beside_button.isChecked() != tr.qc_beside:
+            self.qc_beside_button.blockSignals(True)
+            self.qc_beside_button.setChecked(tr.qc_beside)
+            self.qc_beside_button.blockSignals(False)
+        want = Qt.Orientation.Horizontal if tr.qc_beside else Qt.Orientation.Vertical
+        if self.qc_split.orientation() != want:
+            self.qc_split.setOrientation(want)
+            self._share_qc_room()
+
+    def _share_qc_room(self) -> None:
+        """The QC plots 40 % of the room, the traces the rest: when they
+        appear and when they move beside or under. Left to the splitter, they
+        opened at their minimum, one plot and a clipped second."""
+        beside = self.ctx.scene.traces.qc_beside
+        total = (self.qc_split.width() if beside else self.qc_split.height()) or 800
+        self.qc_split.setSizes([int(total * 0.6), int(total * 0.4)])
+        self.qc_tracks.request_align()
+
+    def _toggle_qc_metric(self, metric: str, on: bool) -> None:
+        tr = self.ctx.scene.traces
+        metrics = list(tr.qc_metrics)
+        if on and metric not in metrics:
+            metrics.append(metric)
+        elif not on and metric in metrics:
+            metrics.remove(metric)
+        # Asking for a measure again shows every type of it again.
+        hidden = [h for h in tr.qc_hidden if not (on and h.startswith(f"{metric}:"))]
+        self._run_ui("traces.qc_view", metrics=metrics, hidden=hidden)
+
+    def _fill_qc_types_menu(self) -> None:
+        menu = self._qc_types_menu
+        menu.clear()
+        res = self.quality_result()
+        tr = self.ctx.scene.traces
+        present = list((res or {}).get("types", {}).items())
+        every = menu.addAction("All types")
+        every.setCheckable(True)
+        every.setChecked(not tr.qc_types)
+        every.triggered.connect(lambda: self._run_ui("traces.qc_view", types=[]))
+        menu.addSeparator()
+        for t, info in present:
+            act = menu.addAction(info["label"])
+            act.setCheckable(True)
+            act.setChecked(not tr.qc_types or t in tr.qc_types)
+            act.toggled.connect(lambda on, ty=t: self._toggle_qc_type(ty, on))
+        if not present:
+            menu.addAction("Switch QC on to list the types").setEnabled(False)
+
+    def _toggle_qc_type(self, ch_type: str, on: bool) -> None:
+        res = self.quality_result() or {}
+        every = list(res.get("types", {}))
+        tr = self.ctx.scene.traces
+        shown = list(tr.qc_types or every)
+        if on and ch_type not in shown:
+            shown.append(ch_type)
+        elif not on and ch_type in shown:
+            shown.remove(ch_type)
+        if not shown:
+            return    # at least one type: an empty panel helps nobody
+        self._run_ui("traces.qc_view", types=[] if set(shown) == set(every) else shown)
+
+    def _hide_qc_track(self, track_id: str) -> None:
+        tr = self.ctx.scene.traces
+        self._run_ui("traces.qc_view", hidden=list(tr.qc_hidden) + [track_id])
+
+    def _maximise_qc(self, on: bool) -> None:
+        self._traces_holder.setVisible(not on)
+
+    def _describe_qc_x(self, x: float) -> str:
+        res = self.quality_result()
+        if res is None:
+            return f"{x:.1f} s"
+        step = float(res["segment_s"])
+        lo = (x // step) * step
+        return f"{lo:.1f} to {lo + step:.1f} s"
+
+    def _qc_go_to(self, x: float) -> None:
+        tr = self.ctx.scene.traces
+        self._run_ui("time.set", t0=max(0.0, float(x) - 0.4 * tr.width))
+
+    def _qc_area(self) -> Optional[tuple[int, int]]:
+        """The QC plots' left and right edges: the traces' plot area, its
+        right edge pulled in to where the plots can reach."""
+        traces = self._traces
+        reach = self.qc_tracks.reach()
+        if (traces is None or reach is None or not traces.plot.isVisible()
+                or self.ctx.scene.traces.qc_beside):
+            # Beside the traces there is no edge to share: the plots keep
+            # their own axes.
+            if traces is not None and getattr(self, "_traces_right_margin", 0):
+                self._traces_right_margin = 0
+                pi = traces.plot.getPlotItem()
+                m = pi.layout.getContentsMargins()
+                pi.layout.setContentsMargins(m[0], m[1], 0, m[3])
+            if self.ctx.scene.traces.qc_beside:
+                for card in self.qc_tracks.cards():
+                    card.align(card.plot.mapToGlobal(card.plot.rect().topLeft()).x() + 56,
+                               card.plot.mapToGlobal(card.plot.rect().topRight()).x() - 6)
+            return None
+        plot = traces.plot
+        pi = plot.getPlotItem()
+        r = pi.getViewBox().sceneBoundingRect()
+        left = plot.mapToGlobal(plot.mapFromScene(r.topLeft())).x()
+        right = plot.mapToGlobal(plot.mapFromScene(r.topRight())).x()
+        # The traces' right edge pulled in to where the QC plots can reach.
+        current = getattr(self, "_traces_right_margin", 0)
+        full_right = right + current
+        margin = int(max(0, full_right - reach[1]))
+        if margin != current:
+            self._traces_right_margin = margin
+            m = pi.layout.getContentsMargins()
+            pi.layout.setContentsMargins(m[0], m[1], margin, m[3])
+        return int(max(left, reach[0])), int(min(full_right - margin, reach[1]))
+
     def _sync_quality(self) -> None:
-        """Start the check the first time it is switched on for a recording;
-        show or hide its lanes and flags."""
+        """Start QC the first time it is switched on for a recording (or
+        when its parameters change); show or hide its plots and flags."""
         tr = self.ctx.scene.traces
         src = self.source
         on = bool(tr.quality and src is not None and self._file_kind == "meeg")
@@ -331,12 +579,21 @@ class SignalPresenter:
 
             self._quality_of = key
             self._quality = None
-            self.viewer.loading_changed.emit(True, "Checking the quality of the recording")
+            self.viewer.loading_changed.emit(True, "Running QC on the recording")
             self.ctx.jobs.start("quality", self._generation, quality, src,
                                 settings=settings, line_freq=line_frequency(src),
                                 exclude=bad_channels(self.ctx.store))
         shown = on and self._quality is not None and self._quality_of == key
-        self.quality_row.setVisible(shown)
+        appeared = False
+        if self.quality_row.isHidden() == shown:
+            self.quality_row.setVisible(shown)
+            appeared = shown
+            if not shown and self.qc_max_button.isChecked():
+                self.qc_max_button.setChecked(False)
+        if shown:
+            self._sync_qc_tracks()
+            if appeared:
+                self._share_qc_room()
         if self._traces is not None:
             flags = self._quality_flags() if shown else {}
             if flags != getattr(self._traces, "quality_flags", {}):
@@ -383,38 +640,109 @@ class SignalPresenter:
         else:
             self._run_ui("traces.quality", value=True)
 
-    def mark_suggested_channels(self) -> int:
+    #: Why QC suggests a channel is bad. Line noise alone is not among them:
+    #: it is usually the room, which a notch filter removes, not the channel.
+    SUGGESTED_REASONS = ("flat", "noisy", "uncorrelated")
+    #: What a flagged segment is labelled, by why it was flagged.
+    SEGMENT_LABELS = (("BAD_muscle", "Muscle"), ("BAD_jump", "Jumps"),
+                      ("BAD_noise", "Noise"))
+
+    def _qc_channels(self, reasons=None) -> list[str]:
+        """The channels QC found with any of ``reasons`` (default: the
+        suggested ones), not marked bad yet."""
+        from ....viz.commands.signal import bad_channels
+
         res = self.quality_result()
-        if not res or not res["suggested_bads"]:
+        if not res:
+            return []
+        wanted = set(reasons or self.SUGGESTED_REASONS)
+        bads = bad_channels(self.ctx.store)
+        return [c["name"] for c in res["channels"]
+                if wanted & set(c["reasons"]) and c["name"] not in bads]
+
+    def _qc_segments(self, label=None) -> dict[str, list]:
+        """The flagged segments, ``(onset, duration)`` by the label each gets
+        (only ``label``'s when given)."""
+        from ....viz.compute.meeg_qc import bad_label
+
+        res = self.quality_result()
+        if res is None:
+            return {}
+        step = float(res["segment_s"])
+        by_label: dict[str, list] = {}
+        for t, bad, kinds in zip(res["times"], res["flagged"], res["segment_kinds"]):
+            if not bad:
+                continue
+            name = bad_label(kinds)
+            if label is None or name == label:
+                by_label.setdefault(name, []).append((float(t), step))
+        return by_label
+
+    def mark_channels(self, reasons=None) -> int:
+        """The channels QC found marked bad: the suggested ones (flat, noisy,
+        uncorrelated), or those with any of ``reasons``. One undoable step."""
+        names = self._qc_channels(reasons)
+        if not names:
             return 0
-        names = list(res["suggested_bads"])
         self._run_ui("channels.set_bad", names=names)
         self.viewer.status_message.emit(
             f"{len(names)} channel{'s' if len(names) != 1 else ''} marked bad; Save to "
             "dataset writes them into the run's _channels.tsv")
         return len(names)
 
-    def mark_flagged_segments(self) -> int:
-        """The flagged segments as bad segments, labelled by why."""
-        res = self._quality
-        if res is None:
-            return 0
-        from ....viz.compute.meeg_qc import bad_label
-
-        step = float(res["segment_s"])
-        by_label: dict[str, list] = {}
-        for t, bad, kinds in zip(res["times"], res["flagged"], res["segment_kinds"]):
-            if not bad:
-                continue
-            by_label.setdefault(bad_label(kinds), []).append((float(t), step))
+    def mark_segments(self, label=None) -> int:
+        """The flagged segments as bad segments, labelled by why
+        (``BAD_muscle``, ``BAD_jump``, ``BAD_noise``), or only ``label``'s."""
         n = 0
-        for label, segments in by_label.items():
-            self._run_ui("annotate.add_many", segments=segments, label=label)
+        for name, segments in self._qc_segments(label).items():
+            self._run_ui("annotate.add_many", segments=segments, label=name)
             n += len(segments)
-        self.viewer.status_message.emit(
-            f"{n} flagged segment{'s' if n != 1 else ''} marked bad; Save to dataset "
-            "writes them into the run's events.tsv")
+        if n:
+            self.viewer.status_message.emit(
+                f"{n} flagged segment{'s' if n != 1 else ''} marked bad; Save to dataset "
+                "writes them into the run's events.tsv")
         return n
+
+    def _fill_qc_mark_menu(self) -> None:
+        """The Mark as bad menu, counted for the QC on screen (a count of
+        zero is shown, disabled, so the menu never changes shape)."""
+        from ..menus import submenu
+
+        menu = self._qc_mark_menu
+        menu.clear()
+
+        def item(target, text: str, n: int, tip: str, run, after: str = "") -> None:
+            act = target.addAction(f"{text} ({n}){after}")
+            act.setToolTip(tip)
+            act.setEnabled(n > 0)
+            act.triggered.connect(lambda _c=False: run())
+
+        item(menu, "Suggested channels", len(self._qc_channels()),
+             "Every channel QC found flat, noisy or uncorrelated with the others of "
+             "its type, not marked bad yet", self.mark_channels)
+        by_reason = submenu(menu, "Channels by reason")
+        by_reason.setToolTipsVisible(True)
+        for reason, text, tip in (
+                ("flat", "Flat", "No signal: disconnected, or saturated"),
+                ("noisy", "Noisy", "Far louder than the others of its type, and not "
+                                   "following them"),
+                ("uncorrelated", "Uncorrelated", "At a normal level but not following "
+                                                 "the others of its type"),
+                ("line noise", "Line noise", "Strong power at the mains frequency. Not "
+                                             "suggested: it is usually the room, which a "
+                                             "notch filter removes")):
+            item(by_reason, text, len(self._qc_channels((reason,))), tip,
+                 lambda r=reason: self.mark_channels((r,)))
+        menu.addSeparator()
+        segments = self._qc_segments()
+        item(menu, "Flagged segments", sum(len(v) for v in segments.values()),
+             "Every segment QC flagged, each labelled by why", self.mark_segments)
+        by_why = submenu(menu, "Segments by why")
+        by_why.setToolTipsVisible(True)
+        for label, text in self.SEGMENT_LABELS:
+            item(by_why, text, len(segments.get(label, [])),
+                 f"The segments flagged for {text.lower()}, labelled {label}",
+                 lambda lab=label: self.mark_segments(lab), after=f", as {label}")
 
     def show_quality_report(self):
         from ..panels.quality_report import QualityReport
@@ -426,7 +754,7 @@ class SignalPresenter:
             "time.set", t0=max(0.0, t - self.source.start_time
                                - 0.4 * self.ctx.scene.traces.width)))
         dlg.mark_channels.connect(lambda names: self._run_ui("channels.set_bad", names=names))
-        dlg.mark_segments.connect(self.mark_flagged_segments)
+        dlg.mark_segments.connect(self.mark_segments)
         self.quality_report = dlg
         dlg.show()
         return dlg
@@ -478,7 +806,7 @@ class SignalPresenter:
     def make_widget(self, name: str):
         return {
             "preset": self._widget_preset, "psd": self._widget_psd,
-            "scale": self._widget_scale,
+            "scale": self._widget_scale, "count": self._widget_count,
         }.get(name, lambda: None)()
 
     def _label(self, text: str) -> QLabel:
@@ -526,22 +854,30 @@ class SignalPresenter:
         self.channels_button.setObjectName("tb-btn")
         self.channels_button.setToolTip("Pick the channels to show")
         self.channels_button.clicked.connect(self.open_channel_picker)
+        self._multi_channel_widgets = [self.type_combo, self.channels_button]
+        return list(self._multi_channel_widgets)
+
+    def _widget_count(self) -> QWidget:
+        """How many channels are on screen: in the toolbar, beside the
+        scaling, since it is changed as often."""
         self.count_control = self._number(
             1, 500, step=1, decimals=0, default=sigcmd.DEFAULT_COUNT, widest="500",
-            tip="How many channels are drawn at once (PgUp and PgDown page through "
+            tip="How many channels are displayed at once (PgUp and PgDown page through "
                 "the rest; the wheel scrolls one at a time).")
         self.count_control.value_changed.connect(
             lambda v: self._run_ui("traces.count", n=int(round(v))))
-        self._multi_channel_widgets = [self.type_combo, self.channels_button,
-                                       self.count_control]
-        return list(self._multi_channel_widgets)
+        group = self._group(self._label("Displayed channels"), self.count_control)
+        # Shown for MEG and EEG with more than one channel (physio shows them all).
+        self._count_group = group
+        return group
 
     def _widget_scale(self) -> list[QWidget]:
         # Logarithmic, every step the same ratio, so the slider is as fine at
         # 0.1 as at 10.
         self.scale_control = self._number(
             0.01, 1000.0, step=0.1, decimals=2, default=1.0, log=True,
-            tip="Amplitude, as a factor ([ and ] change it from the keyboard).")
+            tip="How large the traces are drawn, as a factor of their automatic scale "
+                "([ and ] change it from the keyboard).")
         self.scale_control.value_changed.connect(
             lambda v: self._run_ui("traces.scale", value=float(v)))
         self.width_control = self._number(
@@ -549,7 +885,7 @@ class SignalPresenter:
             log=True, widest="3600.0 s", tip="Seconds on screen (= and - change it).")
         self.width_control.value_changed.connect(
             lambda v: self._run_ui("time.width", seconds=float(v)))
-        return [self._group(self._label("Amplitude"), self.scale_control),
+        return [self._group(self._label("Scaling"), self.scale_control),
                 self._group(self._label("Time span"), self.width_control)]
 
     def _widget_events(self) -> QWidget:
@@ -745,7 +1081,6 @@ class SignalPresenter:
         elif tag == "quality":
             self.viewer.loading_changed.emit(False, "")
             self._quality = result
-            self.quality_strip.set_result(result)
             self._sync_quality()
             self.controls.sync()
             self.viewer.status_message.emit(f"QC: {result['summary']}")
@@ -804,9 +1139,15 @@ class SignalPresenter:
             scene.layers = [SignalLayer(id="sig", source=sid, name=src.path.name)]
             # Its own defaults, with the options left on the last recording
             # of this kind that suit it (``viz.memory``).
-            scene.traces = TracesState(**memory.restore_traces(
+            state = memory.restore_traces(
                 sigcmd.opening_state(src), self.ctx.settings.traces_state.get(self._file_kind),
-                src))
+                src, qc_on_open=self.ctx.settings.qc.on_open)
+            if self._file_kind == "physio":
+                # A run's physio is a handful of channels: all of them, always,
+                # never a count to set.
+                state["count"] = max(1, len(src.ch_names))
+                state["offset"] = 0
+            scene.traces = TracesState(**state)
             store.replace_scene(scene)
         self._ensure_traces()
         self.pages.setCurrentWidget(self.traces_page)
@@ -999,6 +1340,10 @@ class SignalPresenter:
                 # thing about one channel: noise in a full toolbar.
                 for w in self._multi_channel_widgets:
                     w.setVisible(multi)
+                # Physio shows every channel: no count to set.
+                count_group = getattr(self, "_count_group", None)
+                if count_group is not None:
+                    count_group.setVisible(multi and self._file_kind == "meeg")
                 pool = len(src.picks_for(tr.ch_type, tr.picks)) or 1
                 self.count_control.set_range(1, max(1, min(500, pool)))
                 self.width_control.set_range(0.1, max(0.2, src.duration))
