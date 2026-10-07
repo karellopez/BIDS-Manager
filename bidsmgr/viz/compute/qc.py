@@ -331,7 +331,43 @@ QC_ROWS: tuple[tuple[str, str, str], ...] = (
      "the head inwards (Power 2017): motion and spikes show as vertical "
      "bands across many rows."),
 )
-QC_ROW_IDS = tuple(r[0] for r in QC_ROWS)
+#: The QC rows of a DIFFUSION series (``bidsmgr.qc.dwi``), offered by the
+#: same Plots menu when the series is one. Translation and rotation are the
+#: same rows as for BOLD; the rest are diffusion's own.
+DWI_QC_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("displacement", "Displacement",
+     "How far each volume sits from the first b=0 (translations plus rotations on a "
+     "50 mm sphere): the b=0 volumes are the head's reliable track, the diffusion-"
+     "weighted ones scatter by the registration's noise. Marked: volumes far out of "
+     "place."),
+    ("translation", "Translation (x, y, z)",
+     "Where each volume sits against the first b=0, mm, eddy-current shifts taken out "
+     "when the gradients explain them."),
+    ("rotation", "Rotation (pitch, roll, yaw)",
+     "How each volume is turned against the first b=0, in degrees."),
+    ("slices", "Slice signal",
+     "Every slice of every volume against what the diffusion tensor predicts for it, "
+     "as a robust z within its shell: blue is signal lost (a dropout), red signal "
+     "added. Click a cell to go to that volume and slice."),
+    ("b0_signal", "b=0 signal",
+     "The brain's median signal in each b=0 volume against the first: a slope is "
+     "signal drift."),
+    ("spikes", "Spiking voxels",
+     "Voxels far above the tensor's prediction, per million brain voxels."),
+    ("interleave", "Odd against even slices",
+     "Odd slices against even slices, robust z within the shell: motion between the "
+     "two passes of an interleaved acquisition."),
+    ("ndc", "Nearest-direction correlation",
+     "Each diffusion volume's correlation with the volume nearest it in q-space: a "
+     "volume unlike its neighbours is suspect."),
+    ("eddy", "Eddy-current shift",
+     "The shift of each diffusion-weighted volume its gradient direction explains."),
+)
+#: Shown for a diffusion series when none of its own rows were chosen.
+DWI_DEFAULT_ROWS = ("displacement", "slices", "b0_signal", "spikes")
+QC_ROW_IDS = tuple(dict.fromkeys([r[0] for r in QC_ROWS] + [r[0] for r in DWI_QC_ROWS]))
+BOLD_ROW_IDS = tuple(r[0] for r in QC_ROWS)
+DWI_ROW_IDS = tuple(r[0] for r in DWI_QC_ROWS)
 #: Volumes with more than this share of outlier voxels are worth a look
 #: (afni_proc.py's default censoring limit).
 OUTLIER_LIMIT = 0.05
@@ -470,7 +506,8 @@ def carpet(series: np.ndarray, depth: np.ndarray, *, skip: int = 0,
     return out
 
 
-__all__ = ["CARPET_ROWS", "Cancelled", "HELP", "Map", "OUTLIER_LIMIT", "QC_ROWS",
+__all__ = ["BOLD_ROW_IDS", "CARPET_ROWS", "Cancelled", "DWI_DEFAULT_ROWS", "DWI_QC_ROWS",
+           "DWI_ROW_IDS", "HELP", "Map", "OUTLIER_LIMIT", "QC_ROWS",
            "QC_ROW_IDS", "QUANTITY", "SAMPLE_VOXELS", "SPIKE_Z", "TITLES", "TSNR_LOW",
            "brain_mask", "carpet", "describe_summary", "detrend", "display_for",
            "non_steady_state", "outlier_fraction", "per_volume", "quality_map",

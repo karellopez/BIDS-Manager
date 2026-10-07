@@ -262,11 +262,38 @@ class VolumePresenter:
         # the tab is part of the images' side, so it is never dragged away.
         from ..panels.side_tab import SideTab
 
+        # The quality panel beside the views and the time course (a report
+        # is a tall list), or below them: two hosts, one panel.
+        self.qsplit = QSplitter(Qt.Orientation.Horizontal)
+        self.qsplit.setHandleWidth(2)
+        self.qsplit.setChildrenCollapsible(False)
+        self.qsplit.addWidget(self.vsplit)
+        self.quality_right = QWidget()
+        QVBoxLayout(self.quality_right).setContentsMargins(0, 0, 0, 0)
+        self.quality_right.setVisible(False)
+        self.qsplit.addWidget(self.quality_right)
+        self.qsplit.setStretchFactor(0, 3)
+        self.qsplit.setStretchFactor(1, 1)
+        self.qsplit.splitterMoved.connect(
+            lambda *_a: self.remember_sizes("volume.quality", self.qsplit))
+        self.qouter = QSplitter(Qt.Orientation.Vertical)
+        self.qouter.setHandleWidth(2)
+        self.qouter.setChildrenCollapsible(False)
+        self.qouter.addWidget(self.qsplit)
+        self.quality_below = QWidget()
+        QVBoxLayout(self.quality_below).setContentsMargins(0, 0, 0, 0)
+        self.quality_below.setVisible(False)
+        self.qouter.addWidget(self.quality_below)
+        self.qouter.setStretchFactor(0, 3)
+        self.qouter.setStretchFactor(1, 1)
+        self.qouter.splitterMoved.connect(
+            lambda *_a: self.remember_sizes("volume.quality_below", self.qouter))
+
         images = QWidget()
         row = QHBoxLayout(images)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
-        row.addWidget(self.vsplit, 1)
+        row.addWidget(self.qouter, 1)
         self.side_tab = SideTab("Advanced controls", "controls")
         self.side_tab.setVisible(bool(getattr(self.viewer, "panels", True)))
         self.side_tab.clicked.connect(lambda: self.set_inspector(not self.inspector_open()))
@@ -536,7 +563,7 @@ class VolumePresenter:
             QTimer.singleShot(0, lambda: self.side.ensureWidgetVisible(section, 0, 0))
 
     #: The quality items for a 4-D image, all computed only when chosen.
-    QUALITY = ("qc.tsnr", "qc.sd", "qc.mean")
+    QUALITY = ("qc.check", "qc.noise", "", "qc.tsnr", "qc.sd", "qc.mean")
 
     def _widget_quality(self) -> QWidget:
         """Every quality measure of a series in one place, each computed only
@@ -549,14 +576,18 @@ class VolumePresenter:
         btn.setIcon(icons.icon("qc"))
         btn.setIconSize(QSize(16, 16))
         self.viewer.action_manager.track_icon(btn, "qc")
-        btn.setToolTip("Quality control of a 4-D series, computed only when you ask: temporal "
-                       "SNR, standard deviation and mean maps as overlays, and QC plots under "
-                       "the time course (head motion, DVARS, outlier voxels, slice spikes, "
-                       "a carpet plot).")
+        btn.setToolTip("Quality control, computed only when you ask: the quality check of an "
+                       "anatomical or diffusion image (measures, findings, the evidence over "
+                       "the image), the image windowed to its noise, and for a series temporal "
+                       "SNR, standard deviation and mean maps and QC plots under the time "
+                       "course.")
         menu = popup_menu(btn)
         menu.setToolTipsVisible(True)
         for action_id in self.QUALITY:
-            menu.addAction(self.viewer.action(action_id))
+            if action_id:
+                menu.addAction(self.viewer.action(action_id))
+            else:
+                menu.addSeparator()
         menu.addSeparator()
         self._qc_plots_action = menu.addAction("QC plots under the time course")
         self._qc_plots_action.setCheckable(True)
@@ -568,7 +599,8 @@ class VolumePresenter:
         self._qc_on_open_action.setCheckable(True)
         self._qc_on_open_action.setToolTip(
             "On: QC stays on from one file to the next and is computed as soon as a file "
-            "opens. Off: every file opens with QC off.")
+            "opens (the quality check too, while its panel is open). Off: every file opens "
+            "with QC off.")
         self._qc_on_open_action.triggered.connect(
             lambda on: self.ctx.settings_hub.update(
                 lambda st: setattr(st.qc, "on_open", bool(on))))
@@ -576,6 +608,11 @@ class VolumePresenter:
         def sync_menu() -> None:
             self._qc_plots_action.setChecked(bool(self.ctx.scene.graph.qc))
             self._qc_on_open_action.setChecked(bool(self.ctx.settings.qc.on_open))
+            # The plots run under a time course: only a series has one.
+            series = views.series_layer(self.ctx.store)[1]
+            is_series = bool(series is not None and getattr(series, "is_4d", False))
+            self._qc_plots_action.setVisible(is_series)
+            self._qc_on_open_action.setVisible(is_series or self._quality_kind() is not None)
 
         menu.aboutToShow.connect(sync_menu)
         btn.setMenu(menu)
@@ -951,7 +988,8 @@ class VolumePresenter:
                     self.viewer.action_manager.track_icon(self.layout_button, icon_name)
             if hasattr(self, "quality_button"):
                 series = views.series_layer(store)[1]
-                want = bool(series is not None and getattr(series, "is_4d", False))
+                want = bool((series is not None and getattr(series, "is_4d", False))
+                            or self._quality_kind() is not None)
                 if self.quality_button.isHidden() == want:    # only on a real change
                     self.quality_button.setVisible(want)
             if hasattr(self, "slice_control"):
@@ -1023,6 +1061,12 @@ class VolumePresenter:
             "panel.inspector": self.inspector_open(),
             "volume.loaded": bool(has and src.fully_loaded),
             "volume.dwi": bool(has and src.bvals is not None),
+            "qc.checkable": bool(has and src.fully_loaded and self._quality_kind() is not None),
+            "qc.noise": bool(self._noise_look is not None),
+            "qc.panel": bool(self._quality_open),
+            "qc.below": scene.layout.quality == "bottom",
+            "qc.maximized": bool(self._quality_max and self._quality_window is None),
+            "qc.detached": self._quality_window is not None,
             "volume.deface": bool(has and not src.is_4d and not src.is_rgb
                                   and self._deface_available()),
             **self._navigation_context(),
@@ -1054,6 +1098,9 @@ class VolumePresenter:
         self._pending_qc = []
         self.stop_play()
         self._release()
+        if self._quality_open and self._quality_panel is not None:
+            # Never the last image's result over this one.
+            self._quality_panel.set_busy(f"Reading {Path(path).name}")
         self._first_frame_shown = False
         self._show_when_windowed = False
         self._auto_window = None
@@ -1068,6 +1115,10 @@ class VolumePresenter:
         self.ctx.jobs.cancel("open")
         self.ctx.jobs.cancel("render-volume")
         self.ctx.jobs.cancel("series-window")
+        self.ctx.jobs.cancel("quality")
+        self._noise_look = None
+        self._quality_result = None
+        self._evidence = {}
         if self.source is not None:
             self.source.release()
         self.source = None
@@ -1077,12 +1128,15 @@ class VolumePresenter:
 
     def clear(self) -> None:
         self._generation += 1
+        self._pending_quality = False
         self._pending_overlays = []
         self._pending_header = None
         self._pending_scene = None
         self._pending_qc = []
         self.stop_play()
         self._release()
+        if self._quality_panel is not None:
+            self._quality_panel.set_empty("", reason="No image is open.")
         store = self.ctx.store
         store.sources.clear()
         keep = self._persistent_scene()
@@ -1184,6 +1238,10 @@ class VolumePresenter:
 
     def _on_job_done(self, tag: str, generation: int, result) -> None:
         if generation != self._generation:
+            return
+        if tag == "quality":
+            self._quality_result = result
+            self.show_quality(result)
             return
         if tag in self._overlay_tags:
             self._overlay_tags.remove(tag)
@@ -1301,8 +1359,20 @@ class VolumePresenter:
         self.viewer.on_loaded(self.source.path if self.source else None)
         for item in pending_qc:
             self.add_quality_map(item["which"], **item["look"])
+        if self._pending_quality:
+            self._pending_quality = False
+            self.check_quality()
+        elif self._quality_open:
+            self._follow_quality()
 
     def _on_job_failed(self, tag: str, generation: int, message: str) -> None:
+        if generation == self._generation and tag == "quality":
+            panel = self._quality_panel
+            if panel is not None and self.source is not None:
+                panel.set_empty(self.source.path.name,
+                                reason=f"The quality check failed: {message}")
+            self.viewer.status_message.emit(f"The quality check failed: {message}")
+            return
         if (generation == self._generation and tag == "series-window"
                 and self._show_when_windowed):
             # The contrast stays frame 0's; the series is shown all the same.
@@ -1318,6 +1388,8 @@ class VolumePresenter:
             return
         path = self.viewer.current_file()
         self._release()
+        if self._quality_panel is not None and path is not None:
+            self._quality_panel.set_empty(Path(path).name, reason="The image could not be read.")
         self.viewer.on_load_failed(path, message)
 
     def _holding(self) -> bool:
@@ -1329,6 +1401,11 @@ class VolumePresenter:
                     and not self._first_frame_shown)
 
     def _on_job_progress(self, tag: str, generation: int, done: int, total: int) -> None:
+        if tag == "quality" and generation == self._generation and self.source is not None:
+            if self._quality_panel is not None:
+                self._quality_panel.set_progress(
+                    f"Checking the quality of {self.source.path.name}: step {done} of {total}")
+            return
         if tag != "stream" or generation != self._generation or self.source is None:
             return
         now = time.monotonic()
@@ -1356,6 +1433,14 @@ class VolumePresenter:
     def _on_changed(self, paths) -> None:
         if paths & {"mode", "scene", "layout", "plane"}:
             self.apply_mode()
+        if "layout" in paths or "scene" in paths:
+            self.apply_quality()
+        if self._evidence and any(p == "layers" or p.startswith("layer") for p in paths):
+            self._sync_evidence_boxes()
+        if self._quality_panel is not None and any(
+                p in ("graph", "graph_visible") or p.startswith("graph.") for p in paths):
+            self._quality_panel.set_plots(bool(self.ctx.scene.graph_visible
+                                               and self.ctx.scene.graph.qc))
         if (paths & {"mode", "scene"} or "layers" in paths) and self.ctx.scene.mode == "mosaic":
             # A mosaic fitted to the head on screen (a new file, a new head),
             # unless its line was written by hand.
@@ -1525,6 +1610,26 @@ class VolumePresenter:
         if name == "qc":
             self.add_quality_map(str(params.get("map", "tsnr")))
             return True
+        if name == "check_quality":
+            # A toggle, as the time course is: again closes the panel.
+            if self._quality_open:
+                self.set_quality_open(False)
+            else:
+                self.check_quality()
+            return True
+        if name == "quality_below":
+            self.ctx.run("layout.set", quality="right"
+                         if self.ctx.scene.layout.quality == "bottom" else "bottom")
+            return True
+        if name == "quality_maximize":
+            self.set_quality_maximized(not self._quality_max)
+            return True
+        if name == "quality_detach":
+            self.set_quality_detached(self._quality_window is None)
+            return True
+        if name == "show_noise":
+            self.set_noise(self._noise_look is None)
+            return True
         if name == "header":
             self.show_header()
             return True
@@ -1629,6 +1734,362 @@ class VolumePresenter:
         self.viewer.loading_changed.emit(True, f"Computing the {TITLES[which].lower()}")
         self.ctx.jobs.start(tag, self._generation, quality_overlay, src, which)
         return True
+
+    # ------------------------------------------------------------------
+    # The quality check (bidsmgr.qc)
+    # ------------------------------------------------------------------
+
+    #: The base layer's look before "Show the noise" (None: not shown).
+    _noise_look: Optional[dict] = None
+    #: Check quality was asked for while the image was still opening.
+    _pending_quality: bool = False
+
+    _quality_panel = None
+    _quality_open = False
+    _quality_max = False
+    _quality_window = None
+    _quality_result = None
+    #: Map key -> the layer that shows it (one each, shown and hidden).
+    _evidence: dict = {}
+
+    def _ensure_quality_panel(self):
+        if self._quality_panel is None:
+            from ..panels.quality_panel import QualityPanel
+
+            panel = QualityPanel()
+            am = self.viewer.action_manager
+            # The panel's own corner, as the time course's: below or beside,
+            # maximise, its own window; then More and close.
+            panel.header.insert_corner(
+                [am.button(a) for a in ("qc.below", "qc.maximize", "qc.detach")],
+                before=panel.more_button)
+            panel.check_requested.connect(lambda: self.check_quality(again=True))
+            panel.show_map.connect(self.toggle_evidence)
+            panel.go_to.connect(self.go_to_evidence)
+            panel.noise.connect(self.set_noise)
+            panel.plots.connect(self._quality_plots)
+            panel.save.connect(lambda: self.save_quality(self._quality_result))
+            panel.close_requested.connect(lambda: self.set_quality_open(False))
+            self._quality_panel = panel
+        return self._quality_panel
+
+    def set_quality_open(self, on: bool) -> None:
+        self._quality_open = bool(on)
+        if not on:
+            if self._quality_window is not None:
+                self.set_quality_detached(False, apply=False)
+            self._quality_max = False
+        self.apply_quality()
+        self.viewer.refresh_actions()
+
+    def apply_quality(self) -> None:
+        """The panel where the layout puts it, or nowhere."""
+        panel = self._quality_panel
+        right, below = self.quality_right, self.quality_below
+        if not self._quality_open or panel is None:
+            right.setVisible(False)
+            below.setVisible(False)
+            self.vsplit.setVisible(True)
+            self.qsplit.setVisible(True)
+            return
+        if self._quality_window is not None:
+            right.setVisible(False)
+            below.setVisible(False)
+            self.vsplit.setVisible(True)
+            self.qsplit.setVisible(True)
+            return
+        on_below = self.ctx.scene.layout.quality == "bottom"
+        host, other = (below, right) if on_below else (right, below)
+        if panel.parentWidget() is not host:
+            host.layout().addWidget(panel)
+        panel.setVisible(True)
+        first = host.isHidden()
+        other.setVisible(False)
+        host.setVisible(True)
+        if first:
+            if on_below:
+                self.restore_sizes("volume.quality_below", self.qouter, [0.62, 0.38])
+            else:
+                self.restore_sizes("volume.quality", self.qsplit, [0.68, 0.32])
+        # Maximised: the panel alone, the views and time course out of the way.
+        if on_below:
+            self.qsplit.setVisible(not self._quality_max)
+            self.vsplit.setVisible(True)
+        else:
+            self.vsplit.setVisible(not self._quality_max)
+            self.qsplit.setVisible(True)
+
+    def set_quality_maximized(self, on: bool) -> None:
+        self._quality_max = bool(on)
+        self.apply_quality()
+        self.viewer.refresh_actions()
+
+    def set_quality_detached(self, on: bool, *, apply: bool = True) -> None:
+        """The panel in its own window, or back; closing the window puts it
+        back."""
+        if on and self._quality_window is None:
+            panel = self._ensure_quality_panel()
+            win = _GraphWindow(self.viewer)
+            win.setWindowTitle(f"Quality: {self.source.path.name}"
+                               if self.source is not None else "Quality")
+            win.take(panel)
+            win.resize(max(panel.width(), 520), max(panel.height(), 640))
+            win.closed.connect(lambda: self.set_quality_detached(False))
+            self._quality_window = win
+            self._quality_max = False
+        elif not on and self._quality_window is not None:
+            win, self._quality_window = self._quality_window, None
+            win.closed.disconnect()
+            if self._quality_panel is not None:
+                self.quality_right.layout().addWidget(self._quality_panel)
+            win.close()
+            win.deleteLater()
+        if apply:
+            self.apply_quality()
+        self.viewer.refresh_actions()
+
+    def _quality_kind(self) -> Optional[str]:
+        from ....qc import live
+
+        return live.kind_of(self.source)
+
+    def check_quality(self, *, again: bool = False) -> bool:
+        """The quality check of the image on screen into the quality panel
+        (opened), on a worker. False when there is none to run."""
+        from ....qc import live
+
+        panel = self._ensure_quality_panel()
+        if not self._quality_open:
+            self.set_quality_open(True)
+        src = self.source
+        if src is None or not src.fully_loaded:
+            if self.viewer.current_file() is not None:
+                # Still opening (the Editor's Quality check opened it): the
+                # check follows once it is read.
+                self._pending_quality = True
+                panel.set_busy(f"Reading {self.viewer.current_file().name}")
+                return True
+            return False
+        if live.kind_of(src) is None:
+            panel.set_empty(src.path.name, reason=(
+                "The quality check is for anatomical (T1w, T2w, FLAIR, PDw, T2starw) and "
+                "diffusion images."))
+            return False
+        if again:
+            live.forget(src)
+        got = live.cached(src)
+        if got is not None:
+            self._quality_result = got
+            self.show_quality(got)
+            return True
+        panel.set_busy(f"Checking the quality of {src.path.name}")
+        sidecar = dict(self.bids.sidecar) if self.bids is not None else {}
+        self.ctx.jobs.start("quality", self._generation, live.result_for, src, sidecar)
+        return True
+
+    def _follow_quality(self) -> None:
+        """The open panel, after another file was read: its result when one
+        is kept, else the check, run at once when QC runs on opening."""
+        from ....qc import live
+
+        panel = self._ensure_quality_panel()
+        src = self.source
+        if src is None:
+            return
+        if live.kind_of(src) is None:
+            panel.set_empty(src.path.name, reason=(
+                "No quality check for this image: it is for anatomical (T1w, T2w, FLAIR, "
+                "PDw, T2starw) and diffusion images."))
+            return
+        got = live.cached(src)
+        if got is not None or self.ctx.settings.qc.on_open:
+            self.check_quality()
+        else:
+            panel.set_empty(src.path.name)
+
+    def show_quality(self, result) -> None:
+        """``result`` in the panel, with the dataset's context."""
+        from ....qc import live
+
+        src = self.source
+        if src is None:
+            return
+        panel = self._ensure_quality_panel()
+        if not self._quality_open:
+            self.set_quality_open(True)
+        root = self.scene_root()
+        try:
+            context = live.dataset_context(result, root)
+        except Exception:  # noqa: BLE001 - the comparison is a bonus
+            log.debug("could not read the dataset's quality results", exc_info=True)
+            context = {}
+        panel.set_result(result, src.path.name, context=context,
+                         shown=self._shown_evidence(), noise_on=self._noise_look is not None,
+                         plots_on=bool(self.ctx.scene.graph_visible and self.ctx.scene.graph.qc),
+                         can_save=root is not None)
+
+    def _evidence_layer(self, key: str):
+        lid = self._evidence.get(key)
+        if not lid:
+            return None
+        return next((layer for layer in self.ctx.scene.layers if layer.id == lid), None)
+
+    def _shown_evidence(self) -> set:
+        return {k for k in self._evidence if (lay := self._evidence_layer(k)) is not None
+                and lay.visible}
+
+    def _sync_evidence_boxes(self) -> None:
+        """The checkboxes follow the layers (hidden or removed elsewhere)."""
+        panel = self._quality_panel
+        if panel is None:
+            return
+        for key in list(self._evidence):
+            layer = self._evidence_layer(key)
+            if layer is None:
+                self._evidence.pop(key, None)
+            panel.set_map_shown(key, bool(layer is not None and layer.visible))
+
+    def toggle_evidence(self, key: str, on: bool) -> None:
+        """Show or hide one of the check's maps: ONE layer each, added the
+        first time and shown and hidden after."""
+        layer = self._evidence_layer(key)
+        if on:
+            if layer is None:
+                lid = self.add_quality_evidence(self._quality_result, key)
+                if lid:
+                    self._evidence[key] = lid
+            elif not layer.visible:
+                self.ctx.run("layer.set", layer=layer.id, visible=True)
+        elif layer is not None and layer.visible:
+            self.ctx.run("layer.set", layer=layer.id, visible=False)
+        self.ctx.qstore.flush()
+
+    def add_quality_evidence(self, result, key: str) -> str:
+        """Draw one of the check's maps over the image: ``result.maps[key]``,
+        or ONE class of a labelled map (``"tissues:2"``, grey matter); the
+        new layer's id, "" when there is none."""
+        from ....viz.data.volume import array_volume
+        from ....viz.overlays import Overlay
+        from ....viz.scene import LabelTable, VolumeDisplay
+        from ..panels.quality_panel import label_colours, split_key
+
+        base, value = split_key(key)
+        qmap = result.maps.get(base) if result is not None else None
+        if qmap is None or self.source is None:
+            return ""
+        title = qmap.title
+        data = qmap.data
+        if qmap.kind == "labels":
+            colours = label_colours(base, qmap)
+            labels = {int(k): str(v) for k, v in qmap.labels.items()}
+            if value is not None:
+                # One class, one layer: shown and hidden on its own.
+                title = labels.get(value, title)
+                data = (np.asarray(qmap.data) == value).astype(np.uint8)
+                labels = {1: title}
+                colours = {1: colours.get(value, (128, 128, 128))}
+            table = LabelTable(labels=labels, colors=colours)
+            display = VolumeDisplay(label_table=table, opacity=0.45, interpolation="nearest")
+        elif qmap.kind == "field":
+            lo, hi = {"bias": (0.75, 1.25), "fa": (0.0, 1.0), "md": (0.0, 3.0)}.get(
+                key, (0.0, 1.0))
+            display = VolumeDisplay(colormap=qmap.colour, window=(lo, hi), opacity=0.75,
+                                    threshold_mode="hide_below" if key != "bias"
+                                    else "range", interpolation="nearest", gamma=1.0)
+            if key == "bias":
+                display.opacity = 0.55
+        else:
+            display = VolumeDisplay(colormap=qmap.colour, window=(0.5, 1.0), opacity=0.9,
+                                    threshold_mode="hide_below", interpolation="nearest",
+                                    outline_px=2.0, gamma=1.0)
+            if key in ("artefacts", "cc", "face"):
+                display.outline_px = 0.0
+                display.opacity = 0.7
+        vol = array_volume(data, qmap.affine, path=self.source.path, name=title)
+        self._overlay_seq += 1
+        n = str(self._overlay_seq)
+        overlay = Overlay(source=vol, display=display, kind="mask", note=qmap.help, name=title)
+        self._adopt_overlay(n, overlay, origin=f"qc-map:{key}")
+        return f"overlay{n}"
+
+    def go_to_evidence(self, evidence) -> None:
+        """A finding's place: its volume, and its slice along the slice axis
+        (the view turned to show that slice whole)."""
+        from ..canvases.graph import go_to_slice
+
+        if not isinstance(evidence, dict):
+            return
+        if evidence.get("volume") is not None:
+            self.ctx.run("frame.set", frame=int(evidence["volume"]))
+        if evidence.get("slice") is not None:
+            go_to_slice(self.ctx, int(evidence["slice"]), self.bids)
+            axis = int(evidence.get("axis", 2))
+            plane = {0: "sagittal", 1: "coronal", 2: "axial"}.get(axis, "axial")
+            if self.ctx.scene.mode == "single" and self.ctx.scene.plane != plane:
+                self.ctx.run("view.plane", plane=plane)
+        self.ctx.qstore.flush()
+
+    def set_noise(self, on: bool) -> None:
+        """Window the base image to its air (in a perceptual colour map), or
+        put its look back: what MRIQC's background mosaic shows, live."""
+        layer, src = views.base(self.ctx.store)
+        if layer is None or src is None:
+            return
+        if on and self._noise_look is None:
+            frame = np.asarray(src.scale(np.asarray(src.raw_frame(
+                views.frame_of(self.ctx.store, layer, src)))), dtype=np.float32)
+            from ....qc import masks as QM
+
+            level = QM.air_level(frame)
+            if level is None:
+                self.viewer.status_message.emit(
+                    "No noise to show: the air around the head is set to zero (by the "
+                    "scanner, or by defacing), or the head fills the field of view.")
+                if self._quality_panel is not None:
+                    self._quality_panel.set_noise(False)
+                return
+            # Up to well above the noise: ghosts and ringing stand out of it,
+            # the head is saturated.
+            hi = level[0] + 10.0 * level[1]
+            self._noise_look = {"window": layer.display.window,
+                                "colormap": layer.display.colormap,
+                                "gamma": layer.display.gamma}
+            self.ctx.run("layer.set", layer=layer.id, window=(0.0, max(hi, 1e-6)),
+                         colormap="viridis", gamma=1.0)
+        elif not on and self._noise_look is not None:
+            look, self._noise_look = self._noise_look, None
+            params = {k: v for k, v in look.items() if v is not None}
+            self.ctx.run("layer.set", layer=layer.id, **params)
+        else:
+            return
+        self.ctx.qstore.flush()
+        if self._quality_panel is not None:
+            self._quality_panel.set_noise(self._noise_look is not None)
+        self.viewer.action_manager.update_state(self.action_context())
+
+    def _quality_plots(self, on: bool) -> None:
+        if on and not self.ctx.scene.graph_visible:
+            self.ctx.run("view.graph", value=True)
+        self.ctx.run("graph.set", qc=bool(on))
+        self.ctx.qstore.flush()
+
+    def save_quality(self, result) -> Optional[Path]:
+        """Write ``result`` into the dataset's QC derivative."""
+        from ....qc import report
+
+        root = self.scene_root()
+        if root is None:
+            self.viewer.status_message.emit("Open the image from a dataset to save its "
+                                            "quality result.")
+            return None
+        try:
+            path = report.save(result, root)
+            report.write_group(root)
+        except OSError as exc:
+            self.viewer.status_message.emit(f"Could not save the quality result: {exc}")
+            return None
+        self.viewer.status_message.emit(f"Saved {path.relative_to(root).as_posix()}")
+        return path
 
     _deface_ok: Optional[bool] = None
 
@@ -1886,6 +2347,8 @@ class VolumePresenter:
         self.stop_play()
         if self._graph_window is not None:
             self.set_graph_detached(False)
+        if self._quality_window is not None:
+            self.set_quality_detached(False)
         # A change made just before the window closed is kept.
         if self._view_timer.isActive():
             self._view_timer.stop()

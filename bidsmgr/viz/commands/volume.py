@@ -371,7 +371,8 @@ def layout_set(store: "SceneStore",
                planes: Optional[list[Plane]] = None, hero: Optional[str] = None,
                hero_fraction: Optional[float] = None,
                hero_side: Optional[Literal["left", "top"]] = None,
-               graph: Optional[Literal["bottom", "right"]] = None) -> set[str]:
+               graph: Optional[Literal["bottom", "right"]] = None,
+               quality: Optional[Literal["right", "bottom"]] = None) -> set[str]:
     """Change how the multi-view layouts are arranged."""
     lay = store.scene.layout
     before = lay.model_copy(deep=True)
@@ -392,6 +393,8 @@ def layout_set(store: "SceneStore",
         lay.hero_side = hero_side
     if graph is not None:
         lay.graph = graph
+    if quality is not None:
+        lay.quality = quality
     return set() if lay == before else {"layout"}
 
 

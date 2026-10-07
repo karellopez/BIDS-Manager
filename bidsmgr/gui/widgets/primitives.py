@@ -255,6 +255,20 @@ class ElidedLabel(QLabel):
         )
 
 
+class CappedLabel(ElidedLabel):
+    """A name that asks for at most ``cap`` pixels and elides (in the middle,
+    where a file name's entities are) beyond them, so a long name never
+    decides how narrow its panel may be."""
+
+    def __init__(self, cap: int, text: str = "", parent=None) -> None:
+        super().__init__(text, parent, mode=Qt.TextElideMode.ElideMiddle)
+        self._cap = int(cap)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), self._cap), hint.height())
+
+
 class ElidedPushButton(QPushButton):
     """A button whose label shortens instead of widening its window.
 
@@ -374,6 +388,7 @@ class PathBar(QFrame):
 
 
 __all__ = [
+    "CappedLabel",
     "Chip",
     "ElidedLabel",
     "ElidedPushButton",

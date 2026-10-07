@@ -1844,7 +1844,7 @@ class ConverterPanel(QWidget):
         the dialog with a warning instead of stopping the chain.
         """
         s = self._app_settings
-        if not (s.post_run_metadata or s.post_run_validate):
+        if not (s.post_run_metadata or s.post_run_validate or s.post_run_quality):
             return False
 
         self._post_chain_bids_parent = bids_parent
@@ -1855,6 +1855,8 @@ class ConverterPanel(QWidget):
             self._post_chain_pending.append("metadata")
         if s.post_run_validate:
             self._post_chain_pending.append("validate")
+        if s.post_run_quality:
+            self._post_chain_pending.append("quality")
         self._post_chain_dispatch()
         return True
 
@@ -1870,6 +1872,64 @@ class ConverterPanel(QWidget):
         elif step == "validate":
             self._spinner.set_busy(True, message="Validating BIDS tree…")
             self._start_validate_worker(self._post_chain_bids_parent)
+        elif step == "quality":
+            self._spinner.set_busy(True, message="Checking image quality…")
+            self._start_quality_worker(self._post_chain_bids_parent)
+
+    def _start_quality_worker(self, bids_parent: Path) -> None:
+        """The quality check of the images this conversion wrote and nothing
+        has checked yet, dataset by dataset."""
+        from ..qc import report as RP
+        from ..qc import run as RUN
+
+        names = self._converted_datasets()
+        roots = ([Path(bids_parent) / n for n in names] if names
+                 else [Path(bids_parent)])
+        roots = [r for r in roots if (r / "dataset_description.json").is_file()]
+        jobs = []
+        for root in roots:
+            done = {str(r.get("path")) for r in RP.load_all(root)}
+            paths = [p for p in RUN.find_images(root)
+                     if p.relative_to(root).as_posix() not in done]
+            if paths:
+                jobs.append((root, paths))
+        self._quality_queue = jobs
+        self._next_quality_job()
+
+    def _next_quality_job(self) -> None:
+        import os
+
+        from ..workers.quality import QualityWorker
+
+        if not getattr(self, "_quality_queue", None):
+            self._post_chain_dispatch()
+            return
+        root, paths = self._quality_queue.pop(0)
+        self.log_message.emit(f"Checking the quality of {len(paths)} images in {root.name}")
+        worker = QualityWorker(root, paths, jobs=max(1, min(4, (os.cpu_count() or 2) // 2)),
+                               parent=self)
+        worker.progress.connect(
+            lambda d, t, n: self.log_message.emit(f"Quality checked {d}/{t}: {n}"))
+        worker.finished_with_result.connect(lambda rows, r=root: self._on_quality_done(r, rows))
+        worker.failed.connect(self._on_quality_failed)
+        self._quality_worker = worker
+        worker.start()
+
+    def _on_quality_done(self, root: Path, rows) -> None:
+        serious = sum(1 for r in rows for f in r.get("findings", [])
+                      if f.get("level") in ("warning", "error"))
+        self.log_message.emit(
+            f"Quality check of {root.name}: {len(rows)} images, {serious} findings to look "
+            "at (Editor, Tools, Quality check).")
+        if self._project is not None:
+            self._project.append(StageCompleted(
+                stage="quality", success=True,
+                summary={"target": str(root), "images": len(rows), "findings": serious}))
+        self._next_quality_job()
+
+    def _on_quality_failed(self, tb: str) -> None:
+        self.log_message.emit(tb)
+        self._next_quality_job()
 
     def _start_metadata_worker(self, bids_parent: Path) -> None:
         s = self._app_settings

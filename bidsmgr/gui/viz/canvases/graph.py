@@ -26,10 +26,11 @@ on every theme change. Antialiasing is set per item, never process-wide.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSplitter, QVBoxLayout, QWidget,
@@ -38,7 +39,7 @@ from PyQt6.QtWidgets import (
 from ....viz import views
 from ....viz.scene import PLANE_AXIS
 from ....viz.theme import parse_colour
-from ...widgets.primitives import ElidedLabel
+from ...widgets.primitives import CappedLabel
 from .. import fonts
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
@@ -142,6 +143,61 @@ def _qc_track(row_id: str, title: str, ys: list, *, unit: str = "", **kw) -> dic
     return track
 
 
+def is_diffusion(src) -> bool:
+    """A diffusion series: its b-values describe its volumes."""
+    bvals = getattr(src, "bvals", None)
+    return bvals is not None and len(bvals) == int(getattr(src, "loaded_frames", 0))
+
+
+def dwi_qc_for_graph(src, rows=None, path=None, root=None, *, cancel=None,
+                     progress=None) -> dict:
+    """Worker side, for a diffusion series: the rows asked for, from the
+    diffusion check (``bidsmgr.qc.dwi``), computed once and shared with the
+    viewer's Check quality (``bidsmgr.qc.live``)."""
+    from ....qc import live
+    from ....viz import bids as VB
+    from ....viz.compute import qc
+
+    sidecar = VB.inherited_sidecar(Path(path), root) if path is not None else {}
+    res = live.result_for(src, sidecar, cancel=cancel, progress=progress)
+    help_of = {r: h for r, _t, h in qc.DWI_QC_ROWS}
+    out: dict[str, dict] = {}
+    for row_id in rows if rows is not None else qc.DWI_ROW_IDS:
+        t = res.tracks.get(row_id)
+        if t is None:
+            continue
+        if t.get("kind") == "image":
+            image = np.asarray(t["image"], dtype=np.float32)
+            n = image.shape[1]
+            out[row_id] = {
+                "id": row_id, "title": t["title"], "unit": "", "kind": "image",
+                "frames": True, "image": image, "image_x": (-0.5, n - 0.5),
+                "levels": tuple(t.get("levels", (-8.0, 8.0))),
+                "value_name": t.get("value_name", ""), "colormap": t.get("colormap", ""),
+                "height": t.get("height", 2.5), "rows": list(t.get("rows", [])),
+                "movable": True, "closable": True, "fmt": "{:.1f}",
+                "summary": t.get("summary", ""), "note": help_of.get(row_id, t.get("help", ""))}
+            continue
+        ys = [np.asarray(y, dtype=float) for y in t["ys"]]
+        kw = {k: t[k] for k in ("legend", "colour", "rule") if k in t}
+        if "ticks" in t:
+            kw["ticks"] = np.asarray(t["ticks"], dtype=float)
+        x = None
+        if t.get("points"):
+            # Sparse (the b=0 volumes only): the finite points, joined, or a
+            # line broken at every gap would draw nothing at all.
+            keep = np.isfinite(ys[0])
+            x = np.flatnonzero(keep).astype(float)
+            ys = [y[keep] for y in ys]
+        track = _qc_track(row_id, t["title"], ys, unit=t.get("unit", ""),
+                          summary=t.get("summary", ""),
+                          note=help_of.get(row_id, t.get("help", "")), **kw)
+        if x is not None:
+            track["x"] = x
+        out[row_id] = track
+    return {"rows": out, "skip": 0}
+
+
 def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
                  cancel=None, progress=None) -> dict:
     """Worker side: the QC ``rows`` asked for (ids of ``qc.QC_ROWS``), one
@@ -152,7 +208,9 @@ def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
     from ....viz.compute import motion as M
     from ....viz.compute import qc
 
-    rows = set(rows if rows is not None else qc.QC_ROW_IDS)
+    if is_diffusion(src):
+        return dwi_qc_for_graph(src, rows, path, root, cancel=cancel, progress=progress)
+    rows = set(rows if rows is not None else qc.BOLD_ROW_IDS)
     skip = qc.non_steady_state(src, cancel=cancel)
     n = src.loaded_frames
     out: dict[str, dict] = {}
@@ -241,17 +299,20 @@ def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
     return {"rows": out, "skip": skip}
 
 
-class _CappedLabel(ElidedLabel):
-    """A name that asks for at most ``cap`` pixels and elides beyond them, so
-    a long file name never decides how narrow the graph may be."""
-
-    def __init__(self, cap: int) -> None:
-        super().__init__("", mode=Qt.TextElideMode.ElideMiddle)
-        self._cap = int(cap)
-
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
-        hint = super().sizeHint()
-        return QSize(min(hint.width(), self._cap), hint.height())
+def go_to_slice(ctx, k: int, bids_ctx=None) -> None:
+    """Move the crosshair to slice ``k`` along the series' slice axis (the
+    sidecar's SliceEncodingDirection, else k), keeping the rest of its
+    position."""
+    axis = 2
+    if bids_ctx is not None:
+        axis = {"i": 0, "j": 1, "k": 2}.get(
+            str(bids_ctx.sidecar.get("SliceEncodingDirection", "k"))[:1], 2)
+    voxel = views.cursor_voxel(ctx.store)
+    if voxel is None:
+        return
+    v = list(voxel)
+    v[axis] = int(k)
+    ctx.run("cursor.set_voxel", i=v[0], j=v[1], k=v[2])
 
 
 class TimecourseGraph(QWidget):
@@ -338,8 +399,9 @@ class TimecourseGraph(QWidget):
         self.tracks.setVisible(False)
         self.tracks.describe_x = self._describe_x
         self.tracks.clicked.connect(self._go_to_x)
-        # A carpet's rows are voxels: a click on one goes to its moment.
-        self.tracks.row_clicked.connect(lambda x, _row: self._go_to_x(x))
+        # A carpet's rows are voxels: a click on one goes to its moment. The
+        # diffusion slice image's rows are slices: to that slice as well.
+        self.tracks.row_clicked.connect(self._go_to_cell)
         self.tracks.reset_view.connect(lambda: self.set_time_view(None))
         self.tracks.wheel.connect(self._on_wheel)
         self.tracks.order_changed.connect(self._on_tracks_order)
@@ -412,7 +474,7 @@ class TimecourseGraph(QWidget):
         bar = header.controls
         # Which series is plotted: a name, or a choice when there are several
         # (the anatomy's own series and an overlaid BOLD, say).
-        self.series_label = _CappedLabel(260)
+        self.series_label = CappedLabel(260)
         self.series_label.setObjectName("sidecar-footer-summary")
         bar.addWidget(self.series_label)
         self.series_combo = QComboBox()
@@ -487,9 +549,15 @@ class TimecourseGraph(QWidget):
         rows_menu = popup_menu(self.qc_plots_button)
         rows_menu.setToolTipsVisible(True)
         self._qc_plot_actions = {}
-        from ....viz.compute.qc import QC_ROWS
+        from ....viz.compute.qc import DWI_QC_ROWS, QC_ROWS
 
-        for row_id, title, help_text in QC_ROWS:
+        # Every row of both kinds, each shown for the kind of series on
+        # screen (``_sync_controls``); translation and rotation are shared.
+        seen = set()
+        for row_id, title, help_text in tuple(QC_ROWS) + tuple(DWI_QC_ROWS):
+            if row_id in seen:
+                continue
+            seen.add(row_id)
             act = rows_menu.addAction(title)
             act.setCheckable(True)
             act.setToolTip(help_text)
@@ -552,14 +620,34 @@ class TimecourseGraph(QWidget):
         if self.ctx.settings.qc.on_open != bool(on):
             self.ctx.settings_hub.update(lambda st: setattr(st.qc, "on_open", bool(on)))
 
-    def _toggle_qc_plot(self, row_id: str, on: bool) -> None:
+    def _series_is_dwi(self) -> bool:
+        _layer, src = views.series_layer(self.ctx.store)
+        return bool(src is not None and is_diffusion(src))
+
+    def _qc_rows_shown(self) -> list[str]:
+        """The QC rows for the series on screen, in the user's order: a
+        diffusion series shows its own rows (its defaults when none of them
+        was ever chosen), a BOLD its own."""
+        from ....viz.compute import qc
+
         rows = list(self.ctx.scene.graph.qc_rows)
-        if on and row_id not in rows:
-            rows.append(row_id)
-        elif not on and row_id in rows:
-            rows.remove(row_id)
+        if self._series_is_dwi():
+            mine = [r for r in rows if r in qc.DWI_ROW_IDS]
+            own = [r for r in mine if r not in qc.BOLD_ROW_IDS]
+            return mine if own else list(dict.fromkeys(list(qc.DWI_DEFAULT_ROWS) + mine))
+        return [r for r in rows if r in qc.BOLD_ROW_IDS]
+
+    def _toggle_qc_plot(self, row_id: str, on: bool) -> None:
+        shown = self._qc_rows_shown()
+        if on and row_id not in shown:
+            shown.append(row_id)
+        elif not on and row_id in shown:
+            shown.remove(row_id)
         else:
             return
+        # The other kind's rows keep their place.
+        rows = [r for r in self.ctx.scene.graph.qc_rows if r not in shown]
+        rows = [r for r in rows if r != row_id] + shown
         self.ctx.run("graph.set", qc_rows=rows)
 
     def _on_series_choice(self, _i: int) -> None:
@@ -627,10 +715,17 @@ class TimecourseGraph(QWidget):
             self.qc_box.setChecked(g.qc)
             self.qc_box.blockSignals(False)
         self.qc_plots_button.setEnabled(g.qc)
+        from ....viz.compute import qc as Q
+
+        dwi = self._series_is_dwi()
+        kind_rows = Q.DWI_ROW_IDS if dwi else Q.BOLD_ROW_IDS
+        shown = self._qc_rows_shown()
         for row_id, act in self._qc_plot_actions.items():
-            if act.isChecked() != (row_id in g.qc_rows):
+            if act.isVisible() != (row_id in kind_rows):
+                act.setVisible(row_id in kind_rows)
+            if act.isChecked() != (row_id in shown):
                 act.blockSignals(True)
-                act.setChecked(row_id in g.qc_rows)
+                act.setChecked(row_id in shown)
                 act.blockSignals(False)
         if self.marks_action.isChecked() != g.mark_neighbors:
             self.marks_action.blockSignals(True)
@@ -1169,7 +1264,7 @@ class TimecourseGraph(QWidget):
         if g.qc and self._qc_src is not None:
             have = self._qc_src["rows"]
             skip = int(self._qc_src.get("skip", 0))
-            out += [have[r] for r in g.qc_rows if r in have]
+            out += [have[r] for r in self._qc_rows_shown() if r in have]
         if g.physio and self._physio_src is not None:
             out += self._physio_src["tracks"]
         return [t for t in (self._in_x(t, skip) for t in out) if t is not None]
@@ -1203,7 +1298,7 @@ class TimecourseGraph(QWidget):
             # one, so it asks for everything still missing, not only the
             # row just switched on; a row that failed is not retried until
             # the rows asked for change.
-            missing = set(g.qc_rows) - have
+            missing = set(self._qc_rows_shown()) - have
             if missing and not missing <= self._qc_asked:
                 self._qc_asked = missing
                 self._qc_generation += 1
@@ -1294,6 +1389,18 @@ class TimecourseGraph(QWidget):
         if self._x is None or not self._x.size:
             return
         self.ctx.run("frame.set", frame=int(np.argmin(np.abs(self._x - x))))
+
+    def _go_to_cell(self, x: float, row: str) -> None:
+        """A cell of an image track: its moment, and for the diffusion slice
+        image its slice (the crosshair moves to it along the slice axis)."""
+        self._go_to_x(x)
+        if not str(row).startswith("slice "):
+            return
+        try:
+            k = int(str(row).split()[1])
+        except (IndexError, ValueError):
+            return
+        go_to_slice(self.ctx, k, self._context)
 
     def _on_tracks_order(self, order: list) -> None:
         """The user moved a plot: the QC rows take its order (rows not yet

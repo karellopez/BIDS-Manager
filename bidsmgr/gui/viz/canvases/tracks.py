@@ -398,9 +398,31 @@ class TrackCard(QFrame):
         lo, hi = track.get("levels", (-2.0, 2.0))
         # Row 0 at the top; pyqtgraph's y runs up.
         self._image.setImage(image[::-1].T, levels=(lo, hi), autoLevels=False)
+        self._image.setLookupTable(self._lut(track.get("colormap") or ""))
         x0, x1 = track["image_x"]
         self._image.setRect(QRectF(float(x0), 0.0, float(x1) - float(x0), float(image.shape[0])))
         self._image.setVisible(True)
+
+    def _lut(self, name: str):
+        """The look-up table of an image track's colour map: ``diverging``
+        is blue, the plot's own background in the middle, then red, so what
+        is normal (0) fades into the card in either theme and only what
+        departs from it shows; a named map otherwise; grey without one (a
+        card can be reused)."""
+        if not name:
+            return None
+        if name == "diverging":
+            theme = self.panel.theme()
+            mid = np.asarray(parse_colour(theme.plot_background)[:3], dtype=float)
+            blue = np.array([59.0, 130.0, 246.0])
+            red = np.array([239.0, 68.0, 68.0])
+            t = np.linspace(0.0, 1.0, 128)[:, None]
+            low = blue + (mid - blue) * t
+            high = mid + (red - mid) * t
+            return np.clip(np.rint(np.vstack([low, high])), 0, 255).astype(np.uint8)
+        from ....viz.compute import colormaps
+
+        return colormaps.lut(name) if colormaps.exists(name) else None
 
     def set_regions(self, spans) -> None:
         theme = self.panel.theme()
@@ -489,6 +511,9 @@ class TrackCard(QFrame):
         self._rule.setPen(pg.mkPen(_qcolor(warn, 200), width=1, style=Qt.PenStyle.DashLine))
         self._marker.setPen(pg.mkPen(_qcolor(self.panel.ctx.settings.crosshair.color), width=1.5))
         self._hover.setPen(pg.mkPen(_qcolor(theme.dim, 170), width=1))
+        if t.get("kind") == "image" and self._image is not None:
+            # A theme-dependent map follows the theme.
+            self._image.setLookupTable(self._lut(t.get("colormap") or ""))
         if self._bands.isVisible():
             self._set_bars(self._bands, self.track.get("bands") or [])
         for b in (self.up, self.down, self.hide_button):

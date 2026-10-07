@@ -56,6 +56,7 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "LOOK AT THE DATASET",
         "Dashboard",
         "Compare images...",
+        "Quality check...",
 
         "CHECK AND REPAIR",
         # All three answer "what is wrong with this dataset": coherence

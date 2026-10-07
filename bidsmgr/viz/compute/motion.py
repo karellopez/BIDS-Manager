@@ -189,50 +189,108 @@ def _rotation_vector(r: np.ndarray) -> np.ndarray:
     return v * theta / (2.0 * np.sin(theta))
 
 
+class RigidReference:
+    """One reference volume, ready to register others to it rigidly.
+
+    Built once (its edges, their gradients and the 6 x 6 normal matrix), then
+    :meth:`register` costs a few trilinear resamplings per volume. The
+    registration :func:`estimate` runs for a BOLD series, and the one the
+    diffusion check runs against each shell's own mean (``bidsmgr.qc.dwi``):
+    a b=1000 volume and a b0 do not share a contrast, so each is registered
+    to its own kind.
+
+    ``reference`` is on the grid :func:`working_grid` returns for the series
+    (block means of ``factor`` voxels); volumes passed to :meth:`register`
+    must be on the same grid. Parameters are in mm about the grid's centre:
+    three translations, then a rotation vector.
+    """
+
+    def __init__(self, reference: np.ndarray, spacing, *, points: int = ESTIMATE_POINTS,
+                 mask: Optional[np.ndarray] = None) -> None:
+        from scipy import ndimage
+
+        ref = np.asarray(reference, dtype=np.float32)
+        self.spacing = np.asarray(spacing, dtype=float)
+        shape = np.asarray(ref.shape, dtype=float)
+        self.centre = (shape - 1.0) / 2.0
+        if mask is None:
+            finite = ref[np.isfinite(ref)]
+            top = float(np.percentile(finite, 98)) if finite.size else 0.0
+            mask = ref > 0.2 * top
+        mask = np.asarray(mask, dtype=bool)
+        if not mask.any():
+            raise ValueError("no voxel is bright enough to be in the head")
+        # The edge of the head is where motion shows: keep a voxel around it.
+        mask = ndimage.binary_dilation(mask, iterations=1)
+        grads = np.gradient(ref.astype(np.float64), *self.spacing)
+        g = np.stack([gr[mask] for gr in grads], axis=1)           # N x 3
+        idx = np.argwhere(mask).astype(float)
+        if points and len(idx) > points:
+            # The strongest edges carry the registration; flat tissue adds
+            # time, not information.
+            keep = np.argpartition(-(g * g).sum(axis=1), points)[:points]
+            keep.sort()
+            g, idx = g[keep], idx[keep]
+        self.x = (idx - self.centre) * self.spacing                # mm, centred
+        self.values = ref[tuple(idx.astype(int).T)].astype(np.float64)
+        self.sd = np.concatenate([g, np.cross(self.x, g)], axis=1)  # N x 6
+        hessian = self.sd.T @ self.sd
+        try:
+            self.h_inv = np.linalg.inv(hessian)
+        except np.linalg.LinAlgError:
+            self.h_inv = np.linalg.pinv(hessian)
+        self.mean = float(self.values.mean()) or 1.0
+
+    def register(self, frame: np.ndarray, rot: Optional[np.ndarray] = None,
+                 trans: Optional[np.ndarray] = None, *, iterations: int = 12
+                 ) -> tuple[np.ndarray, np.ndarray]:
+        """``(rotation matrix, translation mm)`` taking this reference's
+        points onto ``frame``, started from ``rot``/``trans`` (the previous
+        volume's answer, usually)."""
+        from scipy import ndimage
+
+        rot = np.eye(3) if rot is None else np.array(rot, dtype=float)
+        trans = np.zeros(3) if trans is None else np.array(trans, dtype=float)
+        for _ in range(iterations):
+            pts = self.x @ rot.T + trans
+            coords = (pts / self.spacing + self.centre).T
+            warped = ndimage.map_coordinates(frame, coords, order=1, mode="nearest",
+                                             prefilter=False).astype(np.float64)
+            # Each volume on the reference's intensity scale: a global
+            # signal change is not motion.
+            w_mean = float(warped.mean()) or 1.0
+            err = warped * (self.mean / w_mean) - self.values
+            dp = self.h_inv @ (self.sd.T @ err)
+            d_rot = _rotation(dp[3:])
+            rot = rot @ d_rot.T
+            trans = trans - rot @ dp[:3]
+            if np.max(np.abs(dp[:3])) < 1e-4 and np.max(np.abs(dp[3:])) < 1e-6:
+                break
+        return rot, trans
+
+
+def working_grid(zooms, spatial, target_mm: float = ESTIMATE_MM) -> np.ndarray:
+    """The block factor per axis that brings voxels finer than ``target_mm``
+    up to about it, never below about eight voxels an axis (a gradient needs
+    neighbours)."""
+    zooms = np.asarray(zooms, dtype=float)
+    factor = np.maximum(1, np.round(target_mm / np.maximum(zooms, 1e-3))).astype(int)
+    return np.minimum(factor, np.maximum(1, np.asarray(spatial) // 8)).astype(int)
+
+
 def estimate(src, *, skip: int = 0, cancel: Optional[Callable[[], bool]] = None,
              progress: Optional[Callable[[int, int], None]] = None,
              target_mm: float = ESTIMATE_MM, iterations: int = 12,
              points: int = ESTIMATE_POINTS) -> Motion:
     """Register every volume rigidly to volume ``skip`` (see the module)."""
-    from scipy import ndimage
-
     n = src.loaded_frames
     if n < 2:
         raise ValueError("motion needs at least two volumes")
-    zooms = np.asarray(src.zooms3, dtype=float)
-    factor = np.maximum(1, np.round(target_mm / np.maximum(zooms, 1e-3))).astype(int)
-    # Never below about eight voxels an axis: a gradient needs neighbours.
-    factor = np.minimum(factor, np.maximum(1, np.asarray(src.spatial) // 8)).astype(int)
-    spacing = zooms * factor
+    factor = working_grid(src.zooms3, src.spatial, target_mm)
+    spacing = np.asarray(src.zooms3, dtype=float) * factor
     ref_index = int(min(max(skip, 0), n - 1))
-    ref = _down(src.scale(np.asarray(src.raw_frame(ref_index))), factor)
-    shape = np.asarray(ref.shape, dtype=float)
-    centre = (shape - 1.0) / 2.0
-    finite = ref[np.isfinite(ref)]
-    top = float(np.percentile(finite, 98)) if finite.size else 0.0
-    mask = ref > 0.2 * top
-    if not mask.any():
-        raise ValueError("no voxel is bright enough to be in the head")
-    # The edge of the head is where motion shows: keep a voxel around it.
-    mask = ndimage.binary_dilation(mask, iterations=1)
-    grads = np.gradient(ref.astype(np.float64), *spacing)
-    g = np.stack([gr[mask] for gr in grads], axis=1)           # N x 3
-    idx = np.argwhere(mask).astype(float)
-    if points and len(idx) > points:
-        # The strongest edges carry the registration; flat tissue adds
-        # time, not information.
-        keep = np.argpartition(-(g * g).sum(axis=1), points)[:points]
-        keep.sort()
-        g, idx = g[keep], idx[keep]
-    x = (idx - centre) * spacing                               # mm, centred
-    r_vals = ref[tuple(idx.astype(int).T)].astype(np.float64)
-    sd = np.concatenate([g, np.cross(x, g)], axis=1)           # N x 6
-    hessian = sd.T @ sd
-    try:
-        h_inv = np.linalg.inv(hessian)
-    except np.linalg.LinAlgError:
-        h_inv = np.linalg.pinv(hessian)
-    r_mean = float(r_vals.mean()) or 1.0
+    reference = RigidReference(_down(src.scale(np.asarray(src.raw_frame(ref_index))), factor),
+                               spacing, points=points)
 
     params = np.zeros((n, 6))
     rot = np.eye(3)
@@ -245,21 +303,7 @@ def estimate(src, *, skip: int = 0, cancel: Optional[Callable[[], bool]] = None,
             # Walking back from the reference: start from it again.
             rot, trans = np.eye(3), np.zeros(3)
         frame = _down(src.scale(np.asarray(src.raw_frame(t))), factor)
-        for _ in range(iterations):
-            pts = x @ rot.T + trans
-            coords = (pts / spacing + centre).T
-            warped = ndimage.map_coordinates(frame, coords, order=1, mode="nearest",
-                                             prefilter=False).astype(np.float64)
-            # Each volume on the reference's intensity scale: a global
-            # signal change is not motion.
-            w_mean = float(warped.mean()) or 1.0
-            err = warped * (r_mean / w_mean) - r_vals
-            dp = h_inv @ (sd.T @ err)
-            d_rot = _rotation(dp[3:])
-            rot = rot @ d_rot.T
-            trans = trans - rot @ dp[:3]
-            if np.max(np.abs(dp[:3])) < 1e-4 and np.max(np.abs(dp[3:])) < 1e-6:
-                break
+        rot, trans = reference.register(frame, rot, trans, iterations=iterations)
         params[t, :3] = trans
         params[t, 3:] = _rotation_vector(rot)
         if progress is not None and (count % 16 == 0 or count == n - 1):
@@ -285,6 +329,6 @@ def motion_for(src, path: Optional[Path] = None, root: Optional[Path] = None, *,
 
 __all__ = [
     "CONFOUND_NAMES", "ESTIMATE_MM", "ESTIMATE_POINTS", "FD_THRESHOLD_MM", "HEAD_RADIUS_MM", "Cancelled",
-    "Motion", "confounds_for", "estimate", "framewise_displacement", "motion_for",
-    "read_confounds",
+    "Motion", "RigidReference", "confounds_for", "estimate", "framewise_displacement",
+    "motion_for", "read_confounds", "working_grid",
 ]

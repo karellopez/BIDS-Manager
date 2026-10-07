@@ -190,6 +190,7 @@ bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
 bidsmgr-deface    = "bidsmgr.cli.deface:main"
 bidsmgr-view      = "bidsmgr.cli.view:main"
+bidsmgr-qc        = "bidsmgr.cli.qc:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -213,6 +214,10 @@ include = ["bidsmgr*"]
 # The defacing atlas: a matched template and mask that must travel together.
 # See bidsmgr/deface/atlas/PROVENANCE.md.
 "bidsmgr.deface"            = ["atlas/*.nii.gz", "atlas/PROVENANCE.md"]
+# The quality check's template: the MNI ICBM 152 2009c images at 2 mm, 8-bit,
+# with the licence notice they must travel with. See
+# bidsmgr/qc/templates/PROVENANCE.md.
+"bidsmgr.qc.templates"      = ["*.nii.gz", "PROVENANCE.md"]
 "bidsmgr.vendor"            = ["README.md"]
 # A Windows dcm2niix that can convert MR spectroscopy. The released one
 # cannot: it is killed with 0xC00000FD before it writes anything. Used only

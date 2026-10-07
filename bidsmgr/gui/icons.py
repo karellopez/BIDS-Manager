@@ -160,6 +160,7 @@ NAMES: dict[str, tuple[str, str]] = {
     "mosaic_figure":  ("mdi6.image-multiple-outline", "text"),
     "reattach":       ("mdi6.dock-window",            "text"),
     "dock_right":     ("mdi6.dock-right",             "text"),
+    "dock_bottom":    ("mdi6.dock-bottom",            "text"),
     "chevron_up":     ("mdi6.chevron-up",             "text"),
     "chevron_down":   ("mdi6.chevron-down",           "text"),
     "tracks_scroll":  ("mdi6.arrow-expand-vertical",  "text"),

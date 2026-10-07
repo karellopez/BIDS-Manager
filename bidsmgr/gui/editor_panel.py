@@ -440,6 +440,16 @@ class EditorPanel(QWidget):
         )
         self._compare_action.triggered.connect(self._on_compare_images)
 
+        self._quality_action = self._tools_menu.addAction("Quality check...")
+        self._quality_action.setToolTip(
+            "A fast quality check of every anatomical and diffusion image: "
+            "noise, contrast, artefacts, coverage, the gradient table, motion "
+            "and slice dropout, one row per image, coloured where an image "
+            "sits far from the others of its kind. The air is measured only "
+            "in images that are not defaced."
+        )
+        self._quality_action.triggered.connect(self._on_quality_check)
+
         menu_section(self._tools_menu, "Check and repair")
 
         self._coherence_action = self._tools_menu.addAction("Check coherence...")
@@ -1311,6 +1321,34 @@ class EditorPanel(QWidget):
             self._tree_pane.set_root(root)
             if self._report is not None:
                 self.start_dataset_validation()
+
+    def _on_quality_check(self) -> None:
+        """The dataset's images, checked (non-modal: they are looked at
+        while it stays open)."""
+        from .quality_check_dialog import QualityCheckDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        from PyQt6 import sip
+
+        old = getattr(self, "_quality_dialog", None)
+        # Checked, not tracked through ``destroyed`` (CLAUDE.md guard 8d).
+        if old is not None and not sip.isdeleted(old) and old.isVisible():
+            old.raise_()
+            old.activateWindow()
+            return
+        dlg = QualityCheckDialog(root, open_image=self.open_with_quality, parent=self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._quality_dialog = dlg
+        dlg.show()
+
+    def open_with_quality(self, path: Path) -> None:
+        """Open ``path`` in the viewer and its quality report beside it."""
+        self.select_file_in_tree(Path(path))
+        presenter = getattr(self._nifti_viewer, "presenter", None)
+        if presenter is not None and hasattr(presenter, "check_quality"):
+            presenter.check_quality()
 
     def _on_coherence(self) -> None:
         """Find where the dataset's files stop agreeing with each other."""

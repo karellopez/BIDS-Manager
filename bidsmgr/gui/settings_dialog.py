@@ -860,6 +860,17 @@ class SettingsDialog(QDialog):
         pv.addWidget(_indented(self._post_validate_strict))
         pv.addWidget(_indented(self._post_validate_html))
 
+        self._post_run_quality = QCheckBox(
+            "Check image quality (anatomical and diffusion; a few seconds per image)"
+        )
+        self._post_run_quality.setToolTip(
+            "Last: the fast quality check of every anatomical and diffusion image "
+            "not checked yet, into derivatives/bidsmgr-qc/ (read it in the Editor, "
+            "Tools, Quality check). The air is measured only in images that are not "
+            "defaced."
+        )
+        pv.addWidget(self._post_run_quality)
+
         _bind_children(
             self._post_run_metadata,
             self._post_metadata_fill_todos,
@@ -1083,6 +1094,7 @@ class SettingsDialog(QDialog):
         self._post_run_validate.setChecked(s.post_run_validate)
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
+        self._post_run_quality.setChecked(s.post_run_quality)
 
         # BIDS version, then the validation engine's own knobs.
         sidx = self._validate_schema.findData(s.validate_schema_version)
@@ -1182,6 +1194,7 @@ class SettingsDialog(QDialog):
         s.post_run_validate = self._post_run_validate.isChecked()
         s.post_validate_strict = self._post_validate_strict.isChecked()
         s.post_validate_html = self._post_validate_html.isChecked()
+        s.post_run_quality = self._post_run_quality.isChecked()
 
         s.validate_schema_version = self._validate_schema.currentData() or ""
         s.validate_max_rows = self._validate_max_rows.value()

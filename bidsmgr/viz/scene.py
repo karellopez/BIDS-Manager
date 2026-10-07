@@ -232,6 +232,9 @@ class LayoutState(_Model):
     hero_side: Literal["left", "top"] = "left"
     #: Where the time-course graph sits.
     graph: Literal["bottom", "right"] = "bottom"
+    #: Where the quality panel sits: beside the views and the time course (a
+    #: report is a tall list) or below them.
+    quality: Literal["right", "bottom"] = "right"
 
 
 class Camera(_Model):

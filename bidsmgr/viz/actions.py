@@ -257,15 +257,40 @@ ACTIONS: tuple[ActionDef, ...] = (
        when="volume", short="Add overlay",
        help="Draw another image over this one: a statistical map, an atlas, a "
             "mask, another contrast. Its look follows from what it holds."),
+    _a("qc.check", "Check image quality", "gui:check_quality", category="QC",
+       when="qc.checkable", shown="qc.checkable", short="Check quality", checked="qc.panel",
+       help="The fast quality check of an anatomical or diffusion image: noise, "
+            "contrast, artefacts, tissues, coverage, the gradient table, motion and "
+            "slice dropout, each finding with its evidence over the image. The air is "
+            "measured only in images that are not defaced."),
+    _a("qc.below", "Quality panel below the views", "gui:quality_below", category="QC",
+       when="qc.panel && !qc.detached", short="Below", checked="qc.below",
+       help="Put the quality panel under the views and the time course instead of beside "
+            "them", icon="dock_bottom"),
+    _a("qc.maximize", "Maximise the quality panel", "gui:quality_maximize", category="QC",
+       when="qc.panel && !qc.detached", short="Maximise", checked="qc.maximized",
+       help="Give the quality panel the room of the views (below: of the views and the "
+            "time course); again to bring them back", icon="maximize"),
+    _a("qc.detach", "Quality panel in its own window", "gui:quality_detach", category="QC",
+       when="qc.panel", short="Own window", checked="qc.detached",
+       help="Move the quality panel to a window of its own; closing that window puts it "
+            "back", icon="detach"),
+    _a("qc.noise", "Show the noise", "gui:show_noise", category="QC",
+       checked="qc.noise", when="volume", short="Show the noise",
+       help="The image windowed to its air, in colour: ghosts, ringing, motion and "
+            "wrap-around show as structure where there should be noise. Again to put "
+            "the look back."),
     _a("qc.mean", "Mean image of the series", "gui:qc", {"map": "mean"},
-       category="QC", when="volume.4d && volume.loaded", short="Mean image",
+       category="QC", when="volume.4d && volume.loaded", shown="volume.4d", short="Mean image",
        help="Computed when chosen: the mean over every volume, as an overlay"),
     _a("qc.sd", "Standard deviation map", "gui:qc", {"map": "sd"},
-       category="QC", when="volume.4d && volume.loaded", short="Standard deviation",
+       category="QC", when="volume.4d && volume.loaded", shown="volume.4d",
+       short="Standard deviation",
        help="Computed when chosen: where the signal moves over time (motion at the "
             "edges, vessels, ghosts), as an overlay"),
     _a("qc.tsnr", "Temporal SNR map", "gui:qc", {"map": "tsnr"},
-       category="QC", when="volume.4d && volume.loaded", short="Temporal SNR",
+       category="QC", when="volume.4d && volume.loaded", shown="volume.4d",
+       short="Temporal SNR",
        help="Computed when chosen: each voxel's mean over its standard deviation after "
             "removing slow drifts, as an overlay with a colour bar and how to read it"),
     _a("view.inspector", "Advanced controls", "gui:inspector", category="Views",

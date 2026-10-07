@@ -50,7 +50,7 @@ native desktop launcher, so no existing Python install is required. The
 
 With Python already set up, `pip install bids-manager` works too.
 
-Launch the interface with `bidsmgr`. Prefer the command line? Nine verbs cover
+Launch the interface with `bidsmgr`. Prefer the command line? Ten verbs cover
 the whole pipeline:
 
 ```
@@ -62,6 +62,7 @@ bidsmgr-convert    convert, routing each row to the right engine
 bidsmgr-metadata   dataset_description, participants, phenotype
 bidsmgr-deface     remove faces, or keep only the brain as a derivative
 bidsmgr-validate   validate, with a report you can hand to a colleague
+bidsmgr-qc         a fast quality check of anatomical and diffusion images
 bidsmgr-project    list a project's saved scan versions
 ```
 
@@ -237,6 +238,20 @@ next to no data file at all.
   <img src="miscellaneous/validate.gif" alt="Validating a dataset: findings by scope, each naming its schema rule" width="100%">
 </p>
 
+A valid dataset can still hold a bad image. The quality check measures every
+anatomical and diffusion image in seconds, with nothing extra to install (no
+FSL, AFNI or ANTs): the brain and the tissue classes come from brainchop's
+networks and the registration from niimath, the tools defacing already uses.
+It reports noise and contrast, artefacts in the air, tissue classes, the bias
+field, a field of view that cuts the brain, a face still present; for
+diffusion the gradient table, head motion, slice dropout, interleave
+artefacts, spikes, signal drift and b-vectors that look flipped. The air
+around the head is measured only in images that are not defaced. In the
+viewer the result is docked beside the image, each mask or map a checkbox
+over it and each finding a click from its evidence; the Editor's **Quality
+check** lists the whole dataset with the images that stand out coloured, and
+the results are written as a BIDS derivative (`derivatives/bidsmgr-qc/`).
+
 ### 8. Provenance built in
 
 Every edit is recorded in the project, and every scan is kept as a version. Undo
@@ -284,6 +299,12 @@ Velasco and Chrysa Papadaniil (NYU Center for Brain Imaging), used
 under the MIT License. See `bidsmgr/vendor/bidsphysio/LICENSE` and
 `bidsmgr/vendor/README.md` for the full attribution and what
 changed during vendoring.
+
+The quality check registers images to the MNI ICBM 152 Nonlinear
+Asymmetrical template 2009c (Fonov et al.), shipped as 8-bit copies under
+`bidsmgr/qc/templates/` with the McConnell Brain Imaging Centre notice its
+licence requires; `PROVENANCE.md` there records the source, checksums and the
+conversion.
 
 The Windows `dcm2niix.exe` under `bidsmgr/vendor/dcm2niix_win/` is a
 build of Chris Rorden's

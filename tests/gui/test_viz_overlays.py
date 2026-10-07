@@ -304,15 +304,29 @@ class TestQualityMaps:
         v = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
         tools = [a.text() for a in v.presenter.tools_button.menu().actions() if a.text()]
         assert "Add an overlay..." in tools
-        quality = [a.text() for a in v.presenter.quality_button.menu().actions() if a.text()]
-        assert quality[:3] == ["Temporal SNR map", "Standard deviation map",
+        menu = v.presenter.quality_button.menu()
+        menu.aboutToShow.emit()
+        quality = [a.text() for a in menu.actions() if a.text() and a.isVisible()]
+        # A BOLD is not an anatomical or diffusion image: no Check quality.
+        assert quality[:4] == ["Show the noise", "Temporal SNR map", "Standard deviation map",
                                "Mean image of the series"]
         assert "QC plots under the time course" in quality
         assert "Run QC when a file opens" in quality
         assert v.presenter.quality_button.isVisibleTo(v)
 
-    def test_quality_is_offered_only_for_a_series(self, qtbot, ds):
+    def test_an_anatomical_image_is_offered_its_check(self, qtbot, ds):
+        """A 3-D T1w has no series maps, but the quality check is for it."""
         v = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+        assert v.presenter.quality_button.isVisibleTo(v)
+        menu = v.presenter.quality_button.menu()
+        menu.aboutToShow.emit()
+        quality = [a.text() for a in menu.actions() if a.text() and a.isVisible()]
+        # Running the check when a file opens applies to it too (while the
+        # quality panel is open); the series plots do not.
+        assert quality == ["Check image quality", "Show the noise", "Run QC when a file opens"]
+
+    def test_quality_is_not_offered_for_a_label_image(self, qtbot, ds):
+        v = _open(qtbot, _viewer(qtbot), _atlas(ds), ds)
         assert not v.presenter.quality_button.isVisibleTo(v)
 
     def test_the_quality_rows_open_the_time_course(self, qtbot, ds):

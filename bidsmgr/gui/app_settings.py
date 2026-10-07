@@ -76,6 +76,7 @@ KEYS = {
     "post_validate_html": "post_convert/validate_html",
     "post_fixup_companions": "post_convert/fixup_companions",
     "post_fixup_citation": "post_convert/fixup_citation",
+    "post_run_quality":   "post_convert/run_quality",
     # Self-update
     "skipped_update_version": "update/skipped_version",
     # UI font scale (1.0 = default size baseline; values <1 shrink,
@@ -215,6 +216,10 @@ class AppSettings:
     # output cannot be trusted.
     post_fixup_companions: bool = False
     post_fixup_citation: bool = False
+    # The fast quality check of the anatomical and diffusion images
+    # (bidsmgr.qc), last. OFF by default: seconds per image, minutes for a
+    # study, and its results are a derivative the user should ask for.
+    post_run_quality: bool = False
 
     # PyPI version string the user picked "Skip this version" on, so the
     # startup update check doesn't nag them about the same release on
@@ -422,6 +427,8 @@ class AppSettings:
         out.post_fixup_companions = _as_bool(
             s.value(KEYS["post_fixup_companions"]), out.post_fixup_companions,
         )
+        out.post_run_quality = _as_bool(s.value(KEYS["post_run_quality"]),
+                                        out.post_run_quality)
         out.post_fixup_citation = _as_bool(
             s.value(KEYS["post_fixup_citation"]), out.post_fixup_citation,
         )
@@ -477,6 +484,7 @@ class AppSettings:
             ("post_validate_html",       self.post_validate_html),
             ("post_fixup_companions",    self.post_fixup_companions),
             ("post_fixup_citation",      self.post_fixup_citation),
+            ("post_run_quality",         self.post_run_quality),
             ("editor_strict_validate",   self.editor_strict_validate),
             ("validate_flag_todos",      self.validate_flag_todos),
             ("editor_show_hidden",       self.editor_show_hidden),
