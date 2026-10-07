@@ -496,7 +496,7 @@ def graph_set(store: "SceneStore", scope: Optional[int] = None,
 
         unknown = [r for r in qc_rows if r not in QC_ROW_IDS]
         if unknown:
-            raise ValueError(f"no QC row called {unknown[0]!r}")
+            raise ValueError(f"no QC plot called {unknown[0]!r}")
         # In the user's order, each once.
         qc_rows = list(dict.fromkeys(qc_rows))
     if layer:

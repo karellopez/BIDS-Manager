@@ -17,6 +17,7 @@ and the spectrum run as jobs (QThread, never a pool: they end in scipy).
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Optional
 
@@ -335,7 +336,8 @@ class SignalPresenter:
         from ....viz.compute.meeg_qc import METRICS
 
         self.qc_plots_button, plots = menu_button(
-            "Plots", "plots", "Which QC measures are plotted, one plot per channel type")
+            "Plots", "plots", "Which QC plots are drawn, one per measure and channel type; "
+            "each can also be moved and hidden from its own header")
         self._qc_metric_actions = {}
         for mid, name, _unit, note in METRICS:
             act = plots.addAction(name[:1].upper() + name[1:])
@@ -343,6 +345,17 @@ class SignalPresenter:
             act.setToolTip(note)
             act.toggled.connect(lambda on, m=mid: self._toggle_qc_metric(m, on))
             self._qc_metric_actions[mid] = act
+        plots.addSeparator()
+        # The same choice, worded the same, as at the end of the image
+        # viewer's Plots menu.
+        self._qc_on_open = plots.addAction("Run QC when a file opens")
+        self._qc_on_open.setCheckable(True)
+        self._qc_on_open.setToolTip(
+            "On: QC stays on from one file to the next and is computed as soon as a file "
+            "opens. Off: every file opens with QC off.")
+        self._qc_on_open.toggled.connect(self._set_qc_on_open)
+        plots.aboutToShow.connect(
+            lambda: self._qc_on_open.setChecked(self.ctx.settings.qc.on_open))
         self.qc_types_button, self._qc_types_menu = menu_button(
             "Types", "channel_types",
             "Which channel types are plotted (QC never mixes types: each has its own plots)")
@@ -385,6 +398,7 @@ class SignalPresenter:
         self.qc_tracks = TracksPanel(self.ctx, left_axis_px=56)
         self.qc_tracks.describe_x = self._describe_qc_x
         self.qc_tracks.clicked.connect(self._qc_go_to)
+        self.qc_tracks.row_clicked.connect(self._qc_go_to_cell)
         self.qc_tracks.order_changed.connect(
             lambda order: self._run_ui("traces.qc_view", order=order))
         self.qc_tracks.hide_requested.connect(self._hide_qc_track)
@@ -467,6 +481,10 @@ class SignalPresenter:
         self.qc_split.setSizes([int(total * 0.6), int(total * 0.4)])
         self.qc_tracks.request_align()
 
+    def _set_qc_on_open(self, on: bool) -> None:
+        if self.ctx.settings.qc.on_open != bool(on):
+            self.ctx.settings_hub.update(lambda st: setattr(st.qc, "on_open", bool(on)))
+
     def _toggle_qc_metric(self, metric: str, on: bool) -> None:
         tr = self.ctx.scene.traces
         metrics = list(tr.qc_metrics)
@@ -528,6 +546,20 @@ class SignalPresenter:
     def _qc_go_to(self, x: float) -> None:
         tr = self.ctx.scene.traces
         self._run_ui("time.set", t0=max(0.0, float(x) - 0.4 * tr.width))
+
+    def _qc_go_to_cell(self, x: float, channel: str) -> None:
+        """A cell of a channel map: that channel, over that segment, on the
+        traces, outlined, with the time cursor at its start."""
+        res = self.quality_result()
+        src = self.source
+        if res is None or src is None:
+            return
+        step = float(res["segment_s"])
+        start = math.floor(float(x) / step) * step
+        self._run_ui("traces.go_to", channel=channel, onset=float(src.start_time) + start,
+                     duration=step)
+        self.viewer.status_message.emit(
+            f"{channel}, {start:.1f} to {start + step:.1f} s (outlined on the traces)")
 
     def _qc_area(self) -> Optional[tuple[int, int]]:
         """The QC plots' left and right edges: the traces' plot area, its

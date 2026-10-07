@@ -169,6 +169,58 @@ def traces_pick(store: "SceneStore", names: Optional[list[str]] = None) -> set[s
     return {"traces.channels"}
 
 
+@command("traces.focus", "Outline a channel over a stretch", category="Channels")
+def traces_focus(store: "SceneStore", channel: Optional[str] = None, onset: float = 0.0,
+                 duration: float = 0.0) -> set[str]:
+    """Outline ``channel`` from ``onset`` (seconds of run time) for
+    ``duration``; no channel removes the outline."""
+    from ..scene import TraceFocus
+
+    new = None if channel is None else TraceFocus(channel=channel, onset=float(onset),
+                                                  duration=max(0.0, float(duration)))
+    if store.scene.traces.focus == new:
+        return set()
+    store.scene.traces.focus = new
+    return {"traces.look"}
+
+
+@command("traces.go_to", "Go to a channel at a moment", category="Channels")
+def traces_go_to(store: "SceneStore", channel: str, onset: float,
+                 duration: float = 0.0) -> set[str]:
+    """Show ``channel`` from ``onset`` (seconds of run time, as the time
+    cursor) for ``duration``, as a click on a QC channel map asks: the
+    channel brought on screen (every type shown when its own was filtered
+    out), the stretch centred in the window (from its start when it is
+    longer than the window), the time cursor at its start and the stretch
+    outlined on the channel."""
+    src = source(store)
+    if src is None:
+        return set()
+    if channel not in src.ch_names:
+        raise ValueError(f"no channel called {channel!r}")
+    tr = store.scene.traces
+    changed: set[str] = set()
+    index = src.ch_names.index(channel)
+    if index not in _shown(store):
+        if tr.picks is not None and channel not in tr.picks:
+            tr.picks = None
+        if index not in _shown(store):
+            tr.ch_type = "all"
+        changed.add("traces.channels")
+    pool = _shown(store)
+    k = pool.index(index)
+    if not tr.offset <= k < tr.offset + tr.count:
+        tr.offset = max(0, min(k - tr.count // 2, len(pool) - tr.count))
+        changed.add("traces.channels")
+    start = float(onset) - float(src.start_time)
+    length = max(0.0, float(duration))
+    t0 = start if length >= tr.width else start + length / 2.0 - tr.width / 2.0
+    changed |= time_set(store, t0)
+    changed |= cursor_time(store, float(onset))
+    changed |= traces_focus(store, channel, float(onset), length)
+    return changed
+
+
 @command("traces.count", "Traces on screen", category="Channels")
 def traces_count(store: "SceneStore", n: int) -> set[str]:
     tr = store.scene.traces
@@ -538,6 +590,9 @@ def traces_reset(store: "SceneStore") -> set[str]:
         if getattr(store.scene.traces, key) != value:
             setattr(store.scene.traces, key, value)
             changed = True
+    if store.scene.traces.focus is not None:
+        store.scene.traces.focus = None
+        changed = True
     paths = {"traces.time", "traces.channels", "traces.look", "traces.filter"} if changed else set()
     if store.scene.cursor.time is not None:
         store.scene.cursor.time = None

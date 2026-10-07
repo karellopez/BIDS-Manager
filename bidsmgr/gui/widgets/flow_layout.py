@@ -170,6 +170,14 @@ class FlowBar(QWidget):
     def _visible(self) -> list[QWidget]:
         return [c for c in self._children if not c.isHidden()]
 
+    @staticmethod
+    def _size(child: QWidget) -> QSize:
+        """The size a child is given: its hint within its own minimum and
+        maximum, as a Qt layout does. A fixed-size widget's hint does not
+        report its fixed size, so a 28 px icon button with an 18 px hint was
+        placed in an 18 px row, clipped, and overlapped its neighbour."""
+        return child.sizeHint().expandedTo(child.minimumSize()).boundedTo(child.maximumSize())
+
     def hasHeightForWidth(self) -> bool:  # noqa: N802
         return True
 
@@ -181,7 +189,7 @@ class FlowBar(QWidget):
         left, top, right, bottom = self._margins
         width = height = 0
         for index, child in enumerate(self._visible()):
-            hint = child.sizeHint()
+            hint = self._size(child)
             width += hint.width() + (self._h if index else 0)
             height = max(height, hint.height())
         return QSize(width + left + right, height + top + bottom)
@@ -196,7 +204,7 @@ class FlowBar(QWidget):
         left, top, right, bottom = self._margins
         size = QSize(0, 0)
         for child in self._visible():
-            size = size.expandedTo(child.minimumSizeHint())
+            size = size.expandedTo(child.minimumSizeHint().expandedTo(child.minimumSize()))
         height = size.height() + top + bottom
         if self.width() > 0:
             height = max(height, self._arrange(self.width(), apply=False))
@@ -249,7 +257,7 @@ class FlowBar(QWidget):
         rows: list[list] = [[]]
         x = left
         for child in self._visible():
-            hint = child.sizeHint()
+            hint = self._size(child)
             if rows[-1] and x - left + hint.width() > usable:
                 rows.append([])
                 x = left

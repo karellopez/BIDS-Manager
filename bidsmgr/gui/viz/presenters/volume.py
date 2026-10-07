@@ -558,12 +558,12 @@ class VolumePresenter:
         for action_id in self.QUALITY:
             menu.addAction(self.viewer.action(action_id))
         menu.addSeparator()
-        self._qc_rows_action = menu.addAction("QC plots under the time course")
-        self._qc_rows_action.setCheckable(True)
-        self._qc_rows_action.setToolTip(
+        self._qc_plots_action = menu.addAction("QC plots under the time course")
+        self._qc_plots_action.setCheckable(True)
+        self._qc_plots_action.setToolTip(
             "Framewise displacement, the motion parameters, DVARS and outlier voxels per "
-            "volume (choose more with Rows): opens the time course if it is closed")
-        self._qc_rows_action.triggered.connect(self._toggle_qc_rows)
+            "volume (choose more with Plots): opens the time course if it is closed")
+        self._qc_plots_action.triggered.connect(self._toggle_qc_plots)
         self._qc_on_open_action = menu.addAction("Run QC when a file opens")
         self._qc_on_open_action.setCheckable(True)
         self._qc_on_open_action.setToolTip(
@@ -574,7 +574,7 @@ class VolumePresenter:
                 lambda st: setattr(st.qc, "on_open", bool(on))))
 
         def sync_menu() -> None:
-            self._qc_rows_action.setChecked(bool(self.ctx.scene.graph.qc))
+            self._qc_plots_action.setChecked(bool(self.ctx.scene.graph.qc))
             self._qc_on_open_action.setChecked(bool(self.ctx.settings.qc.on_open))
 
         menu.aboutToShow.connect(sync_menu)
@@ -582,7 +582,7 @@ class VolumePresenter:
         self.quality_button = btn
         return btn
 
-    def _toggle_qc_rows(self, on: bool) -> None:
+    def _toggle_qc_plots(self, on: bool) -> None:
         if on and not self.ctx.scene.graph_visible:
             self.ctx.run("view.graph", value=True)
         self.ctx.run("graph.set", qc=bool(on))
@@ -763,24 +763,30 @@ class VolumePresenter:
 
     # -- saved views (also the scripting surface) ------------------------
 
-    #: What a saved view leaves out: where you were (cursor, zoom and pan
-    #: belong to one image), and what is not a view at all.
-    _VIEW_EXCLUDE = {"sources", "layers", "cursor", "views", "measurements",
-                     "schema_version"}
+    def _has_series(self) -> bool:
+        return views.series_layer(self.ctx.store)[0] is not None
 
     def save_view(self, name: str) -> None:
+        """Save the look as a preset: only what this image has (see
+        :mod:`bidsmgr.viz.presets`)."""
+        from ....viz import presets
+
         name = name.strip()
         if not name:
             return
-        state = self.ctx.scene.model_dump(mode="json", exclude=self._VIEW_EXCLUDE)
+        state = presets.snapshot(self.ctx.scene, has_series=self._has_series())
         self.ctx.settings_hub.update(lambda s: s.view_presets.__setitem__(name, state))
         self.viewer.status_message.emit(f"Saved the view {name!r}")
 
     def apply_view(self, name: str) -> bool:
+        """Apply a preset: the image on screen takes what it has."""
+        from ....viz import presets
+
         state = self.ctx.settings.view_presets.get(name)
         if state is None:
             return False
-        self.viewer.apply_state(state)
+        self.viewer.apply_state(presets.applicable(state, self.ctx.scene,
+                                                   has_series=self._has_series()))
         self.ctx.qstore.flush()
         return True
 
@@ -836,10 +842,13 @@ class VolumePresenter:
     def _apply_scene(self, data: dict) -> None:
         from ....viz import scenes
 
+        from ....viz import presets
+
         root = Path(data.get("_root") or ".")
         view = dict(data.get("view") or {})
         cursor = (view.pop("cursor", None) or {}).get("world")
-        self.viewer.apply_state(view)
+        self.viewer.apply_state(presets.applicable(view, self.ctx.scene,
+                                                   has_series=self._has_series()))
         base = data.get("base_display")
         if base:
             self.ctx.run("layer.set", **{k: v for k, v in base.items()
@@ -849,6 +858,7 @@ class VolumePresenter:
         if cursor is not None:
             self.ctx.run("cursor.set_world", x=float(cursor[0]), y=float(cursor[1]),
                          z=float(cursor[2]), snap=False)
+        gone = []
         for item in data.get("overlays", []):
             look = {"display": item.get("display"), "name": item.get("name", ""),
                     "visible": bool(item.get("visible", True)),
@@ -858,10 +868,16 @@ class VolumePresenter:
                 self._pending_qc.append({"which": origin[3:], "look": look})
             elif origin.startswith("deface:"):
                 self.preview_defacing(origin[len("deface:"):], **look)
-            else:
+            elif scenes.from_rel(root, item["path"]).is_file():
                 self.add_overlay(scenes.from_rel(root, item["path"]), **look)
+            else:
+                gone.append(item["path"])
         self.ctx.qstore.flush()
-        self.viewer.status_message.emit(f"Opened the scene {data.get('name', '')!r}")
+        message = f"Opened the scene {data.get('name', '')!r}"
+        if gone:
+            message += (f"; its overlay{'s are' if len(gone) > 1 else ' is'} gone: "
+                        + ", ".join(gone))
+        self.viewer.status_message.emit(message)
 
     def _ask_scene_name(self) -> None:
         from PyQt6.QtWidgets import QInputDialog, QMessageBox

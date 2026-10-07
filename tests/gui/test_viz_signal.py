@@ -1416,6 +1416,33 @@ class TestQcPlots:
         viewer.qstore.flush()
         assert viewer.scene.traces.t0 == pytest.approx(30.0 - 0.4 * viewer.scene.traces.width)
 
+    def test_a_channel_map_cell_goes_to_that_channel_there(self, qtbot, mixed_rec):
+        viewer, p = self._qc(qtbot, mixed_rec)
+        viewer.run("traces.type", ch_type="mag")
+        p._toggle_qc_metric("map", True)
+        viewer.qstore.flush()
+        card = p.qc_tracks.card("map:eeg")
+        image = np.asarray(card.track["image"])
+        assert card.row_at(13.0, image.shape[0] - 0.5) == card.track["rows"][0]
+        assert card.row_at(13.0, -1.0) is None
+        with qtbot.waitSignal(viewer.status_message, timeout=2000):
+            p.qc_tracks.row_clicked.emit(13.0, "EEG003")
+        viewer.qstore.flush()
+        tr = viewer.scene.traces
+        src = viewer.source()
+        assert tr.ch_type == "all", "EEG was filtered out: every type is shown again"
+        traces = p._traces
+        names = [src.ch_names[i] for i in traces.shown_channels()]
+        assert "EEG003" in names
+        assert tr.t0 <= 12.0 and 14.0 <= tr.t0 + tr.width, "the segment is on screen"
+        rect = traces.focus_rect()
+        assert rect is not None
+        assert (rect.left(), rect.width()) == (pytest.approx(src.start_time + 12.0),
+                                              pytest.approx(2.0))
+        assert traces._strip.focus_row == names.index("EEG003")
+        assert viewer.scene.cursor.time == pytest.approx(src.start_time + 12.0)
+        assert "click a cell" in card.readout.text()
+
     def test_the_qc_plots_open_with_a_share_of_the_room(self, qtbot, mixed_rec):
         _viewer, p = self._qc(qtbot, mixed_rec)
         traces, qc = p.qc_split.sizes()
@@ -1428,6 +1455,12 @@ class TestQcPlots:
         assert all(b.text() == "" and b.toolTip() for b in corner)
         texts = [b.text() for b in p.qc_header.controls.findChildren(QPushButton)]
         assert texts == ["Plots", "Types", "Mark as bad", "Report...", "Settings..."]
+        last = p.qc_plots_button.menu().actions()[-1]
+        assert last.text() == "Run QC when a file opens", "as the image viewer's Plots menu"
+        last.trigger()
+        assert SettingsHub.instance().settings.qc.on_open
+        last.trigger()
+        assert not SettingsHub.instance().settings.qc.on_open
 
     def test_the_qc_plots_can_sit_beside_the_traces(self, qtbot, mixed_rec):
         from PyQt6.QtCore import Qt

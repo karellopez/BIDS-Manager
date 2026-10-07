@@ -319,7 +319,7 @@ class TestQualityMaps:
         v = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
         v.run("view.graph", value=False)
         v.qstore.flush()
-        v.presenter._qc_rows_action.trigger()
+        v.presenter._qc_plots_action.trigger()
         v.qstore.flush()
         assert v.scene.graph_visible and v.scene.graph.qc
 

@@ -70,3 +70,16 @@ def test_a_row_centres_its_children(qtbot) -> None:
     bar.addWidget(button)
     assert label.geometry().center().y() == pytest.approx(button.geometry().center().y(), abs=1), \
         "a short label sits level with the taller control beside it"
+
+
+def test_a_fixed_size_child_gets_its_fixed_size(qtbot) -> None:
+    bar = _bar(qtbot)
+    first, second = QPushButton(), QPushButton()
+    for b in (first, second):
+        b.setFixedSize(28, 28)
+        bar.addWidget(b)
+    assert first.sizeHint().height() != 28 or first.sizeHint().width() != 28, \
+        "the case this covers: a hint that is not the fixed size"
+    assert first.geometry().size().height() == 28
+    assert second.geometry().left() >= first.geometry().right() + 1, "no overlap"
+    assert bar.heightForWidth(bar.width()) >= 28, "the row is as tall as the buttons"

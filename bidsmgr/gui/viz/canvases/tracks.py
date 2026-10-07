@@ -1,6 +1,6 @@
 """Tracks: plots on a shared time axis, one per measure, each its own.
 
-The rows under a BOLD's time course (its QC and the run's physiology) and
+The plots under a BOLD's time course (its QC and the run's physiology) and
 under an MEG or EEG recording (its QC) are TRACKS. Each is a small plot of
 its own in a rounded card:
 
@@ -179,7 +179,7 @@ class TrackCard(QFrame):
         self.up = self._button("chevron_up", "Move this plot up", lambda: panel._move(self, -1))
         self.down = self._button("chevron_down", "Move this plot down",
                                  lambda: panel._move(self, 1))
-        self.hide_button = self._button("close", "Hide this plot (Rows brings it back)",
+        self.hide_button = self._button("close", "Hide this plot (Plots brings it back)",
                                         lambda: panel.hide_requested.emit(self.track_id))
         for b in (self.up, self.down, self.hide_button):
             head.addWidget(b)
@@ -265,9 +265,31 @@ class TrackCard(QFrame):
         if event.button() != Qt.MouseButton.LeftButton or event.double():
             return
         got = self.view_x(event.scenePos())
-        if got is not None:
+        if got is None:
+            return
+        event.accept()
+        row = self.row_at(got[0], got[1])
+        if row is not None:
+            # A cell of an image (a channel map): which row, at what moment.
+            self.panel.row_clicked.emit(got[0], row)
+        else:
             self.panel.clicked.emit(got[0])
-            event.accept()
+
+    def row_at(self, x: float, y: Optional[float]) -> Optional[str]:
+        """The row of an image track under (``x``, ``y``), by name; None off
+        the image or on a track that is not one."""
+        t = self.track or {}
+        if t.get("kind") != "image" or y is None:
+            return None
+        image = np.asarray(t["image"])
+        if not 0 <= y < image.shape[0]:
+            return None
+        x0, x1 = t["image_x"]
+        if not x0 <= x < x1:
+            return None
+        r = image.shape[0] - 1 - int(y)
+        rows = t.get("rows") or []
+        return rows[r] if r < len(rows) else None
 
     # -- content --------------------------------------------------------------
 
@@ -534,6 +556,9 @@ class TracksPanel(QWidget):
 
     #: A click on a track at x (go there).
     clicked = pyqtSignal(float)
+    #: A click on a named row of an image track (a channel map): x and the
+    #: row's name (go to that channel there).
+    row_clicked = pyqtSignal(float, str)
     #: A wheel event over a track (the host zooms or pans time, or ignores it).
     wheel = pyqtSignal(object, object)
     #: Double-click: show everything again.

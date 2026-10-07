@@ -446,7 +446,8 @@ METRICS: tuple[tuple[str, str, str, str], ...] = (
     ("map", "channel map", "",
      "Every channel of this type (rows) in every segment (columns): its STD over its own "
      "level, on a log2 scale from a quarter (dark) to four times (light). A bright row is "
-     "a channel that is often off; a bright column, a moment many channels were."),
+     "a channel that is often off; a bright column, a moment many channels were. Click a "
+     "cell to see that channel in that segment on the traces."),
 )
 METRIC_IDS = tuple(m[0] for m in METRICS)
 
@@ -500,7 +501,8 @@ def tracks(result: dict, metrics=("off", "muscle"), types=None) -> list[dict]:
                              levels=(-2.0, 2.0), rows=list(info["names"]),
                              value_name="log2 of STD over its level", fmt="{:+.2f}",
                              height=2.5, ticks=np.empty(0),
-                             summary=f"{info['n']} channels, light = louder than usual")
+                             summary=(f"{info['n']} channels, light = louder than usual; "
+                                      "click a cell to go there"))
             out.append(track)
     return out
 

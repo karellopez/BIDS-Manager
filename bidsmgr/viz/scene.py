@@ -298,6 +298,15 @@ class Span(_Model):
     label: str = "BAD_"
 
 
+class TraceFocus(_Model):
+    """One channel over one stretch, outlined on the traces: where a click
+    on a QC channel map took you. Seconds of RUN time, as a span's."""
+
+    channel: str
+    onset: float
+    duration: float = 0.0
+
+
 class TracesState(_Model):
     """How a signal is shown: which stretch, which channels, how scaled,
     how filtered. ``t0`` and ``width`` are seconds of RECORDING time."""
@@ -354,6 +363,9 @@ class TracesState(_Model):
     qc_scroll: bool = False
     #: The QC plots to the right of the traces instead of under them.
     qc_beside: bool = False
+    #: One channel over one stretch, outlined (``traces.go_to``); never
+    #: remembered from one file to the next.
+    focus: Optional[TraceFocus] = None
 
 
 class SpectrumState(_Model):

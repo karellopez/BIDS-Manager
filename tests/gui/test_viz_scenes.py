@@ -121,6 +121,24 @@ def test_a_scene_whose_image_is_gone_says_so(qtbot, ds):
     assert "gone" in said.args[0]
 
 
+def test_a_scene_whose_overlay_is_gone_opens_and_names_it(qtbot, ds):
+    v = _viewer(qtbot)
+    with qtbot.waitSignal(v.loaded, timeout=20_000):
+        v.set_file(_t1(ds), ds)
+    dseg = ds / "sub-01" / "anat" / "sub-01_dseg.nii.gz"
+    with qtbot.waitSignal(v.overlay_added, timeout=20_000):
+        v.add_overlay(dseg)
+    path = v.presenter.save_scene("atlas")
+    dseg.unlink()
+    said = []
+    v.status_message.connect(said.append)
+    assert v.presenter.open_scene(path)
+    qtbot.waitUntil(lambda: any("Opened the scene" in m for m in said), timeout=20_000)
+    opened = next(m for m in said if "Opened the scene" in m)
+    assert "sub-01/anat/sub-01_dseg.nii.gz" in opened and "gone" in opened
+    assert not any("FileNotFoundError" in m for m in said)
+
+
 class TestQtFree:
     def test_relative_paths_round_trip(self, tmp_path):
         root = tmp_path / "Study"

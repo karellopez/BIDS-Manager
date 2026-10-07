@@ -33,9 +33,16 @@ import time
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QPointF, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFontMetrics, QPainter
-from PyQt6.QtWidgets import QHBoxLayout, QScrollBar, QSplitter, QToolTip, QWidget
+from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetrics, QPainter, QPen
+from PyQt6.QtWidgets import (
+    QGraphicsRectItem,
+    QHBoxLayout,
+    QScrollBar,
+    QSplitter,
+    QToolTip,
+    QWidget,
+)
 
 from ....viz import inputmap
 from ....viz.commands import signal as sigcmd
@@ -123,6 +130,9 @@ class _LabelStrip(QWidget):
         #: Bands the quality check flagged: ``{row: (colour, reason text)}``,
         #: a marker beside the name and the reasons in its tooltip.
         self.flags: dict[int, tuple[QColor, str]] = {}
+        #: The band a QC channel map sent you to: its name always drawn,
+        #: bold, on a tinted band (never skipped for room).
+        self.focus_row: Optional[int] = None
         self._bad = QColor("#f85149")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._edges: list[int] = []
@@ -189,6 +199,23 @@ class _LabelStrip(QWidget):
                 x = max(3.0, 2 + width - text_w - 8.0)
                 p.drawEllipse(QPointF(x, centre), 2.6, 2.6)
                 p.restore()
+        i = self.focus_row
+        if i is not None and 0 <= i < n:
+            centre = (self._edges[i] + self._edges[i + 1]) / 2.0
+            height = max(line, self._edges[i + 1] - self._edges[i])
+            band_rect = QRect(0, int(round(centre - height / 2.0)), self.width(), int(height))
+            # Covers whatever a neighbour drew there when names are thinned.
+            p.fillRect(band_rect, self._bg)
+            tint = QColor(self._fg)
+            tint.setAlpha(40)
+            p.fillRect(band_rect, tint)
+            bold = QFont(self._font)
+            bold.setBold(True)
+            p.setFont(bold)
+            p.setPen(self._bad if i in self.bad_rows else self._fg)
+            rect = QRect(2, band_rect.top(), width, band_rect.height())
+            p.drawText(rect, align, QFontMetrics(bold).elidedText(
+                self.names[i], Qt.TextElideMode.ElideMiddle, width))
 
     def event(self, event) -> bool:  # noqa: D401
         if event.type() == QEvent.Type.ToolTip:
@@ -248,6 +275,9 @@ class TracesCanvas(QWidget):
         self._wheel_acc = 0.0
         # The time cursor: one line, made on first use, never removed.
         self._cursor_line = None
+        # The stretch a QC channel map sent you to: a halo and a line, made
+        # on first use, hidden and reused, never removed (CLAUDE.md guard 8d).
+        self._focus_items: list = []
         # Bad segments (pooled regions and their labels), the segment being
         # drawn in annotation mode, and a guard while regions are placed.
         self._bad_regions: list = []
@@ -472,6 +502,10 @@ class TracesCanvas(QWidget):
         if tr.events:
             self._draw_events(t0 + src.start_time, t1 + src.start_time, top)
         self._draw_bad_spans(t0 + src.start_time, t1 + src.start_time, top)
+        focus_row = self._draw_focus(src, shown, row_of, tr)
+        if self._strip.focus_row != focus_row:
+            self._strip.focus_row = focus_row
+            self._strip.update()
         self._draw_cursor()
         self.plot.setCursor(Qt.CursorShape.CrossCursor if tr.annotate
                             else Qt.CursorShape.ArrowCursor)
@@ -856,6 +890,51 @@ class TracesCanvas(QWidget):
         line.label.setColor(ink)
         line.setPos(float(t))
 
+    def _draw_focus(self, src, shown: list[int], row_of: dict, tr) -> Optional[int]:
+        """The stretch a QC channel map sent you to, outlined on its channel
+        (``TracesState.focus``): a line in the warning colour, which no
+        channel type is drawn in and the QC flags already use, over a halo
+        in the plot's background, so it stands out on any trace. Returns the
+        channel's band, or None when it is not on screen."""
+        focus = tr.focus
+        band = row = None
+        if focus is not None and focus.channel in src.ch_names:
+            ch = src.ch_names.index(focus.channel)
+            if ch in shown:
+                i = shown.index(ch)
+                if tr.butterfly:
+                    band = row_of[src.ch_types[ch]]
+                else:
+                    band, row = len(shown) - 1 - i, i
+        if band is None:
+            for item in self._focus_items:
+                if item.isVisible():
+                    item.setVisible(False)
+            return None
+        if not self._focus_items:
+            for z in (14, 15):
+                item = QGraphicsRectItem()
+                item.setZValue(z)
+                self.plot.addItem(item, ignoreBounds=True)
+                self._focus_items.append(item)
+        theme = self.ctx.theme
+        width = focus.duration if focus.duration > 0 else tr.width / 200.0
+        rect = QRectF(float(focus.onset), band - 0.5, float(width), 1.0)
+        for item, colour, px in ((self._focus_items[0], theme.plot_background, 5.0),
+                                 (self._focus_items[1], theme.token("warning", "#d29922"), 2.0)):
+            pen = QPen(_qcolor(colour), px)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            item.setRect(rect)
+            item.setVisible(True)
+        return row
+
+    def focus_rect(self) -> Optional[QRectF]:
+        """The outlined stretch in data units, when one is shown."""
+        items = self._focus_items
+        return items[1].rect() if items and items[1].isVisible() else None
+
     def cursor_visible(self) -> bool:
         return self._cursor_line is not None and self._cursor_line.isVisible()
 
@@ -1015,6 +1094,9 @@ class TracesCanvas(QWidget):
         pt = self._vb.mapSceneToView(event.scenePos())
         t = float(pt.x())
         tr = self.ctx.scene.traces
+        if tr.focus is not None:
+            # You have looked: the outline goes, the click does what it does.
+            self.ctx.run("traces.focus")
         if tr.annotate and tr.selected_span is not None:
             self.ctx.run("annotate.select", index=None)
             return

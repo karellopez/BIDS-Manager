@@ -25,9 +25,10 @@ from typing import Optional
 SCHEMA = 1
 SCENES = Path(".bidsmgr") / "viz" / "scenes"
 
-#: What a scene's view leaves out (the layers and sources are stored on
-#: their own, by path).
-_VIEW_EXCLUDE = {"sources", "layers", "measurements", "schema_version"}
+#: What a scene's view leaves out: the layers and sources are stored on
+#: their own, by path, and the signal and spectrum viewers' state is not the
+#: image viewer's.
+_VIEW_EXCLUDE = {"sources", "layers", "measurements", "schema_version", "traces", "spectrum"}
 
 
 def scenes_dir(root: Path) -> Path:

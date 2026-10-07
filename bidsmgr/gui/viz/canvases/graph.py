@@ -338,12 +338,14 @@ class TimecourseGraph(QWidget):
         self.tracks.setVisible(False)
         self.tracks.describe_x = self._describe_x
         self.tracks.clicked.connect(self._go_to_x)
+        # A carpet's rows are voxels: a click on one goes to its moment.
+        self.tracks.row_clicked.connect(lambda x, _row: self._go_to_x(x))
         self.tracks.reset_view.connect(lambda: self.set_time_view(None))
         self.tracks.wheel.connect(self._on_wheel)
         self.tracks.order_changed.connect(self._on_tracks_order)
         self.tracks.align_source = self._plot_area
         self.tracks.follow(self.plot)
-        self.tracks.hide_requested.connect(lambda rid: self._toggle_qc_row(rid, False))
+        self.tracks.hide_requested.connect(lambda rid: self._toggle_qc_plot(rid, False))
         self._physio_src = None
         self._physio_key = None
         self._physio_generation = 0
@@ -470,24 +472,29 @@ class TimecourseGraph(QWidget):
             "displacement, translation and rotation, DVARS, outlier voxels, slice "
             "spikes, the global signal and a carpet plot. Computed when switched "
             "on (motion is read from fMRIPrep's confounds when the run has them); "
-            "choose the plots with Rows.")
+            "choose them with Plots.")
         self.qc_box.toggled.connect(lambda v: ctx.run("graph.set", qc=bool(v)))
         bar.addWidget(self.qc_box)
-        self.qc_rows_button = QPushButton("Rows")
-        self.qc_rows_button.setObjectName("tb-btn")
-        self.qc_rows_button.setToolTip("Which QC plots are drawn (each can also be moved "
-                                       "and hidden from its own header)")
-        rows_menu = popup_menu(self.qc_rows_button)
+        from ... import icons
+
+        self.qc_plots_button = QPushButton("Plots")
+        self.qc_plots_button.setObjectName("tb-btn")
+        self.qc_plots_button.setIcon(icons.icon("plots"))
+        self.qc_plots_button.setProperty("viz_icon", "plots")   # re-coloured by the header
+        self.qc_plots_button.setToolTip(
+            "Which QC plots are drawn under the time course; each can also be moved and "
+            "hidden from its own header")
+        rows_menu = popup_menu(self.qc_plots_button)
         rows_menu.setToolTipsVisible(True)
-        self._qc_row_actions = {}
+        self._qc_plot_actions = {}
         from ....viz.compute.qc import QC_ROWS
 
         for row_id, title, help_text in QC_ROWS:
             act = rows_menu.addAction(title)
             act.setCheckable(True)
             act.setToolTip(help_text)
-            act.toggled.connect(lambda on, r=row_id: self._toggle_qc_row(r, on))
-            self._qc_row_actions[row_id] = act
+            act.toggled.connect(lambda on, r=row_id: self._toggle_qc_plot(r, on))
+            self._qc_plot_actions[row_id] = act
         rows_menu.addSeparator()
         self._qc_on_open = rows_menu.addAction("Run QC when a file opens")
         self._qc_on_open.setCheckable(True)
@@ -497,8 +504,8 @@ class TimecourseGraph(QWidget):
         self._qc_on_open.toggled.connect(self._set_qc_on_open)
         rows_menu.aboutToShow.connect(
             lambda: self._qc_on_open.setChecked(self.ctx.settings.qc.on_open))
-        self.qc_rows_button.setMenu(rows_menu)
-        bar.addWidget(self.qc_rows_button)
+        self.qc_plots_button.setMenu(rows_menu)
+        bar.addWidget(self.qc_plots_button)
 
         # The corner: the panel as a panel.
         self.expand_button = header.add_corner(corner_button(
@@ -545,7 +552,7 @@ class TimecourseGraph(QWidget):
         if self.ctx.settings.qc.on_open != bool(on):
             self.ctx.settings_hub.update(lambda st: setattr(st.qc, "on_open", bool(on)))
 
-    def _toggle_qc_row(self, row_id: str, on: bool) -> None:
+    def _toggle_qc_plot(self, row_id: str, on: bool) -> None:
         rows = list(self.ctx.scene.graph.qc_rows)
         if on and row_id not in rows:
             rows.append(row_id)
@@ -605,7 +612,7 @@ class TimecourseGraph(QWidget):
         qc_ok = bool(src is not None and src.fully_loaded and src.loaded_frames >= 3)
         if self.qc_box.isHidden() == qc_ok:
             self.qc_box.setVisible(qc_ok)
-            self.qc_rows_button.setVisible(qc_ok)
+            self.qc_plots_button.setVisible(qc_ok)
         scroll = g.tracks_mode == "scroll"
         if self.expand_button.isChecked() != scroll:
             self.expand_button.blockSignals(True)
@@ -619,8 +626,8 @@ class TimecourseGraph(QWidget):
             self.qc_box.blockSignals(True)
             self.qc_box.setChecked(g.qc)
             self.qc_box.blockSignals(False)
-        self.qc_rows_button.setEnabled(g.qc)
-        for row_id, act in self._qc_row_actions.items():
+        self.qc_plots_button.setEnabled(g.qc)
+        for row_id, act in self._qc_plot_actions.items():
             if act.isChecked() != (row_id in g.qc_rows):
                 act.blockSignals(True)
                 act.setChecked(row_id in g.qc_rows)
@@ -1313,7 +1320,7 @@ class TimecourseGraph(QWidget):
             self._physio_src = None
             self.ctx.status.emit(f"The run's physio could not be read: {message}")
         elif tag == "graph-qc" and generation == self._qc_generation:
-            self.ctx.status.emit(f"The QC rows could not be computed: {message}")
+            self.ctx.status.emit(f"The QC plots could not be computed: {message}")
 
     def physio_channels(self) -> list[str]:
         """The physio channels drawn (tests)."""

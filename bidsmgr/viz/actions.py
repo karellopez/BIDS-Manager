@@ -109,7 +109,7 @@ ACTIONS: tuple[ActionDef, ...] = (
     _a("graph.maximize", "Maximise the time course", "gui:graph_maximize", category="Views",
        keys=("Ctrl+G",), when="graph && !graph.detached", shown="volume.4d",
        short="Maximise", checked="graph.maximized",
-       help="Give the time-course panel the whole viewer (its QC rows and physiology "
+       help="Give the time-course panel the whole viewer (its QC plots and physiology "
             "too); again to bring the views back", icon="maximize"),
     _a("graph.detach", "Time course in its own window", "gui:graph_detach", category="Views",
        keys=("Ctrl+Shift+G",), when="graph", shown="volume.4d", short="Own window",

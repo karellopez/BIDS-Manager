@@ -753,6 +753,47 @@ def test_a_saved_view_applies_to_another_image(qtbot, ds, no_gpu) -> None:
     assert "Coronal hero" not in SettingsHub.instance().settings.view_presets
 
 
+def test_a_preset_gives_an_image_only_what_it_has(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _bold(ds), ds)
+    viewer.run("view.mode", mode="hero")
+    viewer.run("view.graph", value=True)
+    viewer.run("graph.set", qc_rows=["fd", "carpet"])
+    viewer.trigger("graph.beside")
+    viewer.qstore.flush()
+    viewer.presenter.save_view("Run check")
+    # On an image with no time series: the layout, never the time course.
+    _open(qtbot, viewer, _t1(ds), ds)
+    viewer.run("view.mode", mode="multi")
+    viewer.run("view.graph", value=False)
+    placement, rows = viewer.scene.layout.graph, list(viewer.scene.graph.qc_rows)
+    assert viewer.presenter.apply_view("Run check")
+    assert viewer.scene.mode == "hero"
+    assert not viewer.scene.graph_visible
+    assert not viewer.action("view.graph").isChecked(), "not checked where it cannot show"
+    assert (viewer.scene.layout.graph, viewer.scene.graph.qc_rows) == (placement, rows), \
+        "nothing of the time course is applied"
+    # On another series: all of it.
+    _open(qtbot, viewer, _bold(ds), ds)
+    viewer.run("view.graph", value=False)
+    viewer.run("graph.set", qc_rows=["dvars"])
+    assert viewer.presenter.apply_view("Run check")
+    assert viewer.scene.graph_visible and viewer.scene.graph.qc_rows == ["fd", "carpet"]
+    assert viewer.scene.layout.graph == "right"
+
+
+def test_a_preset_saved_without_a_series_leaves_a_series_alone(qtbot, ds, no_gpu) -> None:
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("view.mode", mode="mosaic")
+    viewer.presenter.save_view("Mosaic")
+    assert "graph_visible" not in SettingsHub.instance().settings.view_presets["Mosaic"]
+    _open(qtbot, viewer, _bold(ds), ds)
+    viewer.run("view.graph", value=True)
+    viewer.run("graph.set", qc_rows=["dvars"])
+    assert viewer.presenter.apply_view("Mosaic")
+    assert viewer.scene.mode == "mosaic"
+    assert viewer.scene.graph_visible and viewer.scene.graph.qc_rows == ["dvars"]
+
+
 def test_the_views_menu_lists_the_saved_views(qtbot, ds, no_gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
     viewer.presenter.save_view("Mine")

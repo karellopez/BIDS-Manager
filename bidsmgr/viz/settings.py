@@ -186,7 +186,7 @@ class QcSettings(_Section):
     on_open: bool = Field(
         False, title="Run QC when a file opens",
         description="On: QC that was on stays on for the next file and is computed as "
-                    "soon as it opens (the rows under a BOLD's time course, the MEG and "
+                    "soon as it opens (the QC plots under a BOLD's time course, the MEG and "
                     "EEG check). Off: every file opens with QC off, and QC is computed "
                     "when you switch it on.")
 

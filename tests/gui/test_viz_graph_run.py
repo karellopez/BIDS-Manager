@@ -248,14 +248,14 @@ class TestQcTracesAndZoom:
         qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == ["global"],
                         timeout=20_000)
         assert set(g._qc_src["rows"]) == {"global"}, "unasked rows were computed"
-        g._qc_row_actions["carpet"].trigger()
+        g._qc_plot_actions["carpet"].trigger()
         v.qstore.flush()
         assert v.scene.graph.qc_rows == ["global", "carpet"]
         qtbot.waitUntil(lambda: any(t["kind"] == "image" for t in g.shown_tracks()),
                         timeout=20_000)
         carpet = g.tracks.card("carpet")
         assert carpet._image is not None and carpet._image.isVisible()
-        g._qc_row_actions["carpet"].trigger()
+        g._qc_plot_actions["carpet"].trigger()
         v.qstore.flush()
         assert g.tracks.card("carpet") is None and carpet.isHidden(), \
             "the card is kept for later, hidden, never destroyed"
@@ -329,8 +329,15 @@ class TestThePanel:
         assert {"graph.beside", "graph.maximize", "graph.detach"} <= set(ids)
         # Icons in the corner, More last; the controls keep the left side.
         assert all(w.text() == "" for w in corner)
+        assert all(g.header.corner.rect().contains(w.geometry()) for w in corner), \
+            "an icon button larger than its row is clipped"
         assert corner[-1] is g.more_button
         assert not g.controls.findChildren(QPushButton, "viz-corner-btn")
+
+    def test_the_qc_plots_menu_is_named_as_the_signal_one(self, qtbot, run):
+        _v, g = _graph(qtbot, run, _bold(run))
+        assert g.qc_plots_button.text() == "Plots"
+        assert g.qc_plots_button.menu().actions()[-1].text() == "Run QC when a file opens"
 
     def test_more_holds_the_marker_and_the_export(self, qtbot, run):
         _v, g = _graph(qtbot, run, _bold(run))
@@ -389,7 +396,7 @@ class TestTracks:
         g.tracks.card("dvars").hide_button.click()
         v.qstore.flush()
         assert v.scene.graph.qc_rows == ["fd", "global"]
-        assert not g._qc_row_actions["dvars"].isChecked()
+        assert not g._qc_plot_actions["dvars"].isChecked()
 
     def test_the_title_is_never_on_the_signal(self, qtbot, run):
         _v, g = self._qc(qtbot, run, ["dvars"])
