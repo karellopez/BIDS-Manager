@@ -24,7 +24,9 @@ colours and follows a theme change.
 A track is plain data built on a worker (a dict):
 
 ``id`` stable identity; ``title``; ``unit`` ("" for none); ``kind`` "line",
-"events" or "image"; ``x`` positions in the panel's x units; ``ys`` one or
+"events", "image" or "pending" (being computed: a spinner and ``summary``,
+no plot yet, at the size the plot will have); ``explain`` the key of its
+explanation (``bidsmgr.qc.explain``: an info icon opens it); ``x`` positions in the panel's x units; ``ys`` one or
 more curves; ``legend`` their names; ``colour`` a channel-type or theme
 token for a single curve; ``ticks`` marked positions; ``rule`` a threshold
 in the track's units (dashed); ``y_range`` fixed limits; ``image`` (rows x
@@ -171,11 +173,21 @@ class TrackCard(QFrame):
         self.title = QLabel("")
         self.title.setObjectName("viz-track-title")
         head.addWidget(self.title)
+        # Being computed: a spinner beside the title until the plot arrives.
+        from ...widgets.spinner import BusySpinner
+
+        self.spinner = BusySpinner()
+        self.spinner.setVisible(False)
+        head.addWidget(self.spinner)
         self.legend = _Legend()
         head.addWidget(self.legend)
         self.readout = ElidedLabel("")
         self.readout.setObjectName("viz-track-readout")
         head.addWidget(self.readout, 1)
+        self.info = self._button("info", "What this plot shows and how to read it",
+                                 self._explain)
+        self.info.setVisible(False)
+        head.addWidget(self.info)
         self.up = self._button("chevron_up", "Move this plot up", lambda: panel._move(self, -1))
         self.down = self._button("chevron_down", "Move this plot down",
                                  lambda: panel._move(self, 1))
@@ -239,6 +251,13 @@ class TrackCard(QFrame):
         b._icon_name = icon
         return b
 
+    def _explain(self) -> None:
+        from ..panels import explain_popup
+
+        t = self.track or {}
+        explain_popup.show(self.info, t.get("explain", ""), title=t.get("title", ""),
+                           here=t.get("note", ""), fallback=t.get("note", ""))
+
     # -- events ---------------------------------------------------------------
 
     def _wheel(self, event) -> None:
@@ -298,14 +317,25 @@ class TrackCard(QFrame):
         theme = self.panel.theme()
         unit = track.get("unit", "")
         self.title.setText(track["title"] + (f" ({unit})" if unit else ""))
-        self.setToolTip(track.get("note", ""))
+        kind = track.get("kind", "line")
+        pending = kind == "pending"
+        if self.spinner.is_busy() != pending:           # only on a real change
+            self.spinner.set_busy(pending)
+        has_info = bool(track.get("explain") or track.get("note"))
+        if self.info.isHidden() == has_info:
+            self.info.setVisible(has_info)
+        if track.get("explain"):
+            from ..panels.explain_popup import hover_text
+
+            self.setToolTip(hover_text(track["explain"]))
+        else:
+            self.setToolTip(track.get("note", ""))
         self.legend.set_items([(name, theme.series(j))
                                for j, name in enumerate(track.get("legend") or [])])
         self.up.setVisible(bool(track.get("movable", True)))
         self.down.setVisible(bool(track.get("movable", True)))
         self.hide_button.setVisible(bool(track.get("closable", True)))
         self.readout.setText(track.get("summary", ""))
-        kind = track.get("kind", "line")
         pi = self.plot.getPlotItem()
         ys = list(track.get("ys") or []) if kind == "line" else []
         x = np.asarray(track.get("x", np.empty(0)), dtype=float)
@@ -345,6 +375,9 @@ class TrackCard(QFrame):
         self._set_image(track if kind == "image" else None)
         left = pi.getAxis("left")
         left.setStyle(showValues=kind == "line")
+        if kind == "pending":
+            # Nothing to scale yet: no bare tick marks down an empty plot.
+            left.setTicks([[], []])
         self.apply_theme()
 
     @staticmethod

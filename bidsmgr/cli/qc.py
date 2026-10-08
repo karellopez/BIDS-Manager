@@ -25,7 +25,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bidsmgr-qc",
         description="Fast quality check of anatomical and diffusion images.")
-    parser.add_argument("bids_root", type=Path, help="The BIDS dataset.")
+    parser.add_argument("bids_root", type=Path, nargs="?", help="The BIDS dataset.")
     parser.add_argument("paths", nargs="*", type=Path,
                         help="Images to check (default: every T1w, T2w, FLAIR, PDw, T2starw "
                              "and dwi image).")
@@ -38,8 +38,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--fast", action="store_true",
                         help="Approximate masks from the numpy fallback instead of mindgrab, "
                              "the tissue model and niimath (seconds faster, less accurate).")
+    parser.add_argument("--config", type=Path, default=None, metavar="JSON",
+                        help="Methods and thresholds, as --print-config writes them (any "
+                             "field left out keeps its default).")
+    parser.add_argument("--print-config", action="store_true",
+                        help="Print the configuration that would be used, as JSON, and "
+                             "exit.")
     parser.add_argument("-q", "--quiet", action="store_true", help="Print only the summary.")
     args = parser.parse_args(argv)
+
+    from ..qc import config as C
+
+    cfg = C.QcConfig()
+    if args.config is not None:
+        try:
+            cfg = C.QcConfig.model_validate_json(args.config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"bidsmgr-qc: cannot read the configuration {args.config}: {exc}",
+                  file=sys.stderr)
+            return 2
+    if args.fast:
+        cfg = C.fast(cfg)
+    if args.no_flip_check:
+        cfg.dwi.check_flips = False
+    if args.print_config:
+        print(cfg.model_dump_json(indent=2))
+        return 0
+    if args.bids_root is None:
+        parser.error("the BIDS dataset is required")
 
     root = args.bids_root.expanduser().resolve()
     if not (root / "dataset_description.json").is_file():
@@ -65,8 +91,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.quiet:
             print(f"[{done}/{total}] {name}", flush=True)
 
-    rows = R.run(root, paths, jobs=max(1, args.jobs), flips=not args.no_flip_check,
-                 engine="numpy" if args.fast else "auto", progress=progress)
+    rows = R.run(root, paths, jobs=max(1, args.jobs), config=cfg, progress=progress)
     failed = 0
     print(f"\nChecked {len(rows)} image(s) in {time.perf_counter() - t0:.0f} s; results in "
           f"{(root / 'derivatives' / 'bidsmgr-qc').as_posix()}")

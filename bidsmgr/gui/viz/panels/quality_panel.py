@@ -14,8 +14,11 @@ In the order a reviewer needs it:
    noise, and for a diffusion series the QC plots. A checkbox shows and
    hides ONE layer; it never adds a second.
 2. **Findings**, each with its evidence a click away (Show, Go there).
-3. **Measures**, grouped, with where each sits among the dataset's checked
-   images of the same kind, and what it means.
+3. **Measures**, grouped (each group folds away), with where each sits
+   among the dataset's checked images of the same kind. What a measure
+   means is on hover, and in full behind its info icon
+   (``explain_popup``, from ``bidsmgr.qc.explain``), never in a box the
+   reader has to scroll to.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from PyQt6.QtWidgets import (
 
 from ....qc.types import QCResult
 from ...widgets.flow_layout import FlowBar
+from .. import fonts
 from ..bridge import ThemeHub, connect_while_alive
 from .panel_header import PanelHeader, corner_button
 
@@ -123,6 +127,10 @@ def _swatch(colour, size: QSize, ratio: float) -> QIcon:
     painter.end()
     pix.setDevicePixelRatio(ratio)
     return QIcon(pix)
+
+
+#: Columns of the measures table.
+COL_NAME, COL_VALUE, COL_DATASET, COL_INFO = range(4)
 
 
 #: Wider than this many average characters (below the views, maximised, its
@@ -392,12 +400,13 @@ class QualityPanel(QWidget):
         heading = QLabel("Measures")
         heading.setObjectName("viz-track-title")
         self.measures_layout.addWidget(heading)
+        hint = QLabel("Hover a measure for what it is; its info icon explains it and how "
+                      "to read it. Click a group's name to fold it.")
+        hint.setObjectName("viz-track-readout")
+        hint.setWordWrap(True)
+        self.measures_layout.addWidget(hint)
         self.table = self._metric_table(result)
         self.measures_layout.addWidget(self.table)
-        self.description = QLabel("Select a measure to read what it means.")
-        self.description.setObjectName("viz-track-readout")
-        self.description.setWordWrap(True)
-        self.measures_layout.addWidget(self.description)
         self.measures_layout.addStretch(1)
 
     # -- on the image -------------------------------------------------------------
@@ -530,19 +539,36 @@ class QualityPanel(QWidget):
 
     # -- measures ---------------------------------------------------------------
 
+    #: Groups the user folded, kept from one image to the next.
+    _collapsed: set = set()
+
     def _metric_table(self, result: QCResult) -> QTableWidget:
+        """One row per measure under its group's row: the name (hover: what
+        it is), the value, where it sits in the dataset, and an info icon
+        (the full explanation). A group's row folds the group away and has
+        its own info icon (how its measures relate)."""
+        from ... import icons
+        from .explain_popup import hover_text
+
+        self._collapsed = set(self._collapsed)
+        self._kind = result.kind
         table = QTableWidget(0, 4, self)
         table.setObjectName("viz-quality-table")
-        table.setHorizontalHeaderLabels(["Measure", "Value", "In this dataset", "Same as MRIQC"])
+        table.setHorizontalHeaderLabels(["Measure", "Value", "In this dataset", ""])
+        table.horizontalHeaderItem(COL_DATASET).setToolTip(
+            "Where the value sits among the dataset's checked images of the same kind and "
+            "acquisition (robust z), and whether that is the worse side.")
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setWordWrap(False)
+        table.setShowGrid(False)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         hh = table.horizontalHeader()
         for c in range(4):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
-        hh.setStretchLastSection(True)
+        hh.setStretchLastSection(False)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         by_group: dict[str, list] = {}
         for m in result.metrics:
@@ -550,54 +576,133 @@ class QualityPanel(QWidget):
         names = dict(GROUPS)
         ordered = [g for g, _t in GROUPS if g in by_group] + [
             g for g in by_group if g not in names]
+        info_icon = icons.icon("info")
         for g in ordered:
             r = table.rowCount()
             table.insertRow(r)
-            head = _item(names.get(g, g.capitalize()))
+            flagged = sum(1 for m in by_group[g]
+                          if dataset_text(self.context.get(m.key), m.better)[1])
+            text = names.get(g, g.capitalize())
+            if flagged:
+                text += f"  ({flagged} off in this dataset)"
+            head = _item(text, tip="Click to fold or unfold this group.")
             font = head.font()
             font.setBold(True)
             head.setFont(font)
             head.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            table.setItem(r, 0, head)
-            table.setSpan(r, 0, 1, 4)
-            self._rows.append(None)
+            table.setItem(r, COL_NAME, head)
+            table.setSpan(r, COL_NAME, 1, 3)
+            key = f"group.{result.kind}.{g}"
+            info = _item("", tip=hover_text(key) or "What this group measures.")
+            info.setIcon(info_icon)
+            info.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            table.setItem(r, COL_INFO, info)
+            self._rows.append(("group", g))
             for m in by_group[g]:
                 r = table.rowCount()
                 table.insertRow(r)
-                tip = m.help + (f" MRIQC: {m.mriqc}." if m.mriqc else "")
-                table.setItem(r, 0, _item(m.title, tip=tip, data=m.key))
-                value = _item(m.text(), tip=m.why_missing or m.help)
+                key = f"{result.kind}.{m.key}"
+                extra = []
+                if m.value is None and m.why_missing:
+                    extra.append(f"Not computed: {m.why_missing}")
+                if m.mriqc:
+                    extra.append(f"MRIQC's counterpart: {m.mriqc}.")
+                tip = hover_text(key, better=m.better, extra=" ".join(extra)) or m.help
+                name = _item(m.title, tip=tip, data=m.key)
+                table.setItem(r, COL_NAME, name)
+                value = _item(m.text(), tip=m.why_missing or tip)
                 value.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(r, 1, value)
+                table.setItem(r, COL_VALUE, value)
                 text, _level = dataset_text(self.context.get(m.key), m.better)
-                table.setItem(r, 2, _item(text, tip="Robust z among the dataset's checked "
-                                                    "images of the same kind and acquisition"
-                                          if text else ""))
-                table.setItem(r, 3, _item(m.mriqc or "",
-                                          tip="The MRIQC measure with the same definition"
-                                          if m.mriqc else ""))
+                table.setItem(r, COL_DATASET, _item(
+                    text, tip="Robust z among the dataset's checked images of the same kind "
+                              "and acquisition" if text else ""))
+                info = _item("", tip="What this measures and how to read it")
+                info.setIcon(info_icon)
+                table.setItem(r, COL_INFO, info)
                 self._rows.append(m)
-        table.itemSelectionChanged.connect(self._describe)
+                table.setRowHidden(r, g in self._collapsed)
+        table.cellClicked.connect(self._on_cell)
+        table.cellDoubleClicked.connect(lambda r, _c: self._explain_row(r))
         # What each column needs; _fit_columns shares the room out.
         self._needs = []
         for c in range(4):
             table.resizeColumnToContents(c)
             self._needs.append(table.columnWidth(c) + 16)
+        self._needs[COL_INFO] = fonts.px(30)
         # Nothing to compare with: no column of blanks.
-        table.setColumnHidden(2, not self.context)
+        table.setColumnHidden(COL_DATASET, not self.context)
         table.viewport().installEventFilter(self)
         # The whole table, no scroll bar of its own: the panel scrolls once.
         table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         table.resizeRowsToContents()
-        table.setFixedHeight(table.horizontalHeader().sizeHint().height() + 4 + sum(
-            table.rowHeight(r) for r in range(table.rowCount())))
+        self._fit_height(table)
+        # Coloured (bands, fold arrows, icons) once it is the panel's table.
+        self.table = table
         self._recolour()
         return table
 
+    def _fit_height(self, table: QTableWidget) -> None:
+        table.setFixedHeight(table.horizontalHeader().sizeHint().height() + 4 + sum(
+            table.rowHeight(r) for r in range(table.rowCount()) if not table.isRowHidden(r)))
+
+    def _on_cell(self, row: int, col: int) -> None:
+        entry = self._rows[row] if 0 <= row < len(self._rows) else None
+        if isinstance(entry, tuple):
+            if col == COL_INFO:
+                self._explain_row(row)
+            else:
+                self.toggle_group(entry[1])
+        elif entry is not None and col == COL_INFO:
+            self._explain_row(row)
+
+    def toggle_group(self, group: str) -> None:
+        """Fold ``group`` away, or back."""
+        table = self.table
+        if table is None:
+            return
+        fold = group not in self._collapsed
+        self._collapsed = (self._collapsed | {group}) if fold else (self._collapsed - {group})
+        current = None
+        for r, entry in enumerate(self._rows):
+            if isinstance(entry, tuple):
+                current = entry[1]
+            elif current == group:
+                table.setRowHidden(r, fold)
+        self._fit_height(table)
+        self._recolour()
+
+    def _explain_row(self, row: int) -> None:
+        """The full explanation of the row's measure or group, beside it."""
+        from .explain_popup import show
+
+        entry = self._rows[row] if 0 <= row < len(self._rows) else None
+        table = self.table
+        if entry is None or table is None:
+            return
+        rect = table.visualRect(table.model().index(row, COL_NAME))
+        at = table.viewport().mapToGlobal(rect.bottomLeft())
+        if isinstance(entry, tuple):
+            group = entry[1]
+            show(table, f"group.{self._kind}.{group}", at=at,
+                 title=dict(GROUPS).get(group, group.capitalize()))
+            return
+        m = entry
+        here = [f"{m.title}: {m.text()}."]
+        if m.value is None and m.why_missing:
+            here.append(f"Not computed: {m.why_missing}")
+        text, level = dataset_text(self.context.get(m.key), m.better)
+        if text:
+            here.append(f"In this dataset: {text}" + (", on the worse side." if level else "."))
+        show(table, f"{self._kind}.{m.key}", at=at, title=m.title, here=" ".join(here),
+             fallback=m.help)
+
     def _fit_columns(self) -> None:
-        """The measure's name whole, then its value and place in the
-        dataset; MRIQC's name only when there is room for it too (it is in
-        the name's tooltip either way)."""
+        """The measure's name whole when there is room (shortened with an
+        ellipsis when not), then the value, its place in the dataset and the
+        info icon. The table fills the panel's width, but not beyond a little
+        more than its names need: a wide panel keeps each value near its
+        name."""
         table = self.table
         if table is None or not self._needs:
             return
@@ -606,55 +711,54 @@ class QualityPanel(QWidget):
         except RuntimeError:                # replaced since
             return
         needs = self._needs
-        middle = [c for c in (1, 2) if not (c == 2 and not self.context)]
-        fixed = sum(needs[c] for c in middle)
-        show_mriqc = needs[0] + fixed + needs[3] <= room
-        table.setColumnHidden(3, not show_mriqc)
-        for c in middle:
+        others = [c for c in (COL_VALUE, COL_DATASET, COL_INFO)
+                  if not (c == COL_DATASET and not self.context)]
+        fixed = sum(needs[c] for c in others)
+        for c in others:
             table.setColumnWidth(c, needs[c])
-        if show_mriqc:
-            table.setColumnWidth(0, needs[0])
-            table.setColumnWidth(3, max(needs[3], room - needs[0] - fixed))
-        else:
-            # The last visible column takes what is left (stretch-last).
-            table.setColumnWidth(0, max(80, min(needs[0], room - fixed)))
+        widest = needs[COL_NAME] + fonts.px(160)
+        table.setColumnWidth(COL_NAME, max(fonts.px(90), min(widest, room - fixed)))
+        table.setMaximumWidth(widest + fixed + 2 * table.frameWidth() + 2)
 
     _needs: list = []
+    _kind = "anat"
 
     def _recolour(self, *_a) -> None:
         table = getattr(self, "table", None)
         if table is None:
             return
+        from ... import icons
+
         try:
             theme = ThemeHub.instance().theme
             dim, text = QColor(theme.dim), QColor(theme.text)
             warn = QColor(theme.token("warning", "#d29922"))
+            band = QColor(theme.token("surface3", "#2a2f36"))
+            info_icon = icons.icon("info")
             for r, m in enumerate(self._rows):
-                if m is None:
+                info = table.item(r, COL_INFO)
+                if info is not None:
+                    info.setIcon(info_icon)
+                if isinstance(m, tuple):
+                    head = table.item(r, COL_NAME)
+                    if head is not None:
+                        head.setIcon(icons.icon("chevron_right" if m[1] in self._collapsed
+                                                else "chevron_down"))
+                        head.setForeground(text)
+                    for c in range(4):
+                        item = table.item(r, c)
+                        if item is not None:
+                            item.setBackground(band)
                     continue
-                for c in range(4):
+                for c in range(3):
                     item = table.item(r, c)
                     if item is not None:
                         item.setForeground(dim if m.value is None and c else text)
                 _t, level = dataset_text(self.context.get(m.key), m.better)
-                if level and table.item(r, 2) is not None:
-                    table.item(r, 2).setForeground(warn)
+                if level and table.item(r, COL_DATASET) is not None:
+                    table.item(r, COL_DATASET).setForeground(warn)
         except RuntimeError:                # the table was replaced
             pass
-
-    def _describe(self) -> None:
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            return
-        m = self._rows[rows[0].row()]
-        if m is None:
-            return
-        parts = [f"{m.title}: {m.help}"]
-        if m.value is None and m.why_missing:
-            parts.append(f"Not computed: {m.why_missing}")
-        if m.better:
-            parts.append(f"{m.better.capitalize()} is better.")
-        self.description.setText(" ".join(parts))
 
 
 __all__ = ["FLAG_Z", "GROUPS", "TISSUE_COLOURS", "QualityPanel", "dataset_text", "engine_text",

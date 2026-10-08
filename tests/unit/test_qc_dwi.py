@@ -8,9 +8,17 @@ import numpy as np
 import pytest
 
 from bidsmgr.qc import dwi
+from bidsmgr.qc.config import QcConfig
 from bidsmgr.qc.series import Series
 
 from tests.unit.qc_phantoms import dataset, dwi_phantom, gradient_table, save_dwi
+
+#: The checks with and without the b-vector flip check; the numpy brain
+#: mask (the phantoms are not heads a network was trained on).
+FLIPS = QcConfig()
+FLIPS.methods.dwi_brain = "median_otsu"
+NO_FLIPS = FLIPS.model_copy(deep=True)
+NO_FLIPS.dwi.check_flips = False
 
 
 def _series(data, affine, bvals, bvecs, sidecar=None) -> Series:
@@ -29,7 +37,7 @@ def table():
 def clean(table):
     bvals, bvecs = table
     data, affine = dwi_phantom(bvals, bvecs)
-    return data, affine, dwi.check(_series(data, affine, bvals, bvecs), flips=False)
+    return data, affine, dwi.check(_series(data, affine, bvals, bvecs), config=NO_FLIPS)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +128,7 @@ def test_a_dropped_slice_is_found_where_it_was_planted(table) -> None:
     data, affine = dwi_phantom(bvals, bvecs)
     v = int(np.flatnonzero(bvals > 0)[10])
     data[:, :, 15, v] *= 0.4
-    res = dwi.check(_series(data, affine, bvals, bvecs), flips=False)
+    res = dwi.check(_series(data, affine, bvals, bvecs), config=NO_FLIPS)
     found = {f.key: f for f in res.findings}
     assert "dropout" in found
     assert found["dropout"].evidence == {"volume": v, "slice": 15, "axis": 2}
@@ -131,7 +139,7 @@ def test_a_spike_is_counted(clean, table) -> None:
     data, affine = dwi_phantom(bvals, bvecs)
     v = int(np.flatnonzero(bvals > 0)[5])
     data[26:30, 10:14, 14:16, v] *= 6.0                   # in tissue, not CSF
-    res = dwi.check(_series(data, affine, bvals, bvecs), flips=False)
+    res = dwi.check(_series(data, affine, bvals, bvecs), config=NO_FLIPS)
     assert res.value("spikes_ppm") > clean[2].value("spikes_ppm") + 10
 
 
@@ -142,7 +150,7 @@ def test_a_moved_volume_is_out_of_place(table) -> None:
     data, affine = dwi_phantom(bvals, bvecs)
     v = int(np.flatnonzero(bvals > 0)[12])
     data[..., v] = ndi.shift(data[..., v], (3.0, 0.0, 0.0), order=1)   # 6 mm
-    res = dwi.check(_series(data, affine, bvals, bvecs), flips=False)
+    res = dwi.check(_series(data, affine, bvals, bvecs), config=NO_FLIPS)
     disp = np.asarray(res.tracks["displacement"]["ys"][0])
     assert disp[v] > 4.0
     assert v in [int(x) for x in res.tracks["displacement"]["ticks"]]
@@ -153,7 +161,7 @@ def test_a_drift_is_measured(table) -> None:
     data, affine = dwi_phantom(bvals, bvecs)
     n = data.shape[3]
     data = data * (1.0 - 0.10 * np.arange(n) / (n - 1))[None, None, None, :]
-    res = dwi.check(_series(data.astype(np.float32), affine, bvals, bvecs), flips=False)
+    res = dwi.check(_series(data.astype(np.float32), affine, bvals, bvecs), config=NO_FLIPS)
     assert res.value("drift") == pytest.approx(-10.0, abs=2.5)
     assert any(f.key == "drift" for f in res.findings)
 
@@ -164,11 +172,11 @@ def test_a_flipped_bvec_is_suspected(table) -> None:
                                band=9.0)
     stored = bvecs.copy()
     stored[:, 0] *= -1.0
-    res = dwi.check(_series(data, affine, bvals, stored), flips=True)
+    res = dwi.check(_series(data, affine, bvals, stored), config=FLIPS)
     fc = res.facts["flip_check"]
     assert fc["best"] == "x reversed"
     assert any(f.key == "bvec_flip" for f in res.findings)
-    good = dwi.check(_series(data, affine, bvals, bvecs), flips=True)
+    good = dwi.check(_series(data, affine, bvals, bvecs), config=FLIPS)
     assert good.facts["flip_check"]["stored_is_best"]
     assert not any(f.key == "bvec_flip" for f in good.findings)
 
@@ -177,7 +185,7 @@ def test_the_air_is_not_measured_in_a_defaced_series(table) -> None:
     bvals, bvecs = table
     data, affine = dwi_phantom(bvals, bvecs)
     res = dwi.check(_series(data, affine, bvals, bvecs,
-                            sidecar={"DeidentificationMethod": ["defaced"]}), flips=False)
+                            sidecar={"DeidentificationMethod": ["defaced"]}), config=NO_FLIPS)
     m = res.metric("efc_b0")
     assert m.value is None and "defaced" in m.why_missing
 
@@ -187,5 +195,5 @@ def test_the_check_of_a_file(tmp_path, table) -> None:
     data, affine = dwi_phantom(bvals, bvecs)
     root = dataset(tmp_path / "ds")
     path = save_dwi(data, affine, bvals, bvecs, root / "sub-01" / "dwi" / "sub-01_dwi.nii.gz")
-    res = dwi.check_file(path, flips=False)
+    res = dwi.check_file(path, config=NO_FLIPS)
     assert res.suffix == "dwi" and res.facts["shells"] == {"0": 4, "1000": 30}

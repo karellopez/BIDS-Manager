@@ -134,16 +134,22 @@ class QualityCheckDialog(QDialog):
         self.jobs.setValue(min(4, max(1, (os.cpu_count() or 2) // 2)))
         self.jobs.setToolTip("Images checked at the same time, each in its own process")
         bar.addWidget(self.jobs)
+        from ..viz.settings import qc_config
+        from .viz.bridge import SettingsHub
+
+        settings_cfg = qc_config(SettingsHub.instance().settings)
         self.flips_box = QCheckBox("Look for flipped b-vectors")
-        self.flips_box.setChecked(True)
+        self.flips_box.setChecked(settings_cfg.dwi.check_flips)
         self.flips_box.setToolTip("Experimental: fit the tensor with every sign flip and axis "
                                   "swap of the table and keep the most coherent (a few "
                                   "seconds per diffusion image)")
         bar.addWidget(self.flips_box)
         self.fast_box = QCheckBox("Fast masks")
-        self.fast_box.setToolTip("Approximate brain and tissue masks from the numpy fallback "
-                                 "instead of mindgrab, the tissue model and niimath: about "
-                                 "15 s faster per anatomical image, less accurate")
+        self.fast_box.setToolTip("For this run, approximate brain and tissue masks from the "
+                                 "fast methods instead of those chosen in Settings > Quality "
+                                 "control (mindgrab, the tissue model and niimath by "
+                                 "default): about 15 s faster per anatomical image, less "
+                                 "accurate. Every threshold comes from Settings.")
         bar.addWidget(self.fast_box)
         bar.addStretch(1)
         self.spinner = BusySpinner()
@@ -151,8 +157,8 @@ class QualityCheckDialog(QDialog):
         bl.addLayout(bar)
 
         self.tabs = QTabWidget()
-        self.anat_table = self._table(ANAT_COLUMNS)
-        self.dwi_table = self._table(DWI_COLUMNS)
+        self.anat_table = self._table(ANAT_COLUMNS, "anat")
+        self.dwi_table = self._table(DWI_COLUMNS, "dwi")
         self.tabs.addTab(self.anat_table, "Anatomical")
         self.tabs.addTab(self.dwi_table, "Diffusion")
         bl.addWidget(self.tabs, 1)
@@ -174,12 +180,18 @@ class QualityCheckDialog(QDialog):
 
     # -- tables -----------------------------------------------------------------
 
-    def _table(self, columns) -> QTableWidget:
+    def _table(self, columns, kind: str) -> QTableWidget:
+        from ..qc import explain
+
         table = QTableWidget(0, 3 + len(columns), self)
         table.setHorizontalHeaderLabels(["Image", "Suffix", "Findings"]
                                         + [c[1] for c in columns])
-        for c, (_k, _h, full) in enumerate(columns, start=3):
-            table.horizontalHeaderItem(c).setToolTip(full)
+        for c, (key, _h, full) in enumerate(columns, start=3):
+            # The measure, what it is, and which way is better: the same
+            # words as the viewer's quality panel.
+            exp = explain.lookup(f"{kind}.{key}")
+            table.horizontalHeaderItem(c).setToolTip(
+                f"{full}. {exp.short}" if exp is not None else full)
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -323,9 +335,7 @@ class QualityCheckDialog(QDialog):
                                 "again.")
             return
         worker = QualityWorker(self._root, paths, jobs=self.jobs.value(),
-                               flips=self.flips_box.isChecked(),
-                               engine="numpy" if self.fast_box.isChecked() else "auto",
-                               parent=self)
+                               config=self.config(), parent=self)
         worker.progress.connect(self._on_progress)
         worker.finished_with_result.connect(self._on_done)
         worker.failed.connect(self._on_failed)
@@ -335,6 +345,17 @@ class QualityCheckDialog(QDialog):
         self.spinner.set_busy(True, message=f"Checking {len(paths)} images")
         self.status.setText(f"Checking {len(paths)} images...")
         worker.start()
+
+    def config(self):
+        """The configuration this run uses: Settings > Quality control, with
+        this dialog's two switches on top."""
+        from ..qc.config import fast
+        from ..viz.settings import qc_config
+        from .viz.bridge import SettingsHub
+
+        cfg = qc_config(SettingsHub.instance().settings).model_copy(deep=True)
+        cfg.dwi.check_flips = self.flips_box.isChecked()
+        return fast(cfg) if self.fast_box.isChecked() else cfg
 
     def stop(self) -> None:
         if self._worker is not None:

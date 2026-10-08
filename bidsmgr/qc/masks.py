@@ -145,7 +145,8 @@ def air(head_mask: np.ndarray, *, excluded: np.ndarray, above: Optional[np.ndarr
 def artefacts(image: np.ndarray, air_mask: np.ndarray, head_mask: np.ndarray, *,
               z: float = 10.0) -> np.ndarray:
     """Air voxels that are not noise (QI1's artefact mask, Mortamet 2009):
-    above ``z`` robust spreads of the air's own intensities, more than a
+    an intensity above ``z`` times the robust spread of the air's own
+    intensities (MRIQC's test: the value over the spread), more than a
     tenth of the largest distance away from the head (closer than that is
     the head's own edge and its partial volume), cleaned by an opening.
 

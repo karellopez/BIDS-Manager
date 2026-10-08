@@ -41,14 +41,12 @@ from typing import Callable, Literal, Optional
 
 import numpy as np
 
-#: FD's sphere radius, mm (Power 2012).
-HEAD_RADIUS_MM = 50.0
-#: The usual FD threshold for a volume to look at (fMRIPrep's default for
-#: its motion outliers, and Power 2012's), mm.
-FD_THRESHOLD_MM = 0.5
-#: The coarsest voxel the estimate registers at, mm: finer grids are
-#: averaged down to about this, coarser ones are used as they are.
-ESTIMATE_MM = 3.5
+from ...qc.config import DEFAULT
+
+# FD's sphere radius (Power 2012: 50 mm), the FD threshold worth a look
+# (fMRIPrep's and Power 2012's 0.5 mm) and the voxel the estimate registers
+# at (3.5 mm) are settings: ``bidsmgr.qc.config.QcBold``.
+_BOLD = DEFAULT.bold
 #: How many of the reference's strongest edges the estimate registers.
 ESTIMATE_POINTS = 15_000
 
@@ -128,7 +126,8 @@ def confounds_for(path: Path, root: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
-def framewise_displacement(params: np.ndarray, radius: float = HEAD_RADIUS_MM) -> np.ndarray:
+def framewise_displacement(params: np.ndarray,
+                           radius: float = _BOLD.fd_radius_mm) -> np.ndarray:
     """Power's FD from ``params`` (n x 6: mm, then radians); NaN first."""
     p = np.asarray(params, dtype=float)
     d = np.abs(np.diff(p, axis=0))
@@ -136,19 +135,21 @@ def framewise_displacement(params: np.ndarray, radius: float = HEAD_RADIUS_MM) -
     return np.concatenate([[np.nan], fd])
 
 
-def read_confounds(path: Path) -> Motion:
-    """The motion columns of an fMRIPrep confounds table."""
+def read_confounds(path: Path, radius: float = _BOLD.fd_radius_mm) -> Motion:
+    """The motion columns of an fMRIPrep confounds table. Its FD column is
+    used as it is when ``radius`` is fMRIPrep's 50 mm; another radius
+    recomputes FD from the parameters."""
     import pandas as pd
 
     table = pd.read_csv(path, sep="\t", na_values=["n/a"])
     for cols in _COLUMNS:
         if all(c in table.columns for c in cols[:6]):
             params = table[list(cols[:6])].to_numpy(dtype=float)
-            if cols[6] in table.columns:
+            if cols[6] in table.columns and abs(radius - 50.0) < 1e-9:
                 fd = table[cols[6]].to_numpy(dtype=float)
                 fd[0] = np.nan
             else:
-                fd = framewise_displacement(params)
+                fd = framewise_displacement(np.nan_to_num(params), radius)
             return Motion(np.nan_to_num(params), fd, "confounds", Path(path))
     raise ValueError(f"{Path(path).name} has no motion parameters (trans_x ... rot_z)")
 
@@ -269,7 +270,7 @@ class RigidReference:
         return rot, trans
 
 
-def working_grid(zooms, spatial, target_mm: float = ESTIMATE_MM) -> np.ndarray:
+def working_grid(zooms, spatial, target_mm: float = _BOLD.motion_grid_mm) -> np.ndarray:
     """The block factor per axis that brings voxels finer than ``target_mm``
     up to about it, never below about eight voxels an axis (a gradient needs
     neighbours)."""
@@ -280,8 +281,8 @@ def working_grid(zooms, spatial, target_mm: float = ESTIMATE_MM) -> np.ndarray:
 
 def estimate(src, *, skip: int = 0, cancel: Optional[Callable[[], bool]] = None,
              progress: Optional[Callable[[int, int], None]] = None,
-             target_mm: float = ESTIMATE_MM, iterations: int = 12,
-             points: int = ESTIMATE_POINTS) -> Motion:
+             target_mm: float = _BOLD.motion_grid_mm, iterations: int = 12,
+             points: int = ESTIMATE_POINTS, radius: float = _BOLD.fd_radius_mm) -> Motion:
     """Register every volume rigidly to volume ``skip`` (see the module)."""
     n = src.loaded_frames
     if n < 2:
@@ -308,27 +309,31 @@ def estimate(src, *, skip: int = 0, cancel: Optional[Callable[[], bool]] = None,
         params[t, 3:] = _rotation_vector(rot)
         if progress is not None and (count % 16 == 0 or count == n - 1):
             progress(count + 1, n)
-    return Motion(params, framewise_displacement(params), "estimated")
+    return Motion(params, framewise_displacement(params, radius), "estimated")
 
 
 def motion_for(src, path: Optional[Path] = None, root: Optional[Path] = None, *,
-               skip: int = 0, cancel: Optional[Callable[[], bool]] = None,
+               skip: int = 0, config=None, cancel: Optional[Callable[[], bool]] = None,
                progress: Optional[Callable[[int, int], None]] = None) -> Motion:
-    """fMRIPrep's motion for the run when it has the run's length, else the
-    estimate."""
-    found = confounds_for(path, root) if path is not None else None
+    """fMRIPrep's motion for the run when it has the run's length and
+    ``config`` (a ``QcConfig``) allows it, else the estimate."""
+    cfg = config or DEFAULT
+    bold = cfg.bold
+    found = (confounds_for(path, root)
+             if path is not None and cfg.methods.bold_motion == "confounds" else None)
     if found is not None:
         try:
-            got = read_confounds(found)
+            got = read_confounds(found, bold.fd_radius_mm)
             if len(got.fd) == src.loaded_frames:
                 return got
         except (ValueError, OSError, KeyError):
             pass
-    return estimate(src, skip=skip, cancel=cancel, progress=progress)
+    return estimate(src, skip=skip, cancel=cancel, progress=progress,
+                    target_mm=bold.motion_grid_mm, radius=bold.fd_radius_mm)
 
 
 __all__ = [
-    "CONFOUND_NAMES", "ESTIMATE_MM", "ESTIMATE_POINTS", "FD_THRESHOLD_MM", "HEAD_RADIUS_MM", "Cancelled",
+    "CONFOUND_NAMES", "ESTIMATE_POINTS", "Cancelled",
     "Motion", "RigidReference", "confounds_for", "estimate", "framewise_displacement",
     "motion_for", "read_confounds", "working_grid",
 ]

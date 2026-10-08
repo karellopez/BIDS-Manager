@@ -1,20 +1,24 @@
-"""Settings dialog — surface CLI knobs the GUI uses.
+"""The Settings dialog: every knob the GUI uses, one page each.
 
 Reads / writes :class:`bidsmgr.gui.app_settings.AppSettings` via
-``QSettings``. All changes are applied on **Save** (no live binding) so
-the user can experiment with values and cancel without commit.
+``QSettings`` and the viewer settings (``SettingsHub``). All changes are
+applied on **Save** (no live binding) so the user can experiment with
+values and cancel without commit.
 
-Tabs: Display / System / Scan / Convert + post-convert. The Convert tab
-lays the post-convert chain out as an indented hierarchy (parent step +
-its sub-options), and a "Restore defaults" button resets every widget to
-the :class:`AppSettings` field defaults.
+The pages are listed down the left (``#settings-nav``), each with its
+title and a line saying what it is for; a narrow dialog shows the list as
+icons only. Every page scrolls on its own and its form rows wrap, so the
+dialog shrinks from the sides without cutting anything off. The Convert
+page lays the post-convert chain out as an indented hierarchy (parent step
++ its sub-options), and "Restore defaults" resets every widget to the
+:class:`AppSettings` field defaults.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -27,13 +31,15 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -71,46 +77,93 @@ def _bind_children(parent_cb: QCheckBox, *children: QWidget) -> None:
 
 
 class SettingsDialog(QDialog):
-    """Settings dialog: Display / System / Scan / Convert + post-convert.
+    """Settings, one page per subject, listed down the left.
 
     Theme + post-convert chain live under their natural homes. The
-    inspector column visibility is NOT here — it's controlled via the
+    inspector column visibility is NOT here: it's controlled via the
     table header's right-click menu, and that menu writes through to
     the same QSettings namespace.
     """
 
+    #: Narrower than this (at font scale 1.0), the page list shows icons only.
+    COMPACT_BELOW_PX = 640
+
     def __init__(self, settings: AppSettings, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("BIDS-Manager — Settings")
-        self.resize(560, 600)
+        self.setWindowTitle("BIDS Manager settings")
+        self.setObjectName("settings-dialog")
         self._settings = settings
         # Detected once: the worker-count spinboxes are capped at the host's
         # logical thread count so the user can never ask for more workers
         # than the machine has threads.
         self._sys: SystemInfo = get_system_info()
+        from .viz import fonts
+
+        self.resize(fonts.px(860), fonts.px(660))
 
         v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, fonts.px(10))
+        v.setSpacing(fonts.px(8))
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self._nav = QListWidget()
+        self._nav.setObjectName("settings-nav")
+        self._nav.setIconSize(QSize(fonts.px(18), fonts.px(18)))
+        self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav.setUniformItemSizes(True)
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("settings-pages")
+        row.addWidget(self._nav)
+        row.addWidget(self._stack, 1)
+        v.addLayout(row, 1)
+        self._page_titles: list[str] = []
+        self._nav_compact: Optional[bool] = None
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_bids_version_tab(), "BIDS version")
-        tabs.addTab(self._build_display_tab(), "Display")
-        tabs.addTab(self._build_system_tab(), "System")
-        tabs.addTab(self._build_scan_tab(), "Scan")
-        tabs.addTab(self._build_scan_rules_tab(), "Scan rules")
-        tabs.addTab(self._build_convert_tab(), "Convert + post-convert")
-        tabs.addTab(self._build_validation_tab(), "Validation")
+        self._add_page("BIDS version", "settings_bids",
+                       "The version of the standard datasets are written and validated "
+                       "against.", self._build_bids_version_tab())
+        self._add_page("Display", "settings_display",
+                       "Theme, text size and how the Editor shows the dataset.",
+                       self._build_display_tab())
+        self._add_page("System", "settings_system",
+                       "What this computer offers the parallel steps.",
+                       self._build_system_tab())
+        self._add_page("Scan", "scan", "How a scan reads raw data and proposes names.",
+                       self._build_scan_tab())
+        self._add_page("Scan rules", "settings_rules",
+                       "Your own hints for naming series, and series to leave out.",
+                       self._build_scan_rules_tab())
+        self._add_page("Convert", "settings_convert",
+                       "How a conversion writes the dataset, and what runs after it.",
+                       self._build_convert_tab())
+        self._add_page("Validation", "file_check",
+                       "What validation checks and what it shows.",
+                       self._build_validation_tab())
         # The viewer's own pages, generated from its settings model. They edit
         # a copy; Save hands it to the hub, which every open viewer follows.
         from .viz.bridge import SettingsHub
-        from .viz.settings_pages import ShortcutsPage, ViewerSettingsPage
+        from .viz.settings_pages import QualitySettingsPage, ShortcutsPage, ViewerSettingsPage
 
         self._viz_settings = SettingsHub.instance().settings.model_copy(deep=True)
+        self._qc_page = QualitySettingsPage()
         self._viewer_page = ViewerSettingsPage()
         self._shortcuts_page = ShortcutsPage()
-        tabs.addTab(self._viewer_page, "Viewer")
-        tabs.addTab(self._shortcuts_page, "Viewer shortcuts")
-        self._tabs = tabs
-        v.addWidget(tabs, 1)
+        self._add_page("Quality control", "qc",
+                       "When the quality checks run, with which methods, and every "
+                       "threshold.", self._qc_page, scroll=False)
+        self._add_page("Viewer", "settings_viewer",
+                       "How images and signals open and look in every viewer.",
+                       self._viewer_page, scroll=False)
+        # Its tables' choice boxes are wide: scrolled sideways rather than
+        # setting a floor under the whole dialog.
+        self._add_page("Viewer shortcuts", "shortcuts",
+                       "Keys and mouse gestures in the viewers.", self._shortcuts_page)
+        self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
+        self._nav.setCurrentRow(0)
+        # A row too wide for a narrow page puts its field under its label.
+        for form in self.findChildren(QFormLayout):
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         # Save / Cancel / Restore defaults.
         buttons = QDialogButtonBox(
@@ -128,7 +181,96 @@ class SettingsDialog(QDialog):
         # Populate every widget from the current settings.
         self._load_into_widgets(self._settings)
         self._viewer_page.load(self._viz_settings)
+        self._qc_page.load(self._viz_settings)
         self._shortcuts_page.load(self._viz_settings)
+        self._fit_nav()
+
+    # ------------------------------------------------------------------
+    # Pages
+    # ------------------------------------------------------------------
+
+    def _add_page(self, title: str, icon: str, description: str, content: QWidget, *,
+                  scroll: bool = True) -> None:
+        """A page: its title, what it is for, and ``content`` (in a scroll
+        area of its own unless it brings one)."""
+        from . import icons
+        from .viz import fonts
+
+        page = QWidget()
+        page.setObjectName("settings-page")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(fonts.px(18), fonts.px(14), fonts.px(14), 0)
+        lay.setSpacing(fonts.px(4))
+        head = QLabel(title)
+        head.setObjectName("settings-page-title")
+        lay.addWidget(head)
+        if description:
+            what = QLabel(description)
+            what.setObjectName("dlg-hint")
+            what.setWordWrap(True)
+            lay.addWidget(what)
+            lay.addSpacing(fonts.px(6))
+        if scroll:
+            area = QScrollArea()
+            area.setObjectName("settings-scroll")
+            area.setWidgetResizable(True)
+            area.setFrameShape(QScrollArea.Shape.NoFrame)
+            area.setWidget(content)
+            lay.addWidget(area, 1)
+        else:
+            lay.addWidget(content, 1)
+        self._stack.addWidget(page)
+        # Every page's icon in the text colour: some of these glyphs are
+        # accent-tinted elsewhere (Scan, Validation, QC), and a list where a
+        # few icons are blue reads as if those pages were selected.
+        item = QListWidgetItem(icons.icon(icon, color=icons.CUR().get("text")), title)
+        item.setData(Qt.ItemDataRole.UserRole, title)
+        item.setData(Qt.ItemDataRole.UserRole + 1, description)
+        item.setToolTip(description)
+        self._nav.addItem(item)
+        self._page_titles.append(title)
+
+    def page_titles(self) -> list[str]:
+        """The pages, in order."""
+        return list(self._page_titles)
+
+    def show_page(self, title: str) -> None:
+        """Open the page called ``title``."""
+        self._nav.setCurrentRow(self._page_titles.index(title))
+
+    def current_page(self) -> str:
+        return self._page_titles[self._nav.currentRow()]
+
+    def _fit_nav(self) -> None:
+        """The page list as wide as its longest title (icons only when the
+        dialog is narrow), measured in the list's own scaled font."""
+        from .viz import fonts
+
+        compact = self.width() < fonts.px(self.COMPACT_BELOW_PX)
+        if compact == self._nav_compact:
+            return
+        self._nav_compact = compact
+        nav = self._nav
+        nav.ensurePolished()
+        for i in range(nav.count()):
+            item = nav.item(i)
+            title = item.data(Qt.ItemDataRole.UserRole)
+            item.setText("" if compact else title)
+            item.setToolTip(title if compact
+                            else str(item.data(Qt.ItemDataRole.UserRole + 1) or ""))
+        icon = nav.iconSize().width()
+        if compact:
+            width = icon + fonts.px(34)
+        else:
+            metrics = nav.fontMetrics()
+            longest = max(metrics.horizontalAdvance(t) for t in self._page_titles)
+            width = longest + icon + fonts.px(56)
+        nav.setFixedWidth(width)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        if self._nav_compact is not None:
+            self._fit_nav()
 
     # ------------------------------------------------------------------
     # Tabs
@@ -175,9 +317,7 @@ class SettingsDialog(QDialog):
         # Editor tree: dotfiles and the machinery folders. Off by default,
         # because a dataset carries .bidsmgr/, .git/ and .bidsignore and none
         # of them are the data. On, they are shown dimmed.
-        self._editor_show_hidden = QCheckBox(
-            "Show hidden files and folders in the Editor tree"
-        )
+        self._editor_show_hidden = QCheckBox("Show hidden files and folders")
         self._editor_show_hidden.setToolTip(
             "Dotfiles and dot-folders (.bidsignore, .bidsmgr, .git) are "
             "hidden by default. Shown, they are dimmed so they do not "
@@ -188,9 +328,7 @@ class SettingsDialog(QDialog):
         # Save as you go. Safe because every editor write goes through the
         # operation log, so an edit made without being asked for can still be
         # undone after the pane has moved on.
-        self._editor_autosave = QCheckBox(
-            "Save a sidecar edit as soon as the field is committed"
-        )
+        self._editor_autosave = QCheckBox("Save sidecar edits as you go")
         self._editor_autosave.setToolTip(
             "Off by default: edits wait for the Save button, and the toolbar "
             "says there are unsaved changes from the first keystroke either "
@@ -205,7 +343,7 @@ class SettingsDialog(QDialog):
             "Theme can also be toggled live via the sun / moon button "
             "in the top header. Font scale and header logo apply on Save."
         )
-        hint.setStyleSheet("color: #8b949e;")
+        hint.setObjectName("dlg-hint")
         hint.setWordWrap(True)
         form.addRow("", hint)
 
@@ -239,7 +377,7 @@ class SettingsDialog(QDialog):
             "the machine has threads only adds scheduling overhead, so the "
             "spinboxes will not go higher."
         )
-        note.setStyleSheet("color: #8b949e;")
+        note.setObjectName("dlg-hint")
         note.setWordWrap(True)
         v.addWidget(note)
         v.addStretch(1)
@@ -265,9 +403,10 @@ class SettingsDialog(QDialog):
         # the "Recording metadata" editor. Free-text fields here would have
         # been a second, inconsistent way to set the same values.
 
-        self._scan_probe = QCheckBox(
-            "Enable --probe-convert (run dcm2niix per series to enrich "
-            "naming with the actual file count + extensions)"
+        self._scan_probe = QCheckBox("Probe each series with dcm2niix")
+        self._scan_probe.setToolTip(
+            "Runs dcm2niix on each series during the scan (--probe-convert), so the "
+            "proposed names know the real number of files and their extensions."
         )
         form.addRow("Probe:", self._scan_probe)
 
@@ -283,9 +422,10 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Converter fields:", self._scan_preview)
 
-        self._scan_skip_bids_guess = QCheckBox(
-            "Skip dcm2niix BidsGuess classifier (use only the legacy "
-            "regex fallback layer)"
+        self._scan_skip_bids_guess = QCheckBox("Skip dcm2niix's BidsGuess classifier")
+        self._scan_skip_bids_guess.setToolTip(
+            "Propose datatypes and suffixes from the series names alone (the older "
+            "pattern-matching layer), without dcm2niix's BidsGuess."
         )
         form.addRow("Classifier:", self._scan_skip_bids_guess)
 
@@ -386,7 +526,7 @@ class SettingsDialog(QDialog):
             "skip any modality."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #8b949e;")
+        intro.setObjectName("dlg-hint")
         v.addWidget(intro)
 
         # Exclusions.
@@ -423,7 +563,7 @@ class SettingsDialog(QDialog):
             "task-<label> for func rows."
         )
         force_hint.setWordWrap(True)
-        force_hint.setStyleSheet("color: #8b949e;")
+        force_hint.setObjectName("dlg-hint")
         hbl.addWidget(force_hint)
         hbl.addLayout(self._rule_row_buttons(self._add_hint_row, self._hint_table))
         v.addWidget(hint_box)
@@ -436,7 +576,7 @@ class SettingsDialog(QDialog):
             "table - their datatype comes from mne channel types."
         )
         builtin_note.setWordWrap(True)
-        builtin_note.setStyleSheet("color: #8b949e;")
+        builtin_note.setObjectName("dlg-hint")
         bbl.addWidget(builtin_note)
         builtin = QTableWidget(0, 4)
         builtin.setHorizontalHeaderLabels(
@@ -659,11 +799,9 @@ class SettingsDialog(QDialog):
         # subject. Deciding at file level throws the curation away; deciding at
         # field level keeps what a person stated and still takes what the fresh
         # pass newly knows.
-        self._convert_preserve_curation = QCheckBox(
-            "Keep curated metadata (merge sidecars field by field instead of "
-            "overwriting them)"
-        )
+        self._convert_preserve_curation = QCheckBox("Keep curated metadata")
         self._convert_preserve_curation.setToolTip(
+            "Merge sidecars field by field instead of overwriting them.\n\n"
             "When a subject you already curated in the Editor is converted "
             "again, merge its JSON sidecars and _scans.tsv field by field: a "
             "value you stated is kept, a TODO placeholder is replaced, and "
@@ -673,20 +811,17 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Curated metadata:", self._convert_preserve_curation)
 
-        self._convert_skip_residuals = QCheckBox(
-            "Skip residual volumes (drop dcm2niix secondary duplicates such "
-            "as ..._bolda / _Eq_ / _ROI that are not real images)"
-        )
+        self._convert_skip_residuals = QCheckBox("Skip residual volumes")
         self._convert_skip_residuals.setToolTip(
+            "Drop the secondary duplicates dcm2niix writes (..._bolda, _Eq_, _ROI), "
+            "which are not real images.\n\n"
             "dcm2niix splits a single input series into the real image plus "
             "derived single-volume duplicates it names ..._bolda, ..._Eq_1, "
             "etc. These have no valid BIDS suffix. Recommended: on."
         )
         form.addRow("Residuals:", self._convert_skip_residuals)
 
-        self._convert_force_edf = QCheckBox(
-            "Force EDF for EEG (re-encode recordings to EDF on convert)"
-        )
+        self._convert_force_edf = QCheckBox("Re-encode EEG to EDF")
         self._convert_force_edf.setToolTip(
             "Re-encode EEG recordings to EDF instead of keeping the "
             "source format. Harmonises a study to one BIDS-native format, and "
@@ -743,9 +878,10 @@ class SettingsDialog(QDialog):
         pv = QVBoxLayout(post)
         pv.setSpacing(4)
 
-        self._post_run_metadata = QCheckBox(
-            "Generate metadata (dataset_description, participants.tsv, "
-            "*_scans.tsv, sidecar audit)"
+        self._post_run_metadata = QCheckBox("Generate metadata")
+        self._post_run_metadata.setToolTip(
+            "dataset_description.json, participants.tsv, the *_scans.tsv tables and an "
+            "audit of every sidecar."
         )
         pv.addWidget(self._post_run_metadata)
         self._post_metadata_fill_todos = QCheckBox(
@@ -793,11 +929,9 @@ class SettingsDialog(QDialog):
         # are the same code the Editor's Fix ups button runs, so a dataset
         # gets the same result whichever moment the user chooses. Both are off
         # by default: one adds files and the other moves fields between them.
-        self._post_fixup_companions = QCheckBox(
-            "Generate missing companion files (events.tsv, channels.tsv, "
-            "JSON sidecars)"
-        )
+        self._post_fixup_companions = QCheckBox("Generate missing companion files")
         self._post_fixup_companions.setToolTip(
+            "events.tsv, channels.tsv and JSON sidecars a recording should have.\n\n"
             "What can be read from a recording is read from it, so a "
             "channels table is real content. The rest is a stub carrying "
             "TODO rows.\n\nA generated events table is deliberately INVALID "
@@ -842,28 +976,29 @@ class SettingsDialog(QDialog):
         citation_note.setContentsMargins(44, 0, 0, 4)
         pv.addWidget(citation_note)
 
-        self._post_run_validate = QCheckBox(
-            "Validate dataset (bidsval schema-driven validation)"
+        self._post_run_validate = QCheckBox("Validate the dataset")
+        self._post_run_validate.setToolTip(
+            "Schema-driven validation (bidsval), the same as the Editor's Validate "
+            "dataset."
         )
         pv.addWidget(self._post_run_validate)
-        self._post_validate_strict = QCheckBox(
-            "Deep checks: read NIfTI headers and file contents (slower)"
-        )
+        self._post_validate_strict = QCheckBox("Deep checks (slower)")
         self._post_validate_strict.setToolTip(
             "When on, validation reads NIfTI headers and file contents in "
             "addition to the structural checks. More thorough, slower on "
             "large trees. Maps to the validator's read-headers mode."
         )
-        self._post_validate_html = QCheckBox(
-            "Write a self-contained validation_report.html (--html)"
+        self._post_validate_html = QCheckBox("Write an HTML validation report")
+        self._post_validate_html.setToolTip(
+            "A self-contained validation_report.html beside the dataset (--html)."
         )
         pv.addWidget(_indented(self._post_validate_strict))
         pv.addWidget(_indented(self._post_validate_html))
 
-        self._post_run_quality = QCheckBox(
-            "Check image quality (anatomical and diffusion; a few seconds per image)"
-        )
+        self._post_run_quality = QCheckBox("Check image quality")
         self._post_run_quality.setToolTip(
+            "Anatomical and diffusion images, a few seconds each, with the methods "
+            "and thresholds of the Quality control page.\n\n"
             "Last: the fast quality check of every anatomical and diffusion image "
             "not checked yet, into derivatives/bidsmgr-qc/ (read it in the Editor, "
             "Tools, Quality check). The air is measured only in images that are not "
@@ -918,7 +1053,7 @@ class SettingsDialog(QDialog):
 
         self._version_summary = QLabel()
         self._version_summary.setWordWrap(True)
-        self._version_summary.setStyleSheet("color: #8b949e;")
+        self._version_summary.setObjectName("dlg-hint")
         form.addRow("", self._version_summary)
         v.addWidget(box)
 
@@ -929,7 +1064,7 @@ class SettingsDialog(QDialog):
             "The command line takes the same choice per run, as --schema."
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: #8b949e;")
+        note.setObjectName("dlg-hint")
         v.addWidget(note)
         v.addStretch(1)
         return w
@@ -1012,7 +1147,7 @@ class SettingsDialog(QDialog):
             "choice. Validation results are written into the project's "
             "<bids_root>/.bidsmgr/ folder, never into the BIDS tree."
         )
-        note.setStyleSheet("color: #8b949e;")
+        note.setObjectName("dlg-hint")
         note.setWordWrap(True)
         v.addWidget(note)
         v.addStretch(1)
@@ -1135,6 +1270,7 @@ class SettingsDialog(QDialog):
         from ..viz.settings import VizSettings
 
         self._viewer_page.load(VizSettings())
+        self._qc_page.load(VizSettings())
         self._shortcuts_page.load(VizSettings())
 
     def _on_save(self) -> None:
@@ -1218,6 +1354,7 @@ class SettingsDialog(QDialog):
 
         new = self._viz_settings.model_copy(deep=True)
         self._viewer_page.apply_to(new)
+        self._qc_page.apply_to(new)
         self._shortcuts_page.apply_to(new)
         # Layout memory, sizes and saved views are not edited here: they
         # survive a Save untouched, unless the page was asked to forget the

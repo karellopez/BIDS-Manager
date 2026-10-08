@@ -44,39 +44,20 @@ import numpy as np
 
 from . import masks as K
 from . import stats
+from .config import DEFAULT, QcConfig
 from .series import Series
 from .types import Finding, Metric, QCMap, QCResult
 
-#: b-values at or below this are b=0 volumes.
-B0_MAX = 50.0
-#: The tensor is fitted on b-values up to this.
-DTI_MAX_B = 1500.0
-#: A slice this many robust spreads below its course is a dropout ...
-DROPOUT_Z = 5.0
-#: ... and at least this much below its prediction (log ratio, about 10 %).
-DROPOUT_DROP = 0.1
-#: Interleave: odd against even slices, robust z across volumes.
-INTERLEAVE_Z = 5.0
-#: A voxel this many robust spreads above its prediction is a spike.
-SPIKE_Z = 8.0
-#: Head motion across the b=0 volumes worth a finding, mm.
-MOTION_B0_MM = 1.0
-#: A volume this far from the first b=0 (and an outlier of its shell) is out
-#: of place, mm: about five times a single volume's registration noise.
-FAR_MM = 2.0
-#: Share of the shifts the gradient must explain to be called eddy current.
-EDDY_R2 = 0.3
-#: How much more coherent another table must be than the stored one. On the
-#: tutorial's single-shell scan a planted flip of x, y or z was found every
-#: time, the true table ahead by 4.4 %; the stored table of the unchanged
-#: scan led the next by the same margin.
-FLIP_MARGIN = 1.02
-#: A slice needs this many brain voxels to be judged ...
+# The thresholds are settings (``config.QcDwi``). Measured when they were
+# chosen: a volume out of place at 2 mm is about five times a single
+# volume's registration noise; on the tutorial's single-shell scan a planted
+# flip of x, y or z was found every time with the true table ahead by 4.4 %,
+# and the stored table of the unchanged scan led the next by the same
+# margin, so a flipped table must lead by 2 %.
+
+#: A slice needs this many brain voxels to be judged (and the share of a
+#: typical slice's set in ``QcDwi.edge_slice_pct``).
 MIN_SLICE_VOXELS = 40
-#: ... and at least this share of a typical slice's.
-EDGE_SLICE_SHARE = 0.25
-#: Two directions closer than this (degrees, either sign) are duplicates.
-DUPLICATE_DEG = 2.0
 
 
 def _metric(key: str, title: str, value, *, unit: str = "", group: str = "diffusion",
@@ -92,13 +73,13 @@ def _metric(key: str, title: str, value, *, unit: str = "", group: str = "diffus
 # ---------------------------------------------------------------------------
 
 
-def shells_of(bvals: np.ndarray) -> np.ndarray:
+def shells_of(bvals: np.ndarray, b0_max: float = DEFAULT.dwi.b0_max) -> np.ndarray:
     """Each volume's shell (the viewer's rule: rounded to the nearest 50),
     0 for every b=0 volume."""
     from ..viz.bids import shells_of as viz_shells
 
     s = viz_shells(bvals)
-    s[np.asarray(bvals, dtype=float) <= B0_MAX] = 0
+    s[np.asarray(bvals, dtype=float) <= b0_max] = 0
     return s
 
 
@@ -118,7 +99,7 @@ def coverage_gap_deg(vectors: np.ndarray, samples: int = 4000) -> float:
     return float(np.degrees(np.arccos(np.clip(cos.min(), -1.0, 1.0))))
 
 
-def duplicates(vectors: np.ndarray, limit_deg: float = DUPLICATE_DEG) -> int:
+def duplicates(vectors: np.ndarray, limit_deg: float = DEFAULT.dwi.duplicate_deg) -> int:
     """Pairs of directions closer than ``limit_deg``, either sign."""
     v = np.asarray(vectors, dtype=float)
     v = v[np.linalg.norm(v, axis=1) > 0.5]
@@ -130,7 +111,8 @@ def duplicates(vectors: np.ndarray, limit_deg: float = DUPLICATE_DEG) -> int:
     return int(np.count_nonzero(np.triu(cos > np.cos(np.radians(limit_deg)))))
 
 
-def check_table(n_volumes: int, bvals, bvecs, problems: list[str]) -> tuple[list[Finding], dict]:
+def check_table(n_volumes: int, bvals, bvecs, problems: list[str], *,
+                b0_max: float = DEFAULT.dwi.b0_max) -> tuple[list[Finding], dict]:
     """Findings about the gradient table, and its usable form (``bvals``,
     ``bvecs`` n x 3) or None when there is none to use."""
     found: list[Finding] = []
@@ -158,12 +140,12 @@ def check_table(n_volumes: int, bvals, bvecs, problems: list[str]) -> tuple[list
         return found, usable
     g = g.T                                                    # n x 3
     norms = np.linalg.norm(g, axis=1)
-    weighted = b > B0_MAX
+    weighted = b > b0_max
     zero = weighted & (norms < 1e-6)
     if zero.any():
         found.append(Finding(
             "bvec_zero", "Diffusion volumes with no direction", "error",
-            f"{int(zero.sum())} volumes have b > {B0_MAX:g} and a zero b-vector: volumes "
+            f"{int(zero.sum())} volumes have b > {b0_max:g} and a zero b-vector: volumes "
             f"{', '.join(str(i) for i in np.flatnonzero(zero)[:8])}.", None))
     off = weighted & ~zero & (np.abs(norms - 1.0) > 0.01)
     if off.any():
@@ -172,7 +154,7 @@ def check_table(n_volumes: int, bvals, bvecs, problems: list[str]) -> tuple[list
             f"{int(off.sum())} b-vectors have a length off 1 by more than 0.01 (from "
             f"{norms[off].min():.3f} to {norms[off].max():.3f}). Some tools rescale the "
             "b-value by it, others do not.", None))
-    if not (b <= B0_MAX).any():
+    if not (b <= b0_max).any():
         found.append(Finding("no_b0", "No b=0 volume", "error",
                              "Without a b=0 volume nothing can be normalised, and the "
                              "tensor, SNR and motion checks are skipped.", None))
@@ -184,13 +166,11 @@ def check_table(n_volumes: int, bvals, bvecs, problems: list[str]) -> tuple[list
 #: A volume registered further than this from the reference is taken as
 #: lost, not as moved: a head does not move 3 cm or turn 15 degrees inside a
 #: head coil between two volumes.
-LOST_MM = 30.0
-LOST_DEG = 15.0
 
 
-def _implausible(rot: np.ndarray, trans: np.ndarray) -> bool:
+def _implausible(rot: np.ndarray, trans: np.ndarray, lost_mm: float, lost_deg: float) -> bool:
     angle = np.degrees(np.arccos(np.clip((np.trace(rot) - 1.0) / 2.0, -1.0, 1.0)))
-    return bool(np.linalg.norm(trans) > LOST_MM or angle > LOST_DEG)
+    return bool(np.linalg.norm(trans) > lost_mm or angle > lost_deg)
 
 
 def brain_mask(b0: np.ndarray, *, exclude: Optional[np.ndarray] = None) -> np.ndarray:
@@ -441,9 +421,11 @@ def flip_check(signal: np.ndarray, coords: np.ndarray, shape, bvals, bvecs, zoom
 # ---------------------------------------------------------------------------
 
 
-def _brain_from_tools(b0: np.ndarray, affine: np.ndarray, engine: str, cancel=None):
-    """``(mask, engine name, note)``: mindgrab's brain on the mean b=0 when
-    the tools can run, else ``(None, "median-Otsu (numpy)", why)``."""
+def _brain_from_tools(b0: np.ndarray, affine: np.ndarray, method: str, cancel=None,
+                      timeout: float = 600.0):
+    """``(mask, method name, note)``: mindgrab's brain on the mean b=0 when
+    asked for and the tools can run, else ``(None, "median-Otsu (numpy)",
+    why)`` (``why`` empty when median-Otsu was asked for)."""
     import tempfile
 
     import nibabel as nib
@@ -451,7 +433,7 @@ def _brain_from_tools(b0: np.ndarray, affine: np.ndarray, engine: str, cancel=No
     from . import tools as T
 
     fallback = "median-Otsu (numpy)"
-    if engine == "numpy":
+    if method != "mindgrab":
         return None, fallback, ""
     why = T.unavailable_reason()
     if why:
@@ -460,7 +442,8 @@ def _brain_from_tools(b0: np.ndarray, affine: np.ndarray, engine: str, cancel=No
     try:
         path = folder / "b0.nii.gz"
         nib.save(nib.Nifti1Image(np.asarray(b0, dtype=np.float32), affine), str(path))
-        got = T.run_models(path, b0.shape, affine, [T.BRAIN_MODEL], cancel=cancel)
+        got = T.run_models(path, b0.shape, affine, [T.BRAIN_MODEL], cancel=cancel,
+                           timeout=timeout)
         mask = stats.largest_components(got[T.BRAIN_MODEL] > 0, 1)
         if mask.sum() < 1000:
             return None, fallback, "mindgrab found no brain on the b=0"
@@ -476,9 +459,9 @@ def _brain_from_tools(b0: np.ndarray, affine: np.ndarray, engine: str, cancel=No
 def check(series: Series, *, problems: Optional[list[str]] = None,
           cancel: Optional[Callable[[], bool]] = None,
           progress: Optional[Callable[[int, int], None]] = None,
-          flips: bool = True, engine: str = "auto") -> QCResult:
-    """The quality check of one diffusion series. ``engine`` as for
-    ``anat.check``: "auto" uses mindgrab for the brain when it can run."""
+          config: Optional[QcConfig] = None) -> QCResult:
+    """The quality check of one diffusion series, with the methods and
+    thresholds of ``config`` (default: :data:`config.DEFAULT`)."""
     from scipy import ndimage as ndi
 
     from ..viz.compute import motion as MO
@@ -486,6 +469,8 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
 
     t_start = time.perf_counter()
     timings: dict[str, float] = {}
+    cfg = config or DEFAULT
+    D = cfg.dwi
 
     def step(name: str, n: int) -> None:
         if cancel is not None and cancel():
@@ -504,21 +489,25 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     zooms = series.zooms
     facts.update(shape=list(series.shape) + [series.n],
                  zooms=[round(float(z), 4) for z in zooms])
-    table_findings, table = check_table(series.n, series.bvals, series.bvecs, problems or [])
+    # What it was made with, so a saved result can be reproduced.
+    facts["config"] = {"methods": cfg.methods.model_dump(mode="json"),
+                       "dwi": D.model_dump(mode="json")}
+    table_findings, table = check_table(series.n, series.bvals, series.bvecs, problems or [],
+                                        b0_max=D.b0_max)
     result.findings += table_findings
     metrics = result.metrics
     if not table:
         facts["seconds"] = round(time.perf_counter() - t_start, 2)
         return result
     bvals, bvecs = table["bvals"], table["bvecs"]
-    shells = shells_of(bvals)
-    b0 = np.flatnonzero(bvals <= B0_MAX)
+    shells = shells_of(bvals, D.b0_max)
+    b0 = np.flatnonzero(bvals <= D.b0_max)
     shell_values = sorted(int(s) for s in set(shells.tolist()) if s > 0)
     facts["shells"] = {str(s): int(np.count_nonzero(shells == s)) for s in [0] + shell_values}
     for s in shell_values:
         sel = shells == s
         gap = coverage_gap_deg(bvecs[sel])
-        dup = duplicates(bvecs[sel])
+        dup = duplicates(bvecs[sel], D.duplicate_deg)
         metrics.append(_metric(f"coverage_gap_b{s}", f"Largest gap between directions (b={s})",
                                gap, unit="degrees", group="gradients", better="lower",
                                help="The radius of the largest cap of the sphere with no "
@@ -527,7 +516,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
         if dup:
             result.findings.append(Finding(
                 f"duplicates_b{s}", f"Repeated directions at b={s}", "info",
-                f"{dup} pairs of directions are within {DUPLICATE_DEG:g} degrees of each "
+                f"{dup} pairs of directions are within {D.duplicate_deg:g} degrees of each "
                 "other: fine for averaging, but they add no angular information.", None))
         if np.count_nonzero(sel) < 6:
             result.findings.append(Finding(
@@ -544,7 +533,8 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     b0_ref = np.median(np.stack(frames_b0), axis=0) if len(frames_b0) > 1 else frames_b0[0]
     zero = K.zero_fill(b0_ref)
     head = K.head(b0_ref, exclude=zero)
-    brain, brain_engine, tool_note = _brain_from_tools(b0_ref, series.affine, engine, cancel)
+    brain, brain_engine, tool_note = _brain_from_tools(
+        b0_ref, series.affine, cfg.methods.dwi_brain, cancel, cfg.methods.tool_timeout_s)
     if cancel is not None and cancel():
         raise MO.Cancelled()
     if brain is None:
@@ -575,8 +565,8 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     for s in shell_values:
         shell_mean[s] = (sums[s] / max(int(np.count_nonzero(shells == s)), 1)).astype(np.float32)
     del sums
-    use = bvals <= DTI_MAX_B
-    can_fit = (np.count_nonzero(use & (bvals > B0_MAX)) >= 6
+    use = bvals <= D.dti_max_b
+    can_fit = (np.count_nonzero(use & (bvals > D.b0_max)) >= 6
                and np.linalg.matrix_rank(design(bvals[use], bvecs[use])) == 7)
     fit = fit_tensor(sig[:, use], bvals[use], bvecs[use]) if can_fit else None
     step("tensor", 3)
@@ -621,14 +611,14 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                 rot, trans = ref.register(frame, *last.get(s, (None, None)))
             except ValueError:
                 rot, trans = np.eye(3), np.zeros(3)
-            if _implausible(rot, trans):
+            if _implausible(rot, trans, D.lost_mm, D.lost_deg):
                 # Lost (a low-SNR volume, a prediction far off at high b):
                 # start again from where the head was, not from the wreck.
                 try:
                     rot, trans = MO.RigidReference(down(predicted), spacing).register(frame)
                 except ValueError:
                     rot, trans = np.eye(3), np.zeros(3)
-                if _implausible(rot, trans):
+                if _implausible(rot, trans, D.lost_mm, D.lost_deg):
                     lost.append(i)
                     rot, trans = np.eye(3), np.zeros(3)
             else:
@@ -665,15 +655,15 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
         r2 = float(1.0 - (params[idx, :3] - part - (params[idx, :3] - part).mean(axis=0)
                           ).var(axis=0).sum() / var) if var > 0 else 0.0
         eddy_r2.append(r2)
-        if r2 >= EDDY_R2:
+        if r2 >= D.eddy_explained_pct / 100.0:
             eddy[idx] = part
     params[:, :3] -= eddy
     disp = (np.abs(params[:, :3]).sum(axis=1)
-            + MO.HEAD_RADIUS_MM * np.abs(params[:, 3:]).sum(axis=1))  # mm from the first b0
+            + D.fd_radius_mm * np.abs(params[:, 3:]).sum(axis=1))  # mm from the first b0
     angles = np.degrees(np.linalg.norm(params[:, 3:], axis=1))
     # The b=0 volumes: high SNR, one contrast, the head's own track.
     b0_disp = disp[b0]
-    b0_fd = (MO.framewise_displacement(params[b0])[1:] if b0.size > 1
+    b0_fd = (MO.framewise_displacement(params[b0], D.fd_radius_mm)[1:] if b0.size > 1
              else np.zeros(0))
     # A volume far off: well outside the scan's own spread, and by more
     # than the noise of a single volume can explain.
@@ -681,8 +671,8 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     for idx in [b0] + [np.flatnonzero(shells == s) for s in shell_values]:
         if idx.size >= 4:
             z_disp[idx] = stats.robust_z(disp[idx])
-    far = np.flatnonzero((z_disp > 5.0) & (disp > FAR_MM))
-    fd = MO.framewise_displacement(params)
+    far = np.flatnonzero((z_disp > 5.0) & (disp > D.far_mm))
+    fd = MO.framewise_displacement(params, D.fd_radius_mm)
     fd_mean = float(np.nanmean(fd)) if np.isfinite(fd).any() else None
     metrics += [
         _metric("motion_b0", "Head motion across the b=0 volumes",
@@ -699,7 +689,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                 help="The largest change between consecutive b=0 volumes."),
         _metric("volumes_far", "Volumes far out of place", float(far.size), group="motion",
                 better="lower", fmt="{:.0f}",
-                help=f"Volumes displaced by more than {FAR_MM:g} mm from the first b=0 and "
+                help=f"Volumes displaced by more than {D.far_mm:g} mm from the first b=0 and "
                      "far outside the spread of their shell (robust z above 5): a movement "
                      "during that volume."),
         _metric("fd_mean", "Mean framewise displacement", fd_mean, unit="mm",
@@ -714,7 +704,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                 unit="mm", group="motion", better="lower", fmt="{:.2f}",
                 help="The largest shift of a diffusion-weighted volume explained by its "
                      "gradient direction (linear in its components, per shell), counted only "
-                     f"when the gradient explains at least {100 * EDDY_R2:.0f} % of the "
+                     f"when the gradient explains at least {D.eddy_explained_pct:.0f} % of the "
                      "shifts: eddy currents, which distortion correction removes."),
         _metric("rotation_max", "Largest rotation of the gradients", float(angles.max()),
                 unit="degrees", group="motion", better="lower", fmt="{:.2f}",
@@ -734,7 +724,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
             {"volume": int(lost[0]), "slice": None}))
     result.tracks["displacement"] = {
         "title": "Displacement from the first b=0", "unit": "mm", "ys": [disp],
-        "ticks": far.astype(float), "rule": FAR_MM, "colour": "accent",
+        "ticks": far.astype(float), "rule": D.far_mm, "colour": "accent",
         "summary": ((f"b=0 volumes up to {b0_disp.max():.2f} mm; " if b0_disp.size else "")
                     + (f"{far.size} volume{'s' if far.size != 1 else ''} far out of place"
                        if far.size else "no volume far out of place")),
@@ -773,7 +763,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                                     "last, from a fit through the b=0 volumes. A few percent "
                                     "is the scanner warming; it biases every diffusion "
                                     "measure unless corrected."))
-        if abs(drift) > 5.0:
+        if abs(drift) > D.drift_pct:
             result.findings.append(Finding(
                 "drift", "Signal drift", "warning",
                 f"The b=0 signal changes by {drift:+.1f} % over the scan: correct the drift "
@@ -813,7 +803,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                          "tissue, 3 in CSF at body temperature)."),
             _metric("negative_eigen", "Voxels with a negative eigenvalue",
                     100.0 * float(fit["negative"].mean()), unit="%", group="diffusion",
-                    better="lower", mriqc="fa_degenerate", fmt="{:.2f}",
+                    better="lower", fmt="{:.2f}",
                     help="Share of the brain where the fitted tensor is not physical: noise, "
                          "motion or artefacts larger than the diffusion contrast."),
         ]
@@ -823,7 +813,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                            ("md_median", "Median MD in the brain"),
                            ("negative_eigen", "Voxels with a negative eigenvalue")):
             metrics.append(_metric(key, title, None, why="A tensor needs six or more "
-                                   f"directions at b <= {DTI_MAX_B:g} and a b=0."))
+                                   f"directions at b <= {D.dti_max_b:g} and a b=0."))
     step("residuals", 5)
 
     # Per slice and volume: dropout, interleave, spikes.
@@ -841,7 +831,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
         # and bottom slices hold a sliver whose mean moves with every
         # tenth of a millimetre of motion, and read as dropouts.
         typical = float(np.median(counts[counts > 0])) if (counts > 0).any() else 0.0
-        judged = counts >= max(MIN_SLICE_VOXELS, EDGE_SLICE_SHARE * typical)
+        judged = counts >= max(MIN_SLICE_VOXELS, D.edge_slice_pct / 100.0 * typical)
         z = np.zeros_like(per_slice)
         groups = [np.flatnonzero(shells == s) for s in [0] + shell_values]
         for idx in groups:
@@ -851,7 +841,9 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
             z[:, idx] = stats.robust_z(block, axis=1)
         z[~judged] = 0.0
         typical = stats.nanmedian_rows(per_slice)
-        drop = (z < -DROPOUT_Z) & (per_slice - typical < -DROPOUT_DROP)
+        # Log ratios: losing a share p is log(1 - p) below the prediction.
+        loss = -float(np.log1p(-min(D.dropout_loss_pct, 99.0) / 100.0))
+        drop = (z < -D.dropout_z) & (per_slice - typical < -loss)
         drop &= judged[:, None]
         dropped = np.argwhere(drop)                              # (slice, volume)
         vols_drop = np.unique(dropped[:, 1]) if len(dropped) else np.empty(0, int)
@@ -881,7 +873,8 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
             for idx in groups:
                 if idx.size >= 4:
                     inter[idx] = stats.robust_z(diff[idx])
-            bad_inter = np.flatnonzero((np.abs(inter) > INTERLEAVE_Z) & (np.abs(diff) > 0.05))
+            bad_inter = np.flatnonzero((np.abs(inter) > D.interleave_z)
+                                       & (np.abs(diff) > 0.05))
         else:
             bad_inter = np.empty(0, int)
         metrics.append(_metric(
@@ -911,12 +904,12 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                 spread = np.median(np.abs(r - med), axis=1, keepdims=True) * stats.MAD_TO_SD
                 spread = np.maximum(spread, 0.05)
                 spike_count[idx] += np.count_nonzero(
-                    ((r - med) > SPIKE_Z * spread) & ((r - med) > 0.5), axis=0)
+                    ((r - med) > D.spike_z * spread) & ((r - med) > 0.5), axis=0)
         spike_ppm = spike_count / len(coords) * 1e6
         metrics.append(_metric(
             "spikes_ppm", "Spiking voxels", float(spike_ppm.mean()), unit="ppm",
             group="artefacts", better="lower", fmt="{:.1f}",
-            help=f"Voxels more than {SPIKE_Z:g} robust spreads (and 65 %) above the "
+            help=f"Voxels more than {D.spike_z:g} robust spreads (and 65 %) above the "
                  "tensor's prediction, against the same voxel in the shell's other "
                  "volumes, per million brain voxels per volume."))
         result.tracks["slices"] = {
@@ -938,7 +931,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                                    "colour": "warning",
                                    "help": "Voxels far above the tensor's prediction."}
         result.tracks["interleave"] = {"title": "Odd against even slices", "unit": "z",
-                                       "ys": [inter], "rule": INTERLEAVE_Z, "colour": "teal",
+                                       "ys": [inter], "rule": D.interleave_z, "colour": "teal",
                                        "ticks": bad_inter.astype(float),
                                        "help": "Odd slices minus even slices against the "
                                                "prediction, robust z within the shell."}
@@ -952,7 +945,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     step("slices", 6)
 
     # Neighbouring directions in q-space.
-    weighted = np.flatnonzero(bvals > B0_MAX)
+    weighted = np.flatnonzero(bvals > D.b0_max)
     if weighted.size >= 2:
         q = np.sqrt(bvals[weighted])[:, None] * bvecs[weighted]
         dist = np.minimum(np.linalg.norm(q[:, None] - q[None], axis=2),
@@ -1079,7 +1072,7 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     step("shells", 9)
 
     # Flipped or swapped b-vectors.
-    if flips and can_fit:
+    if D.check_flips and can_fit:
         fdown = MO.working_grid(zooms, series.shape, 4.0)
         small_brain = stats.block_mean(brain.astype(np.float32), fdown) > 0.5
         sc = np.argwhere(small_brain)
@@ -1090,7 +1083,8 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
                 ssig[:, i] = stats.block_mean(series.frame(i), fdown).ravel()[sflat]
             fc = flip_check(ssig, sc, small_brain.shape, bvals, bvecs, zooms * fdown, use)
             facts["flip_check"] = fc
-            if fc and not fc["stored_is_best"] and fc["best_score"] > FLIP_MARGIN * fc["stored_score"]:
+            margin = 1.0 + D.flip_margin_pct / 100.0
+            if fc and not fc["stored_is_best"] and fc["best_score"] > margin * fc["stored_score"]:
                 result.findings.append(Finding(
                     "bvec_flip", "The b-vectors may be flipped or swapped", "warning",
                     f"The tensor's directions are most continuous with the table "
@@ -1100,16 +1094,16 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     step("flips", 10)
 
     # Findings from motion.
-    if b0_disp.size and b0_disp.max() > MOTION_B0_MM:
+    if b0_disp.size and b0_disp.max() > D.motion_b0_mm:
         result.findings.append(Finding(
-            "motion", "Head motion", "warning" if b0_disp.max() < 3 * MOTION_B0_MM else "error",
+            "motion", "Head motion", "warning" if b0_disp.max() < 3 * D.motion_b0_mm else "error",
             f"The head moved up to {b0_disp.max():.1f} mm between the b=0 volumes.",
             {"volume": int(b0[int(np.argmax(b0_disp))]), "slice": None}))
     if far.size:
         result.findings.append(Finding(
             "far", "Volumes out of place", "warning" if far.size < 0.05 * series.n else "error",
             (f"{far.size} volumes sit" if far.size > 1 else "1 volume sits")
-            + f" far from the rest of their shell (more than {FAR_MM:g} mm): "
+            + f" far from the rest of their shell (more than {D.far_mm:g} mm): "
             + ("volumes " if far.size > 1 else "volume ") + ", ".join(str(v) for v in far[:10])
             + (" and more" if far.size > 10 else "") + ".",
             {"volume": int(far[0]), "slice": None}))
@@ -1135,16 +1129,15 @@ def check(series: Series, *, problems: Optional[list[str]] = None,
     return result
 
 
-def check_file(path, *, root=None, cancel=None, progress=None, flips: bool = True,
-               engine: str = "auto") -> QCResult:
+def check_file(path, *, root=None, cancel=None, progress=None,
+               config: Optional[QcConfig] = None) -> QCResult:
     """Read ``path``, its gradients and sidecar, and check it."""
     from .series import from_file
 
     series, problems = from_file(path, root)
-    return check(series, problems=problems, cancel=cancel, progress=progress, flips=flips,
-                 engine=engine)
+    return check(series, problems=problems, cancel=cancel, progress=progress, config=config)
 
 
-__all__ = ["B0_MAX", "check", "check_file", "check_table", "coherence", "coverage_gap_deg",
+__all__ = ["check", "check_file", "check_table", "coherence", "coverage_gap_deg",
            "design", "duplicates", "fit_tensor", "flip_check", "mppca_noise", "mppca_sigma",
            "predict", "shells_of", "world_directions"]

@@ -1732,7 +1732,8 @@ class VolumePresenter:
 
         tag = self._overlay_job({**look, "origin": f"qc:{which}"})
         self.viewer.loading_changed.emit(True, f"Computing the {TITLES[which].lower()}")
-        self.ctx.jobs.start(tag, self._generation, quality_overlay, src, which)
+        self.ctx.jobs.start(tag, self._generation, quality_overlay, src, which,
+                            config=self.qc_config())
         return True
 
     # ------------------------------------------------------------------
@@ -1848,6 +1849,12 @@ class VolumePresenter:
             self.apply_quality()
         self.viewer.refresh_actions()
 
+    def qc_config(self):
+        """The methods and thresholds of Settings > Quality control."""
+        from ....viz.settings import qc_config
+
+        return qc_config(self.ctx.settings)
+
     def _quality_kind(self) -> Optional[str]:
         from ....qc import live
 
@@ -1877,14 +1884,15 @@ class VolumePresenter:
             return False
         if again:
             live.forget(src)
-        got = live.cached(src)
+        got = live.cached(src, self.qc_config())
         if got is not None:
             self._quality_result = got
             self.show_quality(got)
             return True
         panel.set_busy(f"Checking the quality of {src.path.name}")
         sidecar = dict(self.bids.sidecar) if self.bids is not None else {}
-        self.ctx.jobs.start("quality", self._generation, live.result_for, src, sidecar)
+        self.ctx.jobs.start("quality", self._generation, live.result_for, src, sidecar,
+                            config=self.qc_config())
         return True
 
     def _follow_quality(self) -> None:
@@ -1901,7 +1909,7 @@ class VolumePresenter:
                 "No quality check for this image: it is for anatomical (T1w, T2w, FLAIR, "
                 "PDw, T2starw) and diffusion images."))
             return
-        got = live.cached(src)
+        got = live.cached(src, self.qc_config())
         if got is not None or self.ctx.settings.qc.on_open:
             self.check_quality()
         else:

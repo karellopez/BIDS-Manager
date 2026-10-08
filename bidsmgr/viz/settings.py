@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..qc.config import QcAnat, QcBold, QcConfig, QcDwi, QcMethods
 from .render3d import QUALITY_DEFAULT, QUALITY_MAX, QUALITY_MIN
 
 
@@ -181,7 +182,7 @@ class QcSettings(_Section):
     """Quality control in every viewer."""
 
     model_config = ConfigDict(extra="ignore", validate_assignment=True,
-                              title="Quality control (QC)")
+                              title="When QC runs")
 
     on_open: bool = Field(
         False, title="Run QC when a file opens",
@@ -279,6 +280,11 @@ class VizSettings(_Section):
     render: RenderSettings = Field(default_factory=RenderSettings)
     traces: TraceSettings = Field(default_factory=TraceSettings)
     qc: QcSettings = Field(default_factory=QcSettings)
+    #: The MRI quality checks (``bidsmgr.qc.config``): methods and thresholds.
+    qc_methods: QcMethods = Field(default_factory=QcMethods)
+    qc_bold: QcBold = Field(default_factory=QcBold)
+    qc_anat: QcAnat = Field(default_factory=QcAnat)
+    qc_dwi: QcDwi = Field(default_factory=QcDwi)
     meeg_qc: MeegQcSettings = Field(default_factory=MeegQcSettings)
     #: action id -> key sequences, overriding the defaults (empty list = unbound).
     keymap: dict[str, list[str]] = Field(default_factory=dict)
@@ -308,11 +314,19 @@ class VizSettings(_Section):
 
 
 #: The sections the generated Viewer page shows, in order.
-PAGE_SECTIONS = ("crosshair", "volume", "render", "traces", "qc", "meeg_qc")
+VIEWER_SECTIONS = ("crosshair", "volume", "render", "traces")
+#: The sections the generated Quality control page shows, in order.
+QC_SECTIONS = ("qc", "qc_methods", "qc_bold", "qc_anat", "qc_dwi", "meeg_qc")
+
+
+def qc_config(settings: VizSettings) -> QcConfig:
+    """The MRI quality checks' configuration, as the checks take it."""
+    return QcConfig(methods=settings.qc_methods, bold=settings.qc_bold,
+                    anat=settings.qc_anat, dwi=settings.qc_dwi)
 
 
 __all__ = [
-    "CrosshairSettings", "MeegQcSettings", "PAGE_SECTIONS", "QcSettings", "RenderSettings",
-    "TraceSettings",
-    "VizSettings", "VolumeSettings",
+    "CrosshairSettings", "MeegQcSettings", "QC_SECTIONS", "QcSettings", "RenderSettings",
+    "TraceSettings", "VIEWER_SECTIONS",
+    "VizSettings", "VolumeSettings", "qc_config",
 ]

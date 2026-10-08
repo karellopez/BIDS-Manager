@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("scipy")
 from scipy import ndimage  # noqa: E402
 
+from bidsmgr.qc.config import DEFAULT  # noqa: E402
 from bidsmgr.viz.compute import motion, qc  # noqa: E402
 from bidsmgr.viz.data.volume import array_volume  # noqa: E402
 
@@ -154,7 +155,8 @@ def test_a_spiked_volume_has_many_outlier_voxels() -> None:
     frac = qc.outlier_fraction(s["series"])
     assert int(np.nanargmax(frac)) == 17 and frac[17] > 0.5
     others = np.delete(frac, 17)
-    assert np.nanmax(others) < qc.OUTLIER_LIMIT, "drift or noise counted as outliers"
+    limit = DEFAULT.bold.outlier_limit_pct / 100.0
+    assert np.nanmax(others) < limit, "drift or noise counted as outliers"
 
 
 def test_a_spike_in_one_slice_is_found_with_its_slice() -> None:

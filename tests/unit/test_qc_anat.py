@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from bidsmgr.qc import anat
+from bidsmgr.qc.config import QcConfig, fast
 
 from tests.unit.qc_phantoms import anat_phantom
 
@@ -135,6 +136,6 @@ def test_the_check_of_a_file_reads_its_sidecar(tmp_path) -> None:
     data, affine = anat_phantom()
     path = save(data, affine, root / "sub-01" / "anat" / "sub-01_T1w.nii.gz",
                 {"DeidentificationMethod": ["mri_deface"]})
-    res = anat.check_file(path, engine="numpy")
+    res = anat.check_file(path, config=fast(QcConfig()))
     assert res.suffix == "T1w"
     assert res.facts["defaced"] and "mri_deface" in res.facts["defacing_record"]

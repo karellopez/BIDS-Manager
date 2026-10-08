@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from . import anat, report
+from .config import DEFAULT, QcConfig
 from .types import Finding, QCResult
 
 #: Datatypes the check knows.
@@ -55,7 +56,7 @@ def find_images(root: Path, *, datatypes: Iterable[str] = DATATYPES,
 
 
 def check_path(path: Path, root: Optional[Path] = None, *, cancel=None, progress=None,
-               flips: bool = True, engine: str = "auto") -> QCResult:
+               config: Optional[QcConfig] = None) -> QCResult:
     """The check ``path`` calls for; a result with an error finding when it
     cannot be read."""
     path = Path(path)
@@ -65,10 +66,10 @@ def check_path(path: Path, root: Optional[Path] = None, *, cancel=None, progress
             from . import dwi
 
             return dwi.check_file(path, root=root, cancel=cancel, progress=progress,
-                                  flips=flips, engine=engine)
+                                  config=config)
         if kind == "anat":
             return anat.check_file(path, root=root, cancel=cancel, progress=progress,
-                                   engine=engine)
+                                   config=config)
     except (OSError, ValueError, MemoryError) as exc:
         res = QCResult(path=str(path), kind=kind or "", suffix="")
         res.findings.append(Finding("unreadable", "Could not be checked", "error",
@@ -77,15 +78,15 @@ def check_path(path: Path, root: Optional[Path] = None, *, cancel=None, progress
     raise ValueError(f"{path.name}: no quality check for this kind of image")
 
 
-def _one(path: str, root: str, flips: bool, engine: str = "auto") -> dict:
-    """Worker: check and save one image, return its JSON."""
-    res = check_path(Path(path), Path(root), flips=flips, engine=engine)
+def _one(path: str, root: str, config: dict) -> dict:
+    """Worker (another process): check and save one image, return its JSON.
+    The configuration travels as plain data."""
+    res = check_path(Path(path), Path(root), config=QcConfig.model_validate(config))
     report.save(res, Path(root))
     return report.to_json(res, root=Path(root))
 
 
-def run(root: Path, paths: list[Path], *, jobs: int = 1, flips: bool = True,
-        engine: str = "auto",
+def run(root: Path, paths: list[Path], *, jobs: int = 1, config: Optional[QcConfig] = None,
         progress: Optional[Callable[[int, int, str], None]] = None,
         cancel: Optional[Callable[[], bool]] = None) -> list[dict]:
     """Check ``paths`` (``jobs`` processes), save each, write the group
@@ -93,6 +94,7 @@ def run(root: Path, paths: list[Path], *, jobs: int = 1, flips: bool = True,
     from joblib import Parallel, delayed
 
     root = Path(root)
+    plain = (config or DEFAULT).model_dump(mode="json")
     report.write_description(root)
     rows: list[dict] = []
     total = len(paths)
@@ -100,12 +102,12 @@ def run(root: Path, paths: list[Path], *, jobs: int = 1, flips: bool = True,
         for i, p in enumerate(paths):
             if cancel is not None and cancel():
                 break
-            rows.append(_one(str(p), str(root), flips, engine))
+            rows.append(_one(str(p), str(root), plain))
             if progress is not None:
                 progress(i + 1, total, Path(p).name)
     else:
         gen = Parallel(n_jobs=jobs, return_as="generator")(
-            delayed(_one)(str(p), str(root), flips, engine) for p in paths)
+            delayed(_one)(str(p), str(root), plain) for p in paths)
         for i, row in enumerate(gen):
             rows.append(row)
             if progress is not None:

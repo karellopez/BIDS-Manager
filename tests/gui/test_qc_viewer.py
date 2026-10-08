@@ -107,6 +107,38 @@ def test_check_quality_docks_the_panel_beside_the_views(qtbot, ds, no_gpu) -> No
     assert not p.quality_right.isVisible() and not viewer.action("qc.check").isChecked()
 
 
+def test_measures_explain_themselves_and_groups_fold(qtbot, ds, no_gpu) -> None:
+    """What a measure means is on hover and behind its info icon, never in
+    a box at the end of the table; a group folds away from its name."""
+    from bidsmgr.gui.viz.panels import explain_popup
+    from bidsmgr.gui.viz.panels.quality_panel import COL_INFO
+
+    viewer = _open(qtbot, _viewer(qtbot), ds / "sub-01" / "anat" / "sub-01_T1w.nii.gz", ds)
+    viewer.trigger("qc.check")
+    panel = _panel(qtbot, viewer)
+    t = panel.table
+    r = _measures(panel)["SNR in white matter"]
+    tip = t.item(r, 0).toolTip()
+    assert "white matter" in tip.lower() and "snr_wm" in tip and "info icon" in tip
+    assert not t.item(r, COL_INFO).icon().isNull()
+    assert not hasattr(panel, "description"), "the explanation box is back"
+    panel._on_cell(r, COL_INFO)
+    menu, label = explain_popup.last_shown()
+    text = label.text()
+    assert "How to read it" in text and "In this image" in text and "SNR in white matter" in text
+    menu.close()
+    # The group's own explanation, and folding.
+    head = next(i for i, e in enumerate(panel._rows) if isinstance(e, tuple) and e[1] == "noise")
+    panel._on_cell(head, COL_INFO)
+    assert "How to read it" in explain_popup.last_shown()[1].text()
+    explain_popup.last_shown()[0].close()
+    height = t.height()
+    panel._on_cell(head, 0)
+    assert t.isRowHidden(r) and t.height() < height
+    panel._on_cell(head, 0)
+    assert not t.isRowHidden(r) and t.height() == height
+
+
 def test_a_defaced_image_reports_its_air_as_not_measured(qtbot, ds, no_gpu) -> None:
     viewer = _open(qtbot, _viewer(qtbot), ds / "sub-02" / "anat" / "sub-02_T1w.nii.gz", ds)
     viewer.trigger("qc.check")

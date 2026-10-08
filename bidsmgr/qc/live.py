@@ -4,7 +4,9 @@ once and shared.
 The viewer asks twice for a diffusion series: its report (Check quality) and
 the plots under the series (QC plots). Both run on workers and may start
 together; the first computes, the second waits for it and gets the same
-result. A result is kept per file and number of volumes read.
+result. A result is kept per file, number of volumes read and
+configuration: changing a setting in Settings > Quality control computes
+it again.
 
 Qt-free.
 """
@@ -16,6 +18,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import anat, report
+from .config import DEFAULT, QcConfig
+from .config import key as config_key
 from .types import QCResult
 
 _LOCK = threading.Lock()
@@ -41,29 +45,33 @@ def kind_of(src, bids_ctx=None) -> Optional[str]:
     return None
 
 
-def _key(src) -> tuple:
-    return (str(src.path), int(getattr(src, "loaded_frames", 1)))
+def _key(src, config: Optional[QcConfig]) -> tuple:
+    return (str(src.path), int(getattr(src, "loaded_frames", 1)),
+            config_key(config or DEFAULT))
 
 
-def cached(src) -> Optional[QCResult]:
+def cached(src, config: Optional[QcConfig] = None) -> Optional[QCResult]:
     with _LOCK:
-        return _RESULTS.get(_key(src))
+        return _RESULTS.get(_key(src, config))
 
 
 def forget(src=None) -> None:
-    """Drop the cached result of ``src`` (all of them when None)."""
+    """Drop the cached results of ``src``, whatever their configuration
+    (all of them when None)."""
     with _LOCK:
         if src is None:
             _RESULTS.clear()
         else:
-            _RESULTS.pop(_key(src), None)
+            for k in [k for k in _RESULTS if k[0] == str(src.path)]:
+                _RESULTS.pop(k, None)
 
 
-def result_for(src, sidecar: Optional[dict] = None, *,
+def result_for(src, sidecar: Optional[dict] = None, *, config: Optional[QcConfig] = None,
                cancel: Optional[Callable[[], bool]] = None,
                progress: Optional[Callable[[int, int], None]] = None) -> QCResult:
-    """The check of ``src`` (a ``VolumeSource`` read whole), computed once."""
-    key = _key(src)
+    """The check of ``src`` (a ``VolumeSource`` read whole) with ``config``,
+    computed once."""
+    key = _key(src, config)
     with _LOCK:
         if key in _RESULTS:
             return _RESULTS[key]
@@ -78,7 +86,8 @@ def result_for(src, sidecar: Optional[dict] = None, *,
             from .series import from_source
 
             series, problems = from_source(src, sidecar)
-            res = dwi.check(series, problems=problems, cancel=cancel, progress=progress)
+            res = dwi.check(series, problems=problems, cancel=cancel, progress=progress,
+                            config=config)
         elif kind == "anat":
             import numpy as np
 
@@ -94,7 +103,7 @@ def result_for(src, sidecar: Optional[dict] = None, *,
                 header = None
             res = anat.check(data, src.affine, suffix=VB.suffix_of(Path(str(src.path)).name),
                              sidecar=sidecar or {}, path=str(src.path), header=header,
-                             cancel=cancel, progress=progress)
+                             cancel=cancel, progress=progress, config=config)
         else:
             raise ValueError("no quality check for this image")
         with _LOCK:

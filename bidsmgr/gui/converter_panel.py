@@ -1906,7 +1906,12 @@ class ConverterPanel(QWidget):
             return
         root, paths = self._quality_queue.pop(0)
         self.log_message.emit(f"Checking the quality of {len(paths)} images in {root.name}")
+        from ..viz.settings import qc_config
+        from .viz.bridge import SettingsHub
+
+        # The methods and thresholds of Settings > Quality control.
         worker = QualityWorker(root, paths, jobs=max(1, min(4, (os.cpu_count() or 2) // 2)),
+                               config=qc_config(SettingsHub.instance().settings),
                                parent=self)
         worker.progress.connect(
             lambda d, t, n: self.log_message.emit(f"Quality checked {d}/{t}: {n}"))

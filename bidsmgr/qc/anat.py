@@ -32,6 +32,7 @@ import numpy as np
 from . import masks as K
 from . import register as R
 from . import stats
+from .config import DEFAULT, QcConfig
 from .types import Finding, Metric, QCMap, QCResult
 
 #: Suffixes the check runs on, and those that get the tissue measures.
@@ -40,29 +41,12 @@ SUFFIXES = ("T1w", "T2w", "FLAIR", "PDw", "T2starw")
 TISSUE_SUFFIXES = ("T1w", "T2w")
 #: The tissue model segments these (checked by eye on T1w, T2w and FLAIR).
 TOOL_TISSUE_SUFFIXES = ("T1w", "T2w", "FLAIR")
-#: The working grid, mm.
-WORK_MM = 2.0
-#: A field of view thinner than this along an axis is a slab: it covers
-#: part of the brain on purpose, so the part outside is coverage, not a cut.
-SLAB_MM = 120.0
-#: Thinner than this, the template is not registered at all: a whole head
-#: cannot be placed in a few centimetres of it.
-NO_REGISTRATION_MM = 70.0
 #: Native voxels sampled for the tissue statistics.
 SAMPLE = 1_000_000
-#: Above this share of exactly-zero voxels in the face region, the image is
-#: taken as defaced (defacing blanks it; a scan never does).
-DEFACED_FACE_SHARE = 0.4
-#: Skull stripped when under this share of the shell 2 to 8 mm outside the
-#: brain holds signal. Measured: 0.01 on a stripped T1w, 0.73 to 0.89 on six
-#: intact heads (T1w defaced or not, FLAIR, T2w, T2starw). The volumes are
-#: no test: a defaced head cropped to the skull measured 1.2 x its brain.
-STRIPPED_SHELL_SHARE = 0.2
-#: The shell, in mm outside the brain.
+#: The shell outside the brain whose signal tells a skull-stripped image
+#: (``QcAnat.stripped_shell_pct``), in mm. The volumes are no test: a
+#: defaced head cropped to the skull measured 1.2 x its brain.
 SHELL_MM = (2.0, 8.0)
-#: Above this share of exactly-zero voxels in the air, the scanner (or a
-#: tool) blanked the background: no noise is left to measure.
-ZERO_AIR_SHARE = 0.5
 #: Dietrich's correction for the SD of magnitude noise in the air.
 RAYLEIGH = 0.6551364
 
@@ -100,7 +84,7 @@ METRICS: dict[str, tuple] = {
             "ringing, motion, wrap-around (Mortamet 2009). MRIQC's QI1 is always 0 "
             "through a bug; this is the measure as defined.", "{:.3f}"),
     "qi2": ("Noise fit (QI2)", "", "artefacts", "lower", "qi_2",
-            "How badly a chi distribution fits the tail of the air's noise "
+            "How badly a chi-squared distribution fits the tail of the air's noise "
             "(Mortamet 2009): structured signal in the air raises it.", "{:.4f}"),
     "ghost_ratio": ("Ghost to signal ratio", "", "artefacts", "lower", "",
                     "Mean signal where a ghost of the head falls along the phase-"
@@ -108,9 +92,9 @@ METRICS: dict[str, tuple] = {
                     "mean.", "{:.3f}"),
     "wm2max": ("White matter to maximum", "", "tissues", "", "wm2max",
                "The white matter's median over the 99.9th percentile of the non-zero "
-               "image (the ceiling MRIQC clips to): near 1 when a few bright voxels "
-               "(vessels, fat) do not dominate the range; MRIQC reads 0.6 to 0.8 as "
-               "usual.", "{:.2f}"),
+               "image (the ceiling MRIQC clips to): how much of the intensity range a "
+               "long tail of bright voxels (vessels, fat) takes up. MRIQC reads 0.6 to "
+               "0.8 as usual for a T1w.", "{:.2f}"),
     "inu_range": ("Intensity non-uniformity", "", "tissues", "lower", "",
                   "Spread of the bias field over the brain, 95th minus 5th "
                   "percentile of the field normalised to 1: 0 is uniform.", "{:.3f}"),
@@ -132,12 +116,12 @@ METRICS: dict[str, tuple] = {
                             "higher", "tpm_overlap_wm",
                             "Fuzzy Jaccard index of the white matter with the template's "
                             "map.", "{:.3f}"),
-    "fwhm_x": ("Smoothness along x", "mm", "coverage", "lower", "",
+    "fwhm_x": ("Smoothness along x", "mm", "coverage", "", "",
                "Full width at half maximum of the image's own correlation between "
                "neighbours (Forman 1995), inside the brain.", "{:.2f}"),
-    "fwhm_y": ("Smoothness along y", "mm", "coverage", "lower", "", "As along x.", "{:.2f}"),
-    "fwhm_z": ("Smoothness along z", "mm", "coverage", "lower", "", "As along x.", "{:.2f}"),
-    "fwhm_avg": ("Smoothness (mean)", "mm", "coverage", "lower", "",
+    "fwhm_y": ("Smoothness along y", "mm", "coverage", "", "", "As along x.", "{:.2f}"),
+    "fwhm_z": ("Smoothness along z", "mm", "coverage", "", "", "As along x.", "{:.2f}"),
+    "fwhm_avg": ("Smoothness (mean)", "mm", "coverage", "", "",
                  "The mean of the three. MRIQC reports it in voxels.", "{:.2f}"),
     "fov_cut": ("Brain outside the field of view", "%", "coverage", "lower", "",
                 "Share of the template's brain that falls outside the image after "
@@ -151,7 +135,7 @@ def _why_no_tissue(suffix: str, reg, thinnest: float) -> str:
     if suffix not in TOOL_TISSUE_SUFFIXES:
         return f"Tissue measures are made for T1w, T2w and FLAIR images; this is {suffix}."
     if suffix not in TISSUE_SUFFIXES:
-        return ("Without the tissue model (see the note on the engine), only T1w and T2w "
+        return ("Without the tissue model (see the note on the methods), only T1w and T2w "
                 "are segmented.")
     if reg is None:
         return f"A slab of {thinnest:.0f} mm: no template priors to segment with."
@@ -285,12 +269,13 @@ def shell_signal_share(image: np.ndarray, brain: np.ndarray, zooms) -> float:
 def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optional[dict] = None,
           path: str = "", header=None, cancel: Optional[Callable[[], bool]] = None,
           progress: Optional[Callable[[int, int], None]] = None,
-          engine: str = "auto") -> QCResult:
+          config: Optional[QcConfig] = None) -> QCResult:
     """The quality check of one anatomical image (``data``, 3-D).
 
-    ``engine`` "auto" uses the tools (``qc.tools``: mindgrab, robust_tissue,
-    niimath) when they can run on ``path`` and falls back to the numpy masks
-    otherwise; "numpy" never runs them."""
+    ``config`` (default: :data:`config.DEFAULT`) chooses the methods and
+    every threshold. A method that needs a tool (``qc.tools``: mindgrab,
+    robust_tissue, niimath) falls back to the fast one when the tool
+    cannot run on ``path``, and the result says why."""
     from scipy import ndimage as ndi
 
     from .templates import FACE_Y_MM, FACE_Z_MM, GLABELLA_Z_MM, template
@@ -298,6 +283,8 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
     t_start = time.perf_counter()
     timings: dict[str, float] = {}
     sidecar = sidecar or {}
+    cfg = config or DEFAULT
+    A, how = cfg.anat, cfg.methods
 
     def step(name: str, n: int) -> None:
         if cancel is not None and cancel():
@@ -315,9 +302,12 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
     result = QCResult(path=str(path), kind="anat", suffix=suffix)
     facts = result.facts
     facts.update(shape=list(data.shape), zooms=[round(float(z), 4) for z in zooms])
+    # What it was made with, so a saved result can be reproduced.
+    facts["config"] = {"methods": how.model_dump(mode="json"),
+                       "anat": A.model_dump(mode="json")}
 
     # 1. Zero fill and head, on the working grid.
-    factor = stats.block_factor(zooms, WORK_MM)
+    factor = stats.block_factor(zooms, A.work_mm)
     work = stats.block_mean(data, factor)
     waff = stats.block_affine(affine, factor)
     wzoom = zooms * factor
@@ -330,22 +320,31 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
 
     extent = np.asarray(data.shape[:3], dtype=float) * zooms
     thinnest = float(extent.min())
-    slab = thinnest < SLAB_MM
+    slab = thinnest < A.slab_mm
     facts.update(extent_mm=[round(float(e), 1) for e in extent], slab=bool(slab))
     engines = {"brain": "template (numpy)", "tissues": "", "registration": ""}
+    # Which methods want a tool, and whether the tools can run here; a
+    # method whose tool cannot falls back to the fast one, with a note.
+    want_brain = how.brain == "mindgrab"
+    want_tissue = how.tissues == "robust_tissue"
+    want_reg = how.registration == "niimath"
+    wanted = want_brain or want_tissue or want_reg
     tool_note = ""
     got: dict = {}
-    can_tools = engine != "numpy" and bool(path) and Path(path).is_file()
+    can_tools = wanted and bool(path) and Path(path).is_file()
     if can_tools:
         tool_note = T.unavailable_reason() or ""
         can_tools = not tool_note
-    elif engine != "numpy":
+    elif wanted:
         tool_note = "the image is not a file the tools can read"
-    tissue_suffix = suffix in (TOOL_TISSUE_SUFFIXES if can_tools else TISSUE_SUFFIXES)
-    if can_tools:
-        models = [T.BRAIN_MODEL] + ([T.TISSUE_MODEL] if tissue_suffix else [])
+    tissue_suffix = suffix in (TOOL_TISSUE_SUFFIXES if can_tools and want_tissue
+                               else TISSUE_SUFFIXES)
+    models = ([T.BRAIN_MODEL] if want_brain else []) + (
+        [T.TISSUE_MODEL] if want_tissue and tissue_suffix else [])
+    if can_tools and models:
         try:
-            got = T.run_models(Path(path), data.shape, affine, models, cancel=cancel)
+            got = T.run_models(Path(path), data.shape, affine, models, cancel=cancel,
+                               timeout=how.tool_timeout_s)
         except T.ToolFailed as exc:
             tool_note = str(exc)
     step("models", 2)
@@ -353,7 +352,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
     # 3. Registration, unless the field of view is too thin a slab for a
     # whole-head template to be placed in it.
     tpl = template()
-    if thinnest < NO_REGISTRATION_MM:
+    if thinnest < A.no_registration_mm:
         reg = None
         facts["registration"] = {"skipped": True, "uncertain": True}
         engines["registration"] = "skipped (thin slab)"
@@ -363,7 +362,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
         ty = np.full(work.shape, -np.inf, dtype=np.float32)
     else:
         reg = None
-        if can_tools:
+        if can_tools and want_reg:
             key = "T2w" if suffix in ("T2w", "FLAIR", "PDw", "T2starw") else "T1w"
             try:
                 if T.BRAIN_MODEL in got:
@@ -372,10 +371,12 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
                     # fit. Measured: Dice with mindgrab's brain 0.76 -> 0.94 on
                     # a defaced T1w, and never worse on five other images.
                     matrix = T.allineate_brain(data, affine, got[T.BRAIN_MODEL] > 0, key,
-                                               cancel=cancel)
+                                               cancel=cancel,
+                                               timeout=min(how.tool_timeout_s, 300))
                     stage = "niimath -allineate (brain to brain)"
                 else:
-                    matrix = T.allineate(Path(path), T.template_file(key), cancel=cancel)
+                    matrix = T.allineate(Path(path), T.template_file(key), cancel=cancel,
+                                         timeout=min(how.tool_timeout_s, 300))
                     stage = "niimath -allineate"
                 reg = R.Registration(matrix=matrix, correlation=float("nan"), stages=[stage])
                 engines["registration"] = stage
@@ -420,14 +421,14 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
         tb = brain_p > 0.5
         dice = 2.0 * float((tb & brain_w).sum()) / max(float(tb.sum() + brain_w.sum()), 1.0)
         facts["registration"]["dice_with_brain"] = round(dice, 3)
-        uncertain = dice < 0.8
+        uncertain = dice < A.min_registration_dice
     facts["registration"]["brain_in_head"] = round(brain_in_head, 3)
     facts["registration"]["uncertain"] = uncertain
     head_ml = float(head_w.sum() * np.prod(wzoom)) / 1000.0
     brain_ml = float(brain_w.sum() * np.prod(wzoom)) / 1000.0
     shell = shell_signal_share(work, brain_w, wzoom)
-    stripped = brain_ml > 0 and shell < STRIPPED_SHELL_SHARE
-    defaced = bool(record) or blank > DEFACED_FACE_SHARE
+    stripped = brain_ml > 0 and shell < A.stripped_shell_pct / 100.0
+    defaced = bool(record) or blank > A.defaced_face_pct / 100.0
     facts.update(defaced=defaced, defacing_record=record, face_blank_share=round(blank, 3),
                  skull_stripped=bool(stripped), shell_signal_share=round(shell, 3),
                  head_ml=round(head_ml, 1),
@@ -451,7 +452,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
         air_reason = "The image is skull stripped: there is no air to measure."
     elif candidate_air < 1000:
         air_reason = "The field of view leaves too little air around the head to measure."
-    elif zero_in_air > ZERO_AIR_SHARE:
+    elif zero_in_air > A.zero_air_pct / 100.0:
         air_reason = ("The air is set to zero (by the scanner or a tool): there is no "
                       "noise left in it to measure.")
     else:
@@ -489,7 +490,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
         if seg is not None:
             engines["tissues"] = "EM with template priors (numpy)"
     facts["engine"] = engines
-    if tool_note and engine != "numpy":
+    if tool_note:
         facts["tool_note"] = tool_note
     step("segmentation", 4)
 
@@ -610,7 +611,8 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
             metrics.append(_metric(f"fraction_{name}", float(vol[k]) / total))
         # At the image's own resolution: the share of brain voxels no class
         # holds for sure.
-        metrics.append(_metric("partial_volume", float(np.mean(post_n.max(axis=0) < 0.9))))
+        metrics.append(_metric("partial_volume", float(np.mean(
+            post_n.max(axis=0) < A.partial_volume_p))))
         for k, name in ((1, "gm"), (2, "wm")):
             if tpms is None:
                 metrics.append(_metric(f"template_overlap_{name}", None,
@@ -651,12 +653,12 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
 
     # 6. Findings.
     findings = result.findings
-    if engines["brain"] != "mindgrab" and engine != "numpy":
+    if tool_note:
         findings.append(Finding(
             "approximate", "Approximate masks", "info",
-            "The brain and tissues come from the fast numpy fallback, not from mindgrab and "
-            "the tissue model" + (f" ({tool_note})" if tool_note else "") + ": masks and "
-            "tissue measures are approximate.", "brain"))
+            f"The methods chosen in Settings could not run ({tool_note}): the fast "
+            "methods made the masks, so masks and tissue measures are approximate.",
+            "brain"))
     if uncertain:
         findings.append(Finding(
             "registration", "Registration to the template is uncertain", "warning",
@@ -673,7 +675,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
             f"The image covers {thinnest:.0f} mm along its thinnest axis: too little of the "
             "head to register the template to. The brain mask is the head's inside, and "
             "the field of view and the face are not checked.", "brain"))
-    elif fov["fraction"] > 0.005:
+    elif fov["fraction"] > A.fov_warning_pct / 100.0:
         sides = ", ".join(f"{k} {100 * v:.1f} %" for k, v in sorted(
             fov["sides"].items(), key=lambda kv: -kv[1]) if v >= 0.001)
         if slab:
@@ -686,7 +688,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
         else:
             findings.append(Finding(
                 "fov_cut", "The field of view cuts the brain",
-                "error" if fov["fraction"] > 0.03 else "warning",
+                "error" if fov["fraction"] > A.fov_error_pct / 100.0 else "warning",
                 f"{100 * fov['fraction']:.1f} % of the brain lies outside the image "
                 f"({sides}).", "brain"))
     if defaced:
@@ -705,7 +707,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
                                 "image holds the brain only.", None))
     if air_ok and art_w is not None:
         qi1 = result.value("qi1") or 0.0
-        if qi1 > 0.5:
+        if qi1 > A.air_artefact_pct:
             findings.append(Finding(
                 "air_artefacts", "Structured signal in the air", "warning",
                 f"{qi1:.2f} % of the air above the face holds signal well above its "
@@ -728,7 +730,7 @@ def check(data: np.ndarray, affine: np.ndarray, *, suffix: str, sidecar: Optiona
                     f"encoding axis ({'ijk'[pe]}) and {100 * share:.1f} % of the air at "
                     "both ends of that axis holds structured signal: part of the head "
                     "folded over.", "artefacts"))
-    if sat is not None and sat > 0.5:
+    if sat is not None and sat > A.saturation_pct:
         findings.append(Finding("saturation", "Saturated voxels", "warning",
                                 f"{sat:.2f} % of the head is at the image's maximum: "
                                 "bright tissue was clipped.", None))
@@ -819,7 +821,7 @@ def _header_findings(header) -> list[Finding]:
 
 
 def check_file(path: Path, *, root: Optional[Path] = None, cancel=None,
-               progress=None, engine: str = "auto") -> QCResult:
+               progress=None, config: Optional[QcConfig] = None) -> QCResult:
     """Read ``path`` and its sidecar (with inheritance) and check it."""
     import nibabel as nib
 
@@ -835,7 +837,7 @@ def check_file(path: Path, *, root: Optional[Path] = None, cancel=None,
     suffix = VB.suffix_of(path.name)
     return check(np.asarray(data, dtype=np.float32), img.affine, suffix=suffix,
                  sidecar=sidecar, path=str(path), header=img.header, cancel=cancel,
-                 progress=progress, engine=engine)
+                 progress=progress, config=config)
 
 
 __all__ = ["METRICS", "SUFFIXES", "TISSUE_SUFFIXES", "check", "check_file", "defacing_record"]

@@ -241,6 +241,67 @@ class TestQcTracesAndZoom:
         assert g.tracks.card("rotation").track["legend"] == ["pitch", "roll", "yaw"]
         assert g.tracks.card("translation").track["legend"] == ["x", "y", "z"]
 
+    def test_plots_being_computed_show_a_spinner(self, qtbot, run, monkeypatch):
+        """While the worker computes, each plot asked for is a card with a
+        spinner and its progress, where the plot will be."""
+        import threading
+
+        from bidsmgr.gui.viz.canvases import graph as G
+
+        gate = threading.Event()
+        real = G.qc_for_graph
+
+        def slow(*args, **kwargs):
+            gate.wait(10)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(G, "qc_for_graph", slow)
+        v, g = _graph(qtbot, run, _bold(run))
+        v.run("graph.set", qc=True, qc_rows=["global", "dvars"])
+        v.qstore.flush()
+        qtbot.waitUntil(lambda: g.pending_tracks() == ["global", "dvars"], timeout=5000)
+        card = g.tracks.card("global")
+        assert card.spinner.is_busy() and "Computing" in card.readout.text()
+        assert g.shown_tracks() == [], "a card being computed is not a plot yet"
+        gate.set()
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == ["global", "dvars"],
+                        timeout=20_000)
+        assert g.pending_tracks() == [] and not g.tracks.card("global").spinner.is_busy()
+
+    def test_every_plot_explains_itself(self, qtbot, run):
+        from bidsmgr.gui.viz.panels import explain_popup
+
+        v, g = _graph(qtbot, run, _bold(run))
+        v.run("graph.set", qc=True, qc_rows=["fd", "dvars"])
+        v.qstore.flush()
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == ["fd", "dvars"],
+                        timeout=20_000)
+        card = g.tracks.card("fd")
+        assert card.track["explain"] == "plot.bold.fd" and card.info.isVisibleTo(card)
+        assert "info icon" in card.toolTip()
+        card.info.click()
+        menu, label = explain_popup.last_shown()
+        text = label.text()
+        assert "How to read it" in text and "In this image" in text
+        menu.close()
+
+    def test_a_changed_threshold_redraws_the_plots(self, qtbot, run):
+        from bidsmgr.gui.viz.bridge import SettingsHub
+
+        v, g = _graph(qtbot, run, _bold(run))
+        v.run("graph.set", qc=True, qc_rows=["fd"])
+        v.qstore.flush()
+        qtbot.waitUntil(lambda: [t["id"] for t in g.shown_tracks()] == ["fd"], timeout=20_000)
+        assert g.tracks.card("fd").track["rule"] == 0.5
+        hub = SettingsHub.instance()
+        try:
+            hub.update(lambda s: setattr(s.qc_bold, "fd_threshold_mm", 0.2))
+            qtbot.waitUntil(lambda: g.tracks.card("fd") is not None
+                            and g.tracks.card("fd").track.get("rule") == 0.2, timeout=20_000)
+            assert "above 0.2 mm" in g.tracks.card("fd").track["summary"]
+        finally:
+            hub.update(lambda s: setattr(s.qc_bold, "fd_threshold_mm", 0.5))
+
     def test_rows_are_chosen_and_computed_only_when_shown(self, qtbot, run):
         v, g = _graph(qtbot, run, _bold(run))
         v.run("graph.set", qc=True, qc_rows=["global"])

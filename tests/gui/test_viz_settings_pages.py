@@ -23,7 +23,7 @@ from bidsmgr.gui.viz import Viewer  # noqa: E402
 from bidsmgr.gui.viz.bridge import SettingsHub  # noqa: E402
 from bidsmgr.gui.viz.settings_pages import ShortcutsPage, ViewerSettingsPage  # noqa: E402
 from bidsmgr.viz import keynames  # noqa: E402
-from bidsmgr.viz.settings import PAGE_SECTIONS, VizSettings  # noqa: E402
+from bidsmgr.viz.settings import VIEWER_SECTIONS, VizSettings  # noqa: E402
 
 pytestmark = pytest.mark.gui
 
@@ -58,7 +58,7 @@ def _keys(page: ShortcutsPage, title: str) -> str:
 def test_every_scalar_preference_has_a_control(qtbot) -> None:
     page = ViewerSettingsPage()
     qtbot.addWidget(page)
-    for section in PAGE_SECTIONS:
+    for section in VIEWER_SECTIONS:
         model = VizSettings.model_fields[section].annotation
         for name, info in model.model_fields.items():
             # Collections have their own editors (the keymap page, the QC

@@ -22,6 +22,8 @@ from typing import Callable, Literal, Optional
 
 import numpy as np
 
+from ...qc.config import DEFAULT
+
 Map = Literal["mean", "sd", "tsnr"]
 
 #: What each map is called on screen.
@@ -33,12 +35,13 @@ class Cancelled(Exception):
     pass
 
 
-def non_steady_state(src, *, cancel: Optional[Callable[[], bool]] = None) -> int:
+def non_steady_state(src, *, z: float = DEFAULT.bold.nonsteady_z,
+                     cancel: Optional[Callable[[], bool]] = None) -> int:
     """How many volumes at the START are non-steady-state (dummy scans not
     discarded by the scanner): they are much brighter than the rest, and
     left in they dominate every statistic. Counted from the mean of a
     central block of each of the first frames against the median of the
-    run: brighter by more than 5 robust deviations. 0 when none."""
+    run: brighter by more than ``z`` robust deviations. 0 when none."""
     n = src.loaded_frames
     if n < 8:
         return 0
@@ -55,7 +58,7 @@ def non_steady_state(src, *, cancel: Optional[Callable[[], bool]] = None) -> int
     med = float(np.median(rest))
     mad = float(np.median(np.abs(rest - med))) * 1.4826 or 1e-9
     k = 0
-    while k < min(10, probe) and means[k] > med + 5.0 * mad:
+    while k < min(10, probe) and means[k] > med + z * mad:
         k += 1
     return k
 
@@ -123,7 +126,8 @@ def brain_mask(mean: np.ndarray) -> np.ndarray:
     return mean > 0.2 * top
 
 
-def quality_map(src, which: Map, *, skip: Optional[int] = None, detrend: int = 2,
+def quality_map(src, which: Map, *, skip: Optional[int] = None,
+                detrend: int = DEFAULT.bold.detrend,
                 cancel: Optional[Callable[[], bool]] = None,
                 progress: Optional[Callable[[int, int], None]] = None
                 ) -> tuple[np.ndarray, dict]:
@@ -146,15 +150,12 @@ def quality_map(src, which: Map, *, skip: Optional[int] = None, detrend: int = 2
     return np.where(mask, out, np.nan).astype(np.float32), facts
 
 
-#: Under this temporal SNR a voxel's signal is hard to tell from its noise
-#: in a single run (a reading aid, not a pass mark: see HELP).
-TSNR_LOW = 20.0
-
-
-def summary(values: np.ndarray, which: Map = "tsnr") -> dict:
+def summary(values: np.ndarray, which: Map = "tsnr", *,
+            tsnr_low: float = DEFAULT.bold.tsnr_low) -> dict:
     """The numbers a map is read by, over the head: ``median``, ``q1``,
     ``q3``, ``p5``, ``p95``, ``voxels`` and, for temporal SNR, the share of
-    the head ``below`` :data:`TSNR_LOW`."""
+    the head ``below`` ``tsnr_low`` (a reading aid, not a pass mark: see
+    HELP)."""
     v = np.asarray(values, dtype=np.float64)
     v = v[np.isfinite(v)]
     if v.size == 0:
@@ -162,7 +163,8 @@ def summary(values: np.ndarray, which: Map = "tsnr") -> dict:
     p5, q1, med, q3, p95 = (float(x) for x in np.percentile(v, (5, 25, 50, 75, 95)))
     out = {"voxels": int(v.size), "p5": p5, "q1": q1, "median": med, "q3": q3, "p95": p95}
     if which == "tsnr":
-        out["below"] = float(np.mean(v < TSNR_LOW))
+        out["below"] = float(np.mean(v < tsnr_low))
+        out["low"] = float(tsnr_low)
     return out
 
 
@@ -183,10 +185,11 @@ HELP: dict[str, str] = {
         "slices (slice-wise motion or spikes)."),
     "sd": (
         "Standard deviation through the run, after slow drift is removed, in "
-        "the scanner's units. Bright means the signal moves: expected in "
-        "vessels and ventricles, a warning as a rim at the brain's edge "
-        "(motion) or as copies of the head outside it along the phase-encode "
-        "direction (ghosting)."),
+        "the scanner's units, inside the head. Bright means the signal moves: "
+        "expected in vessels and ventricles, a warning as a rim at the brain's "
+        "edge (motion) or as a band or a faint copy of the head across the brain "
+        "along the phase-encode direction (ghosting). Ghosts outside the head are "
+        "not shown: the map is drawn only where the mean image is bright."),
     "mean": (
         "Mean through the run. Where it is dark inside the head, signal is "
         "lost (susceptibility dropout near the sinuses and ear canals); the "
@@ -202,7 +205,7 @@ def describe_summary(stats: dict, facts: dict, which: Map) -> str:
     text = (f"median {stats['median']:.3g} (middle half {stats['q1']:.3g} to "
             f"{stats['q3']:.3g}) over {stats['voxels']:,} voxels")
     if which == "tsnr" and "below" in stats:
-        text += f"; {stats['below'] * 100:.0f} % below {TSNR_LOW:g}"
+        text += f"; {stats['below'] * 100:.0f} % below {stats.get('low', 20.0):g}"
     if facts:
         text += f"; {facts.get('volumes', '?')} volumes"
         if facts.get("skipped"):
@@ -212,13 +215,15 @@ def describe_summary(stats: dict, facts: dict, which: Map) -> str:
     return text
 
 
-def per_volume(src, *, skip: int = 0, cancel: Optional[Callable[[], bool]] = None,
+def per_volume(src, *, skip: int = 0, fence_iqr: float = DEFAULT.bold.dvars_fence_iqr,
+               cancel: Optional[Callable[[], bool]] = None,
                progress: Optional[Callable[[int, int], None]] = None) -> dict:
     """What each VOLUME looks like, over the head: ``global`` (the mean
     signal), ``dvars`` (the root mean square change from the previous
     volume, in percent of the head's mean: Power 2012), and ``flagged``,
     the volumes whose DVARS is above the upper box-plot fence (75th
-    percentile plus 1.5 interquartile ranges, FSL's default). Cheap: two
+    percentile plus ``fence_iqr`` interquartile ranges, 1.5 being FSL's
+    default). Cheap: two
     passes over frames already in memory. Volume 0 has no DVARS (NaN)."""
     n = src.loaded_frames
     if n < 3:
@@ -246,7 +251,7 @@ def per_volume(src, *, skip: int = 0, cancel: Optional[Callable[[], bool]] = Non
     valid = valid[np.isfinite(valid)]
     if valid.size:
         q1, q3 = np.percentile(valid, (25, 75))
-        fence = float(q3 + 1.5 * (q3 - q1))
+        fence = float(q3 + fence_iqr * (q3 - q1))
     else:
         fence = float("inf")
     flagged = np.flatnonzero(np.isfinite(dvars_pct) & (dvars_pct > fence)
@@ -280,14 +285,19 @@ QUANTITY: dict[str, str] = {"mean": "signal (a.u.)", "sd": "SD (a.u.)",
                             "tsnr": "tSNR (mean / SD)"}
 
 
-def quality_overlay(src, which: Map, *, cancel=None, progress=None):
-    """The map as an :class:`~bidsmgr.viz.overlays.Overlay` over ``src``."""
+def quality_overlay(src, which: Map, *, config=None, cancel=None, progress=None):
+    """The map as an :class:`~bidsmgr.viz.overlays.Overlay` over ``src``,
+    with the BOLD settings of ``config`` (a ``QcConfig``)."""
     from ..data.volume import array_volume
     from ..overlays import Overlay
 
-    values, facts = quality_map(src, which, cancel=cancel, progress=progress)
+    bold = (config or DEFAULT).bold
+    skip = non_steady_state(src, z=bold.nonsteady_z, cancel=cancel) \
+        if bold.skip_nonsteady else 0
+    values, facts = quality_map(src, which, skip=skip, detrend=bold.detrend, cancel=cancel,
+                                progress=progress)
     vol = array_volume(values, src.affine, path=src.path, name=TITLES[which])
-    stats = summary(values, which)
+    stats = summary(values, which, tsnr_low=bold.tsnr_low)
     display = display_for(which, values)
     vol.quantity = QUANTITY[which]
     vol.notes = {"qc": which, "stats": stats, "facts": facts, "window": display.window,
@@ -310,12 +320,14 @@ QC_ROWS: tuple[tuple[str, str, str], ...] = (
      "rotations as arcs on a 50 mm sphere. From fMRIPrep's confounds when the "
      "run has them, else estimated here."),
     ("translation", "Translation (x, y, z)",
-     "Where the head is, in mm, along x (left-right), y (back-front) and z "
-     "(down-up), relative to the reference volume."),
+     "Where the head is, in mm, along the image's three axes, relative to the "
+     "reference volume: left-right, back-front and down-up for an axial "
+     "acquisition, other directions for a tilted or sagittal one."),
     ("rotation", "Rotation (pitch, roll, yaw)",
-     "How the head is turned, in degrees: pitch about the left-right axis "
-     "(nodding), roll about the back-front axis (tilting to a shoulder), yaw "
-     "about the vertical axis (shaking the head)."),
+     "How the head is turned, in degrees, about the image's three axes: for an "
+     "axial acquisition pitch is about the left-right axis (nodding), roll about "
+     "the back-front axis (tilting to a shoulder) and yaw about the vertical axis "
+     "(shaking the head)."),
     ("dvars", "DVARS",
      "How much the whole image changes from one volume to the next, with the "
      "volumes above the box-plot fence marked."),
@@ -368,18 +380,15 @@ DWI_DEFAULT_ROWS = ("displacement", "slices", "b0_signal", "spikes")
 QC_ROW_IDS = tuple(dict.fromkeys([r[0] for r in QC_ROWS] + [r[0] for r in DWI_QC_ROWS]))
 BOLD_ROW_IDS = tuple(r[0] for r in QC_ROWS)
 DWI_ROW_IDS = tuple(r[0] for r in DWI_QC_ROWS)
-#: Volumes with more than this share of outlier voxels are worth a look
-#: (afni_proc.py's default censoring limit).
-OUTLIER_LIMIT = 0.05
-#: A slice this many robust standard deviations from its own course is a spike.
-SPIKE_Z = 6.0
-#: Voxels sampled for the outlier count and the carpet.
-SAMPLE_VOXELS = 8000
+# The share of outlier voxels worth a look (afni_proc.py's 5 %), the slice
+# spike threshold and the voxels sampled are settings:
+# ``bidsmgr.qc.config.QcBold``.
 #: Rows the carpet is drawn with (voxels are averaged in groups).
 CARPET_ROWS = 240
 
 
-def sample_series(src, *, skip: int = 0, voxels: int = SAMPLE_VOXELS, slice_axis: int = 2,
+def sample_series(src, *, skip: int = 0, voxels: int = DEFAULT.bold.sample_voxels,
+                  slice_axis: int = 2,
                   seed: int = 0, cancel: Optional[Callable[[], bool]] = None,
                   progress: Optional[Callable[[int, int], None]] = None) -> dict:
     """One pass over the frames: ``series`` (frames x voxels, a fixed random
@@ -455,7 +464,8 @@ def outlier_fraction(series: np.ndarray, *, skip: int = 0) -> np.ndarray:
     return out
 
 
-def slice_spikes(slice_means: np.ndarray, *, skip: int = 0, z: float = SPIKE_Z) -> dict:
+def slice_spikes(slice_means: np.ndarray, *, skip: int = 0,
+                 z: float = DEFAULT.bold.spike_z) -> dict:
     """Volumes where a slice departs from its own course, beyond what the
     volume as a whole did (a global change, additive or a scaling, is not a
     spike): ``score`` (the
@@ -507,8 +517,8 @@ def carpet(series: np.ndarray, depth: np.ndarray, *, skip: int = 0,
 
 
 __all__ = ["BOLD_ROW_IDS", "CARPET_ROWS", "Cancelled", "DWI_DEFAULT_ROWS", "DWI_QC_ROWS",
-           "DWI_ROW_IDS", "HELP", "Map", "OUTLIER_LIMIT", "QC_ROWS",
-           "QC_ROW_IDS", "QUANTITY", "SAMPLE_VOXELS", "SPIKE_Z", "TITLES", "TSNR_LOW",
+           "DWI_ROW_IDS", "HELP", "Map", "QC_ROWS",
+           "QC_ROW_IDS", "QUANTITY", "TITLES",
            "brain_mask", "carpet", "describe_summary", "detrend", "display_for",
            "non_steady_state", "outlier_fraction", "per_volume", "quality_map",
            "quality_overlay", "sample_series", "series_moments", "slice_spikes", "summary"]

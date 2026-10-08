@@ -1,10 +1,13 @@
-"""The viewer's two Settings pages: Viewer, and Viewer shortcuts.
+"""The viewer's Settings pages: Viewer, Quality control, and Viewer shortcuts.
 
-**Viewer** is GENERATED from :mod:`bidsmgr.viz.settings`: every field of the
-sections in ``PAGE_SECTIONS`` becomes a control chosen by its type (a check
-box, a choice, a number with its range and unit, a colour, a colour map),
-titled and explained by the field's own metadata. A preference added to the
-model appears here with no widget code.
+**Viewer** and **Quality control** are GENERATED from
+:mod:`bidsmgr.viz.settings` (``VIEWER_SECTIONS``, ``QC_SECTIONS``; the MRI
+quality checks' own model is :mod:`bidsmgr.qc.config`): every field becomes
+a control chosen by its type (a check box, a choice, a number with its
+range and unit, a colour, a colour map), titled and explained by the
+field's own metadata. A preference added to the model appears here with no
+widget code. Each group has its own Restore defaults, and a field whose
+hint names ``enabled_by`` is enabled only while that switch is on.
 
 **Viewer shortcuts** edits the keyboard map (record a key, add a second one,
 unbind, reset one or all, import and export as JSON, conflicts shown as they
@@ -34,7 +37,7 @@ from PyQt6.QtWidgets import (
 from ...viz import actions as A
 from ...viz import inputmap, keynames
 from ...viz.compute import colormaps
-from ...viz.settings import PAGE_SECTIONS, VizSettings
+from ...viz.settings import QC_SECTIONS, VIEWER_SECTIONS, VizSettings
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +106,6 @@ def _control_for(field_info) -> Optional[_Control]:
         return _Control(w, w.isChecked, lambda v, w=w: w.setChecked(bool(v)))
     if origin is typing.Literal:
         w = QComboBox()
-        w.setObjectName("ent-input")
         labels = extra.get("labels", {})
         for value in typing.get_args(annotation):
             w.addItem(labels.get(value, str(value).capitalize()), value)
@@ -131,7 +133,6 @@ def _control_for(field_info) -> Optional[_Control]:
         return _Control(holder, button.value, button.set_value)
     if kind == "colormap":
         w = QComboBox()
-        w.setObjectName("ent-input")
         w.addItems(colormaps.names())
         return _Control(w, w.currentText, lambda v, w=w: w.setCurrentText(str(v)))
     if annotation in (int, float):
@@ -158,61 +159,117 @@ def _control_for(field_info) -> Optional[_Control]:
     return None
 
 
-#: Label column width on the Viewer page, so every group lines up.
-_LABEL_WIDTH = 200
+class GeneratedSettingsPage(QWidget):
+    """Every field of ``sections`` (of :class:`VizSettings`), one group
+    each, generated from the model. Rows wrap (the label above its field)
+    when the page is narrow, so nothing here sets a width the dialog cannot
+    shrink below."""
 
-
-class ViewerSettingsPage(QWidget):
-    """Every viewer preference, generated from the settings model."""
-
-    def __init__(self, parent=None) -> None:
+    def __init__(self, sections: tuple[str, ...], *, hint: str = "", parent=None) -> None:
         super().__init__(parent)
+        self._sections = tuple(sections)
         self._controls: dict[tuple[str, str], _Control] = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
+        scroll.setObjectName("settings-scroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body = QWidget()
         lay = QVBoxLayout(body)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(10)
-        hint = QLabel(
-            "How images and signals open and look in every viewer (the Editor, "
-            "comparisons, defacing previews). Saved changes reach open viewers "
-            "at once."
-        )
-        hint.setObjectName("dlg-hint")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
-        for section in PAGE_SECTIONS:
-            model_cls = VizSettings.model_fields[section].annotation
-            box = QGroupBox(model_cls.model_config.get("title", section.capitalize()))
-            form = QFormLayout(box)
-            # Fields keep their natural size (a spin box stretched across the
-            # page puts its number and its arrows a window apart), and every
-            # group's labels share one width so the columns line up.
-            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            for name, info in model_cls.model_fields.items():
-                control = _control_for(info)
-                if control is None:
-                    continue
-                if isinstance(control.widget, QComboBox):
-                    control.widget.setMinimumWidth(220)
-                label = QLabel(info.title or name)
-                label.setMinimumWidth(_LABEL_WIDTH)
-                if info.description:
-                    label.setToolTip(info.description)
-                    control.widget.setToolTip(info.description)
-                control.widget.setProperty("viz_setting", f"{section}.{name}")
-                form.addRow(label, control.widget)
-                self._controls[(section, name)] = control
-            lay.addWidget(box)
-        lay.addWidget(self._build_memory_box())
+        self.body_layout = lay
+        if hint:
+            label = QLabel(hint)
+            label.setObjectName("dlg-hint")
+            label.setWordWrap(True)
+            lay.addWidget(label)
+        for section in self._sections:
+            lay.addWidget(self._build_section(section))
+        self.extend(lay)
         lay.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll)
+
+    def extend(self, lay: QVBoxLayout) -> None:
+        """Add a page's own groups after the generated ones."""
+
+    def _build_section(self, section: str) -> QWidget:
+        model_cls = VizSettings.model_fields[section].annotation
+        box = QGroupBox(model_cls.model_config.get("title", section.capitalize()))
+        form = QFormLayout(box)
+        # Fields keep their natural size (a spin box stretched across the
+        # page puts its number and its arrows a window apart); a row too wide
+        # for the page puts its field under its label.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        switches: dict[str, QCheckBox] = {}
+        for name, info in model_cls.model_fields.items():
+            control = _control_for(info)
+            if control is None:
+                continue
+            label = QLabel(info.title or name)
+            if info.description:
+                label.setToolTip(info.description)
+                control.widget.setToolTip(info.description)
+            control.widget.setProperty("viz_setting", f"{section}.{name}")
+            form.addRow(label, control.widget)
+            self._controls[(section, name)] = control
+            if isinstance(control.widget, QCheckBox):
+                switches[name] = control.widget
+            parent = (info.json_schema_extra or {}).get("enabled_by")
+            if parent in switches:
+                switch = switches[parent]
+                for w in (label, control.widget):
+                    switch.toggled.connect(w.setEnabled)
+        # This group alone back to its defaults (not saved until Save).
+        reset = QPushButton("Restore defaults")
+        reset.setObjectName("tb-btn")
+        reset.setToolTip(f"Set the {box.title().lower()} fields back to their defaults "
+                         "(saved with Save)")
+        reset.clicked.connect(lambda _c=False, sec=section: self.restore_section(sec))
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(reset)
+        form.addRow(row)
+        return box
+
+    def restore_section(self, section: str) -> None:
+        """``section``'s controls back to the model's defaults."""
+        defaults = VizSettings.model_fields[section].annotation()
+        for (sec, name), control in self._controls.items():
+            if sec == section:
+                control.put(getattr(defaults, name))
+
+    def load(self, settings: VizSettings) -> None:
+        for (section, name), control in self._controls.items():
+            control.put(getattr(getattr(settings, section), name))
+
+    def apply_to(self, settings: VizSettings) -> None:
+        """Write the controls into ``settings`` (a copy the dialog owns)."""
+        for (section, name), control in self._controls.items():
+            setattr(getattr(settings, section), name, control.get())
+
+    def control(self, path: str) -> Optional[QWidget]:
+        """The widget for ``section.field`` (tests)."""
+        section, name = path.split(".", 1)
+        found = self._controls.get((section, name))
+        return found.widget if found else None
+
+
+class ViewerSettingsPage(GeneratedSettingsPage):
+    """Every viewer preference, generated from the settings model."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(
+            VIEWER_SECTIONS,
+            hint="Every viewer follows these: the Editor's, comparisons, defacing "
+                 "previews. Saved changes reach open viewers at once.", parent=parent)
+
+    def extend(self, lay: QVBoxLayout) -> None:
+        lay.addWidget(self._build_memory_box())
 
     def _build_memory_box(self) -> QWidget:
         """Each kind of image remembers its own layout, and panels their
@@ -268,23 +325,48 @@ class ViewerSettingsPage(QWidget):
     forget_layouts = False
 
     def load(self, settings: VizSettings) -> None:
-        for (section, name), control in self._controls.items():
-            control.put(getattr(getattr(settings, section), name))
+        super().load(settings)
         from ...viz import memory
 
         self.forget_layouts = False
         self._show_memory(memory.remembered_count(settings))
 
-    def apply_to(self, settings: VizSettings) -> None:
-        """Write the controls into ``settings`` (a copy the dialog owns)."""
-        for (section, name), control in self._controls.items():
-            setattr(getattr(settings, section), name, control.get())
 
-    def control(self, path: str) -> Optional[QWidget]:
-        """The widget for ``section.field`` (tests)."""
-        section, name = path.split(".", 1)
-        found = self._controls.get((section, name))
-        return found.widget if found else None
+class QualitySettingsPage(GeneratedSettingsPage):
+    """How the quality checks run: when, with which methods, and every
+    threshold of the MRI checks (BOLD, anatomical, diffusion) and of the
+    MEG and EEG check."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(
+            QC_SECTIONS,
+            hint="The viewer, the Editor's Quality check and the post-convert step all use "
+                 "these; bidsmgr-qc reads the same settings from a JSON file "
+                 "(--print-config writes one). Each result records the settings it was "
+                 "made with, and a changed setting recomputes what is on screen. Hover a "
+                 "setting for what it does.", parent=parent)
+
+    def extend(self, lay: QVBoxLayout) -> None:
+        box = QGroupBox("Tools on this computer")
+        v = QVBoxLayout(box)
+        self.tools_text = QLabel(self._tools_text())
+        self.tools_text.setObjectName("dlg-hint")
+        self.tools_text.setWordWrap(True)
+        v.addWidget(self.tools_text)
+        # After the methods, which it qualifies.
+        lay.insertWidget(min(3, lay.count()), box)
+
+    @staticmethod
+    def _tools_text() -> str:
+        from ...qc import tools
+
+        why = tools.unavailable_reason()
+        if why:
+            return ("The networks and niimath cannot run here (" + why + "): every check "
+                    "uses the fast methods, whatever is chosen above, and says so in its "
+                    "result.")
+        return ("mindgrab, robust_tissue (brainchop) and niimath can run here. A network "
+                "is downloaded the first time it is used.")
 
 
 # ---------------------------------------------------------------------------

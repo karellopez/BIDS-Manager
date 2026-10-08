@@ -149,7 +149,7 @@ def is_diffusion(src) -> bool:
     return bvals is not None and len(bvals) == int(getattr(src, "loaded_frames", 0))
 
 
-def dwi_qc_for_graph(src, rows=None, path=None, root=None, *, cancel=None,
+def dwi_qc_for_graph(src, rows=None, path=None, root=None, *, config=None, cancel=None,
                      progress=None) -> dict:
     """Worker side, for a diffusion series: the rows asked for, from the
     diffusion check (``bidsmgr.qc.dwi``), computed once and shared with the
@@ -159,7 +159,7 @@ def dwi_qc_for_graph(src, rows=None, path=None, root=None, *, cancel=None,
     from ....viz.compute import qc
 
     sidecar = VB.inherited_sidecar(Path(path), root) if path is not None else {}
-    res = live.result_for(src, sidecar, cancel=cancel, progress=progress)
+    res = live.result_for(src, sidecar, config=config, cancel=cancel, progress=progress)
     help_of = {r: h for r, _t, h in qc.DWI_QC_ROWS}
     out: dict[str, dict] = {}
     for row_id in rows if rows is not None else qc.DWI_ROW_IDS:
@@ -195,28 +195,36 @@ def dwi_qc_for_graph(src, rows=None, path=None, root=None, *, cancel=None,
         if x is not None:
             track["x"] = x
         out[row_id] = track
+    for row_id, track in out.items():
+        track["explain"] = f"plot.dwi.{row_id}"
     return {"rows": out, "skip": 0}
 
 
 def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
-                 cancel=None, progress=None) -> dict:
+                 config=None, cancel=None, progress=None) -> dict:
     """Worker side: the QC ``rows`` asked for (ids of ``qc.QC_ROWS``), one
     track each, on the volume axis: ``{"rows": {id: track}, "skip": n}``.
     Each row is computed only when asked for; motion, the expensive one, is
-    read from fMRIPrep's confounds when the run has them and estimated once
-    for the three rows that show it."""
+    read from fMRIPrep's confounds when the run has them (and ``config``
+    allows it) and estimated once for the three rows that show it. Every
+    threshold is ``config``'s (a ``QcConfig``; Settings > Quality control)."""
+    from ....qc.config import DEFAULT
     from ....viz.compute import motion as M
     from ....viz.compute import qc
 
     if is_diffusion(src):
-        return dwi_qc_for_graph(src, rows, path, root, cancel=cancel, progress=progress)
+        return dwi_qc_for_graph(src, rows, path, root, config=config, cancel=cancel,
+                                progress=progress)
+    cfg = config or DEFAULT
+    bold = cfg.bold
     rows = set(rows if rows is not None else qc.BOLD_ROW_IDS)
-    skip = qc.non_steady_state(src, cancel=cancel)
+    skip = (qc.non_steady_state(src, z=bold.nonsteady_z, cancel=cancel)
+            if bold.skip_nonsteady else 0)
     n = src.loaded_frames
     out: dict[str, dict] = {}
     help_of = {r: h for r, _t, h in qc.QC_ROWS}
     if rows & {"dvars", "global"}:
-        pv = qc.per_volume(src, skip=skip, cancel=cancel)
+        pv = qc.per_volume(src, skip=skip, fence_iqr=bold.dvars_fence_iqr, cancel=cancel)
         if "global" in rows:
             g = pv["global"]
             out["global"] = _qc_track(
@@ -232,21 +240,23 @@ def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
                 summary=(f"median {np.nanmedian(d):.2f} %, fence {fence:.2f} %, "
                          f"{pv['flagged'].size} above it"),
                 note=help_of["dvars"] + " The dashed line is the upper box-plot fence "
-                                        "(75th percentile + 1.5 IQR, FSL's rule).")
+                                        f"(75th percentile + {bold.dvars_fence_iqr:g} IQR).")
     if rows & {"fd", "translation", "rotation"}:
-        m = M.motion_for(src, path, root, skip=skip, cancel=cancel, progress=progress)
+        m = M.motion_for(src, path, root, skip=skip, config=cfg, cancel=cancel,
+                         progress=progress)
         where = m.describe()
         if "fd" in rows:
             fd = m.fd
-            over = np.flatnonzero(np.nan_to_num(fd) > M.FD_THRESHOLD_MM).astype(float)
+            limit = bold.fd_threshold_mm
+            over = np.flatnonzero(np.nan_to_num(fd) > limit).astype(float)
             peak = float(np.nanmax(fd)) if np.isfinite(fd).any() else 0.0
             out["fd"] = _qc_track(
                 "fd", "Framewise displacement", [fd], unit="mm", colour="accent",
-                ticks=over, rule=M.FD_THRESHOLD_MM,
-                y_range=(0.0, max(peak, M.FD_THRESHOLD_MM * 1.2) * 1.05),
+                ticks=over, rule=limit,
+                y_range=(0.0, max(peak, limit * 1.2) * 1.05),
                 summary=(f"mean {np.nanmean(fd):.3f}, max {peak:.2f} mm, {over.size} above "
-                         f"{M.FD_THRESHOLD_MM:g} mm"),
-                note=f"{help_of['fd']} Here: {where}. Dashed: {M.FD_THRESHOLD_MM:g} mm.")
+                         f"{limit:g} mm"),
+                note=f"{help_of['fd']} Here: {where}. Dashed: {limit:g} mm.")
         if "translation" in rows:
             t = m.params[:, :3]
             out["translation"] = _qc_track(
@@ -262,29 +272,30 @@ def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
                 summary=f"{float(r.min()):.2f} to {float(r.max()):.2f} degrees",
                 note=f"{help_of['rotation']} Here: {where}.")
     if rows & {"outliers", "spikes", "carpet"}:
-        sample = qc.sample_series(src, skip=skip, slice_axis=slice_axis, cancel=cancel)
+        sample = qc.sample_series(src, skip=skip, voxels=bold.sample_voxels,
+                                  slice_axis=slice_axis, cancel=cancel)
         if "outliers" in rows:
             frac = qc.outlier_fraction(sample["series"], skip=skip) * 100.0
-            over = np.flatnonzero(np.nan_to_num(frac) > qc.OUTLIER_LIMIT * 100).astype(float)
+            limit = bold.outlier_limit_pct
+            over = np.flatnonzero(np.nan_to_num(frac) > limit).astype(float)
             peak = float(np.nanmax(frac)) if np.isfinite(frac).any() else 0.0
             out["outliers"] = _qc_track(
                 "outliers", "Outlier voxels", [frac], unit="%", colour="teal",
-                ticks=over, rule=qc.OUTLIER_LIMIT * 100,
-                y_range=(0.0, max(peak, qc.OUTLIER_LIMIT * 120) * 1.05),
-                summary=f"max {peak:.1f} %, {over.size} above {qc.OUTLIER_LIMIT * 100:g} %",
+                ticks=over, rule=limit,
+                y_range=(0.0, max(peak, limit * 1.2) * 1.05),
+                summary=f"max {peak:.1f} %, {over.size} above {limit:g} %",
                 note=(f"{help_of['outliers']} {sample['series'].shape[1]:,} sampled voxels. "
-                      f"Dashed: {qc.OUTLIER_LIMIT * 100:g} %, afni_proc.py's censoring "
-                      "default."))
+                      f"Dashed: {limit:g} % (afni_proc.py's censoring default is 5 %)."))
         if "spikes" in rows:
-            sp = qc.slice_spikes(sample["slice_means"], skip=skip)
+            sp = qc.slice_spikes(sample["slice_means"], skip=skip, z=bold.spike_z)
             where = ", ".join(f"volume {int(v)} (slice {int(z)})"
                               for v, z in zip(sp["flagged"][:4], sp["slice"][:4]))
             out["spikes"] = _qc_track(
                 "spikes", "Slice spikes", [sp["score"]], unit="z", colour="warning",
-                ticks=sp["flagged"].astype(float), rule=qc.SPIKE_Z,
-                summary=(f"{sp['flagged'].size} volumes above {qc.SPIKE_Z:g}"
+                ticks=sp["flagged"].astype(float), rule=bold.spike_z,
+                summary=(f"{sp['flagged'].size} volumes above {bold.spike_z:g}"
                          + (f": {where}" if where else "")),
-                note=f"{help_of['spikes']} Dashed: {qc.SPIKE_Z:g} robust SD.")
+                note=f"{help_of['spikes']} Dashed: {bold.spike_z:g} robust SD.")
         if "carpet" in rows:
             image = qc.carpet(sample["series"], sample["depth"], skip=skip)
             out["carpet"] = {
@@ -296,6 +307,8 @@ def qc_for_graph(src, rows=None, path=None, root=None, slice_axis: int = 2, *,
                 "movable": True, "closable": True, "fmt": "{:.2f}",
                 "summary": "the head's edge at the top, its centre at the bottom",
                 "note": help_of["carpet"]}
+    for row_id, track in out.items():
+        track["explain"] = f"plot.bold.{row_id}"
     return {"rows": out, "skip": skip}
 
 
@@ -419,6 +432,9 @@ class TimecourseGraph(QWidget):
         self._qc_generation = 0
         #: QC rows asked of a worker for the current series (computed or not).
         self._qc_asked: set[str] = set()
+        #: QC rows being computed now: shown as cards with a spinner.
+        self._qc_pending: set[str] = set()
+        self._qc_progress = ""
         self.split.addWidget(self.tracks)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 2)
@@ -429,11 +445,12 @@ class TimecourseGraph(QWidget):
         self.split.splitterMoved.connect(lambda *_a: self._sizes_timer.start())
         ctx.jobs.done.connect(self._on_job_done)
         ctx.jobs.failed.connect(self._on_job_failed)
+        ctx.jobs.progressed.connect(self._on_job_progress)
 
         self._sync_controls()
         ctx.qstore.changed.connect(self._on_changed)
         connect_while_alive(ctx.theme_hub.changed, self, lambda w, _t: w.apply_theme())
-        connect_while_alive(ctx.settings_hub.changed, self, lambda w, _s: w.apply_theme())
+        connect_while_alive(ctx.settings_hub.changed, self, lambda w, _s: w._on_settings())
         self.apply_theme()
 
     # ------------------------------------------------------------------
@@ -1261,10 +1278,16 @@ class TimecourseGraph(QWidget):
         g = self.ctx.scene.graph
         out: list[dict] = []
         skip = 0
-        if g.qc and self._qc_src is not None:
-            have = self._qc_src["rows"]
-            skip = int(self._qc_src.get("skip", 0))
-            out += [have[r] for r in self._qc_rows_shown() if r in have]
+        if g.qc:
+            have = self._qc_src["rows"] if self._qc_src is not None else {}
+            skip = int(self._qc_src.get("skip", 0)) if self._qc_src is not None else 0
+            for r in self._qc_rows_shown():
+                if r in have:
+                    out.append(have[r])
+                elif r in self._qc_pending:
+                    # Being computed: its card now, with a spinner, at the size
+                    # the plot will have, so nothing jumps when it arrives.
+                    out.append(self._pending_track(r))
         if g.physio and self._physio_src is not None:
             out += self._physio_src["tracks"]
         return [t for t in (self._in_x(t, skip) for t in out) if t is not None]
@@ -1288,11 +1311,15 @@ class TimecourseGraph(QWidget):
                                     physio_for_graph, ctx.physio_paths[0], span[0], span[1])
         _layer, src = views.series_layer(self.ctx.store)
         if g.qc and src is not None and src.fully_loaded:
-            key = (id(src), src.loaded_frames)
+            from ....qc.config import key as config_key
+
+            cfg = self._qc_config()
+            key = (id(src), src.loaded_frames, config_key(cfg))
             if self._qc_key != key:
                 self._qc_key = key
                 self._qc_src = None
                 self._qc_asked = set()
+                self._qc_pending = set()
             have = set(self._qc_src["rows"]) if self._qc_src is not None else set()
             # Only the rows not yet computed. A new job replaces a running
             # one, so it asks for everything still missing, not only the
@@ -1301,6 +1328,8 @@ class TimecourseGraph(QWidget):
             missing = set(self._qc_rows_shown()) - have
             if missing and not missing <= self._qc_asked:
                 self._qc_asked = missing
+                self._qc_pending = set(missing)
+                self._qc_progress = ""
                 self._qc_generation += 1
                 bids = self._context
                 axis = 2
@@ -1310,7 +1339,7 @@ class TimecourseGraph(QWidget):
                 self.ctx.jobs.start(
                     "graph-qc", self._qc_generation, qc_for_graph, src, sorted(missing),
                     bids.path if bids is not None else None,
-                    bids.root if bids is not None else None, axis)
+                    bids.root if bids is not None else None, axis, config=cfg)
         tracks = self._tracks_wanted()
         if not tracks:
             if not self.tracks.isHidden():
@@ -1417,6 +1446,7 @@ class TimecourseGraph(QWidget):
                 self._qc_src = result
             else:
                 self._qc_src["rows"].update(result["rows"])
+            self._qc_pending = set()
             self._tracks_sized = False
         else:
             return
@@ -1427,7 +1457,51 @@ class TimecourseGraph(QWidget):
             self._physio_src = None
             self.ctx.status.emit(f"The run's physio could not be read: {message}")
         elif tag == "graph-qc" and generation == self._qc_generation:
+            self._qc_pending = set()
             self.ctx.status.emit(f"The QC plots could not be computed: {message}")
+            self._draw_tracks()
+
+    def _on_job_progress(self, tag: str, generation: int, done: int, total: int) -> None:
+        """How far the QC plots being computed are, in their cards."""
+        if tag != "graph-qc" or generation != self._qc_generation or not self._qc_pending:
+            return
+        self._qc_progress = f"{100 * done // max(total, 1)} %" if total > 0 else ""
+        text = self._pending_text()
+        for r in self._qc_pending:
+            card = self.tracks.card(r)
+            if card is not None and card.readout.text() != text:
+                card.readout.setText(text)
+
+    def _pending_text(self) -> str:
+        return "Computing" + (f", {self._qc_progress}" if self._qc_progress else "...")
+
+    def _pending_track(self, row_id: str) -> dict:
+        """The card of a QC row still being computed."""
+        from ....viz.compute import qc
+
+        dwi = self._series_is_dwi()
+        rows = qc.DWI_QC_ROWS if dwi else qc.QC_ROWS
+        title = next((t for r, t, _h in rows if r == row_id), row_id)
+        image = row_id in ("carpet", "slices")
+        return {"id": row_id, "title": title, "unit": "", "kind": "pending", "frames": True,
+                "x": np.empty(0), "ys": [], "ticks": np.empty(0), "movable": True,
+                "closable": True, "summary": self._pending_text(),
+                "note": "Being computed in the background; the plot appears here.",
+                "explain": f"plot.{'dwi' if dwi else 'bold'}.{row_id}",
+                "height": 2.5 if image else 1}
+
+    def _qc_config(self):
+        """The methods and thresholds of Settings > Quality control."""
+        from ....viz.settings import qc_config
+
+        return qc_config(self.ctx.settings)
+
+    def _on_settings(self) -> None:
+        """A setting changed: the look, and the QC plots when their
+        configuration did (``_draw_tracks`` compares it)."""
+        self.apply_theme()
+        if self.ctx.scene.graph.qc and self._qc_key is not None:
+            self._draw_tracks()
 
     def physio_channels(self) -> list[str]:
         """The physio channels drawn (tests)."""
@@ -1438,13 +1512,21 @@ class TimecourseGraph(QWidget):
 
     def shown_tracks(self) -> list[dict]:
         """The plots under the graph, in order: id, title, kind, summary,
-        note and how many marks (tests and the tooltip)."""
+        note and how many marks (tests and the tooltip). A card still being
+        computed is not a plot yet: :meth:`pending_tracks`."""
         if self.tracks.isHidden():
             return []
         return [{"id": c.track["id"], "title": c.track["title"], "kind": c.track.get("kind"),
                  "summary": c.track.get("summary", ""), "note": c.track.get("note", ""),
                  "ticks": int(np.asarray(c.track.get("ticks", ())).size)}
-                for c in self.tracks.cards()]
+                for c in self.tracks.cards() if c.track.get("kind") != "pending"]
+
+    def pending_tracks(self) -> list[str]:
+        """The ids of the cards still being computed, in order."""
+        if self.tracks.isHidden():
+            return []
+        return [c.track["id"] for c in self.tracks.cards()
+                if c.track.get("kind") == "pending"]
 
     def _marked_cells(self) -> list[tuple[int, int]]:
         """(row, col) of the cells that carry a marker, centre first."""

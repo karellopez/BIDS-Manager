@@ -312,6 +312,12 @@ QMenu#rounded-menu::item {
 QMenu#rounded-menu::item:selected { background: $accent_bg; color: $accent; }
 QMenu#rounded-menu::item:disabled { color: $muted; }
 
+/* An explanation opened from an info icon (gui/viz/panels/explain_popup):
+ * running text inside a rounded menu, in the menu's own colours. */
+QFrame#viz-explain { background: transparent; }
+QLabel#viz-explain-text { color: $text; font-size: 12px; background: transparent; }
+QScrollArea#viz-explain-scroll { background: transparent; border: none; }
+
 /* ---------- Toolbar ---------- */
 QFrame#toolbar {
     background: $surface2;
@@ -1338,6 +1344,35 @@ QListWidget#welcome-recent::item:hover { background: $surface3; }
 QListWidget#welcome-recent::item:selected {
     background: $accent_bg;
     color: $accent;
+}
+
+/* ---------- Settings: pages listed down the left ---------- */
+QListWidget#settings-nav {
+    background: $surface;
+    color: $text;
+    border: none;
+    border-right: 1px solid $border;
+    padding: 10px 8px;
+    font-size: 12px;
+    outline: 0;
+}
+QListWidget#settings-nav::item {
+    padding: 7px 10px;
+    margin: 1px 0;
+    border-radius: 6px;
+}
+QListWidget#settings-nav::item:hover { background: $surface3; }
+QListWidget#settings-nav::item:selected {
+    background: $accent_bg;
+    color: $accent;
+}
+QStackedWidget#settings-pages, QWidget#settings-page { background: $bg; }
+QScrollArea#settings-scroll { background: transparent; border: none; }
+QScrollArea#settings-scroll > QWidget > QWidget { background: transparent; }
+QLabel#settings-page-title {
+    color: $text;
+    font-size: 16px;
+    font-weight: 600;
 }
 
 /* ---------- NIfTI viewer image canvas ----------

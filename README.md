@@ -251,6 +251,9 @@ viewer the result is docked beside the image, each mask or map a checkbox
 over it and each finding a click from its evidence; the Editor's **Quality
 check** lists the whole dataset with the images that stand out coloured, and
 the results are written as a BIDS derivative (`derivatives/bidsmgr-qc/`).
+Every measure and QC plot explains what it measures and how to read it, and
+every method and threshold is a setting (Settings > Quality control, or a JSON
+file for `bidsmgr-qc --config`).
 
 ### 8. Provenance built in
 
