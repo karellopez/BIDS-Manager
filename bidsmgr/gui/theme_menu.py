@@ -1,9 +1,10 @@
 """Choosing a theme: the header's menu and the swatches beside each name.
 
 A swatch is the theme in miniature (its background, a surface, its text
-and its accent), so the seven read apart before one is picked. The menu
-lists the dark themes, then the light ones, the current one ringed and in
-bold; Settings > Display shows the same swatches in its list.
+and its accent), so the themes read apart before one is picked. The menu
+lists them by group (Neutral, Classic, Colour, High contrast), dark before
+light, the current one ringed and in bold; Settings > Display shows the
+same swatches in the same order.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QWidget, QWidgetAction
 
 from .theme_manager import PALETTES, THEMES
 
@@ -77,11 +78,16 @@ def build_theme_menu(parent: QWidget, current: str,
     group = QActionGroup(menu)
     group.setExclusive(True)
     side = fonts.px(16)
-    last_dark = None
+    heading = None
     for t in THEMES:
-        if last_dark is not None and t.dark != last_dark:
-            menu.addSeparator()
-        last_dark = t.dark
+        if t.group != heading:
+            heading = t.group
+            title = QLabel(heading.upper())
+            title.setObjectName("menu-section")
+            holder = QWidgetAction(menu)
+            holder.setDefaultWidget(title)
+            holder.setEnabled(False)
+            menu.addAction(holder)
         on = t.id == current
         # The theme on now: its swatch ringed in the accent and its name in
         # bold. A tick would share the icon's column, which Qt draws apart

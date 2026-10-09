@@ -110,8 +110,12 @@ class EditorPanel(QWidget):
         self._path_bar.action_button.clicked.connect(self._on_path_action)
         v.addWidget(self._path_bar)
 
+        # The three panels are cards on the canvas, a gap between them.
+        from .widgets.panel_frame import CARD_GAP_PX
+
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._splitter.setHandleWidth(1)
+        self._splitter.setObjectName("card-split")
+        self._splitter.setHandleWidth(CARD_GAP_PX)
         self._splitter.setChildrenCollapsible(False)
 
         self._tree_pane = BidsTreePane()
@@ -227,7 +231,11 @@ class EditorPanel(QWidget):
         # Collapsing the tree / validation hands width to the center viewer.
         self._tree_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
         self._validation_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
-        v.addWidget(self._splitter, 1)
+        for frame in self._panel_frames:
+            frame.make_card()
+        from .widgets.panel_frame import card_canvas
+
+        v.addWidget(card_canvas(self._splitter), 1)
 
         # Restore the last folder, for viewing: editing happens in the open
         # project, which the window binds when one is opened.

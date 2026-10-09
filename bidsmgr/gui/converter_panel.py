@@ -81,6 +81,7 @@ from .output_fs_pane import OutputFsPane
 from .properties_panel import PropertiesPanel
 from .raw_fs_pane import RawFsPane
 from .widgets import BusySpinner, Chip, PaneHeader, PanelFrame, PathBar, VSep
+from .widgets.panel_frame import CARD_GAP_PX, card_canvas
 
 log = logging.getLogger(__name__)
 
@@ -197,12 +198,17 @@ class ConverterPanel(QWidget):
 
         # ---------------- main vertical splitter ----------------
         # Top: 4-col horizontal splitter (panes). Bottom: tabbed dock.
+        # The panels are cards on the window's canvas: the two top-level
+        # splitters leave a gap between them (``card-split``); the ones
+        # inside a card keep a hairline.
         v_split = QSplitter(Qt.Orientation.Vertical)
-        v_split.setHandleWidth(1)
+        v_split.setObjectName("card-split")
+        v_split.setHandleWidth(CARD_GAP_PX)
         v_split.setChildrenCollapsible(False)
 
         h_split = QSplitter(Qt.Orientation.Horizontal)
-        h_split.setHandleWidth(1)
+        h_split.setObjectName("card-split")
+        h_split.setHandleWidth(CARD_GAP_PX)
         h_split.setChildrenCollapsible(False)
 
         # Every side region is wrapped in a ``PanelFrame`` so it can be
@@ -294,7 +300,10 @@ class ConverterPanel(QWidget):
         v_split.setStretchFactor(0, 1)
         v_split.setStretchFactor(1, 0)
         v_split.setSizes([560, 200])
-        v.addWidget(v_split, 1)
+        for frame in (self._col1_frame, self._filter_frame, self._inspection_unit,
+                      self._dock_frame):
+            frame.make_card()
+        v.addWidget(card_canvas(v_split), 1)
 
         # Stream worker progress messages straight into the Log tab,
         # but throttled: high-volume workers (e.g. dcm2niix parallel)

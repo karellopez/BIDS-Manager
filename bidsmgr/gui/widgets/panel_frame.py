@@ -44,7 +44,22 @@ from .primitives import PaneHeader
 
 _QWIDGETSIZE_MAX = (1 << 24) - 1
 _STRIP_PX = 24  # collapsed vertical-strip thickness
-_BAR_PX = 26    # horizontal title-bar height
+_BAR_PX = 30    # horizontal title-bar height
+
+#: The gap between two cards (the handle of a ``card-split`` splitter).
+CARD_GAP_PX = 8
+
+
+def card_canvas(content: QWidget) -> QWidget:
+    """``content`` (cards in a splitter) with the canvas showing around it."""
+    holder = QWidget()
+    holder.setObjectName("card-canvas")
+    lay = QVBoxLayout(holder)
+    lay.setContentsMargins(CARD_GAP_PX, CARD_GAP_PX // 2, CARD_GAP_PX, CARD_GAP_PX)
+    lay.setSpacing(0)
+    lay.addWidget(content)
+    return holder
+
 
 # Object name a pane gives a child widget to have it rendered beside the
 # frame's title instead of inside the pane. One name rather than a per-pane
@@ -108,6 +123,18 @@ class PanelFrame(QFrame):
         self._refresh_icons()
 
     # ------------------------------------------------------------------
+    def make_card(self) -> "PanelFrame":
+        """Draw this panel as a card: a rounded, outlined surface on the
+        window's canvas (the stylesheet's ``QFrame[card="true"]``). Only a
+        panel at the top of a layout is a card; panels nested in it stay
+        flat, so there are no cards inside cards."""
+        self.setProperty("card", True)
+        # One pixel in from the outline, so the content does not paint over it.
+        self.layout().setContentsMargins(1, 1, 1, 1)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        return self
+
     def _build_controls(self) -> None:
         self._caret = QToolButton()
         self._caret.setObjectName("panel-frame-caret")

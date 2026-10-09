@@ -319,7 +319,11 @@ class SettingsDialog(QDialog):
         from .viz import fonts
 
         self._theme_combo = QComboBox()
+        group = None
         for t in THEMES:
+            if group is not None and t.group != group:
+                self._theme_combo.insertSeparator(self._theme_combo.count())
+            group = t.group
             self._theme_combo.addItem(theme_swatch(t.id, fonts.px(16)), t.label, t.id)
             self._theme_combo.setItemData(self._theme_combo.count() - 1, t.description,
                                           Qt.ItemDataRole.ToolTipRole)

@@ -1,4 +1,4 @@
-"""The seven themes and the two bundled typefaces.
+"""The themes and the two bundled typefaces.
 
 Every theme must give the stylesheet every token it names (a missing one
 leaves ``$name`` in the text and Qt drops the whole stylesheet), read
@@ -30,6 +30,47 @@ def _contrast(a: str, b: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
+def _lin(c: float) -> float:
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _oklab(rgb: list[float]) -> tuple[float, float, float]:
+    r, g, b = rgb
+    lms = [0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b,
+           0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b,
+           0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b]
+    lc, mc, sc = (v ** (1 / 3) if v >= 0 else -((-v) ** (1 / 3)) for v in lms)
+    return (0.2104542553 * lc + 0.7936177850 * mc - 0.0040720468 * sc,
+            1.9779984951 * lc - 2.4285922050 * mc + 0.4505937099 * sc,
+            0.0259040371 * lc + 0.7827717662 * mc - 0.8086757660 * sc)
+
+
+#: Machado et al. 2009, full-severity deuteranopia and protanopia (linear RGB).
+_CVD = (((0.367322, 0.860646, -0.227968), (0.280085, 0.672501, 0.047413),
+         (-0.011820, 0.042940, 0.968881)),
+        ((0.152286, 1.052583, -0.204868), (0.114503, 0.786281, 0.099216),
+         (-0.003882, -0.048116, 1.051998)))
+
+
+def _separation(a: str, b: str) -> tuple[float, float]:
+    """OKLab distance x100: for normal vision, and the worse of deutan and
+    protan simulation."""
+    import math
+
+    from bidsmgr.viz.theme import parse_colour
+
+    def rgb(h):
+        return [_lin(c / 255) for c in parse_colour(h)[:3]]
+
+    def sim(v, m):
+        return [min(1.0, max(0.0, sum(m[i][j] * v[j] for j in range(3)))) for i in range(3)]
+
+    va, vb = rgb(a), rgb(b)
+    normal = 100 * math.dist(_oklab(va), _oklab(vb))
+    cvd = min(100 * math.dist(_oklab(sim(va, m)), _oklab(sim(vb, m))) for m in _CVD)
+    return normal, cvd
+
+
 @pytest.fixture
 def manager(qapp):
     m = ThemeManager(qapp)
@@ -37,13 +78,34 @@ def manager(qapp):
     m.apply("dark")
 
 
-def test_there_are_seven_themes_and_each_is_whole() -> None:
-    assert [t.id for t in THEMES] == ["dark", "dim", "nord", "hc-dark", "light", "paper",
-                                      "hc-light"]
+def test_every_theme_is_whole_and_grouped() -> None:
+    ids = [t.id for t in THEMES]
+    assert len(ids) == len(set(ids)) == len(PALETTES) == 16
+    # Neutral greys beside the blue-cast Dark (user request, 2026-10-09).
+    assert {"graphite", "carbon", "ash", "porcelain"} <= set(ids)
+    groups = [t.group for t in THEMES]
+    assert groups == sorted(groups, key=["Neutral", "Classic", "Colour",
+                                         "High contrast"].index), "listed group by group"
     keys = set(PALETTES["dark"])
     for t in THEMES:
         assert set(PALETTES[t.id]) == keys, t.id
         assert theme_info(t.partner).dark != t.dark, t.id
+
+
+@pytest.mark.parametrize("theme_id", [t.id for t in THEMES])
+def test_plot_colours_stay_apart_in_every_theme(theme_id) -> None:
+    """The plots' own series colours: neighbours apart for every reader
+    (OKLab distance 15 for normal vision, 6 under red-green colour
+    blindness), and 3:1 against the plot's background."""
+    p = PALETTES[theme_id]
+    series = [p[f"series{i}"] for i in range(1, 7)]
+    for a, b in zip(series, series[1:]):
+        normal, cvd = _separation(a, b)
+        assert normal >= 15 and cvd >= 6, (a, b, normal, cvd)
+    for colour in series:
+        for surface in ("bg", "surface"):
+            assert _contrast(colour, p[surface]) >= 3, (colour, surface)
+    assert VizTheme.from_palette(p, theme_id).series(0) == series[0]
 
 
 def test_every_token_the_stylesheet_names_is_given() -> None:
@@ -67,7 +129,12 @@ def test_text_reads_clearly_in_every_theme(theme_id) -> None:
             floor = 7 if strong else (4.0 if surface == "surface3" else 4.5)
             assert _contrast(p[colour], p[surface]) >= floor, (colour, surface)
     assert _contrast(p["primary_btn_text"], p["accent"]) >= (7 if strong else 4.5)
-    assert _contrast(p["input_border"], p["bg"]) >= (4.5 if strong else 3.0)
+    for surface in ("bg", "surface"):
+        assert _contrast(p["input_border"], p[surface]) >= (4.5 if strong else 3.0), surface
+    # The states a status chip shows side by side read apart in colour too.
+    for a, b in (("success", "error"), ("warning", "error"), ("success", "warning"),
+                 ("accent", "error")):
+        assert _separation(p[a], p[b])[0] >= 12, (a, b)
 
 
 def test_each_theme_says_whether_it_is_dark() -> None:
@@ -138,6 +205,10 @@ def test_the_header_lists_every_theme_and_applies_the_pick(manager, qtbot) -> No
     menu = header._theme_menu
     acts = [a for a in menu.actions() if a.data()]
     assert [a.data() for a in acts] == [t.id for t in THEMES]
+    from PyQt6.QtWidgets import QLabel
+
+    headings = [lb.text() for lb in menu.findChildren(QLabel) if lb.objectName() == "menu-section"]
+    assert headings == ["NEUTRAL", "CLASSIC", "COLOUR", "HIGH CONTRAST"]
     current = next(a for a in acts if a.isChecked())
     assert current.data() == "dark" and current.font().weight() > 500
     next(a for a in acts if a.data() == "nord").trigger()
@@ -154,7 +225,9 @@ def test_settings_lists_the_themes_by_name(qtbot) -> None:
     dlg = SettingsDialog(AppSettings.load())
     qtbot.addWidget(dlg)
     combo = dlg._theme_combo
-    assert [combo.itemData(i) for i in range(combo.count())] == [t.id for t in THEMES]
+    listed = [combo.itemData(i) for i in range(combo.count())]
+    assert [d for d in listed if d] == [t.id for t in THEMES]
+    assert listed.count(None) == 3, "a separator between the four groups"
     assert combo.itemText(combo.findData("hc-light")) == "High contrast light"
     assert not combo.itemIcon(0).isNull(), "each theme shows its swatch"
 

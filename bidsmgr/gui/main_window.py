@@ -214,9 +214,16 @@ class _TopHeader(QFrame):
         self._pill_group.addButton(self._converter_btn, 0)
         self._pill_group.addButton(self._editor_btn, 1)
         self._pill_group.idClicked.connect(self._on_pill_clicked)
-        h.addWidget(self._welcome_btn)
-        h.addWidget(self._converter_btn)
-        h.addWidget(self._editor_btn)
+        # The three views as one segmented control: a track with the chosen
+        # view raised in it.
+        track = QFrame()
+        track.setObjectName("nav-track")
+        tl = QHBoxLayout(track)
+        tl.setContentsMargins(3, 3, 3, 3)
+        tl.setSpacing(2)
+        for btn in (self._welcome_btn, self._converter_btn, self._editor_btn):
+            tl.addWidget(btn)
+        h.addWidget(track)
 
         # Project switcher (PyCharm-style), set apart from the Editor pill.
         # Shows the current dataset name + a project icon; its dropdown lists

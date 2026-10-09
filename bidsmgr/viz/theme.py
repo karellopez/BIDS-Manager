@@ -125,7 +125,11 @@ class VizTheme:
         return self.tokens.get(name, default)
 
     def series(self, i: int) -> str:
-        return self.token(SERIES_TOKENS[i % len(SERIES_TOKENS)])
+        """The ``i``-th plot colour: the palette's own ``series1``..``series6``
+        (chosen to stay apart, colour-blind readers included), else the UI
+        colours in ``SERIES_TOKENS``' order."""
+        own = self.tokens.get(f"series{i % 6 + 1}")
+        return own or self.token(SERIES_TOKENS[i % len(SERIES_TOKENS)])
 
     def type_colour(self, ch_type: str, overrides: dict[str, str] | None = None) -> str:
         """Colour for a channel type: the user's choice, else its token.
