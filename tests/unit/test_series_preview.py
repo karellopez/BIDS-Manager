@@ -29,7 +29,7 @@ def test_the_series_converts_into_the_work_folder(tmp_path):
     write_mr_series(folder, "1.2.3.1", n_slices=4, size=8)
     write_mr_series(folder, "1.2.3.9", description="other")
     work = tmp_path / "work"
-    images = preview_series(folder, "1.2.3.1", work)
+    images = preview_series(series_files(folder, "1.2.3.1"), work)
     assert len(images) == 1
     assert images[0].parent == work / "out"
     img = nib.load(str(images[0]))
@@ -42,4 +42,4 @@ def test_an_unknown_series_says_so(tmp_path):
     folder = tmp_path / "raw"
     write_mr_series(folder, "1.2.3.1")
     with pytest.raises(ValueError, match="no DICOM of this series"):
-        preview_series(folder, "9.9.9", tmp_path / "work")
+        preview_series(series_files(folder, "9.9.9"), tmp_path / "work")

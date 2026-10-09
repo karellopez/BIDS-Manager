@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import QLabel
 
 from bidsmgr.gui.models import COLUMNS, InventoryTableModel
 from bidsmgr.gui.properties_panel import PropertiesPanel
+from bidsmgr.inventory.sources import ScanSources
 from bidsmgr.project import Project, ScanImported, UserSetCell, UserSetEntity
 
 
@@ -515,7 +516,7 @@ def test_compute_psd_button_enabled_when_source_resolvable(qtbot, tmp_path) -> N
     rec.parent.mkdir(parents=True)
     rec.write_bytes(b"\x00")
     panel, _m = _build_panel_with_model(qtbot, _eeg_row())
-    panel.set_raw_root(tmp_path)
+    panel.set_sources(ScanSources(tmp_path, tmp_path))
     btns = _psd_buttons(panel)
     assert len(btns) == 1 and btns[0].isEnabled()
     assert panel._resolve_source_path(0) == rec
@@ -530,7 +531,7 @@ def test_compute_psd_runs_the_shared_spectrum(qtbot, tmp_path) -> None:
 
     write_fif(tmp_path / "sub-001", "rec.fif", stim_at=(64,))
     panel, _m = _build_panel_with_model(qtbot, _eeg_row(source_file="sub-001/rec.fif"))
-    panel.set_raw_root(tmp_path)
+    panel.set_sources(ScanSources(tmp_path, tmp_path))
     (btn,) = _psd_buttons(panel)
     btn.click()
     qtbot.waitUntil(lambda: getattr(panel, "_psd_window", None) is not None, timeout=30_000)
@@ -683,6 +684,12 @@ def test_removing_a_plain_companion_matches_by_value(qtbot, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _sources_for(raw: Path, *uids: str):
+    from bidsmgr.inventory.probe_convert import series_files
+
+    return ScanSources(raw, raw, {u: series_files(raw, u) for u in uids})
+
+
 def test_a_dicom_row_previews_its_series(qtbot, tmp_path) -> None:
     pytest.importorskip("pydicom")
     from tests.fixtures.dicoms import write_mr_series
@@ -690,18 +697,21 @@ def test_a_dicom_row_previews_its_series(qtbot, tmp_path) -> None:
     write_mr_series(tmp_path / "raw" / "s1", "1.2.3.77", description="rest")
     panel, _m = _build_panel_with_model(
         qtbot, _func_row(series_uid="1.2.3.77", source_folder="s1"))
-    assert not panel.preview_button.isEnabled(), "no raw root yet"
-    panel.set_raw_root(tmp_path / "raw")
+    assert not panel.preview_button.isEnabled(), "no source data yet"
+    panel.set_sources(_sources_for(tmp_path / "raw", "1.2.3.77"))
     assert panel.preview_button.isEnabled()
     panel.preview_button.click()
     # The window opens on the click, pending, with a spinner; the image
-    # arrives when the series is converted.
+    # arrives when the row is converted, under the name the conversion
+    # gives it.
     dlg = panel.preview_dialog
     qtbot.addWidget(dlg)
     assert dlg.isVisible() and dlg.is_pending() and dlg.spinner.is_busy()
     qtbot.waitUntil(lambda: not dlg.is_pending(), timeout=60_000)
     qtbot.waitUntil(lambda: dlg.viewer.is_loaded(), timeout=20_000)
-    work = dlg.images[0].parents[1]
+    assert dlg.files[0].name == "sub-001_ses-pre_task-rest_bold.nii.gz"
+    assert dlg.viewer.kind == "volume"
+    work = dlg._work_dir
     assert work.is_dir()
     dlg.close()
     assert not work.exists(), "the temporary conversion is removed with the window"
@@ -712,16 +722,16 @@ def test_a_preview_that_fails_says_so_in_its_window(qtbot, tmp_path, monkeypatch
     pytest.importorskip("pydicom")
     from tests.fixtures.dicoms import write_mr_series
 
-    import bidsmgr.inventory.probe_convert as pc
+    import bidsmgr.cli.convert as cc
 
     def broken(*_a, **_k):
         raise RuntimeError("dcm2niix said no")
 
-    monkeypatch.setattr(pc, "preview_series", broken)
+    monkeypatch.setattr(cc, "preview_row", broken)
     write_mr_series(tmp_path / "raw" / "s1", "1.2.3.78", description="rest")
     panel, _m = _build_panel_with_model(
         qtbot, _func_row(series_uid="1.2.3.78", source_folder="s1"))
-    panel.set_raw_root(tmp_path / "raw")
+    panel.set_sources(_sources_for(tmp_path / "raw", "1.2.3.78"))
     panel.preview_button.click()
     dlg = panel.preview_dialog
     qtbot.addWidget(dlg)
@@ -729,6 +739,74 @@ def test_a_preview_that_fails_says_so_in_its_window(qtbot, tmp_path, monkeypatch
     assert "dcm2niix said no" in dlg.status.text()
     assert not dlg.spinner.is_busy()
     assert panel.preview_button.isEnabled(), "ready for another"
+
+
+def test_the_preview_window_opens_each_file_in_its_own_viewer(qtbot, tmp_path) -> None:
+    """A spectrum in the spectrum viewer, a physiology recording in the
+    signal viewer, from one window: what a row makes picks the viewer."""
+    pytest.importorskip("nibabel")
+    from bidsmgr.gui.preview_dialog import PreviewDialog
+    from tests.fixtures.signals import fid_at, write_mrs, write_physio
+
+    work = tmp_path / "work"
+    spectrum = write_mrs(work / "sub-001" / "mrs", "sub-001_svs.nii.gz", fid_at(3.03))
+    physio = write_physio(work, "sub-001_task-rest_physio.tsv.gz",
+                          [[0.1 * i, 1.0] for i in range(200)],
+                          {"SamplingFrequency": 50, "StartTime": 0,
+                           "Columns": ["cardiac", "respiratory"]})
+    dlg = PreviewDialog("svs", work)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    dlg.set_files([spectrum, physio], work)
+    assert dlg.viewer.kind == "spectrum" and dlg.choice.isVisible()
+    assert "Converted now" in dlg.note.text()
+    dlg.choice.setCurrentIndex(1)
+    assert dlg.viewer.kind == "signal"
+    dlg.close()
+    assert not work.exists()
+
+
+def test_a_recording_shown_as_it_is_is_never_removed(qtbot, tmp_path) -> None:
+    pytest.importorskip("mne")
+    from bidsmgr.gui.preview_dialog import PreviewDialog
+    from tests.fixtures.signals import write_fif
+
+    rec = write_fif(tmp_path / "raw", "rest_eeg.fif")
+    work = tmp_path / "work"
+    work.mkdir()
+    dlg = PreviewDialog("rest", work)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    dlg.set_files([rec], work)
+    assert dlg.viewer.kind == "signal" and "as it is" in dlg.note.text()
+    assert not dlg.choice.isVisible()
+    # The traces, without a second click on Load signal.
+    qtbot.waitUntil(lambda: dlg.viewer.presenter.source is not None, timeout=20_000)
+    dlg.close()
+    assert rec.exists() and not work.exists()
+
+
+def test_a_non_image_series_says_why_it_has_no_preview(qtbot, tmp_path) -> None:
+    from bidsmgr.cli.scan import NONIMAGE_ISSUE
+
+    panel, _m = _build_panel_with_model(
+        qtbot, _func_row(issues=NONIMAGE_ISSUE, source_folder="s1"))
+    panel.set_sources(ScanSources(tmp_path, tmp_path))
+    assert not panel.preview_button.isEnabled()
+    assert "holds no image" in panel.preview_button.toolTip()
+
+
+def test_the_preview_is_worded_for_what_it_shows(qtbot) -> None:
+    for row, words in (
+        (_func_row(), "Preview the image"),
+        (_func_row(datatype="mrs", bids_guess_suffix="svs", bids_name="sub-001_svs"),
+         "Preview the spectrum"),
+        (_func_row(bids_guess_suffix="physio",
+                   bids_name="sub-001_ses-pre_task-rest_physio"), "Preview the recording"),
+        (_eeg_row(), "Preview the recording"),
+    ):
+        panel, _m = _build_panel_with_model(qtbot, row)
+        assert panel.preview_button.text() == words, row
 
 
 def test_a_row_without_a_series_has_no_preview(qtbot) -> None:

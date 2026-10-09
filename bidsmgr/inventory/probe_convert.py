@@ -445,25 +445,26 @@ def series_files(folder: Path, series_uid: str, cancel=None) -> list[str]:
 
 
 def preview_series(
-    folder: Path,
-    series_uid: str,
+    files: Iterable[str | Path],
     work_dir: Path,
     *,
     dcm2niix_bin: Optional[Path] = None,
-    cancel=None,
 ) -> list[Path]:
-    """Convert ONE series for a look before the real conversion.
+    """Convert ONE series' DICOMs with plain dcm2niix, for a look.
 
     The same staging and the same dcm2niix call as the probe, into
     ``work_dir`` (which the caller removes). Returns the images dcm2niix
     made, several when the series splits (echoes, magnitude and phase).
+    For a series the plan does not convert (a scout, an unclassified
+    series); the others go through the conversion itself
+    (``cli.convert.preview_row``).
     """
-    files = series_files(Path(folder), series_uid, cancel)
+    files = [str(f) for f in files]
     if not files:
-        raise ValueError(f"no DICOM of this series was found under {folder}")
+        raise ValueError("no DICOM of this series was found")
     work_dir = Path(work_dir)
     staging = work_dir / "_dicoms"
-    _stage_series(series_uid, files, staging)
+    _stage_series("series", files, staging)
     output = work_dir / "out"
     output.mkdir(parents=True, exist_ok=True)
     proc = _run_dcm2niix_full(staging, output, dcm2niix_bin=dcm2niix_bin)

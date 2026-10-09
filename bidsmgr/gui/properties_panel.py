@@ -228,10 +228,10 @@ class PropertiesPanel(QWidget):
         self._row: Optional[int] = None
         self._suppress_writeback = False
         self._entity_rows: list[_EntityRow] = []
-        # Raw input root, used to resolve a row's relative ``source_file`` to an
-        # absolute recording path for the in-panel PSD compute (set by the
-        # ConverterPanel whenever the scanned root changes).
-        self._raw_root: Optional[Path] = None
+        # Where the scan's source data is now, and how to find each row's
+        # files in it (``inventory.sources.ScanSources``): the PSD and the
+        # preview read from it. Set by the ConverterPanel for the scan shown.
+        self._sources = None
         # Background PSD computation. Only one runs at a time, on the viewer
         # library's job runner (a QThread: it ends in an FFT), and
         # ``_psd_row_id`` identifies which recording is computing so the
@@ -239,7 +239,7 @@ class PropertiesPanel(QWidget):
         self._jobs = None
         self._psd_row_id: Optional[str] = None
         self._psd_generation = 0
-        # The DICOM series preview: one at a time, on its own job.
+        # The preview of what a row converts to: one at a time, on its own job.
         self._preview_row_id: Optional[str] = None
         self._preview_generation = 0
         self._preview_dir: Optional[Path] = None
@@ -303,14 +303,12 @@ class PropertiesPanel(QWidget):
         """Attach a project for provenance lookups. Not used yet for writes."""
         self._project = project
 
-    def set_raw_root(self, root: Optional[Path]) -> None:
-        """Set the raw input root used to resolve relative ``source_file`` paths.
-
-        The ConverterPanel calls this whenever the scanned root changes so the
-        per-row PSD button can locate the recording on disk. Re-renders the
-        current row so the button's enabled state reflects path availability.
-        """
-        self._raw_root = Path(root) if root is not None else None
+    def set_sources(self, sources) -> None:
+        """Where the shown scan's data is (``inventory.sources.ScanSources``,
+        ``None`` for nothing): the PSD and preview buttons find each row's
+        recording or series in it. Re-renders the current row, so a button
+        follows whether its data can be found."""
+        self._sources = sources
         if self._row is not None:
             self.set_selected_row(self._row)
 
@@ -436,8 +434,8 @@ class PropertiesPanel(QWidget):
         sec.setStyleSheet(f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; font-weight: 600;")
         self._body_layout.addWidget(sec)
         self._body_layout.addWidget(self._build_path_preview(row, datatype, suffix, entities))
-        if self._cell(row, "series_uid").strip():
-            self._body_layout.addWidget(self._build_image_preview_row(row))
+        if self._cell(row, "series_uid").strip() or self._cell(row, "source_file").strip():
+            self._body_layout.addWidget(self._build_preview_row(row, datatype, suffix))
 
         # 4. Row-state notice (from the scanner's issues) +
         # schema validation. Two distinct sources of "what's wrong with
@@ -1094,29 +1092,12 @@ class PropertiesPanel(QWidget):
         return row_w
 
     def _resolve_source_path(self, row: int) -> Optional[Path]:
-        """Resolve a row's ``source_file`` to an existing absolute path.
-
-        Mirrors the converter's resolution order: an absolute path as-is, else
-        relative to the raw input root, the CWD, or ``.resolve()``. Returns
-        ``None`` when nothing on disk matches (DICOM rows have no source_file)."""
+        """The row's recording (``source_file``) where it is now, or ``None``
+        (DICOM rows have no source_file; a moved recording is not found)."""
         src = self._cell(row, "source_file").strip()
-        if not src:
+        if not src or self._sources is None:
             return None
-        p = Path(src)
-        if p.is_absolute():
-            return p if p.exists() else None
-        candidates: list[Path] = []
-        if self._raw_root is not None:
-            candidates.append(self._raw_root / p)
-        candidates.append(Path.cwd() / p)
-        try:
-            candidates.append(p.resolve())
-        except Exception:
-            pass
-        for c in candidates:
-            if c.exists():
-                return c
-        return None
+        return self._sources.file(src)
 
     def _runner(self):
         """The panel's job runner (PSD and series previews), made on first use."""
@@ -1128,18 +1109,47 @@ class PropertiesPanel(QWidget):
             self._jobs.failed.connect(self._on_job_failed)
         return self._jobs
 
-    def _series_folder(self, row: int) -> Optional[Path]:
-        """The folder holding this row's DICOMs (``source_folder`` under the
-        raw root), when it exists."""
-        rel = self._cell(row, "source_folder").strip()
-        if not rel or self._raw_root is None:
-            return None
-        folder = Path(rel) if Path(rel).is_absolute() else self._raw_root / rel
-        return folder if folder.is_dir() else None
+    def _preview_blocker(self, row: int) -> str:
+        """Why this row cannot be previewed now, or ``""``."""
+        from ..cli.scan import NONIMAGE_ISSUE_TOKEN
 
-    def _build_image_preview_row(self, row: int) -> QWidget:
-        """``[Preview the image] [spinner]``: convert this one series now and
-        look at it, before converting anything for real."""
+        if NONIMAGE_ISSUE_TOKEN in self._cell(row, "issues"):
+            return ("This series holds no image (a report or another non-image object), "
+                    "so there is nothing to look at.")
+        if self._sources is None or self._sources.root is None:
+            return "The folder this scan read is not known."
+        uid = self._cell(row, "series_uid").strip()
+        if uid:
+            files = self._sources.series_files(uid)
+            found = bool(files) and files[0].exists()
+            if not found and not files:
+                found = self._sources.folder(self._cell(row, "source_folder")) is not None
+        else:
+            found = self._resolve_source_path(row) is not None
+        if not found:
+            return ("The source data of this row is not where the scan found it. Locate it "
+                    "from the Raw input bar above.")
+        return ""
+
+    @staticmethod
+    def _preview_wording(datatype: str, suffix: str) -> tuple[str, str]:
+        """The button's words and what it shows, by what the row is."""
+        if suffix == "physio" or datatype in _EEG_MEG_DATATYPES:
+            return ("Preview the recording",
+                    "Show the recording in the signal viewer before converting anything. "
+                    "A physiology log is converted the way the conversion will; an EEG or "
+                    "MEG recording is read as it is.")
+        if datatype == "mrs":
+            return ("Preview the spectrum",
+                    "Convert this series now, the way the conversion will, and show its "
+                    "spectrum.")
+        return ("Preview the image",
+                "Convert this row now, the way the conversion will, into a temporary "
+                "folder, and look at what it makes (every image, when it makes several).")
+
+    def _build_preview_row(self, row: int, datatype: str, suffix: str) -> QWidget:
+        """``[Preview ...] [spinner]``: convert this one row now and look at
+        what it makes, before converting anything for real."""
         row_w = QWidget()
         row_w.setObjectName("meta-row")
         row_w.setStyleSheet("#meta-row { background: transparent; }")
@@ -1148,21 +1158,21 @@ class PropertiesPanel(QWidget):
         h.setSpacing(8)
         busy = (self._preview_row_id is not None and self._model is not None
                 and self._preview_row_id == self._model.row_id(row))
-        btn = QPushButton("Preview the image")
+        text, tip = self._preview_wording(datatype, suffix)
+        btn = QPushButton(text)
         btn.setObjectName("tb-btn")
-        btn.setToolTip("Convert this series now, the way the conversion will, into a "
-                       "temporary folder, and look at it. Nothing is written to the "
-                       "dataset.")
+        btn.setToolTip(tip + " Nothing is written to the dataset.")
+        blocker = "" if busy else self._preview_blocker(row)
         if busy:
             btn.setText("Converting for a preview...")
             btn.setEnabled(False)
-        elif self._series_folder(row) is None:
+        elif blocker:
             btn.setEnabled(False)
-            btn.setToolTip("The folder this series came from cannot be found.")
+            btn.setToolTip(blocker)
         elif self._preview_row_id is not None:
             btn.setEnabled(False)
         else:
-            btn.clicked.connect(lambda _=False, r=row: self._on_preview_image(r))
+            btn.clicked.connect(lambda _=False, r=row: self._on_preview(r))
         self.preview_button = btn
         h.addWidget(btn)
         spinner = BusySpinner()
@@ -1172,28 +1182,28 @@ class PropertiesPanel(QWidget):
         h.addStretch(1)
         return row_w
 
-    def _on_preview_image(self, row: int) -> None:
+    def _on_preview(self, row: int) -> None:
         import tempfile
 
-        from ..inventory.probe_convert import preview_series
+        from ..cli.convert import preview_row
 
-        folder = self._series_folder(row)
-        uid = self._cell(row, "series_uid").strip()
-        if self._model is None or folder is None or not uid or self._preview_row_id:
+        if self._model is None or self._preview_row_id or self._preview_blocker(row):
             return
+        record = self._model.dataframe().iloc[row].to_dict()
         self._preview_dir = Path(tempfile.mkdtemp(prefix="bidsmgr-preview-"))
         self._preview_row_id = self._model.row_id(row)
         self._preview_generation += 1
-        self._preview_title = (self._cell(row, "SeriesDescription").strip()
-                               or self._cell(row, "bids_name").strip() or uid)
-        self._runner().start("image-preview", self._preview_generation, preview_series,
-                             folder, uid, self._preview_dir)
+        title = (self._cell(row, "SeriesDescription").strip()
+                 or self._cell(row, "bids_name").strip()
+                 or Path(self._cell(row, "source_file")).name)
+        self._runner().start("preview", self._preview_generation, preview_row,
+                             record, self._preview_dir, self._sources)
         # The window opens NOW, on the click, with a spinner, and fills when
-        # the series is converted: opened when it finished, it came up
-        # seconds later, behind the main window.
-        from .series_preview_dialog import SeriesPreviewDialog
+        # the row is converted: opened when it finished, it came up seconds
+        # later, behind the main window.
+        from .preview_dialog import PreviewDialog
 
-        dlg = SeriesPreviewDialog(None, self._preview_dir, self._preview_title, parent=self)
+        dlg = PreviewDialog(title, self._preview_dir, parent=self)
         self.preview_dialog = dlg
         dlg.show()
         dlg.raise_()
@@ -1205,7 +1215,7 @@ class PropertiesPanel(QWidget):
         dlg = getattr(self, "preview_dialog", None)
         return dlg if dlg is not None and dlg.isVisible() and dlg.is_pending() else None
 
-    def _on_preview_ready(self, generation: int, images) -> None:
+    def _on_preview_ready(self, generation: int, files) -> None:
         if generation != self._preview_generation:
             return
         import shutil
@@ -1213,7 +1223,7 @@ class PropertiesPanel(QWidget):
         self._preview_row_id = None
         dlg = self._preview_window()
         if dlg is not None:
-            dlg.set_images(images, self._preview_dir)
+            dlg.set_files(files, self._preview_dir)
             # If the app is not in front (the user switched away while it
             # converted): the Dock icon bounces, the taskbar entry flashes.
             from PyQt6.QtWidgets import QApplication
@@ -1263,7 +1273,7 @@ class PropertiesPanel(QWidget):
         self.set_selected_row(row)
 
     def _on_job_done(self, tag: str, generation: int, result) -> None:
-        if tag == "image-preview":
+        if tag == "preview":
             self._on_preview_ready(generation, result)
             return
         if generation != self._psd_generation:
@@ -1278,7 +1288,7 @@ class PropertiesPanel(QWidget):
             self.set_selected_row(self._row)
 
     def _on_job_failed(self, tag: str, generation: int, msg: str) -> None:
-        if tag == "image-preview":
+        if tag == "preview":
             self._on_preview_failed(generation, msg)
             return
         if generation != self._psd_generation:

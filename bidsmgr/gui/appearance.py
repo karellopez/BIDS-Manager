@@ -40,14 +40,17 @@ ICON_STYLES: dict[str, str] = {
     "colourful": "Colourful (by purpose)",
 }
 
-#: The file trees' kinds of entry: (label, the palette token it defaults to).
-TREE_KINDS: dict[str, tuple[str, str]] = {
-    "folder": ("Folders", "accent"),
-    "image": ("Images (NIfTI)", "text"),
-    "sidecar": ("Sidecars (JSON)", "purple"),
-    "table": ("Tables (TSV)", "teal"),
-    "recording": ("Recordings (EEG, MEG, physiology)", "text"),
-    "other": ("Other files", "dim"),
+#: The file trees' kinds of entry, by label. Every theme gives each its own
+#: colour (the palette's ``tree_<kind>``): folders are the accent, other
+#: files the secondary text, and images, sidecars, tables and recordings
+#: the theme's own shades.
+TREE_KINDS: dict[str, str] = {
+    "folder": "Folders",
+    "image": "Images (NIfTI)",
+    "sidecar": "Sidecars (JSON)",
+    "table": "Tables (TSV)",
+    "recording": "Recordings (EEG, MEG, physiology)",
+    "other": "Other files",
 }
 
 #: The strongest tint offered, in percent of the accent mixed into a surface.
@@ -149,8 +152,8 @@ def apply(palette: Mapping[str, str], appearance: Appearance, *, dark: bool,
         for key, share in (("bg", 0.6), ("surface", 1.0), ("surface2", 1.0),
                            ("surface3", 1.0), ("border", 1.2), ("subtle", 1.0)):
             pal[key] = mix(pal[key], accent, min(1.0, amount * share))
-    for kind, (_label, token) in TREE_KINDS.items():
-        pal[f"tree_{kind}"] = look.tree.get(kind) or pal.get(f"tree_{kind}") or pal[token]
+    for kind, colour in look.tree.items():
+        pal[f"tree_{kind}"] = colour
     if look.accent and not look.tree.get("folder") and palette.get("tree_folder") == palette[
             "accent"]:
         # Folders follow the accent unless the user gave them a colour.

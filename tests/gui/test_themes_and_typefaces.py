@@ -80,7 +80,8 @@ def manager(qapp):
 
 def test_every_theme_is_whole_and_grouped() -> None:
     ids = [t.id for t in THEMES]
-    assert len(ids) == len(set(ids)) == len(PALETTES) == 16
+    assert len(ids) == len(set(ids)) == len(PALETTES) == 17
+    assert "monokai" in ids and theme_info("monokai").dark
     # Neutral greys beside the blue-cast Dark (user request, 2026-10-09).
     assert {"graphite", "carbon", "ash", "porcelain"} <= set(ids)
     groups = [t.group for t in THEMES]
@@ -106,6 +107,37 @@ def test_plot_colours_stay_apart_in_every_theme(theme_id) -> None:
         for surface in ("bg", "surface"):
             assert _contrast(colour, p[surface]) >= 3, (colour, surface)
     assert VizTheme.from_palette(p, theme_id).series(0) == series[0]
+
+
+@pytest.mark.parametrize("theme_id", [t.id for t in THEMES])
+def test_file_names_take_the_theme_s_colours(theme_id) -> None:
+    """Images, sidecars, tables and recordings are coloured by the THEME
+    (switching it changes them; none is the plain text colour), read at the
+    status colours' contrast on every surface, and stay apart from each
+    other and from the folders: OKLab 14 for normal vision, 4.5 under
+    red-green colour blindness. Their icons differ too, so colour is never
+    the only cue."""
+    import itertools
+
+    p = PALETTES[theme_id]
+    strong = theme_id.startswith("hc-")
+    kinds = ("folder", "image", "sidecar", "table", "recording")
+    colours = {k: p[f"tree_{k}"] for k in kinds}
+    assert colours["folder"] == p["accent"] and p["tree_other"] == p["dim"]
+    for kind in kinds[1:]:
+        assert _separation(colours[kind], p["text"])[0] >= 15, kind
+        for surface in ("bg", "surface", "surface2", "surface3"):
+            floor = 7 if strong else (4.0 if surface == "surface3" else 4.5)
+            assert _contrast(colours[kind], p[surface]) >= floor, (kind, surface)
+    for a, b in itertools.combinations(kinds, 2):
+        normal, cvd = _separation(colours[a], colours[b])
+        assert normal >= 14 and cvd >= 4.5, (a, b, round(normal, 1), round(cvd, 1))
+
+
+def test_every_theme_colours_file_names_its_own_way() -> None:
+    sets = {tuple(PALETTES[t.id][f"tree_{k}"] for k in ("image", "sidecar", "table"))
+            for t in THEMES}
+    assert len(sets) == len(THEMES), "two themes share their file colours"
 
 
 def test_every_token_the_stylesheet_names_is_given() -> None:

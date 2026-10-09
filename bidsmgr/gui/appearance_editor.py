@@ -102,7 +102,7 @@ class AppearanceEditor(QWidget):
 
         self.tree_buttons: dict[str, QPushButton] = {}
         self.tree_resets: dict[str, QPushButton] = {}
-        for kind, (label, _token) in ap.TREE_KINDS.items():
+        for kind, label in ap.TREE_KINDS.items():
             btn = QPushButton()
             btn.setObjectName("tb-btn")
             btn.setToolTip(f"The colour of {label.lower()} in the file trees. Click to choose.")
@@ -192,7 +192,7 @@ class AppearanceEditor(QWidget):
             btn.setIcon(colour_dot(colour, self._side))
             btn.setText(colour if kind in self._tree else "Theme's own")
             btn.setToolTip(f"{colour}. Click to choose another colour for "
-                           f"{ap.TREE_KINDS[kind][0].lower()} in the file trees.")
+                           f"{ap.TREE_KINDS[kind].lower()} in the file trees.")
             self.tree_resets[kind].setEnabled(kind in self._tree)
 
     # -- edits ---------------------------------------------------------------------
@@ -220,7 +220,7 @@ class AppearanceEditor(QWidget):
 
     def _pick_tree(self, kind: str) -> None:
         start = QColor(self.effective()[f"tree_{kind}"])
-        label = ap.TREE_KINDS[kind][0]
+        label = ap.TREE_KINDS[kind]
         chosen = QColorDialog.getColor(start, self, f"Colour of {label.lower()}")
         if chosen.isValid():
             self.set_tree_colour(kind, chosen.name())

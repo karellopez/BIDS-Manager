@@ -42,6 +42,7 @@ import pandas as pd
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -145,7 +146,17 @@ class ConverterPanel(QWidget):
         self._convert_worker: Optional[ConvertWorker] = None
         self._metadata_worker: Optional[MetadataWorker] = None
         self._validate_worker: Optional[ValidateWorker] = None
+        # The folder the Raw input bar shows: what Scan reads next. With a
+        # table open it is that table's source until another folder is picked.
         self._raw_root: Optional[Path] = None
+        # Where the data of the TABLE SHOWN is now (``inventory.sources``),
+        # and what the last look for it found. The preview, the PSD and the
+        # conversion read from here, never from a folder picked to scan next.
+        self._sources = None
+        self._source_check = None
+        self._source_action = ""
+        self._source_jobs = None
+        self._source_generation = 0
         self._output_tsv: Optional[Path] = None
         self._bids_parent: Optional[Path] = None
         # Set when an explicit project is bound (Welcome -> Open/Create). The
@@ -187,7 +198,13 @@ class ConverterPanel(QWidget):
             "Raw input", raw_init, ok=bool(self._raw_root),
         )
         self._raw_pathbar.change_button.clicked.connect(self._on_pick_raw_dir)
+        self._raw_pathbar.action_button.clicked.connect(self._on_source_action)
         v.addWidget(self._raw_pathbar)
+        # The data can be moved, or its drive unplugged, while the app is in
+        # the background: look again when it comes back to the front.
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state)
 
         bids_init = str(self._bids_parent) if self._bids_parent else "(not set)"
         self._bids_pathbar = PathBar(
@@ -366,6 +383,7 @@ class ConverterPanel(QWidget):
         self._reset_inventory_view()
         # Path bars: clear + lock, with a reason on the buttons.
         self._raw_pathbar.set_value("(open or create a dataset first)", ok=False)
+        self._clear_source_state()
         self._raw_pathbar.change_button.setEnabled(False)
         self._raw_pathbar.change_button.setToolTip(self._NO_PROJECT_TOOLTIP)
         self._bids_pathbar.set_value("(locked to the dataset you open)", ok=False)
@@ -441,12 +459,15 @@ class ConverterPanel(QWidget):
         # Detach the model from every dependent view.
         self._table.setModel(None)
         self._properties.bind_model(None)
-        self._properties.set_raw_root(None)
+        self._sources = None
+        self._source_check = None
+        self._properties.set_sources(None)
         self._filter_pane.bind_model(None)
         self._raw_pane.bind_model(None)
         self._raw_pane.set_root(None)
         # Raw input bar back to "nothing picked".
         self._raw_pathbar.set_value("(no folder selected)", ok=False)
+        self._clear_source_state()
         # Inspection back to the placeholder; clear previews + chips + stats.
         self._inspection_stack.setCurrentIndex(0)
         self._bids_preview.clear()
@@ -503,19 +524,10 @@ class ConverterPanel(QWidget):
         self._project = proj
         self._properties.set_project(proj)
         self._active_version_dir = Path(version.dir)
-        if version.raw_root:
-            self._raw_root = Path(version.raw_root)
-            raw_ok = Path(version.raw_root).exists()
-            self._raw_pathbar.set_value(version.raw_root, ok=raw_ok)
-            if not raw_ok:
-                # Moved-data detection: the table still loads (curation can
-                # continue), but convert will need the source. Point the user at
-                # the fix instead of failing silently later.
-                self.log_message.emit(
-                    f"Source folder for scan '{version.version_id}' is no longer "
-                    f"at {version.raw_root}. Use 'change…' on Raw input to relocate "
-                    f"it (or re-scan) before converting."
-                )
+        # This scan's own source: never the folder another scan read. Where
+        # the data really is now, and whether it is still there, is decided
+        # when the table loads (``_resolve_sources``).
+        self._raw_root = Path(version.raw_root) if version.raw_root else None
         # The model is rebuilt with this version's project, so its event overlay
         # (cell / entity / include edits) replays automatically.
         try:
@@ -652,13 +664,13 @@ class ConverterPanel(QWidget):
             sel_model.currentRowChanged.connect(self._on_current_row_changed)
             sel_model.selectionChanged.connect(self._on_selection_changed)
         self._properties.bind_model(self._model)
-        self._properties.set_raw_root(self._raw_root)
+        if output_tsv is not None:
+            self._output_tsv = Path(output_tsv)
+        self._resolve_sources(df)
         self._filter_pane.bind_model(self._model)
         self._raw_pane.bind_model(self._model)
         if self._raw_root is not None:
             self._raw_pane.set_root(self._raw_root)
-        if output_tsv is not None:
-            self._output_tsv = Path(output_tsv)
         # The BIDS output pathbar is **independent** of the scan TSV
         # location — the user sets it explicitly with the change button.
         # Swap the inspection-pane stack from placeholder → table.
@@ -726,6 +738,7 @@ class ConverterPanel(QWidget):
         self._raw_root = Path(dicom_root)
         self._output_tsv = Path(output_tsv)
         self._raw_pathbar.set_value(str(self._raw_root), ok=True)
+        self._clear_source_state()
 
         # A fresh scan starts from clean metadata: drop any stale
         # recording-metadata scaffold left at this output path by a PREVIOUS
@@ -1680,32 +1693,201 @@ class ConverterPanel(QWidget):
         AppSettings.remember_tsv_filename(text)
 
     def _on_pick_raw_dir(self) -> None:
+        """Pick the folder Scan reads next.
+
+        It is NOT the open table's source: before 2026-10-09 it was written
+        into the open scan's record, so an older scan named a newer scan's
+        folder. Only when the open table's data is missing AND this folder
+        holds it is it offered as that scan's new location.
+        """
         d = QFileDialog.getExistingDirectory(
             self, "Pick raw-data folder",
             str(self._raw_root or Path.home()),
         )
         if not d:
             return
-        self._raw_root = Path(d)
-        self._raw_pathbar.set_value(str(self._raw_root), ok=True)
+        picked = Path(d)
+        if self._source_missing():
+            from ..inventory import sources
+
+            found, seen = sources.locate(self._model.dataframe(), self._sources.files_by_uid,
+                                         picked, scanned=self._sources.scanned)
+            if seen.found and QMessageBox.question(
+                self, "Use this folder for the table shown?",
+                f"This folder holds the source data of the scan table shown "
+                f"({seen.found} of {seen.checked} recordings checked are in it).\n\n"
+                "Yes: read that scan's data from here from now on.\n"
+                "No: keep it as the folder to scan next.",
+            ) == QMessageBox.StandardButton.Yes:
+                self._relink(found, seen)
+                return
+        self._raw_root = picked
         AppSettings.remember_raw_root(self._raw_root)
-        # Relocate: if a scan version is active, persist the new source location
-        # to its descriptor so the move sticks across reopen (moved-data
-        # recovery for EEG/MEG, whose source paths are relative to this root).
+        # Live preview of the picked folder before any scan runs.
+        self._raw_pane.set_root(self._raw_root)
+        self._show_source_state()
+
+    # -- where the table's data is ---------------------------------------------------
+
+    def _resolve_sources(self, df: pd.DataFrame) -> None:
+        """Find the shown table's data (its files over its record), correct a
+        wrong record, and tell the bar and Properties."""
+        from ..inventory import sources
+
+        label = None
         if self._active_version_dir is not None:
             from ..project import workspace
-            meta = workspace.read_version_meta(self._active_version_dir)
+
+            label = workspace.read_version_meta(self._active_version_dir).get("source_label")
+        files_by_uid = sources.load_files_by_uid(self._output_tsv) if self._output_tsv else {}
+        found, seen = sources.resolve(df, files_by_uid, recorded=self._raw_root, label=label)
+        if seen.corrected_from is not None:
+            self._record_source(found.root)
+            self.log_message.emit(
+                f"This scan recorded its source as {seen.corrected_from}, but its files are "
+                f"in {found.root}; the record is corrected.")
+        self._sources, self._source_check = found, seen
+        self._raw_root = found.root
+        self._properties.set_sources(found)
+        self._show_source_state()
+        if seen.state in ("missing", "partial"):
+            self.log_message.emit(sources.describe(seen, found.root)
+                                  + " Use Locate... on the Raw input bar.")
+
+    def _record_source(self, root: Optional[Path]) -> None:
+        """Write where the active scan's data is into its version record."""
+        if self._active_version_dir is None or root is None:
+            return
+        from ..project import workspace
+
+        meta = workspace.read_version_meta(self._active_version_dir)
+        try:
             workspace.write_version_meta(
                 self._active_version_dir,
                 source_label=meta.get("source_label") or self._active_version_dir.name,
-                raw_root=str(self._raw_root),
+                raw_root=str(root),
                 status=meta.get("status") or "curating",
             )
-            self.log_message.emit(f"Relocated source for the active scan to {d}")
-        # Keep the Properties PSD button resolving against the new root.
-        self._properties.set_raw_root(self._raw_root)
-        # Live preview of the picked folder before any scan runs.
-        self._raw_pane.set_root(self._raw_root)
+        except OSError as exc:
+            self.log_message.emit(f"Could not record the source folder: {exc}")
+
+    def _source_missing(self) -> bool:
+        return (self._model is not None and self._sources is not None
+                and self._source_check is not None
+                and self._source_check.state in ("missing", "partial"))
+
+    def _clear_source_state(self) -> None:
+        self._source_action = ""
+        self._raw_pathbar.set_chip()
+        self._raw_pathbar.set_action()
+
+    def _show_source_state(self) -> None:
+        """The Raw input bar: the shown table's source and whether its data is
+        there, or the folder picked to scan next."""
+        from ..inventory import sources
+
+        bar = self._raw_pathbar
+        table_root = self._sources.root if self._sources is not None else None
+        if self._model is not None and table_root is not None and self._raw_root is not None \
+                and self._raw_root != table_root:
+            bar.set_value(str(self._raw_root), ok=True)
+            bar.set_chip("", "Not scanned yet",
+                         "Scan reads this folder into a new scan table. The table shown "
+                         f"came from {table_root}.")
+            bar.set_action("Show the table's source",
+                           f"Back to {table_root}, the folder the table shown was scanned from")
+            self._source_action = "back"
+            return
+        if self._source_missing():
+            missing = self._source_check.state == "missing"
+            bar.set_value(str(table_root), ok=False)
+            bar.set_chip("err" if missing else "warn", "Moved" if missing else "Partly missing",
+                         sources.describe(self._source_check, table_root))
+            bar.set_action("Locate...",
+                           "Pick the folder where this scan's source data is now. The preview "
+                           "and the conversion read it from there.")
+            self._source_action = "locate"
+            return
+        self._clear_source_state()
+        if self._raw_root is not None:
+            bar.set_value(str(self._raw_root), ok=self._raw_root.is_dir())
+
+    def _on_source_action(self) -> None:
+        if self._source_action == "back" and self._sources is not None:
+            self._raw_root = self._sources.root
+            self._raw_pane.set_root(self._raw_root)
+            self._show_source_state()
+        elif self._source_action == "locate":
+            self._on_locate_source()
+
+    def _on_locate_source(self) -> None:
+        """Say where the shown table's data is now."""
+        if self._model is None or self._sources is None:
+            return
+        from ..inventory import sources
+
+        root = self._sources.root
+        start = next((str(p) for p in ((root.parent if root else None), Path.home())
+                      if p is not None and p.is_dir()), "")
+        d = QFileDialog.getExistingDirectory(self, "Where is the source data now?", start)
+        if not d:
+            return
+        found, seen = sources.locate(self._model.dataframe(), self._sources.files_by_uid,
+                                     Path(d), scanned=self._sources.scanned)
+        name = (self._sources.scanned or root or Path(d)).name
+        if seen.checked and not seen.found:
+            QMessageBox.warning(
+                self, "Not this scan's data",
+                f"None of the {seen.checked} recordings checked is in {d}.\n\n"
+                f"Pick the folder that was scanned (it was called \"{name}\").")
+            return
+        if seen.state == "partial" and QMessageBox.question(
+                self, "Part of the data is missing",
+                f"Only {seen.found} of the {seen.checked} recordings checked are in {d}. "
+                "Read this scan's data from there anyway?") != QMessageBox.StandardButton.Yes:
+            return
+        self._relink(found, seen)
+
+    def _relink(self, found, seen) -> None:
+        """The shown table's data is now at ``found.root``: remember it."""
+        self._record_source(found.root)
+        self._sources, self._source_check = found, seen
+        self._raw_root = found.root
+        self._properties.set_sources(found)
+        self._raw_pane.set_root(found.root)
+        self._show_source_state()
+        self.log_message.emit(f"The source data of this scan is now read from {found.root}")
+
+    def _on_application_state(self, state) -> None:
+        """Back in front: look for the table's data again (on a thread, in
+        case it was on a drive that is now gone)."""
+        if state != Qt.ApplicationState.ApplicationActive or self._sources is None \
+                or self._model is None:
+            return
+        from ..inventory import sources
+        from .viz.bridge import JobRunner
+
+        if self._source_jobs is None:
+            self._source_jobs = JobRunner(self)
+            self._source_jobs.done.connect(self._on_source_checked)
+        df = self._model.dataframe()
+        cols = [c for c in ("series_uid", "source_folder", "source_file") if c in df.columns]
+        self._source_generation += 1
+        self._source_jobs.start("source-check", self._source_generation, sources.check,
+                                self._sources, df[cols].copy())
+
+    def _on_source_checked(self, _tag: str, generation: int, result) -> None:
+        if generation != self._source_generation or self._sources is None:
+            return
+        before = self._source_check.state if self._source_check is not None else ""
+        self._source_check = result
+        if result.state != before:
+            self._show_source_state()
+            self._properties.set_sources(self._sources)
+            if self._raw_root == self._sources.root:
+                # The same path, there now or gone now: build the tree again.
+                self._raw_pane.set_root(None)
+                self._raw_pane.set_root(self._raw_root)
 
     def _on_pick_bids_parent(self) -> None:
         """Pick the BIDS output parent dir at any time (before or after scan)."""
@@ -1732,6 +1914,14 @@ class ConverterPanel(QWidget):
             return
         if self._model is None or self._output_tsv is None:
             return
+        if self._source_missing() and self._source_check.state == "missing":
+            from ..inventory import sources
+
+            QMessageBox.warning(
+                self, "The source data has moved",
+                sources.describe(self._source_check, self._sources.root)
+                + "\n\nUse Locate... on the Raw input bar to say where it is now.")
+            return
         # Use the pre-set BIDS output if the user picked one; otherwise
         # prompt now.
         if self._bids_parent is None:
@@ -1757,7 +1947,7 @@ class ConverterPanel(QWidget):
             bids_parent,
             n_jobs=n_jobs,
             on_existing=self._app_settings.convert_on_existing,
-            raw_root=self._raw_root,
+            raw_root=self._sources.root if self._sources is not None else self._raw_root,
             skip_residuals=self._app_settings.convert_skip_residuals,
             preserve_curation=self._app_settings.convert_preserve_curation,
             force_edf=self._app_settings.convert_force_edf,

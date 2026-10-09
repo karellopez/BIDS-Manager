@@ -164,7 +164,8 @@ def test_color_tokens_match_kinds(qapp, qtbot, bids_root: Path) -> None:
     items = _collect_items(pane._tree)
     by_label = {label: token for _, label, token in items}
     # Each kind has its own token, the user's to recolour (Settings >
-    # Display); by default they are the accent, text, purple and teal.
+    # Display); by default folders are the accent and every file kind the
+    # theme's own colour, never the plain text colour.
     assert by_label["sub-01"] == "tree_folder"
     assert by_label["ses-01"] == "tree_folder"
     assert by_label["anat"] == "tree_folder"
@@ -174,8 +175,9 @@ def test_color_tokens_match_kinds(qapp, qtbot, bids_root: Path) -> None:
     from bidsmgr.gui.theme_manager import PALETTES
 
     pal = PALETTES["dark"]
-    assert (pal["tree_folder"], pal["tree_image"], pal["tree_sidecar"], pal["tree_table"]) == (
-        pal["accent"], pal["text"], pal["purple"], pal["teal"])
+    assert pal["tree_folder"] == pal["accent"]
+    kinds = {pal[f"tree_{k}"] for k in ("image", "sidecar", "table", "recording")}
+    assert len(kinds) == 4 and pal["text"] not in kinds
 
 
 def test_file_selected_signal_emits_path(qapp, bids_root: Path, qtbot) -> None:

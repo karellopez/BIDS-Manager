@@ -64,6 +64,8 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 })
 
 
+_PICK_HINT = "(pick a raw-data folder to populate this tree)"
+
 class RawFsPane(QWidget):
     """Filesystem tree of the raw-input directory.
 
@@ -104,7 +106,7 @@ class RawFsPane(QWidget):
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
         v.addWidget(self._tree, 1)
 
-        self._empty = QLabel("(pick a raw-data folder to populate this tree)")
+        self._empty = QLabel(_PICK_HINT)
         self._empty.setObjectName("pane-hint")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
@@ -122,6 +124,7 @@ class RawFsPane(QWidget):
             self._root = None
             self._tree.clear()
             self._tree.setVisible(False)
+            self._empty.setText(_PICK_HINT)
             self._empty.setVisible(True)
             return
         root = Path(root)
@@ -159,6 +162,11 @@ class RawFsPane(QWidget):
     def _rebuild(self) -> None:
         self._tree.clear()
         if self._root is None or not self._root.exists():
+            # A folder that was there and is not: say so, rather than ask
+            # for one as if nothing had been picked.
+            self._empty.setText(_PICK_HINT if self._root is None else
+                                f"{self._root} is not there: it was moved, renamed or is on a "
+                                "drive that is not connected.")
             self._empty.setVisible(True)
             self._tree.setVisible(False)
             return

@@ -109,6 +109,11 @@ class SignalPresenter:
         #: Physio: every physio file of the run together (the default: the
         #: cardiac, breathing and trigger files of one run belong together).
         self.together = True
+        #: An EEG/MEG recording opens on its metadata card and waits for
+        #: "Load signal" (a recording can be gigabytes, and the Editor is
+        #: browsed). A host whose user already asked to SEE it (the
+        #: Converter's preview) sets this: the signal follows the card.
+        self.load_on_open = False
         from PyQt6.QtCore import QTimer
 
         self._memory_timer = QTimer(viewer)
@@ -1102,6 +1107,8 @@ class SignalPresenter:
             self.viewer.status_message.emit(
                 f"{result.get('name', '')}: {result.get('n_channels', 0)} ch, "
                 f"{result.get('sfreq', 0):.0f} Hz, {result.get('duration', 0):.1f} s")
+            if self.load_on_open:
+                self.load_signal()
         elif tag == "signal":
             self._adopt(result)
         elif tag == "resample":

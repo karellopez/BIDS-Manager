@@ -95,7 +95,8 @@ def _rgba(hex6: str, alpha: float) -> str:
     return f'rgba({r},{g},{b},{alpha:.2f})'
 
 
-def _derive(base: dict[str, str], *, dark: bool, strong: bool = False) -> dict[str, str]:
+def _derive(base: dict[str, str], *, dark: bool, strong: bool = False,
+            files: tuple[str, str, str, str]) -> dict[str, str]:
     """A whole palette from its base colours: the tinted backgrounds and
     borders of each status colour, the muted wash, the pressed shade and
     the plots' series colours (higher alphas for the high-contrast pair)."""
@@ -109,11 +110,15 @@ def _derive(base: dict[str, str], *, dark: bool, strong: bool = False) -> dict[s
     pal['pressed_alpha'] = 'rgba(255,255,255,0.06)' if dark else 'rgba(0,0,0,0.05)'
     for i, colour in enumerate(SERIES_DARK if dark else SERIES_LIGHT, start=1):
         pal[f'series{i}'] = colour
-    # The file trees' colours by kind of entry, the user's to change
-    # (Settings > Display; ``appearance.TREE_KINDS``).
-    for kind, token in (('folder', 'accent'), ('image', 'text'), ('sidecar', 'purple'),
-                        ('table', 'teal'), ('recording', 'text'), ('other', 'dim')):
-        pal[f'tree_{kind}'] = pal[token]
+    # The file trees' colours by kind of entry, the theme's OWN for images,
+    # sidecars, tables and recordings (``files``), so file names change with
+    # the theme; folders are the accent and other files the secondary text.
+    # The user can change any of them (Settings > Display;
+    # ``appearance.TREE_KINDS``).
+    pal['tree_folder'] = pal['accent']
+    for kind, colour in zip(('image', 'sidecar', 'table', 'recording'), files):
+        pal[f'tree_{kind}'] = colour
+    pal['tree_other'] = pal['dim']
     return pal
 
 
@@ -124,7 +129,7 @@ DARK = _derive({
     'dim': '#8b949e', 'muted': '#656d76', 'accent': '#58a6ff', 'success': '#3fb950',
     'warning': '#d29922', 'error': '#f85149', 'purple': '#d2a8ff', 'teal': '#39c5cf',
     'primary_btn_text': '#0a0e13',
-}, dark=True)
+}, dark=True, files=('#dcaeff', '#e9b10d', '#63d96f', '#e4928f'))
 
 #: White cards on a cool grey canvas.
 LIGHT = _derive({
@@ -133,7 +138,7 @@ LIGHT = _derive({
     'dim': '#57606a', 'muted': '#8c959f', 'accent': '#0969da', 'success': '#1a7f37',
     'warning': '#946200', 'error': '#cf222e', 'purple': '#8250df', 'teal': '#1b7c83',
     'primary_btn_text': '#ffffff',
-}, dark=False)
+}, dark=False, files=('#9148bb', '#9e6002', '#0e6a45', '#b5265a'))
 
 #: A softer dark: mid blue-greys, lower contrast for long sessions.
 DIM = _derive({
@@ -142,7 +147,7 @@ DIM = _derive({
     'dim': '#9aa6b2', 'muted': '#768390', 'accent': '#6cb6ff', 'success': '#6bc46d',
     'warning': '#daaa3f', 'error': '#f47067', 'purple': '#dcbdfb', 'teal': '#56d4dd',
     'primary_btn_text': '#1c2128',
-}, dark=True)
+}, dark=True, files=('#e88ce7', '#e8ae06', '#76c978', '#d7877e'))
 
 #: A warm light: cream cards on a sand canvas, softer than white.
 PAPER = _derive({
@@ -151,7 +156,7 @@ PAPER = _derive({
     'dim': '#5f5444', 'muted': '#8d806b', 'accent': '#1d5f86', 'success': '#3d6b1f',
     'warning': '#875400', 'error': '#a51d3e', 'purple': '#6f4697', 'teal': '#1e6b66',
     'primary_btn_text': '#ffffff',
-}, dark=False)
+}, dark=False, files=('#7637ac', '#7b2c01', '#3c6b1d', '#b5265a'))
 
 #: Neutral dark grey, no colour cast: the quiet default for long work.
 GRAPHITE = _derive({
@@ -160,7 +165,7 @@ GRAPHITE = _derive({
     'dim': '#a6a6ae', 'muted': '#7a7a83', 'accent': '#7aa7ff', 'success': '#5fd08a',
     'warning': '#f2b84b', 'error': '#f47a72', 'purple': '#c3a6ff', 'teal': '#56c8d6',
     'primary_btn_text': '#0f1115',
-}, dark=True)
+}, dark=True, files=('#edb3fe', '#f5ce59', '#59cea8', '#fd9c8a'))
 
 #: Neutral near-black on a black canvas (OLED-friendly).
 CARBON = _derive({
@@ -169,7 +174,7 @@ CARBON = _derive({
     'dim': '#acacb3', 'muted': '#7d7d85', 'accent': '#8ab4ff', 'success': '#62d896',
     'warning': '#f5c25c', 'error': '#ff7f78', 'purple': '#cbaeff', 'teal': '#60d2de',
     'primary_btn_text': '#000000',
-}, dark=True)
+}, dark=True, files=('#c67de2', '#e9d25b', '#49d29f', '#ffa084'))
 
 #: A lighter neutral dark: soft charcoal.
 ASH = _derive({
@@ -178,7 +183,7 @@ ASH = _derive({
     'dim': '#b6b7bd', 'muted': '#8d8e95', 'accent': '#8eb4ff', 'success': '#7dd89a',
     'warning': '#efc46e', 'error': '#ff8c84', 'purple': '#d0b4ff', 'teal': '#72d3dc',
     'primary_btn_text': '#1d1e22',
-}, dark=True)
+}, dark=True, files=('#d078fc', '#ecc751', '#6ce0ba', '#fe9b93'))
 
 #: Neutral light: white cards on a pale grey canvas, no tint.
 PORCELAIN = _derive({
@@ -187,7 +192,7 @@ PORCELAIN = _derive({
     'dim': '#55555e', 'muted': '#85858e', 'accent': '#2563c9', 'success': '#1c7a40',
     'warning': '#8a5a00', 'error': '#c1312c', 'purple': '#7240c4', 'teal': '#11727c',
     'primary_btn_text': '#ffffff',
-}, dark=False)
+}, dark=False, files=('#7530a4', '#8c611a', '#0e6037', '#b5265a'))
 
 #: Cool blue-grey surfaces with the Nord palette's frost accents.
 NORD = _derive({
@@ -196,7 +201,7 @@ NORD = _derive({
     'dim': '#b9c1cf', 'muted': '#8892a6', 'accent': '#88c0d0', 'success': '#8fc79a',
     'warning': '#ebcb8b', 'error': '#ec959c', 'purple': '#c8a2c4', 'teal': '#8fbcbb',
     'primary_btn_text': '#2e3440',
-}, dark=True)
+}, dark=True, files=('#d68cf1', '#f4c96e', '#88b956', '#f69394'))
 
 #: Warm charcoal with an amber accent, like a dim room by a fire.
 EMBER = _derive({
@@ -205,7 +210,7 @@ EMBER = _derive({
     'dim': '#c4b6aa', 'muted': '#968679', 'accent': '#f2a65a', 'success': '#7fd39a',
     'warning': '#e6d26a', 'error': '#ff6f86', 'purple': '#d9a3d0', 'teal': '#7cc9bd',
     'primary_btn_text': '#1a1310',
-}, dark=True)
+}, dark=True, files=('#d090d5', '#98c8f4', '#7cd499', '#fb6874'))
 
 #: Deep green-grey with a golden accent.
 FOREST = _derive({
@@ -214,7 +219,7 @@ FOREST = _derive({
     'dim': '#a9bcb0', 'muted': '#7d9085', 'accent': '#e8b66a', 'success': '#8fd07b',
     'warning': '#f59e5b', 'error': '#ff6f91', 'purple': '#c3a8f2', 'teal': '#66c9d4',
     'primary_btn_text': '#14110b',
-}, dark=True)
+}, dark=True, files=('#c196e5', '#80c9f9', '#85e0a5', '#fa8793'))
 
 #: Deep plum with an orchid accent.
 AUBERGINE = _derive({
@@ -223,7 +228,18 @@ AUBERGINE = _derive({
     'dim': '#c3b2cf', 'muted': '#93829f', 'accent': '#f095d0', 'success': '#86d3a2',
     'warning': '#efc570', 'error': '#ff8562', 'purple': '#b6a2ff', 'teal': '#74d0de',
     'primary_btn_text': '#1e1722',
-}, dark=True)
+}, dark=True, files=('#909dfd', '#f8d745', '#89d2a3', '#ff9b61'))
+
+#: The classic editor palette: warm olive-black with its vivid cyan, green,
+#: orange, pink and purple. Its yellow is too close to its green for two
+#: statuses shown side by side, so orange is the warning.
+MONOKAI = _derive({
+    'bg': '#1e1f1a', 'surface': '#272822', 'surface2': '#2e2f29', 'surface3': '#3a3b32',
+    'border': '#49483e', 'subtle': '#33342c', 'input_border': '#868268', 'text': '#f8f8f2',
+    'dim': '#cfcfc2', 'muted': '#97927a', 'accent': '#66d9ef', 'success': '#a6e22e',
+    'warning': '#fd971f', 'error': '#ff7096', 'purple': '#bc9bff', 'teal': '#7fe3c9',
+    'primary_btn_text': '#1e1f1a',
+}, dark=True, files=('#bd90ff', '#fe6e9b', '#a7e236', '#fa9930'))
 
 #: Blush cards with a plum accent.
 SAKURA = _derive({
@@ -232,7 +248,7 @@ SAKURA = _derive({
     'dim': '#6c4c57', 'muted': '#9a7c86', 'accent': '#8b3384', 'success': '#2a7448',
     'warning': '#87540a', 'error': '#c0262d', 'purple': '#4b4bb3', 'teal': '#1b7470',
     'primary_btn_text': '#ffffff',
-}, dark=False)
+}, dark=False, files=('#4a47bd', '#9a5800', '#2c7448', '#cd2651'))
 
 #: Pale green-grey with a slate-blue accent.
 SAGE = _derive({
@@ -241,7 +257,7 @@ SAGE = _derive({
     'dim': '#4a5c50', 'muted': '#7a8b7e', 'accent': '#2d6597', 'success': '#3b7a28',
     'warning': '#8a5c00', 'error': '#b42347', 'purple': '#6c48a6', 'teal': '#16736f',
     'primary_btn_text': '#ffffff',
-}, dark=False)
+}, dark=False, files=('#6a2fa5', '#7c440b', '#417917', '#b5265a'))
 
 #: Black and white with strong borders: every text at 7:1 or better (AAA).
 HC_DARK = _derive({
@@ -250,7 +266,7 @@ HC_DARK = _derive({
     'dim': '#e0e0e0', 'muted': '#b8b8b8', 'accent': '#5cc8ff', 'success': '#5ef07a',
     'warning': '#ffd84d', 'error': '#ff8f8f', 'purple': '#e7b6ff', 'teal': '#5cf0f0',
     'primary_btn_text': '#000000',
-}, dark=True, strong=True)
+}, dark=True, strong=True, files=('#ee9eef', '#fdda1a', '#61f07b', '#f5ab88'))
 
 #: White and black with strong borders.
 HC_LIGHT = _derive({
@@ -259,7 +275,7 @@ HC_LIGHT = _derive({
     'dim': '#1f1f1f', 'muted': '#4d4d4d', 'accent': '#0039a6', 'success': '#08521a',
     'warning': '#6b3f00', 'error': '#9e0031', 'purple': '#4f1a99', 'teal': '#00545a',
     'primary_btn_text': '#ffffff',
-}, dark=False, strong=True)
+}, dark=False, strong=True, files=('#5b0481', '#5e1e02', '#04591b', '#9d0049'))
 
 
 @dataclass(frozen=True)
@@ -293,6 +309,8 @@ THEMES: tuple[ThemeInfo, ...] = (
     ThemeInfo('ember', 'Ember', True, 'paper', 'Colour', 'Warm charcoal with an amber accent.'),
     ThemeInfo('forest', 'Forest', True, 'sage', 'Colour', 'Deep green-grey with a golden accent.'),
     ThemeInfo('aubergine', 'Aubergine', True, 'sakura', 'Colour', 'Deep plum with an orchid accent.'),
+    ThemeInfo('monokai', 'Monokai', True, 'paper', 'Colour',
+              'The classic editor palette on warm olive-black.'),
     ThemeInfo('sakura', 'Sakura', False, 'aubergine', 'Colour', 'Blush cards with a plum accent.'),
     ThemeInfo('sage', 'Sage', False, 'forest', 'Colour', 'Pale green-grey with a slate-blue accent.'),
     ThemeInfo('hc-dark', 'High contrast dark', True, 'hc-light', 'High contrast',
@@ -304,7 +322,7 @@ THEMES: tuple[ThemeInfo, ...] = (
 PALETTES: dict[str, dict[str, str]] = {
     'graphite': GRAPHITE, 'carbon': CARBON, 'ash': ASH, 'porcelain': PORCELAIN,
     'dark': DARK, 'dim': DIM, 'light': LIGHT, 'paper': PAPER,
-    'nord': NORD, 'ember': EMBER, 'forest': FOREST, 'aubergine': AUBERGINE,
+    'nord': NORD, 'ember': EMBER, 'forest': FOREST, 'aubergine': AUBERGINE, 'monokai': MONOKAI,
     'sakura': SAKURA, 'sage': SAGE, 'hc-dark': HC_DARK, 'hc-light': HC_LIGHT,
 }
 
