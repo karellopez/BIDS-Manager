@@ -2,8 +2,8 @@
 
 Shared by the full GUI (``bidsmgr``) and the standalone viewer
 (``bidsmgr-view``), so the two cannot drift: the OpenGL format the 3-D view
-needs, the Fusion style, the brand icon, the persisted theme and font scale,
-and the rounded combo popups. Everything here has to happen BEFORE the first
+needs, the Fusion style, the brand icon, the bundled typefaces, the persisted
+theme and font scale, and the rounded combo popups. Everything here has to happen BEFORE the first
 window is built, and most of it before the QApplication itself exists.
 """
 
@@ -51,6 +51,14 @@ def create_application(theme: Optional[str] = None):
     from .app_icon import set_app_icon
 
     set_app_icon(app)
+
+    # The bundled typefaces before anything is styled: every widget inherits
+    # the application font, so it must be Inter before the first one exists.
+    from . import typefaces
+    from .theme_manager import BASE_FONT_PIXEL_SIZE
+
+    typefaces.load()
+    app.setFont(typefaces.ui_font(BASE_FONT_PIXEL_SIZE))
 
     from .app_settings import AppSettings
     from .theme_manager import ThemeManager

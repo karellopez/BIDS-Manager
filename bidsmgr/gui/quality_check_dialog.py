@@ -30,6 +30,7 @@ from ..qc import report as RP
 from ..qc import run as RUN
 from .dialog_chrome import build_footer_with, build_header, hint
 from .widgets.spinner import BusySpinner
+from .typefaces import code
 
 #: The measures a row shows, per kind: (key, header, full name).
 ANAT_COLUMNS = (
@@ -99,7 +100,7 @@ class QualityCheckDialog(QDialog):
             "A fast quality check of every anatomical and diffusion image: noise, "
             "contrast, artefacts, coverage, the gradient table, motion and slice "
             "dropout. <b>The air around the head is measured only in images that "
-            "are not defaced.</b> Results go into <code>derivatives/bidsmgr-qc/</code>; "
+            "are not defaced.</b> Results go into " + code("derivatives/bidsmgr-qc/") + "; "
             "coloured values sit far from the dataset's other images of the same kind."))
 
         body = QWidget()

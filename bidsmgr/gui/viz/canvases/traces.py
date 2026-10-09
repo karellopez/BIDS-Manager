@@ -362,7 +362,7 @@ class TracesCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _dark_override(self) -> bool:
-        return self.ctx.theme.name == "light" and self.ctx.settings.traces.dark_plot
+        return not self.ctx.theme.dark and self.ctx.settings.traces.dark_plot
 
     def _apply_theme(self) -> None:
         theme = self.ctx.theme

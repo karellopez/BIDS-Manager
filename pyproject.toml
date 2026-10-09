@@ -207,6 +207,9 @@ include = ["bidsmgr*"]
     "assets/macos/*.png",
     "assets/macos/*.icns",
     "assets/windows/*.ico",
+    "assets/fonts/*.ttf",
+    "assets/fonts/*.txt",
+    "assets/fonts/*.md",
 ]
 # NOTE: no "bidsmgr.schema" entry. That package is a pure adapter over
 # bidsval and ships no data; it used to carry a "bundled/**/*" glob pointing

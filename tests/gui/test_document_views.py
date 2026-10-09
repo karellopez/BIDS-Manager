@@ -105,9 +105,9 @@ def test_code_quotes_rules_and_tables_are_drawn(view) -> None:
     first, last = view._codes[0]
     code = view.document().findBlockByNumber(first)
     assert code.text() == "bidsmgr-validate study"
-    assert code.begin().fragment().charFormat().font().fixedPitch() or (
-        "Menlo" in code.begin().fragment().charFormat().fontFamilies()
-        or "Consolas" in code.begin().fragment().charFormat().fontFamilies())
+    from bidsmgr.gui.typefaces import MONO_FAMILY
+
+    assert MONO_FAMILY in code.begin().fragment().charFormat().fontFamilies()
     # The rule is painted in the border colour, never Qt's own in the text
     # colour on top of it.
     from PyQt6.QtGui import QTextFormat

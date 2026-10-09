@@ -14,8 +14,8 @@ Usage:
 
     from bidsmgr.gui.theme_manager import ThemeManager
     theme = ThemeManager(app)
-    theme.apply('dark')   # or 'light'
-    theme.toggle()        # swap
+    theme.apply('dark')   # or any id in THEMES ('light', 'dim', 'nord', ...)
+    theme.toggle()        # to the partner of the other kind
 
 Other GUI modules subscribe to palette changes:
 
@@ -29,6 +29,7 @@ the listener flow (e.g. ``QStyledItemDelegate.paint``).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 from typing import Callable
@@ -146,7 +147,112 @@ LIGHT: dict[str, str] = {
     'pressed_alpha':    'rgba(0,0,0,0.04)',
 }
 
-PALETTES: dict[str, dict[str, str]] = {'dark': DARK, 'light': LIGHT}
+
+
+def _rgba(hex6: str, alpha: float) -> str:
+    h = hex6.lstrip('#')
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f'rgba({r},{g},{b},{alpha:.2f})'
+
+
+def _derive(base: dict[str, str], *, dark: bool, strong: bool = False) -> dict[str, str]:
+    """A whole palette from its base colours: the tinted backgrounds and
+    borders of each status colour, the muted wash and the pressed shade,
+    with the alphas Dark and Light use (higher for the high-contrast pair)."""
+    tint, edge = (0.22, 0.75) if strong else ((0.12, 0.30) if dark else (0.10, 0.30))
+    pal = dict(base)
+    for key in ('accent', 'success', 'warning', 'error', 'purple', 'teal'):
+        pal[f'{key}_bg'] = _rgba(base[key], tint)
+        pal[f'{key}_border'] = _rgba(base[key], edge if key != 'accent' or strong
+                                     else (0.40 if dark else 0.32))
+    pal['muted_40'] = _rgba(base['muted'], 0.40)
+    pal['pressed_alpha'] = 'rgba(255,255,255,0.06)' if dark else 'rgba(0,0,0,0.05)'
+    return pal
+
+
+#: A softer dark: mid greys, lower contrast for long sessions.
+DIM = _derive({
+    'bg': '#1c2128', 'surface': '#22272e', 'surface2': '#2a3038', 'surface3': '#323942',
+    'border': '#3d444d', 'input_border': '#6e7681', 'subtle': '#2a3038',
+    'text': '#cdd9e5', 'dim': '#9aa6b2', 'muted': '#768390',
+    'accent': '#6cb6ff', 'success': '#6bc46d', 'warning': '#daaa3f', 'error': '#f47067',
+    'purple': '#dcbdfb', 'teal': '#56d4dd', 'primary_btn_text': '#1c2128',
+}, dark=True)
+
+#: Cool blue-grey surfaces with the Nord palette's muted accents.
+NORD = _derive({
+    'bg': '#272c36', 'surface': '#2e3440', 'surface2': '#353c4a', 'surface3': '#3b4252',
+    'border': '#434c5e', 'input_border': '#7b88a1', 'subtle': '#353c4a',
+    'text': '#eceff4', 'dim': '#b9c1cf', 'muted': '#8892a6',
+    'accent': '#88c0d0', 'success': '#a3be8c', 'warning': '#ebcb8b', 'error': '#ec959c',
+    'purple': '#c8a2c4', 'teal': '#8fbcbb', 'primary_btn_text': '#2e3440',
+}, dark=True)
+
+#: A warm light: cream surfaces and warm greys, softer than white.
+PAPER = _derive({
+    'bg': '#fcfaf5', 'surface': '#f4efe4', 'surface2': '#fffdf8', 'surface3': '#ebe4d4',
+    'border': '#d9cfbb', 'input_border': '#8f8470', 'subtle': '#e6dece',
+    'text': '#33291f', 'dim': '#5f5444', 'muted': '#8d806b',
+    'accent': '#1d5f86', 'success': '#3d6b1f', 'warning': '#875400', 'error': '#a8321f',
+    'purple': '#6f4697', 'teal': '#1e6b66', 'primary_btn_text': '#ffffff',
+}, dark=False)
+
+#: Black, white and strong borders: every text at 7:1 or better (AAA).
+HC_DARK = _derive({
+    'bg': '#000000', 'surface': '#0b0b0b', 'surface2': '#141414', 'surface3': '#202020',
+    'border': '#7a7a7a', 'input_border': '#cfcfcf', 'subtle': '#1a1a1a',
+    'text': '#ffffff', 'dim': '#e0e0e0', 'muted': '#b8b8b8',
+    'accent': '#5cc8ff', 'success': '#5ef07a', 'warning': '#ffd84d', 'error': '#ff8f8f',
+    'purple': '#e7b6ff', 'teal': '#5cf0f0', 'primary_btn_text': '#000000',
+}, dark=True, strong=True)
+
+HC_LIGHT = _derive({
+    'bg': '#ffffff', 'surface': '#ffffff', 'surface2': '#ffffff', 'surface3': '#ececec',
+    'border': '#6e6e6e', 'input_border': '#1a1a1a', 'subtle': '#e3e3e3',
+    'text': '#000000', 'dim': '#1f1f1f', 'muted': '#4d4d4d',
+    'accent': '#0039a6', 'success': '#08521a', 'warning': '#6b3f00', 'error': '#94000d',
+    'purple': '#4f1a99', 'teal': '#00545a', 'primary_btn_text': '#ffffff',
+}, dark=False, strong=True)
+
+
+@dataclass(frozen=True)
+class ThemeInfo:
+    """A theme the user can pick: its palette, and what it is."""
+
+    id: str
+    label: str
+    dark: bool
+    #: The theme of the other kind ``toggle`` switches to.
+    partner: str
+    description: str
+
+
+#: Every theme, in the order the menus list them (dark ones first).
+THEMES: tuple[ThemeInfo, ...] = (
+    ThemeInfo('dark', 'Dark', True, 'light', 'Near-black surfaces, the default.'),
+    ThemeInfo('dim', 'Dim', True, 'paper', 'A softer dark in mid greys, for long sessions.'),
+    ThemeInfo('nord', 'Nord', True, 'light', 'Cool blue-grey surfaces with muted accents.'),
+    ThemeInfo('hc-dark', 'High contrast dark', True, 'hc-light',
+              'Black and white with strong borders.'),
+    ThemeInfo('light', 'Light', False, 'dark', 'White surfaces.'),
+    ThemeInfo('paper', 'Paper', False, 'dim', 'Warm cream surfaces, softer than white.'),
+    ThemeInfo('hc-light', 'High contrast light', False, 'hc-dark',
+              'White and black with strong borders.'),
+)
+
+PALETTES: dict[str, dict[str, str]] = {
+    'dark': DARK, 'dim': DIM, 'nord': NORD, 'hc-dark': HC_DARK,
+    'light': LIGHT, 'paper': PAPER, 'hc-light': HC_LIGHT,
+}
+
+
+def theme_info(theme_id: str) -> ThemeInfo:
+    """The theme ``theme_id`` (Dark for an id no longer known)."""
+    return next((t for t in THEMES if t.id == theme_id), THEMES[0])
+
+
+def theme_ids() -> list[str]:
+    return [t.id for t in THEMES]
 
 
 # =====================================================================
@@ -272,7 +378,12 @@ class ThemeManager:
         scaled_template = Template(
             _scale_qss_font_sizes(self._raw_template_text, self._font_scale)
         )
-        self._app.setStyleSheet(scaled_template.safe_substitute(**pal))
+        # The stylesheet's images (tick, chevrons) are drawn in this
+        # palette's colours and named by token beside its colours.
+        from .theme_assets import write as write_theme_images
+
+        tokens = {**pal, **write_theme_images(pal, theme)}
+        self._app.setStyleSheet(scaled_template.safe_substitute(**tokens))
         self._update_qpalette(pal)
         try:
             app_font = QFont(self._app.font())
@@ -289,8 +400,14 @@ class ThemeManager:
             except Exception as exc:  # pragma: no cover — never let a listener crash the app
                 print(f'[theme listener] {exc}')
 
+    @property
+    def is_dark(self) -> bool:
+        return theme_info(self._theme).dark
+
     def toggle(self) -> str:
-        self.apply('light' if self._theme == 'dark' else 'dark')
+        """Switch to the current theme's partner of the other kind (Dark and
+        Light, Dim and Paper, the two high-contrast themes)."""
+        self.apply(theme_info(self._theme).partner)
         return self._theme
 
     # ------------------------------------------------------------- internals

@@ -1209,7 +1209,24 @@ class EditorPanel(QWidget):
             self._sidecar_form.set_file(path, root, self._report)
         elif path is not None:
             pane.set_file(path, root)
+        self._name_pane(pane, path)
         self._center_stack.setCurrentWidget(pane)
+
+    def _name_pane(self, pane, path: Optional[Path]) -> None:
+        """Under the frame's "Viewer", the pane's own header names the file
+        shown (a second "Sidecar" or "Table" said nothing new). The panes
+        that name what they show themselves are left alone."""
+        if pane not in (self._sidecar_form, self._tsv_viewer, self._nifti_viewer,
+                        self._signal_viewer, self._spectrum_viewer):
+            return
+        from .widgets.primitives import PaneHeader
+
+        header = pane.findChild(PaneHeader)
+        if header is None:
+            return
+        if not hasattr(header, "_generic"):
+            header._generic = header.text()
+        header.setText(path.name if path is not None else header._generic)
 
     def _clear_pane(self, pane) -> None:
         if pane is self._sidecar_form:

@@ -2,9 +2,10 @@
 
 Usage::
 
-    bidsmgr [--theme dark|light] [--project PATH]
+    bidsmgr [--theme THEME] [--project PATH]
 
-* ``--theme``  selects the initial palette (defaults to ``dark``).
+* ``--theme``  selects the initial theme: dark, dim, nord, hc-dark, light,
+  paper or hc-light (defaults to the last one chosen, else ``dark``).
 * ``--project`` opens (or creates / adopts) a BIDS dataset project at the
   given directory and lands in the Converter bound to it - the same
   project-first flow as the Welcome tab's Open / Create. The output is locked
@@ -24,13 +25,19 @@ from pathlib import Path
 from typing import Optional
 
 
+def _theme_ids() -> list[str]:
+    from .gui.theme_manager import theme_ids
+
+    return theme_ids()
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bidsmgr",
         description="Schema-driven BIDS converter / curator (GUI).",
     )
     parser.add_argument(
-        "--theme", choices=("dark", "light"), default=None,
+        "--theme", choices=_theme_ids(), default=None,
         help=(
             "Initial color theme. If omitted, the last theme the user "
             "selected in-app is restored (default: dark on first run)."

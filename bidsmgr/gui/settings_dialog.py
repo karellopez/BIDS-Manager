@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -51,6 +52,7 @@ from ..deface import run as deface_run
 from ..classifier import user_rules
 from ..util.system_info import SystemInfo, get_system_info
 from .app_settings import AppSettings
+from .typefaces import code
 
 
 def _indented(child: QWidget, *, indent: int = 22) -> QWidget:
@@ -176,7 +178,17 @@ class SettingsDialog(QDialog):
         buttons.button(
             QDialogButtonBox.StandardButton.RestoreDefaults
         ).clicked.connect(self._on_restore_defaults)
-        v.addWidget(buttons)
+        self._save_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
+        # In the dialogs' footer strip, with room around it (the buttons sat
+        # flush against the window's edge).
+        from .viz import fonts
+
+        footer = QFrame()
+        footer.setObjectName("issue-dialog-footer")
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(fonts.px(14), fonts.px(10), fonts.px(14), fonts.px(10))
+        fl.addWidget(buttons)
+        v.addWidget(footer)
 
         # Populate every widget from the current settings.
         self._load_into_widgets(self._settings)
@@ -267,6 +279,12 @@ class SettingsDialog(QDialog):
             width = longest + icon + fonts.px(56)
         nav.setFixedWidth(width)
 
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        # Save is the default button (the accent, and what Enter presses).
+        # Set on show: a dialog settles its default button when it appears.
+        super().showEvent(event)
+        self._save_btn.setDefault(True)
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().resizeEvent(event)
         if self._nav_compact is not None:
@@ -296,8 +314,15 @@ class SettingsDialog(QDialog):
         w = QWidget()
         form = QFormLayout(w)
 
+        from .theme_manager import THEMES
+        from .theme_menu import theme_swatch
+        from .viz import fonts
+
         self._theme_combo = QComboBox()
-        self._theme_combo.addItems(["dark", "light"])
+        for t in THEMES:
+            self._theme_combo.addItem(theme_swatch(t.id, fonts.px(16)), t.label, t.id)
+            self._theme_combo.setItemData(self._theme_combo.count() - 1, t.description,
+                                          Qt.ItemDataRole.ToolTipRole)
         form.addRow("Theme:", self._theme_combo)
 
         # Font scale: multiplies every font-size (QSS + delegate paints +
@@ -445,8 +470,8 @@ class SettingsDialog(QDialog):
 
         explain = QLabel(
             "An <b>index</b> entity is one whose value is a number: run, "
-            "echo, and the others below. BIDS accepts <code>run-1</code> and "
-            "<code>run-01</code> equally, so this is a house style rather "
+            "echo, and the others below. BIDS accepts " + code("run-1") + " and "
+            + code("run-01") + " equally, so this is a house style rather "
             "than a correction.<br><br>"
             "Setting a width here makes the inspection table propose that "
             "width from the moment a scan finishes, so you never have to go "
@@ -477,7 +502,7 @@ class SettingsDialog(QDialog):
             box.setToolTip(why[:300] if why else f"The {entity} entity.")
             self._index_widths[entity] = box
 
-            name = QLabel(f"<code>{entity}-</code>")
+            name = QLabel(code(f"{entity}-"))
             name.setToolTip(display)
             sample = QLabel("")
             sample.setObjectName("dlg-hint")
@@ -1184,7 +1209,7 @@ class SettingsDialog(QDialog):
         """
         cap = self._sys.logical_threads
 
-        self._theme_combo.setCurrentText(s.theme)
+        self._theme_combo.setCurrentIndex(max(0, self._theme_combo.findData(s.theme)))
         self._editor_show_hidden.setChecked(s.editor_show_hidden)
         self._editor_autosave.setChecked(s.editor_autosave)
         self._font_scale_combo.setCurrentIndex(
@@ -1284,7 +1309,7 @@ class SettingsDialog(QDialog):
         s = self._settings
         s.user_hints = hints
         s.scan_exclusions = exclusions
-        s.theme = self._theme_combo.currentText()
+        s.theme = self._theme_combo.currentData() or "dark"
         s.editor_show_hidden = self._editor_show_hidden.isChecked()
         s.editor_autosave = self._editor_autosave.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[

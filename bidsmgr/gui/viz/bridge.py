@@ -197,7 +197,10 @@ class ThemeHub(QObject):
 
     def publish(self, palette: dict, name: str = "") -> None:
         if not name:
-            name = "light" if palette.get("bg", "").lower() in ("#ffffff", "#fff") else "dark"
+            from .. import theme_manager
+
+            name = next((k for k, p in theme_manager.PALETTES.items() if p is palette or p == palette),
+                        "dark")
         self.theme = VizTheme.from_palette(palette, name)
         self.changed.emit(self.theme)
 

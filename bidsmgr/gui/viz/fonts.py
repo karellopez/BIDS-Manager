@@ -42,7 +42,9 @@ def font(base_px: int, *, bold: bool = False, mono: bool = False) -> QFont:
     """A font of ``base_px`` pixels at scale 1.0, scaled."""
     f = QFont()
     if mono:
-        f.setFamilies(["SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono", "monospace"])
+        from ..typefaces import mono_families
+
+        f.setFamilies(mono_families())
         f.setStyleHint(QFont.StyleHint.Monospace)
     f.setPixelSize(px(base_px))
     f.setBold(bold)

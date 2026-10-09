@@ -54,6 +54,21 @@ def parse_colour(value: str) -> tuple[int, int, int, int]:
     return 0, 0, 0, 255
 
 
+def luminance(value: str) -> float:
+    """WCAG relative luminance of a colour, 0 (black) to 1 (white)."""
+    def channel(c: int) -> float:
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b, _a = parse_colour(value)
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def is_dark_colour(value: str) -> bool:
+    """Whether text on this background should be light."""
+    return luminance(value) < 0.18
+
+
 def hex_colour(rgba: tuple[int, int, int, int]) -> str:
     return "#{:02x}{:02x}{:02x}".format(*rgba[:3])
 
@@ -79,12 +94,16 @@ class VizTheme:
     #: and read as nothing on black (colour bar titles, captions, letters).
     canvas_text: str = "#e6edf3"
     canvas_dim: str = "#a7b0ba"
+    #: A dark theme (any of them): decided by the background's luminance,
+    #: so a theme added later needs no list to be kept.
+    dark: bool = True
 
     @classmethod
     def from_palette(cls, palette: dict[str, str], name: str = "dark") -> "VizTheme":
         p = dict(palette)
         return cls(
             name=name,
+            dark=is_dark_colour(p.get("bg", "#0a0e13")),
             # Images keep a black surround in both themes: grey matter on a
             # white field reads as a different image.
             background="#000000",
@@ -137,5 +156,5 @@ def default_theme() -> VizTheme:
 
 __all__ = [
     "SERIES_TOKENS", "TYPE_TOKENS", "VizTheme", "default_theme", "hex_colour",
-    "parse_colour",
+    "is_dark_colour", "luminance", "parse_colour",
 ]

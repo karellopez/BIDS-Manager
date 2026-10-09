@@ -260,18 +260,14 @@ class _TopHeader(QFrame):
         self._settings_btn.clicked.connect(self.settings_requested.emit)
         h.addWidget(self._settings_btn)
 
-        # Icon-only toggle. ``sun`` glyph in dark mode (click to lighten),
-        # ``moon`` glyph in light mode (click to darken). Re-tinted in
-        # ``repaint_for_palette`` on every theme swap.
+        # The theme: a menu of every theme, each with a swatch. The glyph
+        # says which kind is on (a sun in a dark theme, a moon in a light
+        # one); re-tinted in ``repaint_for_palette`` on every change.
         self._theme_btn = QPushButton()
         self._theme_btn.setObjectName("theme-toggle")
-        self._theme_btn.setToolTip("Toggle light / dark theme")
         self._theme_btn.setFixedSize(32, 28)
-        icons.apply_button(
-            self._theme_btn,
-            "sun" if theme.name == "dark" else "moon",
-        )
-        self._theme_btn.clicked.connect(self._on_toggle)
+        self._sync_theme_button()
+        self._theme_btn.clicked.connect(self._open_theme_menu)
         h.addWidget(self._theme_btn)
 
     def set_active_view(self, view: str) -> None:
@@ -375,12 +371,31 @@ class _TopHeader(QFrame):
         self._project_menu.close()
         self.project_switch_requested.emit(path)
 
-    def _on_toggle(self) -> None:
-        from .app_settings import AppSettings
+    def _sync_theme_button(self) -> None:
         from . import icons
-        new = self._theme.toggle()
-        icons.apply_button(self._theme_btn, "sun" if new == "dark" else "moon")
-        AppSettings.remember_theme(new)
+        from .theme_manager import theme_info
+
+        info = theme_info(self._theme.name)
+        icons.apply_button(self._theme_btn, "sun" if info.dark else "moon")
+        self._theme_btn.setToolTip(f"Theme: {info.label}. Click to choose another.")
+
+    def _open_theme_menu(self) -> None:
+        from PyQt6.QtCore import QPoint
+
+        from .theme_menu import build_theme_menu
+
+        self._theme_menu = build_theme_menu(self, self._theme.name, self.choose_theme)
+        self._theme_menu.popup(self._theme_btn.mapToGlobal(
+            QPoint(self._theme_btn.width() - self._theme_menu.sizeHint().width(),
+                   self._theme_btn.height() + 4)))
+
+    def choose_theme(self, theme_id: str) -> None:
+        """Apply ``theme_id`` and remember it."""
+        from .app_settings import AppSettings
+
+        self._theme.apply(theme_id)
+        self._sync_theme_button()
+        AppSettings.remember_theme(self._theme.name)
 
     @staticmethod
     def _largest_app_icon(assets: Path) -> Path:
@@ -482,10 +497,7 @@ class _TopHeader(QFrame):
         from . import icons
         icons.apply_button(self._settings_btn, "settings")
         icons.apply_button(self._project_btn, "project")
-        icons.apply_button(
-            self._theme_btn,
-            "sun" if self._theme.name == "dark" else "moon",
-        )
+        self._sync_theme_button()
 
 
 class MainWindow(QMainWindow):

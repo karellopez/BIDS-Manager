@@ -449,13 +449,22 @@ class WelcomePanel(QWidget):
         return card
 
     @staticmethod
-    def _link_label(text: str, url: str) -> QLabel:
-        """A clickable rich-text link (opens in the system browser).
+    def _link_html(text: str, url: str) -> str:
+        """The link in the current theme's accent, written into the anchor:
+        a label parses its rich text once, so a link left to the palette
+        kept the colour of the theme it was made in."""
+        from .theme_manager import CUR
 
-        No explicit anchor colour, so it inherits ``QPalette.Link`` (accent)
-        and recolours on a theme swap. ``text-decoration:none`` keeps it tidy.
-        """
-        lbl = QLabel(f'<a style="text-decoration:none" href="{url}">{text}</a>')
+        return (f'<a style="text-decoration:none; color:{CUR()["accent"]}" '
+                f'href="{url}">{text}</a>')
+
+    @classmethod
+    def _link_label(cls, text: str, url: str) -> QLabel:
+        """A clickable rich-text link (opens in the system browser),
+        re-written in the accent on every theme change."""
+        lbl = QLabel(cls._link_html(text, url))
+        lbl.setProperty("link_text", text)
+        lbl.setProperty("link_url", url)
         lbl.setObjectName("welcome-link")
         lbl.setOpenExternalLinks(True)
         lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
@@ -519,6 +528,9 @@ class WelcomePanel(QWidget):
         self._recent_empty = QLabel("No recent projects yet.")
         self._recent_empty.setObjectName("welcome-section-desc")
         lay.addWidget(self._recent_empty)
+        # With the list hidden (no recent projects) the spare height goes
+        # here, not to the labels, which centred their text in it.
+        lay.addStretch(0)
         return card
 
     # ------------------------------------------------------------------
@@ -813,7 +825,7 @@ class WelcomePanel(QWidget):
     # ------------------------------------------------------------------
 
     def repaint_for_palette(self, pal: dict) -> None:
-        """Force QSS recomputation on a dark<->light swap.
+        """Force QSS recomputation on a theme change.
 
         The same unpolish/polish dance the other panels use, so the cards /
         inputs / recent list pick up the re-applied stylesheet instead of
@@ -825,12 +837,12 @@ class WelcomePanel(QWidget):
             style.unpolish(w)
             style.polish(w)
             w.update()
-        # Rich-text anchors bake the link colour into their layout at parse
-        # time, so a bare update() keeps the old colour. Re-set the text to
-        # force a re-parse against the new ``QPalette.Link``.
+        # Rich-text anchors bake the link colour in when parsed (and setText
+        # with the same text is ignored), so each link is written again in
+        # the new accent.
         for lbl in self.findChildren(QLabel):
-            if lbl.objectName() == "welcome-link":
-                lbl.setText(lbl.text())
+            if lbl.objectName() == "welcome-link" and lbl.property("link_url"):
+                lbl.setText(self._link_html(lbl.property("link_text"), lbl.property("link_url")))
         # The recent-list delegate reads palette tokens at paint time; nudge
         # the viewport so the rows recolour immediately.
         if hasattr(self, "_recent"):

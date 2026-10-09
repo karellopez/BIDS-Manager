@@ -969,7 +969,8 @@ class ConverterPanel(QWidget):
         v = QVBoxLayout(pane)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addWidget(PaneHeader("Inspection"))
+        # No header of its own: the frame around it (with Properties) is
+        # titled Inspection, and a second one read as a stutter.
 
         # Use QStackedWidget so we can swap between "empty placeholder"
         # and the actual table without recreating widgets — keeps view

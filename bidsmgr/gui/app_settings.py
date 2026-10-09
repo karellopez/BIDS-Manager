@@ -24,7 +24,7 @@ from PyQt6.QtCore import QSettings
 # Canonical setting keys. Grouped by section as a flat string namespace
 # so QSettings shows them under ``[section]`` headers in INI / plist.
 KEYS = {
-    "theme":              "ui/theme",                # "dark" | "light"
+    "theme":              "ui/theme",                # a theme_manager.THEMES id
     "raw_root":           "paths/raw_root",          # last raw input dir
     "bids_parent":        "paths/bids_parent",       # last BIDS output dir
     "scan_tsv_filename":  "scan/tsv_filename",       # filename of the scan TSV
@@ -297,7 +297,9 @@ class AppSettings:
             return out if isinstance(out, list) else list(default)
 
         out.theme = _as_str(s.value(KEYS["theme"]), out.theme)
-        if out.theme not in ("dark", "light"):
+        from .theme_manager import PALETTES
+
+        if out.theme not in PALETTES:
             out.theme = "dark"
         out.active_view = _as_str(s.value(KEYS["active_view"]), out.active_view)
         if out.active_view not in ("converter", "editor"):

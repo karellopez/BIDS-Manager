@@ -611,8 +611,7 @@ class PropertiesPanel(QWidget):
         lbl.setWordWrap(True)
         lbl.setObjectName("path-preview")
         lbl.setStyleSheet(
-            '#path-preview { font-family: "SF Mono","Menlo","Monaco",monospace; '
-            f'font-size: {scaled_px(11)}px; color: {pal["text"]}; '
+            f'#path-preview {{ font-size: {scaled_px(11)}px; color: {pal["text"]}; '
             'background: transparent; }'
         )
         lay.addWidget(lbl)

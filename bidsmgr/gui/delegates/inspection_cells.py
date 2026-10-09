@@ -126,7 +126,7 @@ class CellTextDelegate(QStyledItemDelegate):
     ``role`` selects how the cell is rendered:
 
     * ``"plain"``     — sans-serif text (default).
-    * ``"mono"``      — monospace text (used for IDs, sessions, runs).
+    * ``"mono"``      — identifiers (IDs, sessions, runs), in the interface typeface.
     * ``"basename"``  — dim text + strikethrough on skipped rows + tint
       to ``pal["error"]`` on error rows.
     * ``"conf"``      — color by numeric confidence: ≥0.9 green,
@@ -136,8 +136,6 @@ class CellTextDelegate(QStyledItemDelegate):
     sentinel value ``"—"`` (em-dash) for missing fields — these paint
     in ``pal["muted"]`` regardless of role.
     """
-
-    _MONO_FAMILIES = ["SF Mono", "Menlo", "Monaco", "Consolas", "monospace"]
 
     def __init__(self, role: str = "plain", parent=None) -> None:
         super().__init__(parent)
@@ -154,9 +152,9 @@ class CellTextDelegate(QStyledItemDelegate):
             return
 
         painter.save()
+        # The interface typeface for every cell, names and numbers alike: a
+        # monospace column read as a terminal beside the rest of the table.
         f = QFont(painter.font())
-        if self._role in ("mono", "basename", "conf"):
-            f.setFamilies(self._MONO_FAMILIES)
         # Pixel size, not point size: ``setPointSize`` is DPI-relative
         # (11 pt is ~11 px on macOS at 72 dpi but ~15 px on Linux /
         # Windows at 96 dpi). Pixel size matches the QSS rules in

@@ -6,7 +6,7 @@ Usage::
                  [--layout MODE] [--plane PLANE]
                  [--colormap NAME] [--window LO HI] [--frame N]
                  [--run COMMAND [KEY=VALUE ...]] [--screenshot OUT.png]
-                 [--scale S] [--transparent] [--size W H] [--theme dark|light]
+                 [--scale S] [--transparent] [--size W H] [--theme THEME]
     bidsmgr-view PATH [--overlay IMAGE ...] [...] --render OUT.png
                  [--planes PLANE ...] [--height PX] [--crosshair]
 
@@ -117,7 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "of the black surround.")
     parser.add_argument("--size", nargs=2, type=int, metavar=("W", "H"), default=(1100, 760),
                         help="Window size in pixels (default 1100 760).")
-    parser.add_argument("--theme", choices=("dark", "light"), default=None)
+    # Checked when the window opens, not here: the theme list lives in the
+    # GUI package, and --render must parse and run with no Qt at all.
+    parser.add_argument("--theme", default=None, metavar="THEME",
+                        help="The colour theme: dark, dim, nord, hc-dark, light, paper or "
+                             "hc-light (default: the one last chosen in the app).")
     parser.add_argument("--render", type=Path, default=None, metavar="OUT.png",
                         help="Write the 2-D planes to this PNG with no window, no Qt and "
                              "no display, and exit.")
@@ -179,7 +183,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _render(args, path, commands)
 
     from ..gui.bootstrap import create_application
+    from ..gui.theme_manager import theme_ids
 
+    if args.theme is not None and args.theme not in theme_ids():
+        print(f"bidsmgr-view: no theme {args.theme!r}; choose from "
+              f"{', '.join(theme_ids())}", file=sys.stderr)
+        return 2
     app, _theme = create_application(args.theme)
 
     from ..gui.viz import Viewer
