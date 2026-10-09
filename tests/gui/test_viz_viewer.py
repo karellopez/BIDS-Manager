@@ -772,6 +772,31 @@ def test_the_next_file_of_the_same_kind_keeps_the_current_view(qtbot, ds, no_gpu
     assert (viewer.scene.mode, viewer.scene.plane) == ("single", "coronal")
 
 
+def test_a_cleared_viewer_keeps_a_3d_arrangement(qtbot, ds, no_gpu) -> None:
+    """User report, 2026-10-09: a T1 in 3-D, a click on a JSON, the T1 again,
+    and it was in three planes. With nothing open, no image is "3-D
+    capable", so the arrangement was rewritten to "multi" while the viewer
+    was empty, and the next image of the same kind inherited it (and the
+    next change saved it, so 3-D was lost for good)."""
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.set_file(None, None)          # the Editor shows a sidecar
+    viewer.ctx.scene.mode = "3d"         # the arrangement kept from a 3-D view
+    viewer.presenter.apply_mode()
+    assert viewer.scene.mode == "3d", "the empty viewer rewrote the arrangement"
+
+
+def test_a_change_still_settling_is_kept_when_the_viewer_is_cleared(qtbot, ds, no_gpu) -> None:
+    """A 3-D tweak is written once it settles; a click on a JSON in that
+    moment used to drop it."""
+    viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)
+    viewer.run("clip.toggle")
+    viewer.qstore.flush()
+    assert viewer.presenter._view_timer.isActive()
+    viewer.set_file(None, None)
+    clips = SettingsHub.instance().settings.volume_look.get("clips") or []
+    assert clips and clips[0]["active"], "the clip plane was not remembered"
+
+
 def test_each_kind_of_file_opens_in_its_own_layout(qtbot, ds, no_gpu) -> None:
     """A BOLD run opens with its graph and a T1 without."""
     viewer = _open(qtbot, _viewer(qtbot), _t1(ds), ds)

@@ -329,6 +329,18 @@ class SettingsDialog(QDialog):
                                           Qt.ItemDataRole.ToolTipRole)
         form.addRow("Theme:", self._theme_combo)
 
+        # The user's touches on any theme: accent, tint, icon colours and
+        # the file trees' colours (gui/appearance.py).
+        from .appearance_editor import AppearanceEditor
+
+        look = QGroupBox("Appearance")
+        look_lay = QVBoxLayout(look)
+        self._appearance_editor = AppearanceEditor()
+        look_lay.addWidget(self._appearance_editor)
+        self._theme_combo.currentIndexChanged.connect(
+            lambda _i: self._appearance_editor.set_theme(self._theme_combo.currentData() or "dark"))
+        form.addRow(look)
+
         # Font scale: multiplies every font-size (QSS + delegate paints +
         # inline stylesheets + icon sizes) so the user can comfortably
         # nudge the whole UI up or down. Persisted under ``ui/font_scale``.
@@ -369,8 +381,8 @@ class SettingsDialog(QDialog):
         form.addRow("Editor saving:", self._editor_autosave)
 
         hint = QLabel(
-            "Theme can also be toggled live via the sun / moon button "
-            "in the top header. Font scale and header logo apply on Save."
+            "The header's sun or moon button lists every theme and switches at once. "
+            "Everything on this page applies on Save."
         )
         hint.setObjectName("dlg-hint")
         hint.setWordWrap(True)
@@ -1214,6 +1226,8 @@ class SettingsDialog(QDialog):
         cap = self._sys.logical_threads
 
         self._theme_combo.setCurrentIndex(max(0, self._theme_combo.findData(s.theme)))
+        self._appearance_editor.set_theme(s.theme)
+        self._appearance_editor.load(s.appearance())
         self._editor_show_hidden.setChecked(s.editor_show_hidden)
         self._editor_autosave.setChecked(s.editor_autosave)
         self._font_scale_combo.setCurrentIndex(
@@ -1314,6 +1328,9 @@ class SettingsDialog(QDialog):
         s.user_hints = hints
         s.scan_exclusions = exclusions
         s.theme = self._theme_combo.currentData() or "dark"
+        look = self._appearance_editor.appearance()
+        s.accent, s.tint, s.icon_style, s.tree_colours = (
+            look.accent, look.tint, look.icons, dict(look.tree))
         s.editor_show_hidden = self._editor_show_hidden.isChecked()
         s.editor_autosave = self._editor_autosave.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[

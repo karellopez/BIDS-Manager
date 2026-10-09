@@ -109,6 +109,11 @@ def _derive(base: dict[str, str], *, dark: bool, strong: bool = False) -> dict[s
     pal['pressed_alpha'] = 'rgba(255,255,255,0.06)' if dark else 'rgba(0,0,0,0.05)'
     for i, colour in enumerate(SERIES_DARK if dark else SERIES_LIGHT, start=1):
         pal[f'series{i}'] = colour
+    # The file trees' colours by kind of entry, the user's to change
+    # (Settings > Display; ``appearance.TREE_KINDS``).
+    for kind, token in (('folder', 'accent'), ('image', 'text'), ('sidecar', 'purple'),
+                        ('table', 'teal'), ('recording', 'text'), ('other', 'dim')):
+        pal[f'tree_{kind}'] = pal[token]
     return pal
 
 
@@ -377,6 +382,7 @@ class ThemeManager:
         app: QApplication,
         qss_path: Path | None = None,
         font_scale: float = 1.0,
+        appearance=None,
     ):
         self._app = app
         self._raw_template_text = (
@@ -384,6 +390,12 @@ class ThemeManager:
         ).read_text(encoding='utf-8')
         self._theme = 'dark'
         self._listeners: list[Callable[[dict], None]] = []
+        from .appearance import Appearance
+
+        #: The user's touches (accent, tint, icon style, tree colours),
+        #: laid over every theme by ``apply``.
+        self._appearance = (appearance or Appearance()).normalised()
+        self._effective: dict[str, str] = dict(DARK)
         # The font scale is applied to the QSS template + QApplication
         # default font at every ``apply`` call. Stored on the manager so
         # callers can swap it without re-creating the manager.
@@ -397,7 +409,19 @@ class ThemeManager:
     # ---------------------------------------------------------------- state
     @property
     def palette(self) -> dict[str, str]:
-        return PALETTES[self._theme]
+        """The palette in use: the theme with the user's appearance over it."""
+        return self._effective
+
+    @property
+    def appearance(self):
+        return self._appearance
+
+    def set_appearance(self, appearance, *, apply: bool = True) -> None:
+        """Change the accent, tint, icon style or tree colours (and re-apply,
+        unless the caller applies a theme next anyway)."""
+        self._appearance = appearance.normalised()
+        if apply:
+            self.apply(self._theme)
 
     @property
     def name(self) -> str:
@@ -428,9 +452,16 @@ class ThemeManager:
         if theme not in PALETTES:
             return
         global _CURRENT, _FONT_SCALE
+        from . import appearance as _appearance
+        from . import icons as _icons
+
         self._theme = theme
-        pal = PALETTES[theme]
+        info = theme_info(theme)
+        pal = _appearance.apply(PALETTES[theme], self._appearance, dark=info.dark,
+                                strong=theme.startswith('hc-'))
+        self._effective = pal
         _CURRENT = pal
+        _icons.set_style(self._appearance.icons)
         _FONT_SCALE = self._font_scale
 
         # Apply the active scale to (a) the QSS template every ``font-size:

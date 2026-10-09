@@ -64,7 +64,8 @@ def create_application(theme: Optional[str] = None):
     from .theme_manager import ThemeManager
 
     persisted = AppSettings.load()
-    manager = ThemeManager(app, font_scale=persisted.font_scale)
+    manager = ThemeManager(app, font_scale=persisted.font_scale,
+                           appearance=persisted.appearance())
     manager.apply(theme or persisted.theme)
 
     # Every viewer, in any window or dialog, takes its colours from one hub

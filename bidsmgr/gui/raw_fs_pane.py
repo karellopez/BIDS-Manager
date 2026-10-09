@@ -251,7 +251,7 @@ class RawFsPane(QWidget):
             parent.addChild(child)
             child.setIcon(0, icons.icon_for_path(entry.name, is_dir=entry.is_dir()))
             if entry.is_dir():
-                child.setForeground(0, QColor(pal["accent"]))
+                child.setForeground(0, QColor(pal["tree_folder"]))
                 child.setData(0, _PATH_ROLE, entry.path)
                 # A placeholder, so the arrow is there and the real
                 # children are built when it is clicked.

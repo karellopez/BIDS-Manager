@@ -107,25 +107,28 @@ PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
 
 
 def _color_token_for(entry_name: str, is_dir: bool) -> str:
-    """Pick the palette token used to color a row.
+    """Pick the palette token used to color a row (a ``tree_*`` token: the
+    user can change each in Settings > Display).
 
     Folder-recordings (``.ds`` / ``.mff``) are colored like data files
     (``text``) even though they're directories on disk, because the
     user thinks of them as recordings.
     """
+    from ..icons import RECORDING_TREE_EXTS
+
     lower = entry_name.lower()
     if is_dir and not lower.endswith(_FOLDER_RECORDING_SUFFIXES):
-        return "accent"
+        return "tree_folder"
     if lower.endswith(".nii.gz") or lower.endswith(".nii"):
-        return "text"
+        return "tree_image"
     if lower.endswith(".json"):
-        return "purple"
+        return "tree_sidecar"
     if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
-        return "teal"
-    if lower.endswith(_FOLDER_RECORDING_SUFFIXES):
-        # CTF .ds / EGI .mff — folder-shaped recordings.
-        return "text"
-    return "dim"
+        return "tree_table"
+    if lower.endswith(_FOLDER_RECORDING_SUFFIXES) or lower.endswith(RECORDING_TREE_EXTS):
+        # CTF .ds / EGI .mff (folder-shaped) and every other recording.
+        return "tree_recording"
+    return "tree_other"
 
 
 def _is_folder_recording(name: str) -> bool:
@@ -480,7 +483,7 @@ class BidsTreePane(QWidget):
         # to grow WILL grow: these two are a fixed-size control, not text.
         from ..theme_manager import scaled_px
         for button in (self._collapse_btn, self._expand_btn):
-            button.setFixedSize(scaled_px(30), scaled_px(22))
+            button.setFixedSize(scaled_px(24), scaled_px(22))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         header_line.addWidget(group, 0)

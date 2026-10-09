@@ -663,7 +663,9 @@ QFrame[card="true"] {
     border-radius: 10px;
 }
 QFrame[card="true"] QFrame#panel-frame-header { background: transparent; }
-QFrame[card="true"] QFrame#panel-frame-strip { background: transparent; border: none; }
+QWidget#panel-frame-strip { background: transparent; border: none; }
+/* A top or bottom panel's title bar folds it: a hover says so. */
+QFrame#panel-frame-header[foldable="true"]:hover { background: $surface3; }
 QFrame[card="true"] QWidget#pane,
 QFrame[card="true"] QWidget#pane-dark { background: transparent; border: none; }
 QFrame[card="true"] QLabel#pane-h5 { background: transparent; }
@@ -684,13 +686,6 @@ QFrame#panel-frame-header QLabel#pane-h5 {
     background: transparent;
     border-bottom: none;
     padding: 0px 2px;
-}
-/* Vertical collapse strip for left / right panels: a thin bar carrying a
- * vertically-centred caret (+ detach button) on the panel's outer edge. */
-QFrame#panel-frame-strip {
-    background: $surface;
-    border-right: 1px solid $subtle;
-    border-left: 1px solid $subtle;
 }
 QToolButton#panel-frame-caret,
 QToolButton#panel-frame-detach {
@@ -1723,32 +1718,37 @@ QLabel#val-caption {
    rounded outline with a divider between the halves rather than two separate
    buttons that happen to sit next to each other. */
 QWidget[navGroup="true"] { background: transparent; }
+/* The tree's collapse / open-a-level pair: quiet icons, no outline, a
+ * hover tint, like every other icon in a panel header. */
 QPushButton#tree-nav-left, QPushButton#tree-nav-right {
-    background: $surface2;
-    border: 1px solid $input_border;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
     padding: 0px;
     min-width: 0;
 }
-QPushButton#tree-nav-left {
-    border-top-left-radius: 5px;
-    border-bottom-left-radius: 5px;
-    border-right: none;
-}
-QPushButton#tree-nav-right {
-    border-top-right-radius: 5px;
-    border-bottom-right-radius: 5px;
-}
 QPushButton#tree-nav-left:hover, QPushButton#tree-nav-right:hover {
     background: $surface3;
-    border-color: $accent_border;
 }
 QPushButton#tree-nav-left:pressed, QPushButton#tree-nav-right:pressed {
     background: $accent_bg;
 }
-QPushButton#tree-nav-right:disabled {
-    background: $surface;
-    border-color: $border;
+QPushButton#tree-nav-right:disabled { background: transparent; }
+
+/* A button whose face is one glyph (the minus that removes an entry, the
+ * cross that unlinks): no padding, so the glyph fits its fixed width. */
+QPushButton#glyph-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0px;
+    min-width: 0;
+    color: $dim;
+    font-size: 14px;
 }
+QPushButton#glyph-btn:hover { background: $surface3; color: $text; }
+QPushButton#glyph-btn:pressed { background: $accent_bg; }
+QPushButton#glyph-btn:disabled { color: $muted; }
 
 /* The validation pane's own severity filter row. */
 QFrame#val-filter-row { background: transparent; border: none; }

@@ -404,6 +404,13 @@ class VolumePresenter:
 
     def apply_mode(self) -> None:
         scene = self.ctx.scene
+        if self.source is None:
+            # Nothing is open (the Editor cleared the viewer for a JSON or a
+            # table): the arrangement waits for the next image, which is
+            # judged when it opens. Judged here, no image is "3-D capable",
+            # so a 3-D layout was rewritten to three planes and the next
+            # image of the same kind opened without its 3-D.
+            return
         mode = self.allowed_mode(scene.mode)
         if mode != scene.mode:
             # A state asking for 3-D arrives on machines without a GPU as a
@@ -1127,6 +1134,11 @@ class VolumePresenter:
             self._render.clear()
 
     def clear(self) -> None:
+        # A change made just before (a 3-D effect still settling) is kept
+        # under the kind of the image leaving, as ``load`` and ``stop`` do.
+        if self._view_timer.isActive():
+            self._view_timer.stop()
+            self._remember_view()
         self._generation += 1
         self._pending_quality = False
         self._pending_overlays = []

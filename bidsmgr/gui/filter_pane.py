@@ -11,6 +11,9 @@ The checkboxes drive the inventory model's ``include`` column —
 exactly the same flag the table's checkbox column toggles per row.
 This pane is the bulk-edit counterpart: toggle "sub-002 / ses-post"
 to include / exclude every series under it in one click.
+
+It also follows the table: picking a sequence here selects its row in the
+inspection table (and Properties), and a row selected there is shown here.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QLabel,
     QTreeWidget,
@@ -48,6 +51,9 @@ class FilterPane(QWidget):
     are recorded and chips refresh.
     """
 
+    #: A sequence (an inventory row) picked in the tree.
+    row_chosen = pyqtSignal(int)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pane")
@@ -68,6 +74,10 @@ class FilterPane(QWidget):
         self._tree.setIndentation(16)
         self._tree.setUniformRowHeights(True)
         self._tree.itemChanged.connect(self._on_item_changed)
+        # A sequence picked here is picked in the inspection table (and so
+        # in Properties); one picked there is shown here.
+        self._tree.currentItemChanged.connect(self._on_current_changed)
+        self._revealing = False
         v.addWidget(self._tree, 1)
 
         self._empty = QLabel("(scan first to populate this filter)")
@@ -81,6 +91,38 @@ class FilterPane(QWidget):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def reveal_row(self, row: Optional[int]) -> None:
+        """Make the leaf of inventory ``row`` the current item, scrolled into
+        view, without announcing it back (the table already shows it)."""
+        leaf = self._leaf_for_row(row) if row is not None else None
+        self._revealing = True
+        try:
+            if leaf is None:
+                self._tree.setCurrentItem(None)
+                self._tree.clearSelection()
+            else:
+                self._tree.setCurrentItem(leaf)
+                self._tree.scrollToItem(leaf)
+        finally:
+            self._revealing = False
+
+    def _leaf_for_row(self, row: int) -> Optional[QTreeWidgetItem]:
+        stack = [self._tree.topLevelItem(i) for i in range(self._tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            rows = item.data(0, _ROW_IDS_ROLE)
+            if rows and row in rows:
+                return item
+            stack.extend(item.child(i) for i in range(item.childCount()))
+        return None
+
+    def _on_current_changed(self, current, _previous) -> None:
+        if self._revealing or current is None:
+            return
+        rows = current.data(0, _ROW_IDS_ROLE)
+        if rows:
+            self.row_chosen.emit(int(rows[0]))
 
     def bind_model(self, model: Optional[InventoryTableModel]) -> None:
         """Attach / detach the inventory model. Rebuilds the tree."""

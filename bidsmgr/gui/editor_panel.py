@@ -982,31 +982,17 @@ class EditorPanel(QWidget):
         running = self._partial_worker is not None and getattr(
             self._partial_worker, "isRunning", lambda: False,
         )()
-        from .theme_manager import CUR
-        pal = CUR()
         if path is None or not has_root or running:
             self._validate_file_btn.setEnabled(False)
             self._validate_folder_btn.setEnabled(False)
-            # No selection: both icons stay accent (default).
-            icons.apply_button(self._validate_file_btn, "file_check",
-                               color=pal.get("accent"))
-            icons.apply_button(self._validate_folder_btn, "folder_check",
-                               color=pal.get("accent"))
-            return
-        file_selected = path.is_file()
-        folder_selected = path.is_dir()
-        self._validate_file_btn.setEnabled(file_selected)
-        self._validate_folder_btn.setEnabled(folder_selected)
-        # Recolor icons: the button matching the selected kind goes
-        # green (success); the other stays accent blue.
-        icons.apply_button(
-            self._validate_file_btn, "file_check",
-            color=pal.get("success" if file_selected else "accent"),
-        )
-        icons.apply_button(
-            self._validate_folder_btn, "folder_check",
-            color=pal.get("success" if folder_selected else "accent"),
-        )
+        else:
+            self._validate_file_btn.setEnabled(path.is_file())
+            self._validate_folder_btn.setEnabled(path.is_dir())
+        # The icons in the app's icon colour, like every other toolbar icon
+        # (they used to turn green for the selected kind, which read as a
+        # verdict on the file). Enabled or not says which one applies.
+        icons.apply_button(self._validate_file_btn, "file_check")
+        icons.apply_button(self._validate_folder_btn, "folder_check")
 
     @staticmethod
     def _recompute_report_summary(report: ValidationReport) -> None:

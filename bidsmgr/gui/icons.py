@@ -113,10 +113,10 @@ NAMES: dict[str, tuple[str, str]] = {
     "waveform":     ("mdi6.chart-line-variant",       "text"),
 
     # ---- File-tree node icons (Converter raw + output, Editor BIDS) ----
-    "tree_folder":  ("ph.folder-simple-light",        "accent"),
-    "tree_nifti":   ("ph.brain-light",                "text"),
-    "tree_json":    ("mdi6.code-json",                "purple"),
-    "tree_tsv":     ("mdi6.microsoft-excel",          "teal"),
+    "tree_folder":  ("ph.folder-simple-light",        "tree_folder"),
+    "tree_nifti":   ("ph.brain-light",                "tree_image"),
+    "tree_json":    ("mdi6.code-json",                "tree_sidecar"),
+    "tree_tsv":     ("mdi6.microsoft-excel",          "tree_table"),
 
     # ---- Validation chips (kept for future reuse) ----
     "ok":           ("mdi6.check-circle-outline",     "success"),
@@ -205,7 +205,8 @@ def icon(name: str, color: Optional[str] = None) -> QIcon:
     glyph, default_key = entry
     if color is None:
         pal = CUR()
-        color = pal.get(default_key, pal.get("text", "#e6edf3"))
+        key = styled_key(name, default_key)
+        color = pal.get(key, pal.get("text", "#e6edf3"))
     key = (name, color)
     cached = _CACHE.get(key)
     if cached is not None:
@@ -222,7 +223,7 @@ def icon(name: str, color: Optional[str] = None) -> QIcon:
 # EEG / MEG / iEEG recording file extensions that get the "brain + signal"
 # composite tree icon (mirrors the Editor viewer's openable file set; the
 # directory formats .ds / .mff render as folders in the tree).
-_RECORDING_TREE_EXTS: tuple[str, ...] = (
+RECORDING_TREE_EXTS: tuple[str, ...] = (
     ".fif.gz", ".fif", ".con", ".sqd", ".kdf",
     ".vhdr", ".edf", ".bdf", ".gdf", ".set", ".cnt", ".egi", ".mef", ".nwb",
 )
@@ -235,7 +236,7 @@ def _recording_tree_icon() -> QIcon:
     Cached + theme-tinted like the rest of the icon set.
     """
     pal = CUR()
-    brain = pal.get("text", "#e6edf3")
+    brain = pal.get("tree_recording", pal.get("text", "#e6edf3"))
     signal = pal.get("accent", "#58a6ff")
     key = ("__recording_tree__", f"{brain}|{signal}")
     cached = _CACHE.get(key)
@@ -277,7 +278,7 @@ def icon_for_path(name: str, *, is_dir: bool = False) -> QIcon:
         return icon("tree_json")
     if lower.endswith(".tsv.gz") or lower.endswith(".tsv"):
         return icon("tree_tsv")
-    if lower.endswith(_RECORDING_TREE_EXTS):
+    if lower.endswith(RECORDING_TREE_EXTS):
         return _recording_tree_icon()
     return QIcon()
 
@@ -292,6 +293,35 @@ def refresh_for_palette(_pal: dict) -> None:
     re-set them in their ``repaint_for_palette`` hook.
     """
     _CACHE.clear()
+
+
+#: How action icons are coloured (``appearance.ICON_STYLES``), set by the
+#: theme manager from the user's appearance.
+_STYLE = "monochrome"
+#: Icons whose colour is their meaning, the same in every style: a status,
+#: a stop, an alert, the controls tab's own accent.
+_MEANINGFUL = frozenset({"ok", "warn", "err", "warning", "check", "stop", "close_data",
+                         "mark_bad", "info", "sun", "moon"})
+
+
+def set_style(style: str) -> None:
+    """Colour action icons "monochrome" (the text colour), in the "accent",
+    or "colourful" (each its own default). Drops the cache."""
+    global _STYLE
+    if style != _STYLE:
+        _STYLE = style
+        _CACHE.clear()
+
+
+def styled_key(name: str, default_key: str) -> str:
+    """The palette token icon ``name`` is drawn in under the current style.
+    A meaningful icon, a file-tree icon and a deliberately quiet one keep
+    their own token in every style."""
+    if name in _MEANINGFUL or default_key.startswith("tree_") or default_key in ("dim", "muted"):
+        return default_key
+    if _STYLE == "colourful":
+        return default_key
+    return "text" if _STYLE == "monochrome" else "accent"
 
 
 def apply_button(
@@ -333,6 +363,9 @@ def apply_tab(
 
 __all__ = [
     "NAMES",
+    "RECORDING_TREE_EXTS",
+    "set_style",
+    "styled_key",
     "DEFAULT_BUTTON_ICON_SIZE",
     "DEFAULT_TAB_ICON_SIZE",
     "DEFAULT_TREE_ICON_SIZE",

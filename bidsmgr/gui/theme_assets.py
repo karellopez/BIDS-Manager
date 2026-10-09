@@ -13,6 +13,7 @@ Windows home folder with a space in it still works.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import tempfile
 from pathlib import Path
@@ -77,7 +78,11 @@ def write(palette: dict[str, str], theme_id: str) -> dict[str, str]:
         folder = Path(tempfile.gettempdir()) / "bidsmgr-theme" / theme_id
         folder.mkdir(parents=True, exist_ok=True)
     for name, text in images(palette).items():
-        path = folder / f"{name}.svg"
+        # The colours are in the NAME too: Qt caches a stylesheet image by
+        # its path, so a changed accent written over the same file kept
+        # showing the old one.
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+        path = folder / f"{name}-{digest}.svg"
         try:
             if not path.is_file() or path.read_text(encoding="utf-8") != text:
                 path.write_text(text, encoding="utf-8")

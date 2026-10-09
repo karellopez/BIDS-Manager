@@ -245,6 +245,7 @@ class ConverterPanel(QWidget):
         h_split.addWidget(self._col1_frame)
 
         self._filter_pane = FilterPane()
+        self._filter_pane.row_chosen.connect(self._jump_to_row)
         self._filter_frame = PanelFrame(self._filter_pane, "Filter / structure", edge="left")
         h_split.addWidget(self._filter_frame)
 
@@ -2135,8 +2136,10 @@ class ConverterPanel(QWidget):
         """Forward the table's row selection to the Properties panel."""
         if not current.isValid():
             self._properties.set_selected_row(None)
+            self._filter_pane.reveal_row(None)
             return
         self._properties.set_selected_row(current.row())
+        self._filter_pane.reveal_row(current.row())
 
     def _on_selection_changed(self, *_args) -> None:
         """Enable the bulk-edit button only when ≥ 2 rows are selected."""

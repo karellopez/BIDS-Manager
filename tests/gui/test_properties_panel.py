@@ -694,14 +694,40 @@ def test_a_dicom_row_previews_its_series(qtbot, tmp_path) -> None:
     panel.set_raw_root(tmp_path / "raw")
     assert panel.preview_button.isEnabled()
     panel.preview_button.click()
-    qtbot.waitUntil(lambda: getattr(panel, "preview_dialog", None) is not None, timeout=60_000)
+    # The window opens on the click, pending, with a spinner; the image
+    # arrives when the series is converted.
     dlg = panel.preview_dialog
     qtbot.addWidget(dlg)
+    assert dlg.isVisible() and dlg.is_pending() and dlg.spinner.is_busy()
+    qtbot.waitUntil(lambda: not dlg.is_pending(), timeout=60_000)
     qtbot.waitUntil(lambda: dlg.viewer.is_loaded(), timeout=20_000)
     work = dlg.images[0].parents[1]
     assert work.is_dir()
     dlg.close()
     assert not work.exists(), "the temporary conversion is removed with the window"
+    assert panel.preview_button.isEnabled(), "ready for another"
+
+
+def test_a_preview_that_fails_says_so_in_its_window(qtbot, tmp_path, monkeypatch) -> None:
+    pytest.importorskip("pydicom")
+    from tests.fixtures.dicoms import write_mr_series
+
+    import bidsmgr.inventory.probe_convert as pc
+
+    def broken(*_a, **_k):
+        raise RuntimeError("dcm2niix said no")
+
+    monkeypatch.setattr(pc, "preview_series", broken)
+    write_mr_series(tmp_path / "raw" / "s1", "1.2.3.78", description="rest")
+    panel, _m = _build_panel_with_model(
+        qtbot, _func_row(series_uid="1.2.3.78", source_folder="s1"))
+    panel.set_raw_root(tmp_path / "raw")
+    panel.preview_button.click()
+    dlg = panel.preview_dialog
+    qtbot.addWidget(dlg)
+    qtbot.waitUntil(lambda: dlg.status.isVisible(), timeout=20_000)
+    assert "dcm2niix said no" in dlg.status.text()
+    assert not dlg.spinner.is_busy()
     assert panel.preview_button.isEnabled(), "ready for another"
 
 

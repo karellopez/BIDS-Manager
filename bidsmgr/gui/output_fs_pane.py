@@ -82,19 +82,22 @@ _PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 4
 
 
 def _color_token_for(path_name: str) -> str:
-    """Pick the palette token used to color a leaf file.
-
-    Mirrors the BIDS-preview tree in the bottom dock: nii.gz = text,
-    json = purple, tsv = teal, anything else = dim.
+    """Pick the palette token used to color a leaf file: the ``tree_*``
+    token of its kind (image, sidecar, table, recording, other), the same
+    as the Editor's tree; the user can change each in Settings > Display.
     """
+    from .icons import RECORDING_TREE_EXTS
+
     lower = path_name.lower()
     if lower.endswith(".nii.gz") or lower.endswith(".nii"):
-        return "text"
+        return "tree_image"
     if lower.endswith(".json"):
-        return "purple"
+        return "tree_sidecar"
     if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
-        return "teal"
-    return "dim"
+        return "tree_table"
+    if lower.endswith(RECORDING_TREE_EXTS):
+        return "tree_recording"
+    return "tree_other"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +219,7 @@ def _walk_dir(
         if entry.name in _SKIP_DIRS:
             continue
         if entry.is_dir():
-            node = _TreeNode(name=entry.name, is_dir=True, color_token="accent")
+            node = _TreeNode(name=entry.name, is_dir=True, color_token="tree_folder")
             parent.children.append(node)
             dirs.append(entry.path)
             _walk_dir(Path(entry.path), node, depth=depth + 1, dirs=dirs)

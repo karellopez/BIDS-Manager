@@ -1188,18 +1188,41 @@ class PropertiesPanel(QWidget):
                                or self._cell(row, "bids_name").strip() or uid)
         self._runner().start("image-preview", self._preview_generation, preview_series,
                              folder, uid, self._preview_dir)
+        # The window opens NOW, on the click, with a spinner, and fills when
+        # the series is converted: opened when it finished, it came up
+        # seconds later, behind the main window.
+        from .series_preview_dialog import SeriesPreviewDialog
+
+        dlg = SeriesPreviewDialog(None, self._preview_dir, self._preview_title, parent=self)
+        self.preview_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         self.set_selected_row(row)
+
+    def _preview_window(self):
+        """The preview window still open for the current conversion."""
+        dlg = getattr(self, "preview_dialog", None)
+        return dlg if dlg is not None and dlg.isVisible() and dlg.is_pending() else None
 
     def _on_preview_ready(self, generation: int, images) -> None:
         if generation != self._preview_generation:
             return
-        from .series_preview_dialog import SeriesPreviewDialog
+        import shutil
 
         self._preview_row_id = None
-        dlg = SeriesPreviewDialog(images, self._preview_dir, self._preview_title, parent=self)
+        dlg = self._preview_window()
+        if dlg is not None:
+            dlg.set_images(images, self._preview_dir)
+            # If the app is not in front (the user switched away while it
+            # converted): the Dock icon bounces, the taskbar entry flashes.
+            from PyQt6.QtWidgets import QApplication
+
+            QApplication.alert(dlg)
+        elif self._preview_dir is not None:
+            # Closed while converting: nothing to show, nothing to keep.
+            shutil.rmtree(self._preview_dir, ignore_errors=True)
         self._preview_dir = None
-        self.preview_dialog = dlg
-        dlg.show()
         if self._row is not None:
             self.set_selected_row(self._row)
 
@@ -1212,7 +1235,9 @@ class PropertiesPanel(QWidget):
         if self._preview_dir is not None:
             shutil.rmtree(self._preview_dir, ignore_errors=True)
             self._preview_dir = None
-        QMessageBox.warning(self, "Preview", f"The series could not be converted: {msg}")
+        dlg = self._preview_window()
+        if dlg is not None:
+            dlg.set_failed(msg)
         if self._row is not None:
             self.set_selected_row(self._row)
 
@@ -1504,6 +1529,7 @@ class PropertiesPanel(QWidget):
                 # A cross rather than the word: at the width this panel is
                 # meant to reach, a second labelled button would not fit.
                 clear = QPushButton("\u2715")
+                clear.setObjectName("glyph-btn")
                 clear.setToolTip("Unlink this curve")
                 clear.setFixedWidth(scaled_px(24))
                 clear.clicked.connect(

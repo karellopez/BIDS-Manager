@@ -27,12 +27,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QSplitter,
     QToolButton,
     QVBoxLayout,
@@ -65,6 +67,101 @@ def card_canvas(content: QWidget) -> QWidget:
 # frame's title instead of inside the pane. One name rather than a per-pane
 # argument, so a pane stays buildable on its own and the frame stays generic.
 HEADER_EXTRAS = "pane-header-extras"
+
+
+class FoldStrip(QWidget):
+    """The handle of a panel that folds sideways, clickable ANYWHERE on it
+    (a caret button in a strip was a target the size of the caret). Painted
+    like the viewer's controls tab: open, a slim strip with a chevron;
+    folded, the chevron and the panel's name written down the strip."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, title: str, edge: str, parent=None) -> None:
+        super().__init__(parent)
+        self.title = title
+        self.edge = edge
+        self.collapsed = False
+        self.setObjectName("panel-frame-strip")
+        self.setFixedWidth(_STRIP_PX)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._sync_tip()
+
+    def set_collapsed(self, on: bool) -> None:
+        self.collapsed = bool(on)
+        self._sync_tip()
+        self.update()
+
+    def _sync_tip(self) -> None:
+        self.setToolTip(f"{'Open' if self.collapsed else 'Fold away'} "
+                        f"{self.title or 'this panel'}")
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+                event.position().toPoint()):
+            self.clicked.emit()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self.update()
+
+    def _points_left(self) -> bool:
+        # Open, the chevron points the way the panel folds (toward its
+        # edge); folded, the way it opens.
+        toward_edge = self.edge == "left"
+        return toward_edge != self.collapsed
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+        from ...viz.theme import parse_colour
+        from ..viz import fonts
+        from ..viz.bridge import ThemeHub
+
+        theme = ThemeHub.instance().theme
+        hover = self.underMouse()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(2.0, 3.0, -2.0, -3.0)
+        if hover or self.collapsed:
+            path = QPainterPath()
+            path.addRoundedRect(r, 6.0, 6.0)
+            p.fillPath(path, QColor(*parse_colour(theme.token(
+                "surface3" if hover else "surface2", "#161b22"))))
+        ink = QColor(*parse_colour(theme.text if hover else theme.dim))
+        cx = r.center().x()
+        name = (self.title or "").upper()
+        font = fonts.font(10, bold=True)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+        text_len = QFontMetricsF(font).horizontalAdvance(name) if self.collapsed else 0.0
+        group = 10.0 + (12.0 + text_len if text_len else 0.0)
+        top = max(r.top() + 8.0, r.center().y() - group / 2.0)
+        y = top + 5.0
+        half = fonts.px(4)
+        pen = QPen(ink, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        if self._points_left():
+            pts = [QPointF(cx + half * 0.5, y - half), QPointF(cx - half * 0.5, y),
+                   QPointF(cx + half * 0.5, y + half)]
+        else:
+            pts = [QPointF(cx - half * 0.5, y - half), QPointF(cx + half * 0.5, y),
+                   QPointF(cx - half * 0.5, y + half)]
+        p.drawPolyline(pts)
+        if text_len:
+            p.setFont(font)
+            p.save()
+            p.translate(cx, y + 12.0)
+            p.rotate(90)
+            p.drawText(QRectF(0, -9, text_len + 4.0, 18),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            p.restore()
+        p.end()
 
 
 class PanelFrame(QFrame):
@@ -169,22 +266,23 @@ class PanelFrame(QFrame):
             bl.addWidget(self._extras)
         bl.addWidget(self._detach_btn)
 
-        # Side strip (left/right only): a thin vertical bar with the caret
-        # centred vertically.
-        self._strip: Optional[QFrame] = None
+        # Side strip (left/right only): the whole strip is the handle.
+        self._strip: Optional[FoldStrip] = None
         if self._vertical_fold:
-            self._strip = QFrame()
-            self._strip.setObjectName("panel-frame-strip")
-            self._strip.setFixedWidth(_STRIP_PX)
-            self._strip.setToolTip(self._title)
-            sl = QVBoxLayout(self._strip)
-            sl.setContentsMargins(0, 4, 0, 4)
-            sl.setSpacing(4)
-            sl.addStretch(1)
-            sl.addWidget(self._caret, 0, Qt.AlignmentFlag.AlignHCenter)
-            sl.addStretch(1)
-
-        self._caret.setVisible(self._collapsible)
+            self._strip = FoldStrip(self._title, self._edge)
+            self._strip.clicked.connect(self.toggle_collapsed)
+            self._strip.setVisible(self._collapsible)
+            self._caret.setVisible(False)
+        else:
+            self._caret.setVisible(self._collapsible)
+            if self._collapsible:
+                # A top or bottom panel folds from anywhere on its title bar
+                # (its buttons keep their own clicks).
+                self._bar.setProperty("foldable", True)
+                self._bar.setCursor(Qt.CursorShape.PointingHandCursor)
+                self._bar.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+                self._bar.setToolTip(f"Fold or open {self._title or 'this panel'}")
+                self._bar.installEventFilter(self)
         self._detach_btn.setVisible(self._detachable)
 
     def _assemble(self) -> None:
@@ -244,6 +342,16 @@ class PanelFrame(QFrame):
 
     def is_detached(self) -> bool:
         return self._detached is not None
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt override
+        from PyQt6.QtCore import QEvent
+
+        if (obj is self._bar and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._bar.rect().contains(event.position().toPoint())):
+            self.toggle_collapsed()
+            return True
+        return super().eventFilter(obj, event)
 
     def toggle_collapsed(self) -> None:
         self.set_collapsed(not self._collapsed)
@@ -399,17 +507,13 @@ class PanelFrame(QFrame):
             inner_repaint(pal)
 
     def _refresh_icons(self) -> None:
-        if self._vertical_fold:
-            if self._edge == "left":
-                glyph = "panel_expand" if self._collapsed else "chevron_left"
-            else:  # right
-                glyph = "chevron_left" if self._collapsed else "panel_expand"
-        else:
-            glyph = "panel_expand" if self._collapsed else "panel_collapse"
+        if self._strip is not None:
+            self._strip.set_collapsed(self._collapsed)
+        glyph = "panel_expand" if self._collapsed else "panel_collapse"
         self._caret.setIcon(icons.icon(glyph))
         self._detach_btn.setIcon(
             icons.icon("reattach" if self.is_detached() else "detach")
         )
 
 
-__all__ = ["PanelFrame"]
+__all__ = ["CARD_GAP_PX", "FoldStrip", "PanelFrame", "card_canvas"]

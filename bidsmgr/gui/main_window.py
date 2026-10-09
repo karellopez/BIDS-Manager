@@ -624,6 +624,7 @@ class MainWindow(QMainWindow):
             # Font scale first, then theme — a single Save can change both
             # and the theme re-apply re-substitutes the scaled QSS template.
             self.apply_font_scale(s.font_scale)
+            self._theme.set_appearance(s.appearance(), apply=False)
             self.apply_theme(s.theme)
             reload_fn = getattr(self.converter, "reload_app_settings", None)
             if callable(reload_fn):

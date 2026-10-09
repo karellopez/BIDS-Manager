@@ -103,6 +103,9 @@ class _RowList(QWidget):
         layout.setSpacing(4)
         layout.addWidget(widget, 1)
         remove = QPushButton("−")
+        # A glyph button: no padding, or the generic button's padding leaves
+        # the minus no room in a fixed 26 px (it rendered as an empty box).
+        remove.setObjectName("glyph-btn")
         remove.setFixedWidth(26)
         remove.setToolTip("Remove this entry")
         layout.addWidget(remove, 0)
