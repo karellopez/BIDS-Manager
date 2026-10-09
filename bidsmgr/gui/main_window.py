@@ -535,6 +535,13 @@ class MainWindow(QMainWindow):
         self._header.about_requested.connect(self._show_about_dialog)
         self._header.settings_requested.connect(self._open_settings)
         self.welcome.project_opened.connect(self._on_project_opened)
+        # A folder that is not a BIDS dataset, chosen on Welcome to look at.
+        self.welcome.view_requested.connect(self._on_view_folder)
+        # The Editor's Open folder chose a BIDS dataset as the project.
+        self.editor.open_project_requested.connect(self._on_editor_open_project)
+        # The open project is never deleted from the Recent list.
+        self._project_root: Optional[Path] = None
+        self.welcome.current_project = lambda: self._project_root
         # Project-switcher dropdown: opening a recent reuses the Welcome
         # open-project flow (which re-emits project_opened -> _on_project_opened).
         self._header.project_switch_requested.connect(self._on_switch_project)
@@ -703,21 +710,50 @@ class MainWindow(QMainWindow):
         Editor is pointed at the same root so both views work inside the project.
         """
         self._project = project
+        self._project_root = Path(bids_root)
         self.converter.set_project(project, Path(bids_root))
-        # Point the Editor at the same root so both views work inside the
-        # project. ``_set_root`` is the Editor's open-root primitive.
-        set_root = getattr(self.editor, "_set_root", None)
-        if callable(set_root):
-            try:
-                set_root(Path(bids_root), persist=False)
-            except Exception as exc:  # never block entering the project
-                log.warning("editor could not open %s: %s", bids_root, exc)
+        # The Editor shows the same dataset, editable: it is the project.
+        try:
+            self.editor.set_project_root(Path(bids_root))
+        except Exception as exc:  # never block entering the project
+            log.warning("editor could not open %s: %s", bids_root, exc)
         # Reveal + label the header project switcher.
         from .welcome_panel import _dataset_display_name
         self._header.set_active_project(
             _dataset_display_name(Path(bids_root)), Path(bids_root),
         )
-        self._apply_active_view("converter", persist=True)
+        self._apply_active_view(self._view_after_opening(Path(bids_root)), persist=True)
+
+    def _view_after_opening(self, bids_root: Path) -> str:
+        """Where a newly opened project lands. Switched from the Converter or
+        the Editor (the header's project switcher, the Editor's Open folder),
+        the user stays where they are. From Welcome, a dataset with nothing
+        converted yet goes to the Converter, which is all it can use; one with
+        subjects goes to the view last worked in."""
+        current = {0: "converter", 1: "editor"}.get(self.stack.currentIndex())
+        if current is not None:
+            return current
+        from .app_settings import AppSettings
+
+        has_data = any(p.is_dir() and p.name.startswith("sub-")
+                       for p in bids_root.iterdir()) if bids_root.is_dir() else False
+        return AppSettings.load().active_view if has_data else "converter"
+
+    def _on_editor_open_project(self, path: Path) -> None:
+        """The Editor's Open folder chose a BIDS dataset as the project."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        try:
+            self.welcome.open_project(Path(path))
+        except Exception as exc:  # noqa: BLE001 - said, never swallowed
+            log.warning("could not open %s as a project: %s", path, exc)
+            QMessageBox.warning(self, "Not opened",
+                                f"{path} could not be opened as a project:\n\n{exc}")
+
+    def _on_view_folder(self, path: Path) -> None:
+        """A folder to look at, not a project: the Editor shows it read only."""
+        self.editor.view_folder(Path(path))
+        self._apply_active_view("editor", persist=True)
 
     def _on_switch_project(self, path: Path) -> None:
         """A recent project was chosen from the header switcher.

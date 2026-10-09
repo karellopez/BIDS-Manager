@@ -1481,6 +1481,23 @@ QWidget#viz-tracks-bar {
    theme swap it keeps the brush it was first polished with. Same treatment
    as #issue-dialog-scroll / #issue-dialog-body above. */
 QScrollArea#cff-scroll, QWidget#cff-body { background: $surface; border: none; }
+
+/* Editor documents (gui/widgets/text_pane, picture_pane, gradient_pane):
+ * the text as stored in a monospace face, the rendered view in the app's,
+ * both on the pane's surface and sized by the font setting. */
+QPlainTextEdit#text-document {
+    background: $surface; color: $text; border: none;
+    padding: 10px 14px;
+    font-family: "SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    selection-background-color: $accent_bg;
+}
+QTextBrowser#text-rendered {
+    background: $bg; color: $text; border: none;
+    selection-background-color: $accent_bg;
+}
+QScrollArea#picture-scroll, QLabel#picture-label { background: $surface; border: none; }
+QTableWidget#gradient-table { border: none; }
 QPlainTextEdit#ent-input {
     background: $bg; color: $text;
     border: 1px solid $input_border; border-radius: 4px; padding: 3px 6px;

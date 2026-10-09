@@ -83,7 +83,50 @@ def kind_of(path, *, sidecar_checked: Optional[bool] = None) -> Kind:
     return ""
 
 
+#: What the Editor shows a file that is not an image, a recording or a
+#: table in (``document_kind``).
+Document = Literal["gradients", "picture", "markdown", "html", "text", ""]
+
+#: Pictures a dataset carries: electrode and anatomical photos (``_photo``),
+#: figures under ``derivatives`` and ``code``.
+PICTURE_EXTS: frozenset[str] = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".webp"})
+#: Text the standard names without an extension (README, CHANGES, LICENSE)
+#: and the usual others.
+TEXT_NAMES: frozenset[str] = frozenset({
+    "readme", "changes", "license", "authors", "copying", "notice", ".gitignore",
+    ".gitattributes", ".datalad"})
+TEXT_EXTS: frozenset[str] = frozenset({
+    ".txt", ".rst", ".csv", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".log", ".py",
+    ".sh", ".bash", ".m", ".r", ".jl", ".js", ".bat", ".ps1", ".vmrk", ".xml", ".tex",
+    ".bib", ".sql", ".cff"})
+MARKDOWN_EXTS: frozenset[str] = frozenset({".md", ".markdown"})
+
+
+def document_kind(path) -> Document:
+    """How a file that is not a volume, a recording or a table is shown
+    ("" for none: the Editor shows what it is and offers the system's app).
+
+    ``.bval``/``.bvec`` are the gradient table; README, README.md and other
+    Markdown render; CHANGES, LICENSE and the like are text."""
+    p = Path(path)
+    name = p.name.lower()
+    ext = full_ext(p)
+    if ext in (".bval", ".bvec"):
+        return "gradients"
+    if ext in PICTURE_EXTS:
+        return "picture"
+    if ext in MARKDOWN_EXTS:
+        return "markdown"
+    if ext in (".html", ".htm"):
+        return "html"
+    if name in TEXT_NAMES or ext in TEXT_EXTS or name.startswith(("readme.", "changes.")):
+        return "text"
+    return ""
+
+
 __all__ = [
-    "RECORDING_DIR_EXTS", "RECORDING_FILE_EXTS", "VOLUME_EXTS", "is_mrs_path",
+    "Document", "MARKDOWN_EXTS", "PICTURE_EXTS", "RECORDING_DIR_EXTS", "RECORDING_FILE_EXTS",
+    "TEXT_EXTS", "TEXT_NAMES", "VOLUME_EXTS", "document_kind", "is_mrs_path",
     "is_recording_path", "kind_of",
 ]

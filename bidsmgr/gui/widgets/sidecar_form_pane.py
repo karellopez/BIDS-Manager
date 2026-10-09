@@ -332,6 +332,14 @@ class SidecarFormPane(QWidget):
     # A row asked where its value is actually stated.
     explain_requested = pyqtSignal(str)
 
+    #: A folder open for viewing: every field is read only, nothing is saved.
+    _read_only = False
+
+    def set_read_only(self, on: bool) -> None:
+        """No editing (a folder open for viewing): fields are shown read only
+        and the edit toolbar is hidden. Takes effect on the next file."""
+        self._read_only = bool(on)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pane-dark")
@@ -808,11 +816,13 @@ class SidecarFormPane(QWidget):
             fields, key=lambda f: _LEVEL_SORT.get(f.level, 99)
         )
         # Editable when the bound file is a JSON sidecar and we have a
-        # readable on-disk cache to save back into.
+        # readable on-disk cache to save back into, and the folder is not open
+        # for viewing only.
         editable = (
             self._current_file is not None
             and self._current_file.name.lower().endswith(".json")
             and self._json_cache is not None
+            and not self._read_only
         )
         insert_idx = self._body_layout.count() - 1  # before the stretch
         # What the standard says about each field, so the editor for it can be
@@ -1437,6 +1447,7 @@ class SidecarFormPane(QWidget):
             self._current_file is not None
             and self._current_file.name.lower().endswith(".json")
             and self._json_cache is not None
+            and not self._read_only
         )
         self._edit_toolbar.setVisible(editable)
         n = self._dirty_count() if editable else 0

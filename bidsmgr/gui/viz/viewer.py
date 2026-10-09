@@ -481,10 +481,19 @@ class Viewer(QWidget):
         self._readout.setText(self.presenter.readout())
         self._summary.setText(self.presenter.summary())
 
+    #: A folder open for viewing: nothing is written into it (no scene, no
+    #: QC result, no reviewed channels or segments). The host sets it.
+    read_only = False
+
+    def set_read_only(self, on: bool) -> None:
+        self.read_only = bool(on)
+        self.refresh_actions()
+
     def refresh_actions(self) -> None:
         ctx = dict(self.presenter.action_context())
         ctx["undo"] = self.store.can_undo
         ctx["redo"] = self.store.can_redo
+        ctx["writable"] = not self.read_only
         self.action_manager.update_state(ctx)
 
     # ------------------------------------------------------------------

@@ -513,8 +513,8 @@ class BidsTreePane(QWidget):
         self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
 
         self._hint = QLabel(
-            "No BIDS dataset opened.\n\n"
-            "Use “Open BIDS root…” in the toolbar."
+            "No folder opened.\n\n"
+            "Use “Open folder…” in the toolbar."
         )
         self._hint.setObjectName("pane-hint")
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -605,6 +605,9 @@ class BidsTreePane(QWidget):
         """Grey out Expand when there is nothing left folded."""
         if hasattr(self, "_expand_btn"):
             self._expand_btn.setEnabled(self._next_folded_depth() is not None)
+
+    #: A folder open for viewing: the right-click offers no tool that writes.
+    read_only = False
 
     def set_root(self, path: Optional[Path]) -> None:
         """Switch the tree to a new BIDS root (or clear it with ``None``).
@@ -1141,7 +1144,9 @@ class BidsTreePane(QWidget):
         # References, offered only where a link field is worth having: on a
         # fieldmap, an MEG recording, a derivative. Offering it on every
         # file would be true and useless.
-        if self._root is not None and clicked_path.is_file():
+        # A folder open for viewing offers only what reads: comparing, and the
+        # path. Every tool below writes.
+        if self._root is not None and clicked_path.is_file() and not self.read_only:
             from ...editor import linkage as lk
             if lk.fields_for(self._root, clicked_path):
                 menu_section(menu, "Check and repair")
@@ -1160,8 +1165,9 @@ class BidsTreePane(QWidget):
         # Every entity the clicked row actually carries, so the menu offers
         # renaming exactly what is in front of the user. A folder named
         # sub-01 offers the subject; a func file offers task, run and echo.
-        renames = _renameable_entities(Path(path))
-        if renames or _can_restructure(Path(path)):
+        renames = [] if self.read_only else _renameable_entities(Path(path))
+        restructure = not self.read_only and _can_restructure(Path(path))
+        if renames or restructure:
             menu_section(menu, "Names and structure")
         if renames:
             for entity, value, label in renames:
@@ -1184,7 +1190,7 @@ class BidsTreePane(QWidget):
         chosen = self.selected_paths()
         clicked = Path(path)
         scope = chosen if clicked in chosen and len(chosen) > 1 else [clicked]
-        if _can_restructure(clicked):
+        if restructure:
             add_entity = menu.addAction("Add or change an entity...")
             add_entity.setToolTip(
                 "Give these files an entity the schema allows them, placed "

@@ -369,7 +369,8 @@ ACTIONS: tuple[ActionDef, ...] = (
        when="traces && annotate && span.selected", short="Delete segment",
        help="Click a segment to select it (it is drawn stronger), then Delete"),
     _a("review.save", "Save the bad channels and segments to the dataset", "gui:save_review",
-       category="Annotation", when="traces && meeg && review.changed", shown="meeg",
+       category="Annotation", when="traces && meeg && review.changed && writable",
+       shown="meeg",
        short="Save to dataset",
        help="Bad channels into the status column of _channels.tsv, bad segments as "
             "BAD_ rows of the run's _events.tsv (how mne-bids reads them back as "
@@ -449,7 +450,7 @@ ACTIONS: tuple[ActionDef, ...] = (
        category="Spectrum", keys=("[",), when="spectrum"),
     # -- saved views ----------------------------------------------------------
     _a("scene.save", "Save a scene in this dataset...", "gui:save_scene",
-       category="Views", when="volume",
+       category="Views", when="volume && writable",
        help="THIS image with its overlays in their looks, the crosshair and the layout, "
             "saved in the dataset (.bidsmgr/viz/scenes) to open again or share with "
             "someone who has the dataset"),

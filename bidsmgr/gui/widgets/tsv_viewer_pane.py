@@ -931,9 +931,26 @@ class TsvViewerPane(QWidget):
         if snap is not None:
             self._restore(snap)
 
+    #: A folder open for viewing: the table is shown, never edited.
+    _read_only = False
+
+    def set_read_only(self, on: bool) -> None:
+        """No editing (a folder open for viewing)."""
+        self._read_only = bool(on)
+        # Visualize stays: it only reads. Everything that edits goes.
+        for w in (self._add_row_btn, self._del_row_btn, self._add_col_btn, self._del_col_btn,
+                  self._revert_btn, self._save_btn):
+            w.setVisible(not on)
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers if on else (
+                QAbstractItemView.EditTrigger.DoubleClicked
+                | QAbstractItemView.EditTrigger.EditKeyPressed
+                | QAbstractItemView.EditTrigger.SelectedClicked))
+        self._refresh_dirty_ui()
+
     def _refresh_dirty_ui(self) -> None:
         has_file = self._current_file is not None
-        editable = has_file and not self._truncated_on_load
+        editable = has_file and not self._truncated_on_load and not self._read_only
         if self._dirty:
             self._dirty_chip.setText("unsaved changes")
             self._dirty_chip.setVisible(True)
@@ -948,7 +965,8 @@ class TsvViewerPane(QWidget):
 
     def _sync_delete_button_state(self, *args) -> None:
         del args
-        editable = self._current_file is not None and not self._truncated_on_load
+        editable = (self._current_file is not None and not self._truncated_on_load
+                    and not self._read_only)
         idx = self._table.currentIndex()
         has_sel = idx.isValid()
         self._del_row_btn.setEnabled(

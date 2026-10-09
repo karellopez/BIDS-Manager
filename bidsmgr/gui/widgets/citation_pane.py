@@ -61,6 +61,8 @@ class CitationPane(QWidget):
         self._root: Optional[Path] = None
         self._data: dict[str, Any] = {}
         self._editors: dict[str, QWidget] = {}
+        #: A folder open for viewing: shown, never written.
+        self._read_only = False
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -111,6 +113,13 @@ class CitationPane(QWidget):
         v.addWidget(scroll, 1)
 
     # -- binding -------------------------------------------------------
+
+    def set_read_only(self, on: bool) -> None:
+        self._read_only = bool(on)
+        self._save_btn.setVisible(not on)
+        self._revert_btn.setVisible(not on)
+        if self._path is not None:
+            self._rebuild()
 
     def set_file(self, path: Optional[Path], root: Optional[Path]) -> None:
         self._path = Path(path) if path is not None else None
@@ -219,6 +228,7 @@ class CitationPane(QWidget):
             if value is not None:
                 editor.setText(str(value))
         editor.setToolTip(tip)
+        editor.setReadOnly(self._read_only)
         self._editors[field.name] = editor
         layout.addWidget(editor)
         return row
@@ -269,7 +279,7 @@ class CitationPane(QWidget):
 
     def save(self) -> bool:
         """Write the file, reversibly when it sits inside a dataset."""
-        if self._path is None:
+        if self._path is None or self._read_only:
             return False
         data = self.collect()
         text = cff.dumps(data)

@@ -1943,6 +1943,52 @@ _BOLD_PLOTS: dict[str, Explanation] = {
 # ---------------------------------------------------------------------------
 
 _DWI_PLOTS: dict[str, Explanation] = {
+    "plot.dwi.directions": Explanation(
+        title="Directions on the sphere",
+        short=("Each diffusion volume's gradient direction, one colour per shell, seen along "
+               "one axis. An even spread covers the sphere; gaps and clusters do not."),
+        measures=(
+            "Where the gradient directions of each shell point. A direction and its "
+            "opposite measure the same thing, so every direction is folded onto the half of "
+            "the sphere facing the viewer."),
+        computed=(
+            "Each b-vector is normalised and reversed when it points away from the viewing "
+            "axis, then drawn with Lambert's equal-area projection, so an even spread looks "
+            "even: the centre is the viewing axis, the outer circle the plane across it, "
+            "and the faint rings lie 30 and 60 degrees from the axis. The b=0 volumes have "
+            "no direction and are not drawn."),
+        reading=(
+            "Look for empty regions and for points on top of one another, and view along "
+            "each axis: a scheme can look even from one side and leave a gap seen from "
+            "another. The largest gap of each shell, beside its name, puts a number on it."),
+        causes=(
+            "A poorly designed scheme, a scheme meant for a full sphere acquired as half of "
+            "one, and volumes dropped at conversion or by a scan stopped early."),
+        caveats=(
+            "A property of the table, not of the image: an image whose table is wrong or "
+            "flipped looks the same here. The axes are the image's, as the .bvec stores "
+            "them."),
+        references=(_JONES99, _JEURISSEN),
+    ),
+    "plot.dwi.bvalues": Explanation(
+        title="b-value of each volume",
+        short=("Every volume's b-value in the order acquired, one colour per shell and the "
+               "b=0 volumes in grey. Shows how the b=0 volumes are spread through the scan."),
+        measures="The order in which the shells and the b=0 volumes were acquired.",
+        computed=(
+            "Each volume's b-value from the .bval, at its position in the series. Values up "
+            "to the b=0 limit count as b=0 and the others are grouped into shells rounded to "
+            "the nearest 50, as the quality check groups them (Settings > Quality control > "
+            "Diffusion)."),
+        reading=(
+            "b=0 volumes spread through the series let drift and motion be followed over "
+            "the whole scan; all of them at the start cannot. Interleaved shells share "
+            "heating and motion evenly. A point off its shell's line is a b-value unlike "
+            "its neighbours'."),
+        causes="The acquisition protocol; series reordered or joined after the scan.",
+        caveats="It shows the table, not whether the images were acquired in that order.",
+        references=(_VOS,),
+    ),
     "plot.dwi.displacement": Explanation(
         title="Displacement",
         short=("How far each volume sits from the first b=0, in mm, with volumes far out of "

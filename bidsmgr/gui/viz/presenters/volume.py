@@ -847,7 +847,7 @@ class VolumePresenter:
 
         name = name.strip()
         root = self.scene_root()
-        if not name or root is None or self.source is None:
+        if not name or root is None or self.source is None or self.viewer.read_only:
             return None
         data = scenes.snapshot(self.ctx.scene, self.ctx.store.sources, root, name)
         path = scenes.save(root, data)
@@ -1934,7 +1934,7 @@ class VolumePresenter:
         panel.set_result(result, src.path.name, context=context,
                          shown=self._shown_evidence(), noise_on=self._noise_look is not None,
                          plots_on=bool(self.ctx.scene.graph_visible and self.ctx.scene.graph.qc),
-                         can_save=root is not None)
+                         can_save=root is not None and not self.viewer.read_only)
 
     def _evidence_layer(self, key: str):
         lid = self._evidence.get(key)
@@ -2086,6 +2086,10 @@ class VolumePresenter:
         from ....qc import report
 
         root = self.scene_root()
+        if self.viewer.read_only:
+            self.viewer.status_message.emit("This folder is open for viewing only: nothing "
+                                            "is written into it.")
+            return None
         if root is None:
             self.viewer.status_message.emit("Open the image from a dataset to save its "
                                             "quality result.")

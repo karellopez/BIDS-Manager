@@ -22,7 +22,7 @@ All four respect palette swaps through the QSS alone; no per-widget
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPalette, QPen
@@ -343,6 +343,8 @@ class PathBar(QFrame):
         ok: bool = False,
         trailing_chips: Sequence[tuple[str, str]] | None = None,
         parent=None,
+        *,
+        button: Optional[str] = "change…",
     ) -> None:
         super().__init__(parent)
         self.setObjectName("pathbar")
@@ -350,11 +352,13 @@ class PathBar(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 9, 14, 9)
         lay.setSpacing(10)
+        self._lay = lay
 
         lbl = QLabel(label)
         lbl.setObjectName("path-label")
         lbl.setMinimumWidth(80)
         lay.addWidget(lbl)
+        self._label = lbl
 
         ico = "✔  " if ok else "○  "
         field = QLineEdit(f"{ico}{value}")
@@ -364,10 +368,23 @@ class PathBar(QFrame):
 
         for chip_kind, chip_text in trailing_chips or ():
             lay.addWidget(Chip(chip_text, chip_kind))
+        # What the path IS (a project, a folder open for viewing): set by the
+        # view with :meth:`set_chip`, hidden until then.
+        self._chip: Optional[Chip] = None
+        # One action about the path (Back to the project, Open as project):
+        # :meth:`set_action`.
+        self.action_button = QPushButton("")
+        self.action_button.setObjectName("tb-btn")
+        self.action_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.action_button.setVisible(False)
+        lay.addWidget(self.action_button)
 
-        btn = QPushButton("change…")
+        # ``button=None``: the view opens paths from its own toolbar, and two
+        # buttons that do one thing is one too many.
+        btn = QPushButton(button or "")
         btn.setObjectName("tb-btn-ghost")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setVisible(button is not None)
         lay.addWidget(btn)
 
         # Expose the change-button + value field so views can
@@ -385,6 +402,31 @@ class PathBar(QFrame):
         """Return the current value without the ✔/○ prefix."""
         raw = self._field.text()
         return raw[3:] if raw[:1] in ("✔", "○") else raw
+
+    def set_label(self, text: str) -> None:
+        self._label.setText(text)
+
+    def set_chip(self, kind: str = "", text: str = "", tip: str = "") -> None:
+        """A chip after the path saying what it is; ``text`` empty hides it."""
+        if self._chip is not None:
+            self._lay.removeWidget(self._chip)
+            self._chip.setParent(None)
+            self._chip.deleteLater()
+            self._chip = None
+        if text:
+            self._chip = Chip(text, kind)
+            self._chip.setToolTip(tip)
+            self._lay.insertWidget(self._lay.indexOf(self.action_button), self._chip)
+
+    def chip_text(self) -> str:
+        return self._chip.text() if self._chip is not None else ""
+
+    def set_action(self, text: str = "", tip: str = "") -> None:
+        """The action button's text (``""`` hides it); connect to
+        ``action_button.clicked``."""
+        self.action_button.setText(text)
+        self.action_button.setToolTip(tip)
+        self.action_button.setVisible(bool(text))
 
 
 __all__ = [

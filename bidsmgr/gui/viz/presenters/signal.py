@@ -1567,7 +1567,7 @@ class SignalPresenter:
         from ....viz.data.signal import channels_sibling
 
         src = self.source
-        if src is None:
+        if src is None or self.viewer.read_only:
             return False
         tr = self.ctx.scene.traces
         root = self.viewer.current_root() or dataset_root(src.path) or src.path.parent

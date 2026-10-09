@@ -5,9 +5,15 @@ horizontal splitter — BIDS tree | sidecar form | validation panel).
 
 Through Step 3 the panel hosts:
 
-* a toolbar with ``Open BIDS root…``, ``Validate dataset``, status
-  chips, a busy spinner, and (disabled) file / folder validate stubs;
-* a :class:`PathBar` showing the active dataset;
+* a toolbar with ``Open folder…`` (the one way to open something),
+  ``Validate dataset``, status chips, a busy spinner, file / folder
+  validate;
+* a :class:`PathBar` showing the open folder and what it is: the PROJECT
+  (every edit recorded, undoable) or a folder open for VIEWING only
+  (nothing is written into it; editing and the dataset tools are off).
+  A BIDS dataset is opened as a project after asking (the Converter
+  switches too); any other folder opens for viewing, so BIDS Manager can
+  be a plain viewer without leaving a trace;
 * the 3-pane horizontal splitter with the
   :class:`BidsTreePane` on the left (badges stamped from the in-memory
   :class:`bidsmgr.editor.types.ValidationReport`).
@@ -43,6 +49,10 @@ from . import icons
 from .combo_popup import menu_section, round_menu
 from .widgets.bidsignore_pane import BidsIgnorePane
 from .widgets.citation_pane import CitationPane
+from .widgets.file_info_pane import FileInfoPane
+from .widgets.gradient_pane import GradientPane
+from .widgets.picture_pane import PicturePane
+from .widgets.text_pane import TextPane
 from .viz import Viewer
 from .widgets import (
     BidsTreePane,
@@ -69,10 +79,17 @@ class EditorPanel(QWidget):
     """
 
     log_message = pyqtSignal(str)
+    #: The user chose to open a BIDS dataset as the project (Path): the
+    #: window opens it, and both views follow.
+    open_project_requested = pyqtSignal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("editor-panel")
+        #: The open project's dataset (the window sets it), if any.
+        self._project_root: Optional[Path] = None
+        #: The folder on screen is open for viewing only.
+        self._view_only = False
 
         self._report: Optional[ValidationReport] = None
         self._report_worker: Optional[ReportWorker] = None
@@ -88,8 +105,9 @@ class EditorPanel(QWidget):
         self._toolbar = self._build_toolbar()
         v.addWidget(self._toolbar)
 
-        self._path_bar = PathBar("Dataset", "(none)", ok=False)
-        self._path_bar.change_button.clicked.connect(self._on_change_root)
+        # No change button: Open folder in the toolbar is the one way in.
+        self._path_bar = PathBar("Dataset", "(none)", ok=False, button=None)
+        self._path_bar.action_button.clicked.connect(self._on_path_action)
         v.addWidget(self._path_bar)
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -153,6 +171,18 @@ class EditorPanel(QWidget):
         self._center_stack.addWidget(self._bidsignore_pane)
         self._citation_pane = CitationPane()
         self._center_stack.addWidget(self._citation_pane)
+        # Every other common file: documents (README, CHANGES, Markdown, HTML,
+        # text), the gradient table (.bval / .bvec), pictures, and a card for
+        # what BIDS Manager cannot show.
+        self._text_pane = TextPane()
+        self._gradient_pane = GradientPane()
+        self._picture_pane = PicturePane()
+        self._file_info_pane = FileInfoPane()
+        for pane in (self._text_pane, self._gradient_pane, self._picture_pane,
+                     self._file_info_pane):
+            self._center_stack.addWidget(pane)
+        # A link in a README to a file of the folder opens that file.
+        self._text_pane.file_requested.connect(self._on_document_link)
         # Threaded panes drive the toolbar busy spinner + status bar.
         self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
         self._tsv_viewer.status_message.connect(self.log_message)
@@ -199,13 +229,14 @@ class EditorPanel(QWidget):
         self._validation_frame.attach_splitter(self._splitter, grow_target=self._center_frame)
         v.addWidget(self._splitter, 1)
 
-        # Restore last-opened root if available.
+        # Restore the last folder, for viewing: editing happens in the open
+        # project, which the window binds when one is opened.
         from .app_settings import AppSettings
         settings = AppSettings.load()
         if settings.editor_bids_root:
             root = Path(settings.editor_bids_root)
             if root.exists() and root.is_dir():
-                self._set_root(root, persist=False)
+                self._set_root(root, persist=False, view_only=True)
 
     # ------------------------------------------------------------------
     # Public API
@@ -306,10 +337,14 @@ class EditorPanel(QWidget):
         lay.setContentsMargins(14, 6, 14, 6)
         lay.setSpacing(8)
 
-        self._open_btn = QPushButton("  Open BIDS root…")
+        self._open_btn = QPushButton("  Open folder…")
         self._open_btn.setObjectName("tb-btn")
         icons.apply_button(self._open_btn, "open_folder")
-        self._open_btn.clicked.connect(self._on_change_root)
+        self._open_btn.setToolTip(
+            "Open a folder. A BIDS dataset can become the project (the Converter "
+            "and the Editor both switch to it) or be opened for viewing only; any "
+            "other folder opens for viewing, and nothing is written into it.")
+        self._open_btn.clicked.connect(self._on_open_folder)
         lay.addWidget(self._open_btn)
 
         lay.addWidget(VSep())
@@ -588,18 +623,6 @@ class EditorPanel(QWidget):
         )
         self._delete_action.triggered.connect(self._on_delete)
 
-        # Only meaningful for a dataset this tool did not convert, so it
-        # hides itself once the dataset carries a project bundle.
-        menu_section(self._tools_menu, "History")
-        self._adopt_action = self._tools_menu.addAction("Track changes")
-        self._adopt_action.setToolTip(
-            "This dataset was not converted here, so there is no record "
-            "of what it looked like before you started editing. Tracking "
-            "writes that baseline into .bidsmgr/ and changes nothing "
-            "else, so edits become reversible."
-        )
-        self._adopt_action.setVisible(False)
-        self._adopt_action.triggered.connect(self._on_adopt)
 
         lay.addWidget(self._tools_btn)
 
@@ -675,34 +698,165 @@ class EditorPanel(QWidget):
     # Open-root flow
     # ------------------------------------------------------------------
 
-    def _on_change_root(self) -> None:
+    def _on_open_folder(self) -> None:
         from .app_settings import AppSettings
         current = self.current_root()
         start = str(current) if current else (
             AppSettings.load().editor_bids_root or str(Path.home())
         )
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Open BIDS root", start,
-        )
-        if not chosen:
-            return
-        self._set_root(Path(chosen), persist=True)
+        chosen = QFileDialog.getExistingDirectory(self, "Open folder", start)
+        if chosen:
+            self.open_folder(Path(chosen))
 
-    def _set_root(self, path: Path, *, persist: bool) -> None:
+    def open_folder(self, path: Path) -> str:
+        """Open what the user picked. Inside the open project: the project,
+        at that folder. A BIDS dataset: as the project, or for viewing only,
+        after asking (opening it as the project changes the Converter too).
+        Anything else: for viewing only, writing nothing into it. Returns
+        "project", "view" or "" (cancelled)."""
+        from ..project.adopt import looks_like_bids
+
+        path = Path(path)
+        project = self._project_root
+        if project is not None and (path == project or project in path.parents):
+            if self._view_only or self.current_root() != project:
+                self.set_project_root(project)
+            if path != project:
+                self.select_file_in_tree(path)
+            return "project"
+        if looks_like_bids(path):
+            choice = self.ask_bids_folder(path)
+            if choice == "project":
+                self.open_project_requested.emit(path)
+            elif choice == "view":
+                self.view_folder(path)
+            return choice
+        self.view_folder(path)
+        self.log_message.emit(
+            f"{path.name} is not a BIDS dataset: opened for viewing only, nothing is "
+            "written into it")
+        return "view"
+
+    def ask_bids_folder(self, path: Path) -> str:
+        """``"project"``, ``"view"`` or ``""`` for a BIDS dataset."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        from ..project.adopt import is_managed
+
+        managed = is_managed(path)
+        current = self._project_root
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Open a BIDS dataset")
+        box.setText(f"Open {path.name} as the project?")
+        swap = (f" {current.name}, the project open now, stays in Recent projects."
+                if current is not None and current != path else "")
+        how = ("BIDS Manager keeps its history in the dataset's .bidsmgr/ folder, so "
+               "every edit can be undone." if managed else
+               "It is not a BIDS Manager project yet: opening it as one adds a "
+               ".bidsmgr/ folder (and a README, .bidsignore or dataset description if it "
+               "has none), so every edit can be undone. Nothing else changes.")
+        box.setInformativeText(
+            f"As the project, the Converter and the Editor both switch to it.{swap} "
+            f"{how}\n\nOr view it only: nothing is written into it, and editing and "
+            "the dataset tools are off.")
+        as_project = box.addButton("Open as project", QMessageBox.ButtonRole.AcceptRole)
+        view = box.addButton("View only", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(as_project)
+        box.exec()
+        clicked = box.clickedButton()
+        return "project" if clicked is as_project else "view" if clicked is view else ""
+
+    def set_project_root(self, path: Optional[Path]) -> None:
+        """The open project's dataset (the window, on opening one): shown
+        and editable, every edit recorded."""
+        self._project_root = Path(path) if path is not None else None
+        if path is not None:
+            self._set_root(Path(path), persist=False)
+
+    def view_folder(self, path: Path) -> None:
+        """Open ``path`` for viewing only: nothing is written into it."""
+        self._set_root(Path(path), persist=True, view_only=True)
+
+    def is_view_only(self) -> bool:
+        return self._view_only
+
+    def _on_path_action(self) -> None:
+        """The path bar's one action: back to the project, or open the
+        folder on screen as the project."""
+        root = self.current_root()
+        if not self._view_only or root is None:
+            return
+        if self._project_root is not None:
+            self.set_project_root(self._project_root)
+        else:
+            self.open_project_requested.emit(root)
+
+    def _apply_mode(self, path: Path, view_only: bool) -> None:
+        """Everything that differs between the project and a folder open for
+        viewing: what the path bar says, and whether anything can write."""
+        from ..project.adopt import looks_like_bids
+
+        self._view_only = bool(view_only)
+        bids = looks_like_bids(path)
+        if view_only:
+            self._path_bar.set_label("Folder")
+            self._path_bar.set_chip(
+                "warn", "view only",
+                "Opened for viewing: nothing is written into this folder, and editing "
+                "and the dataset tools are off." + (
+                    " Open it as a project to edit it." if bids else
+                    " It is not a BIDS dataset."))
+            if self._project_root is not None:
+                self._path_bar.set_action(f"Back to {self._project_root.name}",
+                                          "Show the open project again")
+            elif bids:
+                self._path_bar.set_action(
+                    "Open as project",
+                    "Make this dataset the project: the Converter and the Editor both "
+                    "switch to it, and every edit can be undone")
+            else:
+                self._path_bar.set_action("")
+        else:
+            self._path_bar.set_label("Dataset")
+            in_project = self._project_root is not None and path == self._project_root
+            self._path_bar.set_chip(
+                "success" if in_project else "accent", "project" if in_project else "dataset",
+                "The open project: every edit is recorded and can be undone."
+                if in_project else "Edits are recorded in the dataset's .bidsmgr/ folder "
+                                   "and can be undone.")
+            self._path_bar.set_action("")
+        for pane in (self._sidecar_form, self._tsv_viewer, self._citation_pane,
+                     self._bidsignore_pane, self._text_pane):
+            pane.set_read_only(view_only)
+        for viewer in (self._nifti_viewer, self._signal_viewer, self._spectrum_viewer):
+            viewer.set_read_only(view_only)
+        self._tree_pane.read_only = view_only
+        # Validation reads only; it means something for a BIDS dataset.
+        self._can_validate = (not view_only) or bids
+
+    #: Validation applies to the folder on screen (a BIDS dataset).
+    _can_validate = True
+
+    def _set_root(self, path: Path, *, persist: bool, view_only: bool = False) -> None:
         self._tree_pane.set_root(path)
         self._tree_pane.clear_badges()
         self._path_bar.set_value(str(path), ok=True)
+        self._apply_mode(Path(path), view_only)
         # Switching roots invalidates any stored report + form state.
         self._report = None
         self._show_pane(self._sidecar_form)
         self._validation_pane.set_report(None)
         self._validation_pane.set_current_file(None, None)
         self._hide_chips()
-        # Enable dataset-level validation now that we have a root.
-        self._validate_dataset_btn.setEnabled(True)
-        self._tools_btn.setEnabled(True)
+        # Dataset-level validation and the tools, as the mode allows.
+        self._validate_dataset_btn.setEnabled(self._can_validate)
+        self._tools_btn.setEnabled(not view_only)
+        self._tools_btn.setToolTip(
+            "Open the folder as a project to use the dataset tools: each of them "
+            "writes." if view_only else "")
         self._refresh_deface_action()
-        self._refresh_adopt_button()
         if persist:
             from .app_settings import AppSettings
             AppSettings.remember_editor_bids_root(path)
@@ -741,7 +895,8 @@ class EditorPanel(QWidget):
     def _on_worker_finished(self) -> None:
         self._set_busy(False)
         # Re-enable the button only if a root is still loaded.
-        self._validate_dataset_btn.setEnabled(self.current_root() is not None)
+        self._validate_dataset_btn.setEnabled(
+            self.current_root() is not None and self._can_validate)
         self._report_worker = None
 
     def _on_partial_ready(
@@ -815,7 +970,7 @@ class EditorPanel(QWidget):
         Both stay disabled until a BIDS root is open. A partial-validate
         already in flight also disables them (debounce).
         """
-        has_root = self.current_root() is not None
+        has_root = self.current_root() is not None and self._can_validate
         running = self._partial_worker is not None and getattr(
             self._partial_worker, "isRunning", lambda: False,
         )()
@@ -933,7 +1088,7 @@ class EditorPanel(QWidget):
         # While a validation run is in flight we lock the trigger so
         # double-clicks don't pile up workers.
         self._validate_dataset_btn.setEnabled(
-            (not busy) and (self.current_root() is not None)
+            (not busy) and (self.current_root() is not None) and self._can_validate
         )
 
     # ------------------------------------------------------------------
@@ -949,7 +1104,12 @@ class EditorPanel(QWidget):
         * any other NIfTI -> the volume viewer;
         * EEG / MEG / iEEG recordings (``.fif``, ``.edf``, ``.set``,
           ``.vhdr``, ``.cnt``, CTF ``.ds``, ...) -> the signal viewer;
-        * everything else (JSON sidecars, ...) -> :class:`SidecarFormPane`.
+        * JSON -> :class:`SidecarFormPane`;
+        * ``.bval`` / ``.bvec`` -> :class:`GradientPane`; README, CHANGES,
+          LICENSE, Markdown, HTML and text -> :class:`TextPane`; pictures ->
+          :class:`PicturePane` (``formats.document_kind``);
+        * anything else -> :class:`FileInfoPane` (what it is, and the
+          system's app to open it).
 
         Routed from the NAME and the folder, never by reading the file
         (``viz.data.formats``). Every pane but the one shown is cleared, so
@@ -988,13 +1148,20 @@ class EditorPanel(QWidget):
             # A NIfTI by container only: the data block is a complex FID.
             self._note_image(path)
             self._show_pane(self._spectrum_viewer, path, root)
-        elif name.endswith(".nii") or name.endswith(".nii.gz"):
+        elif name.endswith((".nii", ".nii.gz", ".mgz", ".mgh")):
             self._note_image(path)
             self._show_pane(self._nifti_viewer, path, root)
         elif is_recording_path(path):
             self._show_pane(self._signal_viewer, path, root)
-        else:
+        elif name.endswith(".json"):
             self._show_pane(self._sidecar_form, path, root)
+        else:
+            from ..viz.data.formats import document_kind
+
+            pane = {"gradients": self._gradient_pane, "picture": self._picture_pane,
+                    "markdown": self._text_pane, "html": self._text_pane,
+                    "text": self._text_pane}.get(document_kind(path), self._file_info_pane)
+            self._show_pane(pane, path, root)
         self._validation_pane.set_current_file(path, root)
 
     def _note_image(self, path: Path) -> None:
@@ -1029,7 +1196,8 @@ class EditorPanel(QWidget):
 
     def _viewer_panes(self) -> tuple:
         return (self._sidecar_form, self._tsv_viewer, self._nifti_viewer,
-                self._signal_viewer, self._spectrum_viewer)
+                self._signal_viewer, self._spectrum_viewer, self._text_pane,
+                self._gradient_pane, self._picture_pane, self._file_info_pane)
 
     def _show_pane(self, pane, path: Optional[Path] = None,
                    root: Optional[Path] = None) -> None:
@@ -1097,6 +1265,11 @@ class EditorPanel(QWidget):
         self.select_file_in_tree(path)
         self._on_fix_requested(path, field)
 
+    def _on_document_link(self, path: Path) -> None:
+        root = self.current_root()
+        if root is not None and (Path(path) == root or root in Path(path).parents):
+            self.select_file_in_tree(Path(path))
+
     def select_file_in_tree(self, path: Path) -> None:
         """Select ``path`` in the BIDS tree (cascades to all panes).
 
@@ -1116,52 +1289,6 @@ class EditorPanel(QWidget):
         # between validation and the click), fall back to loading
         # the sidecar / TSV viewer directly so the click still works.
         self._on_file_selected(path)
-
-    def _refresh_adopt_button(self) -> None:
-        """Offer tracking only while the open dataset lacks a project bundle."""
-        from ..project.adopt import is_managed
-
-        root = self.current_root()
-        self._adopt_action.setVisible(
-            root is not None and not is_managed(root)
-        )
-
-    def _on_adopt(self) -> None:
-        """Write the baseline that makes editing this dataset reversible."""
-        from ..project.adopt import NotABidsDataset, adopt
-
-        root = self.current_root()
-        if root is None:
-            return
-        answer = QMessageBox.question(
-            self, "Track changes to this dataset",
-            f"This will create a .bidsmgr folder inside\n{root}\n\n"
-            "and record what every file looks like right now, so edits made "
-            "from here can be undone. Nothing else in the dataset is touched, "
-            "and every BIDS tool ignores dot-folders, so validation is "
-            "unaffected.\n\nOn a large dataset this reads every file once.",
-            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
-            QMessageBox.StandardButton.Ok,
-        )
-        if answer != QMessageBox.StandardButton.Ok:
-            return
-        try:
-            result = adopt(root)
-        except NotABidsDataset as exc:
-            QMessageBox.warning(self, "Not a BIDS dataset", str(exc))
-            return
-        except OSError as exc:
-            QMessageBox.warning(
-                self, "Could not write",
-                f"{root} could not be written to, so the baseline was not "
-                f"recorded:\n\n{exc}",
-            )
-            return
-        self.log_message.emit(
-            f"tracking {result.files} file(s) in {result.root}"
-        )
-        self._refresh_adopt_button()
-        self._tree_pane.set_root(root)
 
     def _on_rename(
         self, entity: str = "", value: str = "", focus: str = "",
@@ -2018,6 +2145,10 @@ class EditorPanel(QWidget):
         self._nifti_viewer.repaint_for_palette(pal)
         self._bidsignore_pane.repaint_for_palette(pal)
         self._citation_pane.repaint_for_palette(pal)
+        self._text_pane.repaint_for_palette(pal)
+        self._gradient_pane.repaint_for_palette(pal)
+        self._picture_pane.repaint_for_palette(pal)
+        self._file_info_pane.repaint_for_palette(pal)
         self._signal_viewer.repaint_for_palette(pal)
         self._spectrum_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)

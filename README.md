@@ -262,10 +262,14 @@ a decision taken in a session weeks ago, or reopen last month's scan and convert
 it again against the same answers. Curation is resumable rather than something
 you redo from the raw files each time.
 
-A dataset converted by some other tool can be adopted, from the Editor's
-**Track changes** or with `bidsmgr-adopt`, so the edits you make to it are
-recorded and reversible in the same way. Adopting writes nothing outside
-`.bidsmgr/`, so the dataset validates exactly as it did before.
+A dataset converted by some other tool can be adopted, by opening it as the
+project (**Open folder...** in the Editor, or **Open dataset folder...** on the
+Home page) or with `bidsmgr-adopt`, so the edits you make to it are recorded
+and reversible in the same way. `bidsmgr-adopt` writes nothing outside
+`.bidsmgr/`; opening it as the project also adds a README, `.bidsignore` or
+dataset description where one is missing. A folder you only want to look at,
+BIDS or not, opens in the Editor for viewing only, with nothing written into
+it.
 
 ## Modalities
 
