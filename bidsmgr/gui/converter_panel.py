@@ -40,6 +40,7 @@ from typing import Optional
 
 import pandas as pd
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -51,7 +52,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
+    QToolButton,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -123,6 +124,11 @@ def _repolish_combo(combo: QComboBox) -> None:
         w.update()
 
 
+
+def _native(key: QKeySequence.StandardKey) -> str:
+    """A standard shortcut as this OS writes it (Cmd+Z on macOS)."""
+    return QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)
+
 class ConverterPanel(QWidget):
     """The pre-conversion Inspector layout.
 
@@ -174,6 +180,10 @@ class ConverterPanel(QWidget):
         # Persistent settings — loaded fresh each construction so a
         # Settings dialog save propagates on the next open of this panel.
         self._app_settings: AppSettings = AppSettings.load()
+        from .delegates.inspection_cells import set_confidence_bands
+
+        _general = self._app_settings.classifier().general
+        set_confidence_bands(_general.apply_at, _general.check_at)
         # Column visibility: persisted via QSettings under
         # ``inspector/columns/<key>``. The setter ``set_column_visible``
         # writes through to QSettings so a restart re-applies the choice.
@@ -242,6 +252,7 @@ class ConverterPanel(QWidget):
         # collapsible (fold up) + detachable, wrapped again so the whole
         # column folds to the left as one.
         self._raw_pane = RawFsPane()
+        self._raw_pane.file_activated.connect(self._on_raw_file_activated)
         self._output_pane = OutputFsPane()
         self._raw_frame = PanelFrame(self._raw_pane, "Raw data tree", edge="top")
         self._output_frame = PanelFrame(self._output_pane, "Output data tree", edge="top")
@@ -263,6 +274,7 @@ class ConverterPanel(QWidget):
 
         self._filter_pane = FilterPane()
         self._filter_pane.row_chosen.connect(self._jump_to_row)
+        self._filter_pane.rename_requested.connect(self.rename_from_tree)
         self._filter_frame = PanelFrame(self._filter_pane, "Filter / structure", edge="left")
         h_split.addWidget(self._filter_frame)
 
@@ -271,6 +283,7 @@ class ConverterPanel(QWidget):
         # detaches both together as a single unit.
         self._properties = PropertiesPanel()
         self._properties.set_project(self._project)
+        self._properties.renumber_requested.connect(self.open_renumber)
         self._properties_frame = PanelFrame(
             self._properties, "Properties", edge="right", detachable=False,
         )
@@ -602,11 +615,12 @@ class ConverterPanel(QWidget):
         if self._project is None:
             self.log_message.emit("Nothing to undo")
             return
-        event = self._project.undo_last_user_edit()
-        if event is not None:
-            self._redo_stack.append(event)
+        events = self._project.undo_last_user_edit()
+        if events:
+            self._redo_stack.append(events)
             self._reload_active_version()
-            self.log_message.emit("Undid last edit")
+            self.log_message.emit("Undid the last change" if len(events) == 1
+                                  else f"Undid the last change ({len(events)} rows)")
         else:
             self.log_message.emit("Nothing to undo")
         self._update_undo_redo()
@@ -615,10 +629,12 @@ class ConverterPanel(QWidget):
         """Re-apply the most recently undone edit."""
         if self._project is None or not self._redo_stack:
             return
-        event = self._redo_stack.pop()
-        self._project.append(event)
+        events = self._redo_stack.pop()
+        for event in events:
+            self._project.append(event)
         self._reload_active_version()
-        self.log_message.emit("Redid edit")
+        self.log_message.emit("Redid the change" if len(events) == 1
+                              else f"Redid the change ({len(events)} rows)")
         self._update_undo_redo()
 
     def _on_user_edited(self) -> None:
@@ -666,6 +682,7 @@ class ConverterPanel(QWidget):
         self._properties.bind_model(self._model)
         if output_tsv is not None:
             self._output_tsv = Path(output_tsv)
+        self._properties.set_shims(self._series_shims())
         self._resolve_sources(df)
         self._filter_pane.bind_model(self._model)
         self._raw_pane.bind_model(self._model)
@@ -754,6 +771,7 @@ class ConverterPanel(QWidget):
             log.warning("could not remove stale recording-metadata scaffold %s", stale)
 
         self._spinner.set_busy(True, message=f"Scanning {self._raw_root.name}…")
+        self._begin_run("Scan", self._raw_root.name)
         worker = ScanWorker(
             self._raw_root, self._output_tsv,
             dataset=dataset, line_freq=line_freq, montage=montage,
@@ -764,6 +782,7 @@ class ConverterPanel(QWidget):
             user_hints=user_hints,
             exclusions=exclusions,
             index_widths=index_widths,
+            classifier_config=AppSettings.load().classifier(),
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -835,7 +854,10 @@ class ConverterPanel(QWidget):
         self._undo_btn.setObjectName("tb-btn-ghost")
         self._undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.apply_button(self._undo_btn, "undo")
-        self._undo_btn.setToolTip("Undo the last edit")
+        self._undo_btn.setToolTip(
+            f"Undo the last change ({_native(QKeySequence.StandardKey.Undo)}). A change "
+            "made to many "
+            "rows at once (a folder's checkbox, a bulk edit) goes back in one step.")
         self._undo_btn.setVisible(False)
         self._undo_btn.clicked.connect(self._on_undo)
         lay.addWidget(self._undo_btn)
@@ -844,10 +866,22 @@ class ConverterPanel(QWidget):
         self._redo_btn.setObjectName("tb-btn-ghost")
         self._redo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.apply_button(self._redo_btn, "redo")
-        self._redo_btn.setToolTip("Redo the last undone edit")
+        self._redo_btn.setToolTip(
+            f"Redo the last undone change ({_native(QKeySequence.StandardKey.Redo)})")
         self._redo_btn.setVisible(False)
         self._redo_btn.setEnabled(False)
         self._redo_btn.clicked.connect(self._on_redo)
+        # Ctrl+Z / Cmd+Z anywhere in the Converter. A text field being typed
+        # in keeps its own undo: Qt offers the key to the focused editor
+        # first.
+        # Every key the platform binds (Redo is Ctrl+Y and Ctrl+Shift+Z on
+        # Windows, Shift+Cmd+Z on macOS), not just the first.
+        for sequence, slot in ((QKeySequence.StandardKey.Undo, self._on_undo),
+                               (QKeySequence.StandardKey.Redo, self._on_redo)):
+            shortcut = QShortcut(self)
+            shortcut.setKeys(sequence)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
         lay.addWidget(self._redo_btn)
 
         lay.addWidget(VSep())
@@ -1033,6 +1067,8 @@ class ConverterPanel(QWidget):
     def _build_table(self) -> QTableView:
         t = QTableView()
         t.setObjectName("inv-table")
+        t.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        t.customContextMenuRequested.connect(self._on_table_menu)
         t.setShowGrid(False)
         t.setAlternatingRowColors(False)
         t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1245,6 +1281,8 @@ class ConverterPanel(QWidget):
             # fields real questions rather than ones nobody can answer.
             also_ask={("pet", "blood"): blood_conditions(df)},
             bids_root=self._bids_root,
+            eyetrack=df is not None and "modality" in df.columns
+            and bool((df["modality"].astype(str) == "eyetrack").any()),
         )
         if not dlg.exec():
             return
@@ -1459,12 +1497,14 @@ class ConverterPanel(QWidget):
 
         # Log — append-only stream from worker progress signals.
         # Styling lives in theme.qss under ``QPlainTextEdit#dock-log``.
-        self._log_view = QPlainTextEdit()
-        self._log_view.setReadOnly(True)
-        self._log_view.setObjectName("dock-log")
-        self._log_view.setMaximumBlockCount(2000)  # rolling buffer
+        # Runs with headings, warnings and errors in colour, emptied for
+        # each run when the setting says so; every run also writes a file.
+        from .widgets.run_log import RunLog
+
+        self._log_view = RunLog()
         left_tabs.addTab(self._log_view, "Log")
         icons.apply_tab(left_tabs, 0, "log")
+        left_tabs.setCornerWidget(self._build_log_corner(), Qt.Corner.TopRightCorner)
 
         # Detach-only wrappers so the Log and the preview/stats group can
         # each pop out into their own window (no collapse here -- the whole
@@ -1513,6 +1553,64 @@ class ConverterPanel(QWidget):
         split.setSizes([700, 700])
         return split
 
+    def _build_log_corner(self) -> QWidget:
+        """Clear, the last run's file and every log, as the panel's corner
+        icons."""
+        corner = QWidget()
+        corner.setObjectName("dock-corner")
+        h = QHBoxLayout(corner)
+        h.setContentsMargins(0, 0, 4, 0)
+        h.setSpacing(2)
+        self._log_buttons: dict[str, QToolButton] = {}
+        for name, tip, slot in (
+            ("log_clear", "Clear the Log", lambda: self._log_view.clear_log()),
+            ("log_file", "Open the last run's log file", self._open_last_log),
+            ("log_history", "Every log of this dataset...", self._show_log_history),
+        ):
+            btn = QToolButton()
+            btn.setObjectName("dock-corner-btn")
+            btn.setAutoRaise(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.setIcon(icons.icon(name))
+            btn.clicked.connect(slot)
+            h.addWidget(btn)
+            self._log_buttons[name] = btn
+        return corner
+
+    def _log_root(self) -> Optional[Path]:
+        """Whose logs: the open project's, else the user's."""
+        from ..util.oplog import dataset_root_for
+
+        return self._bids_root or dataset_root_for(self._output_tsv)
+
+    def _open_last_log(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        from ..util import oplog
+
+        path = oplog.latest(self._log_root())
+        if path is None:
+            self.log_message.emit("No log file yet: every operation writes one when it runs.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _show_log_history(self) -> None:
+        from .log_history_dialog import LogHistoryDialog
+
+        dlg = LogHistoryDialog(self._log_root(), self)
+        self._log_history = dlg
+        dlg.show()
+
+    def _begin_run(self, title: str, detail: str = "", *, first: bool = True) -> None:
+        """A heading in the Log for an operation. The first step of a
+        user's action empties the panel when the setting says so; the steps
+        that follow it (metadata, validation after a conversion) do not."""
+        self._flush_log_buffer()
+        self._log_view.begin_run(title, detail,
+                                 clear=first and AppSettings.load().log_clear_on_run)
+
     def _on_log_message(self, text: str) -> None:
         if not text:
             return
@@ -1528,8 +1626,8 @@ class ConverterPanel(QWidget):
     def _flush_log_buffer(self) -> None:
         if not self._log_buffer:
             return
-        # Single appendPlainText for the whole batch — one repaint.
-        self._log_view.appendPlainText("\n".join(self._log_buffer))
+        # One append for the whole batch: one repaint.
+        self._log_view.append_lines(self._log_buffer)
         self._log_buffer.clear()
 
     def _rebuild_bids_preview(self) -> None:
@@ -1858,6 +1956,21 @@ class ConverterPanel(QWidget):
         self._show_source_state()
         self.log_message.emit(f"The source data of this scan is now read from {found.root}")
 
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Closed: no more source checks, and none still running into the
+        deletion that follows. An activation reaching a closed panel started
+        one, and its signals racing the panel's deletion crashed the
+        process (the GUI suite, about one run in six)."""
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.disconnect(self._on_application_state)
+            except (TypeError, RuntimeError):
+                pass
+        if self._source_jobs is not None:
+            self._source_jobs.stop_all()
+        super().closeEvent(event)
+
     def _on_application_state(self, state) -> None:
         """Back in front: look for the table's data again (on a thread, in
         case it was on a drive that is now gone)."""
@@ -1928,7 +2041,72 @@ class ConverterPanel(QWidget):
             self._on_pick_bids_parent()
             if self._bids_parent is None:
                 return
+        from ..converter.sourcedata import SourcedataOptions
+
+        settings = AppSettings.load()
+        options = SourcedataOptions.parse(settings.convert_sourcedata,
+                                          settings.convert_sourcedata_modalities)
+        if options.enabled and self._sources is not None:
+            self._measure_sourcedata(options)
+            return
         self.start_convert(self._bids_parent)
+
+    def _measure_sourcedata(self, options) -> None:
+        """How much keeping the source data adds, measured on a thread, then
+        said before anything is converted (and refused when it will not fit)."""
+        from ..cli.convert import sourcedata_estimate
+        from .viz.bridge import JobRunner
+
+        if getattr(self, "_sourcedata_jobs", None) is None:
+            self._sourcedata_jobs = JobRunner(self)
+            self._sourcedata_jobs.done.connect(self._on_sourcedata_measured)
+            self._sourcedata_jobs.failed.connect(
+                lambda _t, _g, msg: (self._spinner.set_busy(False),
+                                     self.log_message.emit(f"Could not measure the source "
+                                                           f"data: {msg}")))
+        self._sourcedata_generation = getattr(self, "_sourcedata_generation", 0) + 1
+        self._sourcedata_options = options
+        self._spinner.set_busy(True, message="Measuring the source data...")
+        self._sourcedata_jobs.start("sourcedata", self._sourcedata_generation,
+                                    sourcedata_estimate, self._model.dataframe().copy(),
+                                    self._sources, options)
+
+    def _on_sourcedata_measured(self, _tag: str, generation: int, result) -> None:
+        from ..converter import sourcedata as sd
+
+        if generation != getattr(self, "_sourcedata_generation", 0) or self._bids_parent is None:
+            return
+        self._spinner.set_busy(False)
+        files, size, kinds = result
+        target = self._bids_root or self._bids_parent
+        problem = sd.space_problem(target, size)
+        if problem:
+            QMessageBox.warning(self, "Not enough room for the source data",
+                                problem + "\n\nNothing was converted. Free some space, or "
+                                "turn the copy off or choose an archive in Settings > Convert.")
+            return
+        if files:
+            what = ", ".join(sd.LABELS[k] for k in kinds)
+            how = ("as they are" if self._sourcedata_options.form == "copy"
+                   else "as one archive per series")
+            if not self.confirm_sourcedata(
+                    f"The conversion also keeps {files:,} source file(s), "
+                    f"{sd.human_size(size)} of {what}, in sourcedata/ {how}.\n\n"
+                    f"{sd.IDENTIFIERS_NOTE}"):
+                return
+        self.start_convert(self._bids_parent)
+
+    def confirm_sourcedata(self, text: str) -> bool:
+        """Ask before a conversion that keeps source data (tests replace it)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Keep the source data")
+        box.setText(text)
+        convert = box.addButton("Convert", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(convert)
+        box.exec()
+        return box.clickedButton() is convert
 
     def start_convert(self, bids_parent: Path, *, n_jobs: Optional[int] = None) -> ConvertWorker:
         """Run conversion against the live model + scan TSV. Returns the worker."""
@@ -1941,6 +2119,7 @@ class ConverterPanel(QWidget):
         if n_jobs is None:
             n_jobs = self._app_settings.convert_n_jobs
         self._spinner.set_busy(True, message="Converting…")
+        self._begin_run("Conversion", Path(bids_parent).name)
         worker = ConvertWorker(
             self._model.dataframe(),
             self._output_tsv,
@@ -1953,6 +2132,10 @@ class ConverterPanel(QWidget):
             force_edf=self._app_settings.convert_force_edf,
             deface=self._app_settings.convert_deface,
             deface_engine=self._app_settings.convert_deface_engine,
+            intended_for=self._app_settings.convert_intended_for,
+            b0_field=self._app_settings.convert_b0_field,
+            sourcedata=self._app_settings.convert_sourcedata,
+            sourcedata_modalities=self._app_settings.convert_sourcedata_modalities,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -2078,6 +2261,7 @@ class ConverterPanel(QWidget):
             self._start_quality_worker(self._post_chain_bids_parent)
 
     def _start_quality_worker(self, bids_parent: Path) -> None:
+        self._begin_run("Quality check", first=False)
         """The quality check of the images this conversion wrote and nothing
         has checked yet, dataset by dataset."""
         from ..qc import report as RP
@@ -2138,6 +2322,7 @@ class ConverterPanel(QWidget):
         self._next_quality_job()
 
     def _start_metadata_worker(self, bids_parent: Path) -> None:
+        self._begin_run("Metadata", first=False)
         s = self._app_settings
         worker = MetadataWorker(
             bids_parent,
@@ -2159,6 +2344,7 @@ class ConverterPanel(QWidget):
         worker.start()
 
     def _start_validate_worker(self, bids_parent: Path) -> None:
+        self._begin_run("Validation", first=False)
         s = self._app_settings
         worker = ValidateWorker(
             bids_parent,
@@ -2235,6 +2421,10 @@ class ConverterPanel(QWidget):
         """
         if hasattr(self, "_properties"):
             self._properties.repaint_for_palette(pal)
+        if hasattr(self, "_log_view"):
+            self._log_view.repaint_for_palette(pal)
+            for name, btn in getattr(self, "_log_buttons", {}).items():
+                btn.setIcon(icons.icon(name))
         if hasattr(self, "_raw_pane"):
             self._raw_pane.repaint_for_palette(pal)
         if hasattr(self, "_output_pane"):
@@ -2320,15 +2510,102 @@ class ConverterPanel(QWidget):
         restart. (Scan / convert also reload settings at launch time, so
         this is belt-and-braces for any cached toolbar state.)
         """
+        before = self._app_settings.scan_exclusions
+        before_classifier = self._app_settings.classifier_config
         self._app_settings = AppSettings.load()
+        self._sync_confidence_bands()
+        if self._model is not None and self._app_settings.scan_exclusions != before:
+            self._offer_exclusions()
+        if self._model is not None and self._app_settings.classifier_config != before_classifier:
+            self.offer_reclassify()
+
+    def _sync_confidence_bands(self) -> None:
+        from .delegates.inspection_cells import set_confidence_bands
+
+        general = self._app_settings.classifier().general
+        set_confidence_bands(general.apply_at, general.check_at)
+        if getattr(self, "_table", None) is not None:
+            self._table.viewport().update()
+
+    def _series_shims(self) -> dict:
+        """Series uid -> shim settings, from the scan's cached features."""
+        from ..classifier.acquisition import cache
+
+        if self._output_tsv is None:
+            return {}
+        return {uid: f.shim for uid, f in cache.read(self._output_tsv).items() if f.shim}
+
+    def reclassify_changes(self):
+        """What the current classifier settings would change in the open
+        table (from the scan's cached features; no DICOM is read)."""
+        from ..classifier.acquisition import cache
+        from ..classifier.acquisition import scan as by_parameters
+
+        if self._model is None or self._output_tsv is None:
+            return []
+        features = cache.read(self._output_tsv)
+        if not features:
+            return []
+        return by_parameters.rescore(self._model.dataframe(), features,
+                                     self._app_settings.classifier())
+
+    def offer_reclassify(self, *, ask: bool = True) -> int:
+        """After the classification settings change: name the open table
+        again, asked first, as one Undo. Returns the rows renamed."""
+        config = self._app_settings.classifier()
+        changes = self.reclassify_changes()
+        if not changes:
+            return 0
+        renamed = [c for c in changes if c.renamed]
+        names = config.general.mode == "applied"
+        if ask and renamed and names:
+            answer = QMessageBox.question(
+                self, "Name the table again",
+                f"With the new classification settings, {len(renamed)} series would be "
+                "named differently. Name them now? (One Undo takes it back.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            names = answer == QMessageBox.StandardButton.Yes
+        done = self._model.apply_classification(changes, names=names)
+        if done:
+            self.log_message.emit(f"Named again from the acquisition parameters: {done} "
+                                  "series")
+        return done
+
+    def _offer_exclusions(self) -> None:
+        """Saved scan rules act on the table already open, not only on the
+        next scan: say what they would change and apply it as one Undo."""
+        from ..classifier.user_rules import plan_exclusions
+
+        plan = plan_exclusions(self._model.dataframe(), self._app_settings.to_exclusions())
+        if not plan:
+            return
+        parts = []
+        if plan.exclude:
+            parts.append(f"{len(plan.exclude)} series would be excluded")
+        if plan.restore:
+            parts.append(f"{len(plan.restore)} excluded by a rule you removed would be "
+                         "included again")
+        answer = QMessageBox.question(
+            self, "Apply the scan rules to the open table?",
+            "Your scan rules changed. In the scan table open now, " + " and ".join(parts)
+            + ".\n\nApply them now? One Undo takes it back. Otherwise they apply "
+              "from the next scan.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        changed = self._model.apply_exclusion_plan(plan)
+        self.log_message.emit(f"Scan rules applied to the open table: {changed} row(s) changed")
 
     def _on_current_row_changed(self, current, _previous) -> None:
         """Forward the table's row selection to the Properties panel."""
         if not current.isValid():
-            self._properties.set_selected_row(None)
+            self._properties.request_row(None)
             self._filter_pane.reveal_row(None)
             return
-        self._properties.set_selected_row(current.row())
+        self._properties.request_row(current.row())
         self._filter_pane.reveal_row(current.row())
 
     def _on_selection_changed(self, *_args) -> None:
@@ -2340,6 +2617,171 @@ class ConverterPanel(QWidget):
                 f"Apply one value to one column across the {len(rows)} "
                 "selected rows."
             )
+
+    def _on_table_menu(self, pos) -> None:
+        """Right-click on the inspection table: what applies to the rows
+        chosen (the clicked row when it is not among them)."""
+        if self._model is None:
+            return
+        from ..inventory.renumber import identity
+        from .viz.menus import popup_menu
+
+        index = self._table.indexAt(pos)
+        rows = self._selected_rows()
+        if index.isValid() and index.row() not in rows:
+            self._table.selectRow(index.row())
+            rows = [index.row()]
+        if not rows:
+            return
+        menu = popup_menu(self._table)
+        menu.setToolTipsVisible(True)
+        # One row: what Properties offers for it (preview, spectrum, other
+        # names, fieldmap runs, eye-tracker pairing), then its DICOM header.
+        if len(rows) == 1:
+            dicom = self._dicom_header_action(menu, rows[0])
+            self._properties.add_row_actions(menu, rows[0],
+                                             extra=[dicom] if dicom is not None else [])
+        if not menu.isEmpty():
+            menu.addSeparator()
+        df = self._model.dataframe()
+        people = len({identity(df, r) for r in rows})
+        from . import icons
+
+        renumber = menu.addAction(
+            icons.icon("bulk_edit"),
+            "Give new subject numbers..." if people > 1 else "Give a new subject number...")
+        renumber.setToolTip("Number the people of the chosen rows with the next free "
+                            "subject numbers")
+        renumber.triggered.connect(lambda: self.open_renumber(rows))
+        menu.popup(self._table.viewport().mapToGlobal(pos))
+        self._table_menu = menu
+
+    def _dicom_header_action(self, menu, row: int):
+        """"Show the DICOM header" for a DICOM row (not yet in ``menu``), or
+        ``None``."""
+        first = self._first_dicom_of(row)
+        if first is None:
+            return None
+        from PyQt6.QtGui import QAction
+
+        from . import icons
+
+        act = QAction(icons.icon("tree_dicom"), "Show the DICOM header", menu)
+        act.setToolTip("The header of the first file of this series, in a window")
+        act.triggered.connect(lambda: self.show_dicom_header(first))
+        return act
+
+    def _first_dicom_of(self, row: int) -> Optional[Path]:
+        """The first DICOM of a row's series, where it is now, if any."""
+        if self._model is None or self._sources is None:
+            return None
+        uid = str(self._model.dataframe().iloc[row].get("series_uid", "") or "").strip()
+        if not uid:
+            return None
+        return next((f for f in self._sources.series_files(uid) if f.exists()), None)
+
+    def _on_raw_file_activated(self, path) -> None:
+        from ..inventory.mri_dicom import is_dicom_file
+
+        if is_dicom_file(str(path)):
+            self.show_dicom_header(Path(path))
+
+    def show_dicom_header(self, path: Path):
+        """``path``'s header in the DICOM window (one, reused)."""
+        from .widgets.dicom_pane import DicomWindow
+
+        win = getattr(self, "_dicom_window", None)
+        if win is None:
+            win = DicomWindow(self)
+            win.pane.status_message.connect(self.log_message)
+            self._dicom_window = win
+        win.show_file(Path(path))
+        return win
+
+    def _taken_subject_labels(self, rows: list[int]) -> set[str]:
+        from ..inventory.renumber import taken_labels
+
+        others = []
+        if self._bids_root is not None:
+            from ..project import workspace
+
+            for version in workspace.list_versions(self._bids_root):
+                if self._active_version_dir is not None and \
+                        Path(version.dir) == Path(self._active_version_dir):
+                    continue
+                try:
+                    others.append(pd.read_csv(version.inventory, sep="\t", dtype=str,
+                                              usecols=["participant_id"]))
+                except (OSError, ValueError):
+                    continue
+        return taken_labels(self._model.dataframe(), rows, bids_root=self._bids_root,
+                            others=others)
+
+    def open_renumber(self, rows: list[int]) -> Optional[int]:
+        """Plan new subject numbers for the people of ``rows``, show them,
+        apply them as one Undo. Returns the rows changed (``None``: cancelled)."""
+        if self._model is None or not rows:
+            return None
+        from ..inventory.renumber import plan_renumber
+        from .renumber_dialog import RenumberDialog, apply_renumbering
+
+        taken = self._taken_subject_labels(rows)
+        width = AppSettings.load().scan_index_widths.get("sub")
+        people = plan_renumber(self._model.dataframe(), rows, taken,
+                               width=int(width) if width else None)
+        dlg = RenumberDialog(people, taken, self)
+        self._renumber_dialog = dlg
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return None
+        changed = apply_renumbering(self._model, dlg.mapping())
+        self.log_message.emit(f"New subject numbers: {changed} row(s) changed")
+        self._flag_existing_subject_rows(self._model.dataframe())
+        return changed
+
+    def rename_from_tree(self, kind: str, rows: list[int], current: str,
+                         new: Optional[str] = None) -> int:
+        """Rename a subject or a session from Filter / structure: every row
+        under it, as one Undo. ``new`` skips the question (scripts, tests)."""
+        import re
+
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+
+        if self._model is None or not rows:
+            return 0
+        prefix = "sub-" if kind == "subject" else "ses-"
+        shown = current[len(prefix):] if current.startswith(prefix) else current
+        if new is None:
+            new, ok = QInputDialog.getText(
+                self, f"Rename {kind}", f"New label for {prefix}{shown} "
+                f"({len(rows)} series):", QLineEdit.EchoMode.Normal, shown)
+            if not ok:
+                return 0
+        new = new.strip()
+        new = new[len(prefix):] if new.startswith(prefix) else new
+        if not re.fullmatch(r"[0-9A-Za-z]+", new or ""):
+            QMessageBox.warning(self, f"Rename {kind}",
+                                f"'{new}' cannot be a {kind} label: letters and digits only.")
+            return 0
+        if new == shown:
+            return 0
+        if kind == "subject" and new in self._taken_subject_labels(rows):
+            answer = QMessageBox.question(
+                self, "That subject exists",
+                f"sub-{new} is already used. Converting will put this person's data into "
+                "it (their sessions merge). Use it anyway?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return 0
+        entity = "subject" if kind == "subject" else "session"
+        changed = 0
+        with self._model.edit_group():
+            for row in rows:
+                if self._model.set_entity(row, entity, new):
+                    changed += 1
+        self.log_message.emit(f"Renamed {prefix}{shown} to {prefix}{new} ({changed} row(s))")
+        if kind == "subject":
+            self._flag_existing_subject_rows(self._model.dataframe())
+        return changed
 
     def _selected_rows(self) -> list[int]:
         """Return source-DataFrame row indices for the user's selection."""
@@ -2357,15 +2799,16 @@ class ConverterPanel(QWidget):
             return
         from .bulk_edit_dialog import BulkEditDialog
         dlg = BulkEditDialog(self._model, rows, parent=self)
-        dlg.exec()
+        with self._model.edit_group():
+            dlg.exec()
         # A removal applies row by row, so some rows can be left alone. Say
         # so: "24 rows changed" must never quietly mean "and 6 were not".
         skipped = dlg.skipped_count()
         if skipped:
-            self._log_view.appendPlainText(
+            self._log_view.append_lines([
                 f"Bulk edit: {dlg.changed_count()} row(s) changed, {skipped} "
                 f"kept the entity because their datatype requires it."
-            )
+            ])
         # Status chips + previews refresh via the model's dataChanged
         # signal — the dispatcher's per-row writes already trigger them.
 

@@ -26,6 +26,7 @@ from PyQt6.QtCore import QSettings
 KEYS = {
     "theme":              "ui/theme",                # a theme_manager.THEMES id
     # The user's touches on any theme (gui/appearance.py).
+    "log_clear_on_run":   "ui/log_clear_on_run",
     "accent":             "ui/accent",               # "" | preset | "custom"
     "custom_accent":      "ui/custom_accent",        # JSON: {"dark"|"light": "#rrggbb"}
     "tint":               "ui/tint",                 # 0..12 percent
@@ -69,6 +70,12 @@ KEYS = {
     "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
     "convert_deface":     "convert/deface",          # remove faces before commit
     "convert_deface_engine": "convert/deface_engine",
+    "convert_intended_for": "convert/intended_for",
+    "convert_b0_field":   "convert/b0_field",
+    "convert_sourcedata": "convert/sourcedata",      # none|copy|archive
+    # The parameter-based classifier's settings, as JSON (its own model).
+    "classifier_config":  "classifier/acquisition",
+    "convert_sourcedata_modalities": "convert/sourcedata_modalities",  # comma list
     # Scan rules (user-extensible classifier hints + series exclusions).
     # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
     "user_hints":         "classifier/user_hints",
@@ -110,6 +117,8 @@ class AppSettings:
     # UI
     theme: str = "dark"
     # Appearance on top of the theme (gui/appearance.Appearance).
+    #: Empty the Converter's Log when a scan or a conversion starts.
+    log_clear_on_run: bool = True
     accent: str = ""
     custom_accent: dict = field(default_factory=dict)
     tint: int = 0
@@ -209,6 +218,19 @@ class AppSettings:
     # discovered after the fact.
     convert_deface: bool = False
     convert_deface_engine: str = "allineate"
+    # How a fieldmap names its runs: "uri" (BIDS URIs) or "relative" (paths
+    # from the subject, with the session); and whether to write
+    # B0FieldIdentifier / B0FieldSource too (read by every fMRIPrep).
+    convert_intended_for: str = "uri"
+    convert_b0_field: bool = True
+    # Keep each subject's source data in sourcedata/: "none", "copy" or
+    # "archive" (one .tar.gz per series), for these modalities (comma list).
+    # Off by default: the copies are not anonymised.
+    convert_sourcedata: str = "none"
+    # The parameter-based classifier (classifier/acquisition/config.py), as
+    # its JSON; "" is the defaults. Read through ``classifier()``.
+    classifier_config: str = ""
+    convert_sourcedata_modalities: str = "mri,pet,eeg,meg,nirs,physio,eyetrack"
 
     # Post-convert chain. All steps on by default: run metadata + validation
     # with TODO placeholders, strict validation, and an HTML report.
@@ -356,6 +378,8 @@ class AppSettings:
         out.editor_autosave = _as_bool(
             s.value(KEYS["editor_autosave"]), out.editor_autosave,
         )
+        out.log_clear_on_run = _as_bool(s.value(KEYS["log_clear_on_run"]),
+                                        out.log_clear_on_run)
         out.editor_strict_validate = _as_bool(
             s.value(KEYS["editor_strict_validate"]),
             out.editor_strict_validate,
@@ -443,6 +467,25 @@ class AppSettings:
 
         if out.convert_deface_engine not in _deface_engine_ids():
             out.convert_deface_engine = cls.convert_deface_engine
+        out.convert_intended_for = str(s.value(KEYS["convert_intended_for"])
+                                       or out.convert_intended_for)
+        if out.convert_intended_for not in ("uri", "relative"):
+            out.convert_intended_for = "uri"
+        out.convert_b0_field = _as_bool(s.value(KEYS["convert_b0_field"]),
+                                        out.convert_b0_field)
+        out.classifier_config = str(s.value(KEYS["classifier_config"]) or "")
+        from ..converter.sourcedata import FORMS as _SD_FORMS
+        from ..converter.sourcedata import MODALITIES as _SD_MODALITIES
+
+        out.convert_sourcedata = str(s.value(KEYS["convert_sourcedata"])
+                                     or out.convert_sourcedata)
+        if out.convert_sourcedata not in _SD_FORMS:
+            out.convert_sourcedata = cls.convert_sourcedata
+        raw = s.value(KEYS["convert_sourcedata_modalities"])
+        if raw is not None:
+            # Stored as a comma list; an unknown name (a later version's) is dropped.
+            out.convert_sourcedata_modalities = ",".join(
+                m for m in str(raw).split(",") if m.strip() in _SD_MODALITIES)
 
         out.post_run_metadata = _as_bool(s.value(KEYS["post_run_metadata"]),
                                          out.post_run_metadata)
@@ -489,6 +532,17 @@ class AppSettings:
         out.recent_projects = _as_json_list(s.value(KEYS["recent_projects"]), [])
         return out
 
+    def classifier(self):
+        """The parameter-based classifier's settings (defaults when unset or
+        unreadable)."""
+        from ..classifier.acquisition.config import ClassifierConfig, load_json
+
+        try:
+            return load_json(self.classifier_config) if self.classifier_config else \
+                ClassifierConfig()
+        except ValueError:
+            return ClassifierConfig()
+
     def save(self) -> None:
         s = self._settings()
         # Strings.
@@ -518,6 +572,7 @@ class AppSettings:
             ("convert_preserve_curation", self.convert_preserve_curation),
             ("convert_force_edf",        self.convert_force_edf),
             ("convert_deface",           self.convert_deface),
+            ("convert_b0_field",         self.convert_b0_field),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
@@ -531,6 +586,7 @@ class AppSettings:
             ("validate_flag_todos",      self.validate_flag_todos),
             ("editor_show_hidden",       self.editor_show_hidden),
             ("editor_autosave",          self.editor_autosave),
+            ("log_clear_on_run",         self.log_clear_on_run),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
         # Strings. Keep them OUT of the loop above: it writes "1" for anything
@@ -540,6 +596,10 @@ class AppSettings:
         # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
+        s.setValue(KEYS["convert_intended_for"], self.convert_intended_for)
+        s.setValue(KEYS["convert_sourcedata"], self.convert_sourcedata)
+        s.setValue(KEYS["classifier_config"], self.classifier_config)
+        s.setValue(KEYS["convert_sourcedata_modalities"], self.convert_sourcedata_modalities)
         s.setValue(KEYS["scan_index_widths"], json.dumps(self.scan_index_widths))
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))

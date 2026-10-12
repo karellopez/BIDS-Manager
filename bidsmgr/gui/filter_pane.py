@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 # Stored on the *leaf* nodes (datatype level); parent nodes derive
 # their state from their children automatically via Qt's tri-state.
 _ROW_IDS_ROLE = Qt.ItemDataRole.UserRole + 10
+#: What a parent node is ("dataset", "subject", "session", "datatype") and
+#: the label it stands for.
+_KIND_ROLE = Qt.ItemDataRole.UserRole + 11
+_LABEL_ROLE = Qt.ItemDataRole.UserRole + 12
 
 
 class FilterPane(QWidget):
@@ -53,6 +57,8 @@ class FilterPane(QWidget):
 
     #: A sequence (an inventory row) picked in the tree.
     row_chosen = pyqtSignal(int)
+    #: Rename a subject or a session: (kind, its rows, the current label).
+    rename_requested = pyqtSignal(str, list, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -77,6 +83,8 @@ class FilterPane(QWidget):
         # A sequence picked here is picked in the inspection table (and so
         # in Properties); one picked there is shown here.
         self._tree.currentItemChanged.connect(self._on_current_changed)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_menu)
         self._revealing = False
         v.addWidget(self._tree, 1)
 
@@ -199,19 +207,27 @@ class FilterPane(QWidget):
         ses_nodes: dict[tuple[str, str, str], QTreeWidgetItem] = {}
         dt_nodes: dict[tuple[str, str, str, str], QTreeWidgetItem] = {}
 
+        # One dataset: its node gets no checkbox. One misplaced click there
+        # unticked or ticked the whole table, and a whole table is not a
+        # choice anyone makes from the tree.
+        lone_dataset = len({k[0] for k in groups}) == 1
         for (ds, sub, ses, dt) in sorted(groups.keys()):
             entries = groups[(ds, sub, ses, dt)]
             # --- dataset / subject / session / datatype parents ---
             if ds not in ds_nodes:
-                ds_nodes[ds] = self._make_parent_node(ds, "")
+                ds_nodes[ds] = self._make_parent_node(ds, "", checkable=not lone_dataset)
                 self._tree.addTopLevelItem(ds_nodes[ds])
             if (ds, sub) not in sub_nodes:
                 sub_nodes[(ds, sub)] = self._make_parent_node(sub, "")
+                sub_nodes[(ds, sub)].setData(0, _KIND_ROLE, "subject")
+                sub_nodes[(ds, sub)].setData(0, _LABEL_ROLE, sub)
                 ds_nodes[ds].addChild(sub_nodes[(ds, sub)])
             parent_for_dt = sub_nodes[(ds, sub)]
             if ses:
                 if (ds, sub, ses) not in ses_nodes:
                     ses_nodes[(ds, sub, ses)] = self._make_parent_node(ses, "")
+                    ses_nodes[(ds, sub, ses)].setData(0, _KIND_ROLE, "session")
+                    ses_nodes[(ds, sub, ses)].setData(0, _LABEL_ROLE, ses)
                     sub_nodes[(ds, sub)].addChild(ses_nodes[(ds, sub, ses)])
                 parent_for_dt = ses_nodes[(ds, sub, ses)]
             if (ds, sub, ses, dt) not in dt_nodes:
@@ -234,14 +250,19 @@ class FilterPane(QWidget):
 
         self._tree.expandAll()
 
-    def _make_parent_node(self, label: str, suffix: str) -> QTreeWidgetItem:
+    def _make_parent_node(self, label: str, suffix: str, *,
+                          checkable: bool = True) -> QTreeWidgetItem:
         """Build a tri-state parent node (dataset / sub / ses / datatype)."""
         node = QTreeWidgetItem([self._format_label(label, suffix)])
-        node.setFlags(
-            node.flags()
-            | Qt.ItemFlag.ItemIsUserCheckable
-            | Qt.ItemFlag.ItemIsAutoTristate
-        )
+        if checkable:
+            node.setFlags(
+                node.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsAutoTristate
+            )
+        else:
+            # Qt makes every item user-checkable by default.
+            node.setFlags(node.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         return node
 
     @staticmethod
@@ -302,12 +323,41 @@ class FilterPane(QWidget):
         )
         if include_col is None:
             return
+        # A parent checkbox ticks every leaf under it, one signal each, in
+        # this same turn: one user action, one Undo.
+        self._model.edit_group_this_turn()
         self._suppress_writeback = True
         try:
             for r in row_ids:
                 self._model.setData(self._model.index(r, include_col), included)
         finally:
             self._suppress_writeback = False
+
+    def _on_tree_menu(self, pos) -> None:
+        """Right-click on a subject or session: rename it, every row under
+        it at once."""
+        item = self._tree.itemAt(pos)
+        kind = item.data(0, _KIND_ROLE) if item is not None else None
+        if kind not in ("subject", "session"):
+            return
+        from .viz.menus import popup_menu
+
+        rows = self._rows_under(item)
+        label = str(item.data(0, _LABEL_ROLE) or "")
+        menu = popup_menu(self._tree)
+        action = menu.addAction(f"Rename {kind} {label}...")
+        action.triggered.connect(lambda: self.rename_requested.emit(kind, rows, label))
+        menu.popup(self._tree.viewport().mapToGlobal(pos))
+        self._menu = menu
+
+    def _rows_under(self, item: QTreeWidgetItem) -> list[int]:
+        rows: list[int] = []
+        stack = [item]
+        while stack:
+            node = stack.pop()
+            rows.extend(node.data(0, _ROW_IDS_ROLE) or ())
+            stack.extend(node.child(i) for i in range(node.childCount()))
+        return sorted(set(int(r) for r in rows))
 
     def _on_model_data_changed(self, top_left, bottom_right, _roles=()) -> None:
         """Re-sync the tree if the model changed underneath us.

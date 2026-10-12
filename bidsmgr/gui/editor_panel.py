@@ -49,6 +49,7 @@ from . import icons
 from .combo_popup import menu_section, round_menu
 from .widgets.bidsignore_pane import BidsIgnorePane
 from .widgets.citation_pane import CitationPane
+from .widgets.dicom_pane import DicomPane
 from .widgets.file_info_pane import FileInfoPane
 from .widgets.gradient_pane import GradientPane
 from .widgets.picture_pane import PicturePane
@@ -182,8 +183,12 @@ class EditorPanel(QWidget):
         self._gradient_pane = GradientPane()
         self._picture_pane = PicturePane()
         self._file_info_pane = FileInfoPane()
+        # A DICOM (a raw folder opened to view, sourcedata/): its header.
+        self._dicom_pane = DicomPane()
+        self._dicom_pane.loading_changed.connect(self._on_pane_loading)
+        self._dicom_pane.status_message.connect(self.log_message)
         for pane in (self._text_pane, self._gradient_pane, self._picture_pane,
-                     self._file_info_pane):
+                     self._file_info_pane, self._dicom_pane):
             self._center_stack.addWidget(pane)
         # A link in a README to a file of the folder opens that file.
         self._text_pane.file_requested.connect(self._on_document_link)
@@ -1101,12 +1106,13 @@ class EditorPanel(QWidget):
         * JSON -> :class:`SidecarFormPane`;
         * ``.bval`` / ``.bvec`` -> :class:`GradientPane`; README, CHANGES,
           LICENSE, Markdown, HTML and text -> :class:`TextPane`; pictures ->
-          :class:`PicturePane` (``formats.document_kind``);
+          :class:`PicturePane`; a DICOM (by its content) ->
+          :class:`DicomPane` (``formats.document_kind``);
         * anything else -> :class:`FileInfoPane` (what it is, and the
           system's app to open it).
 
         Routed from the NAME and the folder, never by reading the file
-        (``viz.data.formats``). Every pane but the one shown is cleared, so
+        (``viz.data.formats``), except a DICOM's 132-byte preamble. Every pane but the one shown is cleared, so
         none keeps a stale file (the MRS pane used to, after any selection
         but a NIfTI).
         """
@@ -1154,7 +1160,8 @@ class EditorPanel(QWidget):
 
             pane = {"gradients": self._gradient_pane, "picture": self._picture_pane,
                     "markdown": self._text_pane, "html": self._text_pane,
-                    "text": self._text_pane}.get(document_kind(path), self._file_info_pane)
+                    "text": self._text_pane, "dicom": self._dicom_pane,
+                    }.get(document_kind(path), self._file_info_pane)
             self._show_pane(pane, path, root)
         self._validation_pane.set_current_file(path, root)
 
@@ -1191,7 +1198,8 @@ class EditorPanel(QWidget):
     def _viewer_panes(self) -> tuple:
         return (self._sidecar_form, self._tsv_viewer, self._nifti_viewer,
                 self._signal_viewer, self._spectrum_viewer, self._text_pane,
-                self._gradient_pane, self._picture_pane, self._file_info_pane)
+                self._gradient_pane, self._picture_pane, self._file_info_pane,
+                self._dicom_pane)
 
     def _show_pane(self, pane, path: Optional[Path] = None,
                    root: Optional[Path] = None) -> None:
@@ -2160,6 +2168,7 @@ class EditorPanel(QWidget):
         self._gradient_pane.repaint_for_palette(pal)
         self._picture_pane.repaint_for_palette(pal)
         self._file_info_pane.repaint_for_palette(pal)
+        self._dicom_pane.repaint_for_palette(pal)
         self._signal_viewer.repaint_for_palette(pal)
         self._spectrum_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)

@@ -157,6 +157,17 @@ dependencies = [
     # tooltip says why. Drop the marker once the wheel exists.
     "niimath>=1.0.20250526; python_version < '3.14'",
     "brainchop>=0.2.5",
+
+    # EyeLink eye tracking (.edf). eyelinkio is one pure-Python wheel that
+    # ships SR Research's EDF reader for macOS (x86_64 and arm64), Linux
+    # (x86_64) and Windows (32 and 64 bit), loaded through ctypes, so the
+    # Python version does not matter. Measured 2026-10-12 on Python 3.10 to
+    # 3.14: macOS arm64 and x86_64, Linux x86_64 (slim and full images).
+    # Where the library cannot load (Linux on ARM; Windows without the
+    # Visual C++ 2008 runtime its DLL is linked against, which the Windows
+    # installer adds), the reader falls back to edf2asc or a .asc export
+    # and says what is missing; nothing else depends on it.
+    "eyelinkio>=0.3.0,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -184,6 +195,7 @@ bidsmgr-create    = "bidsmgr.cli.create:main"
 bidsmgr-adopt     = "bidsmgr.cli.adopt:main"
 bidsmgr-project   = "bidsmgr.cli.project:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
+bidsmgr-classify  = "bidsmgr.cli.classify:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
 bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
@@ -222,6 +234,8 @@ include = ["bidsmgr*"]
 # bidsmgr/qc/templates/PROVENANCE.md.
 "bidsmgr.qc.templates"      = ["*.nii.gz", "PROVENANCE.md"]
 "bidsmgr.vendor"            = ["README.md"]
+# The parameter-based classifier's rulebook: data, edited by the user as a delta.
+"bidsmgr.classifier.acquisition" = ["rulebook.json"]
 # A Windows dcm2niix that can convert MR spectroscopy. The released one
 # cannot: it is killed with 0xC00000FD before it writes anything. Used only
 # as a fallback on that exit code, never in preference to the wheel's binary.

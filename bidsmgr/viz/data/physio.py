@@ -136,7 +136,72 @@ def read_timing(path: Path) -> Optional[dict]:
         "sampling_frequency": rate,
         "start_time": start if math.isfinite(start) else 0.0,
         "units": str(units) if isinstance(units, str) else "",
+        "physio_type": str(data.get("PhysioType") or ""),
     }
+
+
+#: Eye-tracker messages that are its own set-up chatter, not the experiment's.
+_TRACKER_MESSAGES = ("!CAL", "VALIDATE", "RECCFG", "ELCL", "GAZE_COORDS", "THRESHOLDS",
+                     "CAMERA_LENS", "DISPLAY_COORDS", "!MODE", "PUPIL_DATA_TYPE",
+                     "DRIFTCORRECT", "BUTTON", "INPUT")
+
+
+def split_timestamps(columns: list[np.ndarray], timing: dict):
+    """An eye-tracking recording's ``timestamp`` column is its clock, not a
+    channel: ``(columns, timing, timestamps)`` without it (``None`` when
+    there is none)."""
+    names = list(timing.get("columns", []))
+    if timing.get("physio_type") != "eyetrack" or "timestamp" not in names:
+        return columns, timing, None
+    i = names.index("timestamp")
+    if i >= len(columns):
+        return columns, timing, None
+    stamps = np.asarray(columns[i], dtype=np.float64)
+    rest = [c for k, c in enumerate(columns) if k != i]
+    timing = {**timing, "columns": [n for k, n in enumerate(names) if k != i]}
+    return rest, timing, stamps
+
+
+def eyetrack_events(path: Path, stamps: np.ndarray, sfreq: float, step: int = 1) -> list:
+    """Blinks and the experiment's messages from the recording's
+    ``_physioevents.tsv.gz``, in seconds from its first sample, placed on the
+    SAMPLES (a pause between trials is not drawn, so an event after one sits
+    where its sample is drawn, not where the clock says)."""
+    import csv
+    import gzip
+
+    from .events import Event
+
+    events_path = Path(path).with_name(Path(path).name.replace("_physio.", "_physioevents."))
+    if not events_path.is_file() or stamps is None or not len(stamps):
+        return []
+    out = []
+    try:
+        with gzip.open(events_path, "rt", encoding="utf-8", newline="") as fh:
+            for row in csv.reader(fh, delimiter="\t"):
+                if len(row) < 4:
+                    continue
+                try:
+                    onset = float(row[0])
+                except ValueError:
+                    continue
+                kind, message = row[2], row[3]
+                if kind == "blink":
+                    label = "blink"
+                elif kind in ("n/a", "") and message not in ("n/a", "") and \
+                        not message.startswith(_TRACKER_MESSAGES):
+                    label = message
+                else:
+                    continue
+                try:
+                    duration = max(0.0, float(row[1]))
+                except ValueError:
+                    duration = 0.0
+                index = int(np.clip(np.searchsorted(stamps, onset), 0, len(stamps) - 1))
+                out.append(Event(index * step / sfreq, duration, label))
+    except (OSError, ValueError) as exc:
+        log.debug("could not read %s: %s", events_path, exc)
+    return out
 
 
 def _channel_table_names(path: Path) -> list[str]:
@@ -324,6 +389,8 @@ def build_combined_raw(paths: list[Path]):
         columns, _total, step = read_columns(path)
         if not columns:
             continue
+        # An eye tracker's timestamp is its clock, not a channel.
+        columns, timing, _stamps = split_timestamps(columns, timing)
         rate = (float(timing["sampling_frequency"]) or 1.0) / max(1, step)
         loaded.append((path, timing, columns, rate))
     if not loaded:

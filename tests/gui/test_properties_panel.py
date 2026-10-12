@@ -185,8 +185,9 @@ def test_panel_model_data_changed_rerenders(qtbot) -> None:
     # ``dataChanged`` fires.
     task_col = next(i for i, c in enumerate(COLUMNS) if c.key == "task")
     m.setData(m.index(0, task_col), "motor")
-    by_name = {r.entity_name: r.edit.text() for r in panel._entity_rows}
-    assert by_name["task"] == "motor"
+    # One render per burst of edits, on the next turn of the event loop.
+    qtbot.waitUntil(lambda: {r.entity_name: r.edit.text()
+                             for r in panel._entity_rows}.get("task") == "motor", timeout=2000)
 
 
 def test_panel_project_integration(qtbot, tmp_path: Path) -> None:
@@ -468,6 +469,7 @@ def test_per_row_fields_have_tooltips(qtbot) -> None:
     panel, m = _build_panel_with_model(qtbot, _eeg_row())
     from bidsmgr.recording_meta import default_spec
     m.set_global_spec(default_spec()); panel.set_selected_row(0)
+    _open_sidecar(panel)
     tipped = sum(1 for w in panel._body.findChildren((QComboBox, QLineEdit)) if w.toolTip())
     assert tipped >= 8  # sex/hand/line_freq/manufacturer/ref/ground/montage/...
 
@@ -493,8 +495,18 @@ def test_nirs_row_has_no_reference_montage_section(qtbot) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _open_sidecar(panel) -> None:
+    """The sidecar section is built when opened (closed by default)."""
+    from bidsmgr.gui.widgets.template_form import CollapsibleSection
+
+    for box in panel._body.findChildren(CollapsibleSection):
+        if box._title_text == "Sidecar fields":
+            box.set_expanded(True)
+
+
 def _psd_buttons(panel):
     from PyQt6.QtWidgets import QPushButton
+    _open_sidecar(panel)
     return [
         b for b in panel._body.findChildren(QPushButton)
         if "Compute PSD" in b.text()
@@ -787,7 +799,7 @@ def test_a_recording_shown_as_it_is_is_never_removed(qtbot, tmp_path) -> None:
 
 
 def test_a_non_image_series_says_why_it_has_no_preview(qtbot, tmp_path) -> None:
-    from bidsmgr.cli.scan import NONIMAGE_ISSUE
+    from bidsmgr.inventory.types import NONIMAGE_ISSUE
 
     panel, _m = _build_panel_with_model(
         qtbot, _func_row(issues=NONIMAGE_ISSUE, source_folder="s1"))

@@ -120,6 +120,16 @@ class CheckboxDelegate(QStyledItemDelegate):
         return True
 
 
+#: The confidence colours' bands: named without asking at or above the first,
+#: named and marked to check down to the second (Settings > Classification
+#: sets both; ``ConverterPanel`` keeps this in step).
+CONFIDENCE_BANDS: list = [0.80, 0.40]
+
+
+def set_confidence_bands(apply_at: float, check_at: float) -> None:
+    CONFIDENCE_BANDS[:] = [float(apply_at), float(check_at)]
+
+
 class CellTextDelegate(QStyledItemDelegate):
     """Generic text-cell delegate with role-based formatting.
 
@@ -165,6 +175,7 @@ class CellTextDelegate(QStyledItemDelegate):
         painter.setFont(f)
 
         color = QColor(pal["text"])
+        bar = None
         if text == "—":
             color = QColor(pal["muted"])
         elif self._role == "basename":
@@ -174,14 +185,13 @@ class CellTextDelegate(QStyledItemDelegate):
         elif self._role == "conf":
             try:
                 v = float(text)
-                if v >= 0.9:
-                    color = QColor(pal["success"])
-                elif v >= 0.75:
-                    color = QColor(pal["warning"])
-                else:
-                    color = QColor(pal["error"])
             except ValueError:
                 color = QColor(pal["muted"])
+            else:
+                apply_at, check_at = CONFIDENCE_BANDS
+                token = "success" if v >= apply_at else "warning" if v >= check_at else "error"
+                color = QColor(pal[token])
+                bar = v
         elif text == "missing":
             color = QColor(pal["error"])
 
@@ -204,6 +214,19 @@ class CellTextDelegate(QStyledItemDelegate):
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
             elided,
         )
+        if bar is not None and row_state != "skip":
+            # A short bar beside the number: how sure, at a glance.
+            left = r.left() + fm.horizontalAdvance(".00") + scaled_px(6)
+            width = min(r.right() - left, scaled_px(40))
+            if width > scaled_px(10):
+                h = max(2, scaled_px(3))
+                y = r.center().y() - h // 2
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(pal["subtle"]))
+                painter.drawRoundedRect(left, y, width, h, h / 2, h / 2)
+                painter.setBrush(color)
+                painter.drawRoundedRect(left, y, max(h, int(width * min(1.0, bar))), h,
+                                        h / 2, h / 2)
 
         # Strikethrough for skipped basenames — drawn by hand because
         # QFont.setStrikeOut would also strike the elision ellipsis,

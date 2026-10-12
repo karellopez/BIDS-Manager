@@ -119,6 +119,7 @@ def test_moved_data_is_said_and_can_be_located(qtbot, isolated_settings, tmp_pat
     assert bar.chip_text() == "Moved" and bar.action_button.text() == "Locate..."
     assert str(raw) in bar.value()
     panel._table.selectRow(0)
+    panel._properties.flush()          # a selection renders once it settles
     assert not panel._properties.preview_button.isEnabled()
     assert "Locate" in panel._properties.preview_button.toolTip()
 

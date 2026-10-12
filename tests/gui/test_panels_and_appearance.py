@@ -86,6 +86,26 @@ def test_picking_a_sequence_in_the_filter_selects_it_everywhere(qtbot, tmp_path)
     assert tree.currentItem() is panel._filter_pane._leaf_for_row(0)
 
 
+def test_a_closed_panel_checks_no_sources(qtbot, qapp, tmp_path) -> None:
+    """Coming back to the front looks for the table's data on a thread. A
+    closed panel did it too, and the job racing the panel's deletion
+    crashed the next test (exit 139) about one run in six."""
+    from PyQt6.QtCore import Qt
+
+    from bidsmgr.gui.converter_panel import ConverterPanel
+
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    panel.load_inventory(_rows(), output_tsv=tmp_path / "inv.tsv")
+    qapp.applicationStateChanged.emit(Qt.ApplicationState.ApplicationActive)
+    assert panel._source_jobs is not None, "an open panel looks again"
+    panel.close()
+    assert not panel._source_jobs.busy(), "closing stopped the check"
+    generation = panel._source_generation
+    qapp.applicationStateChanged.emit(Qt.ApplicationState.ApplicationActive)
+    assert panel._source_generation == generation, "a closed panel starts none"
+
+
 # ---------------------------------------------------------------------------
 # Buttons
 # ---------------------------------------------------------------------------

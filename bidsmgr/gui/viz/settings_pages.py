@@ -165,9 +165,13 @@ class GeneratedSettingsPage(QWidget):
     when the page is narrow, so nothing here sets a width the dialog cannot
     shrink below."""
 
-    def __init__(self, sections: tuple[str, ...], *, hint: str = "", parent=None) -> None:
+    def __init__(self, sections: tuple[str, ...], *, hint: str = "", parent=None,
+                 root=None) -> None:
         super().__init__(parent)
         self._sections = tuple(sections)
+        # The model the sections belong to (the viewer settings unless another
+        # pydantic settings model is given, such as the classifier's).
+        self._root = root if root is not None else VizSettings
         self._controls: dict[tuple[str, str], _Control] = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -196,7 +200,7 @@ class GeneratedSettingsPage(QWidget):
         """Add a page's own groups after the generated ones."""
 
     def _build_section(self, section: str) -> QWidget:
-        model_cls = VizSettings.model_fields[section].annotation
+        model_cls = self._root.model_fields[section].annotation
         box = QGroupBox(model_cls.model_config.get("title", section.capitalize()))
         form = QFormLayout(box)
         # Fields keep their natural size (a spin box stretched across the
@@ -238,16 +242,16 @@ class GeneratedSettingsPage(QWidget):
 
     def restore_section(self, section: str) -> None:
         """``section``'s controls back to the model's defaults."""
-        defaults = VizSettings.model_fields[section].annotation()
+        defaults = self._root.model_fields[section].annotation()
         for (sec, name), control in self._controls.items():
             if sec == section:
                 control.put(getattr(defaults, name))
 
-    def load(self, settings: VizSettings) -> None:
+    def load(self, settings) -> None:
         for (section, name), control in self._controls.items():
             control.put(getattr(getattr(settings, section), name))
 
-    def apply_to(self, settings: VizSettings) -> None:
+    def apply_to(self, settings) -> None:
         """Write the controls into ``settings`` (a copy the dialog owns)."""
         for (section, name), control in self._controls.items():
             setattr(getattr(settings, section), name, control.get())

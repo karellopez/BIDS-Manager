@@ -444,6 +444,23 @@ def series_files(folder: Path, series_uid: str, cancel=None) -> list[str]:
     return sorted(out)
 
 
+def preview_dicom(path: str | Path, work_dir: Path, *, cancel=None) -> list[Path]:
+    """The series one DICOM file belongs to, converted for a look.
+
+    Every DICOM in the file's folder (and below it) with the same
+    SeriesInstanceUID goes through :func:`preview_series`. For the DICOM
+    header pane, which has a file and no scan.
+    """
+    import pydicom
+
+    path = Path(path)
+    ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True,
+                         specific_tags=["SeriesInstanceUID"])
+    uid = str(getattr(ds, "SeriesInstanceUID", "") or "")
+    files = series_files(path.parent, uid, cancel=cancel) if uid else []
+    return preview_series(files or [str(path)], work_dir)
+
+
 def preview_series(
     files: Iterable[str | Path],
     work_dir: Path,

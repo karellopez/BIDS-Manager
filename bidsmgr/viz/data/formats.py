@@ -2,7 +2,9 @@
 
 Routing a click must not read the file: a 500 MB BOLD and a 32 KB spectrum
 look the same until you do. So the kind of a file is decided from its name,
-its folder and (for a table) its sidecar, here, once, for every host.
+its folder and (for a table) its sidecar, here, once, for every host. The
+one exception is DICOM, which vendors write with any name or none: its
+132-byte preamble is read, never more.
 """
 
 from __future__ import annotations
@@ -85,7 +87,7 @@ def kind_of(path, *, sidecar_checked: Optional[bool] = None) -> Kind:
 
 #: What the Editor shows a file that is not an image, a recording or a
 #: table in (``document_kind``).
-Document = Literal["gradients", "picture", "markdown", "html", "text", ""]
+Document = Literal["gradients", "picture", "markdown", "html", "text", "dicom", ""]
 
 #: Pictures a dataset carries: electrode and anatomical photos (``_photo``),
 #: figures under ``derivatives`` and ``code``.
@@ -108,7 +110,8 @@ def document_kind(path) -> Document:
     ("" for none: the Editor shows what it is and offers the system's app).
 
     ``.bval``/``.bvec`` are the gradient table; README, README.md and other
-    Markdown render; CHANGES, LICENSE and the like are text."""
+    Markdown render; CHANGES, LICENSE and the like are text; a DICOM file
+    (by its content) opens in the DICOM header pane."""
     p = Path(path)
     name = p.name.lower()
     ext = full_ext(p)
@@ -122,6 +125,13 @@ def document_kind(path) -> Document:
         return "html"
     if name in TEXT_NAMES or ext in TEXT_EXTS or name.startswith(("readme.", "changes.")):
         return "text"
+    # A DICOM is recognised by its content: Siemens ``.IMA``, Philips files
+    # named by their UID and extensionless files are all DICOM. Reading the
+    # 132-byte preamble on a click is cheap; pixels are never read here.
+    from ...inventory.mri_dicom import is_dicom_file
+
+    if p.is_file() and is_dicom_file(str(p)):
+        return "dicom"
     return ""
 
 

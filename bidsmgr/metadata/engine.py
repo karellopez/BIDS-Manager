@@ -58,6 +58,14 @@ _NA_VALUE = "n/a"
 # Sentinel: this field gets no placeholder at all.
 _NO_TODO = object()
 
+# Fields that LINK files by an identifier: the same placeholder on both
+# sides IS a link. "TODO" in the B0FieldIdentifier of two phase images made
+# sdcflows estimate a field from them, and "TODO" in a run's B0FieldSource
+# then pointed the run at it (or, with no such field, at nothing, so
+# fMRIPrep corrected the run with no fieldmap at all and never fell back to
+# IntendedFor). Absent is the honest state: the run has no fieldmap.
+_LINK_FIELDS = frozenset({"B0FieldIdentifier", "B0FieldSource"})
+
 # How much of what the standard declares a fill should mark. Nested: each
 # includes the ones before it.
 FILL_NONE = "none"
@@ -105,6 +113,8 @@ def _todo_value_for(field) -> object:
     item_type = getattr(field, "item_type", "")
     declared = getattr(field, "type", "")
 
+    if _canonical_field_name(str(getattr(field, "name", ""))) in _LINK_FIELDS:
+        return _NO_TODO
     if getattr(field, "accepts_na", False) or "n/a" in enum:
         return _NA_VALUE
     if enum:
@@ -128,6 +138,8 @@ def unmarkable_reason(field) -> str:
     """
     if _todo_value_for(field) is not _NO_TODO:
         return ""
+    if _canonical_field_name(str(getattr(field, "name", ""))) in _LINK_FIELDS:
+        return "links files by its value: a placeholder would link them"
     enum = tuple(getattr(field, "enum", ()) or ())
     if enum:
         shown = ", ".join(str(v) for v in enum[:4])

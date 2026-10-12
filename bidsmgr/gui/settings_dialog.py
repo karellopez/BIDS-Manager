@@ -136,6 +136,23 @@ class SettingsDialog(QDialog):
         self._add_page("Scan rules", "settings_rules",
                        "Your own hints for naming series, and series to leave out.",
                        self._build_scan_rules_tab())
+        from ..classifier.acquisition.config import ClassifierConfig
+
+        from .classifier_rules import ClassifierSettingsPage
+
+        self._classifier_page = ClassifierSettingsPage(
+            ("general", "weights", "anatomy", "gradient_echo", "echoes", "series", "contrast"),
+            root=ClassifierConfig,
+            hint="An MRI series is named from how it was acquired (echo, repetition and "
+                 "inversion times, readout, volumes, diffusion weighting) and from the "
+                 "series beside it, with dcm2niix's guess and the series name as second "
+                 "opinions. Every name keeps its confidence and its evidence: the "
+                 "Properties panel's Why this name. bidsmgr-scan and bidsmgr-classify "
+                 "read the same settings from a JSON file (--print-classifier-config "
+                 "writes one).")
+        self._add_page("Classification", "settings_classify",
+                       "How MRI series are named from their acquisition parameters.",
+                       self._classifier_page, scroll=False)
         self._add_page("Convert", "settings_convert",
                        "How a conversion writes the dataset, and what runs after it.",
                        self._build_convert_tab())
@@ -192,6 +209,7 @@ class SettingsDialog(QDialog):
 
         # Populate every widget from the current settings.
         self._load_into_widgets(self._settings)
+        self._classifier_page.load(self._settings.classifier())
         self._viewer_page.load(self._viz_settings)
         self._qc_page.load(self._viz_settings)
         self._shortcuts_page.load(self._viz_settings)
@@ -348,6 +366,12 @@ class SettingsDialog(QDialog):
         for label, _value in self._FONT_SCALE_PRESETS:
             self._font_scale_combo.addItem(label)
         form.addRow("Font scale:", self._font_scale_combo)
+
+        self._log_clear_on_run = QCheckBox("Start each scan and conversion with an empty Log")
+        self._log_clear_on_run.setToolTip(
+            "The Converter's Log shows one run at a time. Every run is also kept as a "
+            "file: the Log's history icon lists them.")
+        form.addRow("Log:", self._log_clear_on_run)
 
         # Header brand artwork.
         self._header_logo_combo = QComboBox()
@@ -802,6 +826,51 @@ class SettingsDialog(QDialog):
             })
         return hints, exclusions, None
 
+    def _build_sourcedata_group(self) -> QWidget:
+        """Keep the source data in sourcedata/: how, and for which
+        modalities (``converter/sourcedata``)."""
+        from ..converter import sourcedata as sd
+        from .widgets.flow_layout import FlowBar
+
+        group = QGroupBox("Source data")
+        form = QFormLayout(group)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self._convert_sourcedata = QComboBox()
+        for value, label in (("none", "No (default)"),
+                             ("copy", "Copy the files as they are"),
+                             ("archive", "One archive per series (.tar.gz)")):
+            self._convert_sourcedata.addItem(label, value)
+        self._convert_sourcedata.setToolTip(
+            "Keep each subject's source data in the dataset's sourcedata/ folder, the "
+            "place BIDS reserves for data before conversion: "
+            "sourcedata/sub-<label>/[ses-<label>/]<modality>/<series>/. A manifest.tsv "
+            "per subject lists every file with its checksum.\n\nArchives are fewer "
+            "files, compress DICOM well and keep paths short on Windows. The "
+            "conversion is refused before it starts when the disk cannot hold them.")
+        form.addRow("Keep in sourcedata/:", self._convert_sourcedata)
+        self._sourcedata_boxes: dict[str, QCheckBox] = {}
+        boxes = FlowBar(h_spacing=12, v_spacing=4)
+        for m in sd.MODALITIES:
+            box = QCheckBox(sd.LABELS[m])
+            box.setToolTip(f"Keep the {sd.LABELS[m]} source data")
+            boxes.addWidget(box)
+            self._sourcedata_boxes[m] = box
+        form.addRow("Modalities:", boxes)
+        note = QLabel(sd.IDENTIFIERS_NOTE)
+        note.setObjectName("sourcedata-note")
+        note.setWordWrap(True)
+        form.addRow("", note)
+
+        def follow() -> None:
+            on = self._convert_sourcedata.currentData() != "none"
+            for box in self._sourcedata_boxes.values():
+                box.setEnabled(on)
+            note.setEnabled(on)
+
+        self._convert_sourcedata.currentIndexChanged.connect(lambda _i: follow())
+        self._sourcedata_follow = follow
+        return group
+
     def _build_convert_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
@@ -862,6 +931,25 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Residuals:", self._convert_skip_residuals)
 
+        # How a fieldmap is linked to the runs it corrects. Measured with
+        # sdcflows (what fMRIPrep uses): URIs are ignored by fMRIPrep 24.1 and
+        # earlier, B0FieldIdentifier is read by every version.
+        self._convert_intended_for = QComboBox()
+        self._convert_intended_for.addItem("BIDS URIs (bids::sub-01/...), the current form",
+                                           "uri")
+        self._convert_intended_for.addItem("Paths from the subject (ses-1/func/...)",
+                                           "relative")
+        self._convert_intended_for.setToolTip(
+            "How a fieldmap's IntendedFor names the runs it corrects. BIDS URIs are the "
+            "current form; fMRIPrep 24.1 and earlier ignore them silently. Paths from the "
+            "subject are the older form every version reads.")
+        form.addRow("Fieldmap links:", self._convert_intended_for)
+        self._convert_b0_field = QCheckBox("Also write B0FieldIdentifier and B0FieldSource")
+        self._convert_b0_field.setToolTip(
+            "The newer pairing of a fieldmap and its runs, read by every fMRIPrep "
+            "version and preferred to IntendedFor. Recommended: on.")
+        form.addRow("", self._convert_b0_field)
+
         self._convert_force_edf = QCheckBox("Re-encode EEG to EDF")
         self._convert_force_edf.setToolTip(
             "Re-encode EEG recordings to EDF instead of keeping the "
@@ -911,6 +999,7 @@ class SettingsDialog(QDialog):
             )
 
         v.addWidget(convert)
+        v.addWidget(self._build_sourcedata_group())
 
         # Post-convert chain laid out as an indented hierarchy: each step is
         # a parent checkbox; its sub-options sit indented beneath and are
@@ -1230,6 +1319,7 @@ class SettingsDialog(QDialog):
         self._appearance_editor.load(s.appearance())
         self._editor_show_hidden.setChecked(s.editor_show_hidden)
         self._editor_autosave.setChecked(s.editor_autosave)
+        self._log_clear_on_run.setChecked(s.log_clear_on_run)
         self._font_scale_combo.setCurrentIndex(
             self._closest_font_scale_index(s.font_scale)
         )
@@ -1248,6 +1338,15 @@ class SettingsDialog(QDialog):
         idx = self._convert_on_existing.findData(s.convert_on_existing)
         self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
         self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
+        self._convert_intended_for.setCurrentIndex(
+            max(0, self._convert_intended_for.findData(s.convert_intended_for)))
+        self._convert_b0_field.setChecked(s.convert_b0_field)
+        self._convert_sourcedata.setCurrentIndex(
+            max(0, self._convert_sourcedata.findData(s.convert_sourcedata)))
+        chosen = {m.strip() for m in s.convert_sourcedata_modalities.split(",")}
+        for m, box in self._sourcedata_boxes.items():
+            box.setChecked(m in chosen)
+        self._sourcedata_follow()
         self._convert_preserve_curation.setChecked(
             s.convert_preserve_curation
         )
@@ -1310,7 +1409,10 @@ class SettingsDialog(QDialog):
         """Reset all widgets to the AppSettings field defaults (not saved
         until the user clicks Save)."""
         self._load_into_widgets(AppSettings())
+        from ..classifier.acquisition.config import ClassifierConfig
         from ..viz.settings import VizSettings
+
+        self._classifier_page.load(ClassifierConfig())
 
         self._viewer_page.load(VizSettings())
         self._qc_page.load(VizSettings())
@@ -1334,6 +1436,7 @@ class SettingsDialog(QDialog):
             {k: dict(v) for k, v in look.tree.items()})
         s.editor_show_hidden = self._editor_show_hidden.isChecked()
         s.editor_autosave = self._editor_autosave.isChecked()
+        s.log_clear_on_run = self._log_clear_on_run.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()
         ][1]
@@ -1357,6 +1460,11 @@ class SettingsDialog(QDialog):
         # Keep the legacy flag in sync for any old reader.
         s.convert_overwrite = (s.convert_on_existing == "replace")
         s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
+        s.convert_intended_for = self._convert_intended_for.currentData() or "uri"
+        s.convert_b0_field = self._convert_b0_field.isChecked()
+        s.convert_sourcedata = self._convert_sourcedata.currentData() or "none"
+        s.convert_sourcedata_modalities = ",".join(
+            m for m, box in self._sourcedata_boxes.items() if box.isChecked())
         s.convert_preserve_curation = (
             self._convert_preserve_curation.isChecked()
         )
@@ -1383,6 +1491,9 @@ class SettingsDialog(QDialog):
         s.validate_max_rows = self._validate_max_rows.value()
         s.validate_show = self._validate_show.currentData() or "error_warning"
         s.validate_flag_todos = self._validate_flag_todos.isChecked()
+        classifier = s.classifier()
+        self._classifier_page.apply_to(classifier)
+        s.classifier_config = classifier.model_dump_json()
 
         s.save()
         self._save_viewer_settings()

@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Sequence, Iterable, Optional
 
+from ..util.oplog import add_log_arguments, dataset_root_for, log_keywords, logged
 from ..metadata import DatasetMetadata, MetadataReport, run_metadata
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+@logged("metadata", lambda a: (
+    dataset_root_for(Path(a["target"]) / a["dataset"] if a["dataset"] else Path(a["target"])),
+    {"target": a["target"], "dataset": a["dataset"], "inventory": a["inventory_tsv"],
+     "fill TODOs": a["fill_todos"]}))
 def run_metadata_cli(
     target: Path,
     *,
@@ -378,6 +383,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
 
+    add_log_arguments(parser)
     args = parser.parse_args(argv)
     # One version for the whole run, adopted before any schema question is
     # asked. Without this the flag would reach the validator alone and a
@@ -434,6 +440,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         write_report=args.write_report,
         participants_file=args.participants_file,
         phenotype_files=args.phenotype_files,
+        **log_keywords(args),
     )
 
 

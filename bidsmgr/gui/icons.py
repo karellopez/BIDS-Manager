@@ -90,6 +90,9 @@ NAMES: dict[str, tuple[str, str]] = {
 
     # ---- Converter bottom tabs ----
     "log":          ("mdi6.text-box-outline",         "text"),
+    "log_clear":    ("mdi6.broom",                    "dim"),
+    "log_file":     ("mdi6.file-document-outline",    "dim"),
+    "log_history":  ("mdi6.history",                  "dim"),
     "warning":      ("mdi6.alert-outline",            "warning"),
     "preview":      ("mdi6.eye-outline",              "accent"),
     "statistics":   ("mdi6.chart-bar",                "purple"),
@@ -170,11 +173,19 @@ NAMES: dict[str, tuple[str, str]] = {
     "settings_system":  ("mdi6.memory",                         "text"),
     "settings_rules":   ("mdi6.playlist-check",                 "text"),
     "settings_convert": ("mdi6.transfer-right",                 "text"),
+    "settings_classify": ("mdi6.tag-search-outline",   "text"),
     "settings_viewer":  ("mdi6.monitor-eye",                    "text"),
     "tracks_scroll":  ("mdi6.arrow-expand-vertical",  "text"),
     "plots":          ("mdi6.chart-multiple",         "text"),
     "channel_types":  ("mdi6.filter-variant",         "text"),
     "more":           ("mdi6.dots-horizontal",        "text"),
+    # DICOM header pane.
+    "tree_dicom":     ("mdi6.radiology-box-outline",  "tree_image"),
+    "identifies":     ("mdi6.account-alert-outline",  "warning"),
+    "read_by_scan":   ("mdi6.target",                 "accent"),
+    "compare":        ("mdi6.compare-horizontal",     "text"),
+    "export":         ("mdi6.export-variant",         "text"),
+    "copy":           ("mdi6.content-copy",           "text"),
     "mark_bad":       ("mdi6.cancel",                 "warning"),
 }
 
@@ -280,6 +291,8 @@ def icon_for_path(name: str, *, is_dir: bool = False) -> QIcon:
         return icon("tree_tsv")
     if lower.endswith(RECORDING_TREE_EXTS):
         return _recording_tree_icon()
+    if lower.endswith((".dcm", ".ima")):
+        return icon("tree_dicom")
     return QIcon()
 
 

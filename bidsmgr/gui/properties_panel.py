@@ -33,8 +33,9 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -200,6 +201,15 @@ class _EntityRow(QWidget):
 
 
 
+def _preview_job(record, work_dir, sources):
+    """Worker side of a row preview. The conversion module is imported here,
+    on the worker's thread: on the GUI thread its imports (mne, the
+    backends) froze the click that asked for the preview."""
+    from ..cli.convert import preview_row
+
+    return preview_row(record, work_dir, sources)
+
+
 def _row_spectrum(path) -> dict:
     """Worker side: read a source recording and take its spectrum."""
     from ..viz.compute.spectral import psd
@@ -217,6 +227,10 @@ class PropertiesPanel(QWidget):
     Passing ``row=None`` blanks the form.
     """
 
+    #: Give these rows' people new subject numbers (the Converter opens the
+    #: dialog): asked for from the existing-subject warning.
+    renumber_requested = pyqtSignal(list)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pane")
@@ -232,6 +246,7 @@ class PropertiesPanel(QWidget):
         # files in it (``inventory.sources.ScanSources``): the PSD and the
         # preview read from it. Set by the ConverterPanel for the scan shown.
         self._sources = None
+        self._shims: dict = {}
         # Background PSD computation. Only one runs at a time, on the viewer
         # library's job runner (a QThread: it ends in an FFT), and
         # ``_psd_row_id`` identifies which recording is computing so the
@@ -259,22 +274,46 @@ class PropertiesPanel(QWidget):
         # Body lives inside a scroll area so the form can grow without
         # bumping the splitter handles. The scroll area's contents are
         # ``self._body`` which we rebuild on every set_selected_row.
+        # A fixed holder in the scroll area, the body inside it: a new body
+        # replaces the old within the holder, so neither is ever re-parented
+        # (taking a widget out of a scroll area re-parents its whole tree).
+        self._holder = QWidget()
+        self._holder.setObjectName("props-panel")
+        self._holder_layout = QVBoxLayout(self._holder)
+        self._holder_layout.setContentsMargins(0, 0, 0, 0)
+        self._holder_layout.setSpacing(0)
         self._body = QWidget()
         self._body.setObjectName("props-panel")
         self._body_layout = QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(14, 12, 14, 12)
         self._body_layout.setSpacing(7)
+        self._holder_layout.addWidget(self._body)
 
         scroll = QScrollArea()
+        self._scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self._body)
+        scroll.setWidget(self._holder)
         # A scroll area otherwise reports its contents' minimum as its own, so
         # the pane could not be squeezed past whatever the widest card wanted.
         scroll.setMinimumWidth(0)
         scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         outer.addWidget(scroll, 1)
+
+        # A selection renders once it settles; edits to the shown row render
+        # once per burst.
+        self._pending = False
+        self._rendered_row: Optional[int] = None
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(40)
+        self._render_timer.timeout.connect(self._on_render_timer)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(0)
+        self._refresh_timer.timeout.connect(self._on_refresh_timer)
+        self._links_cache: Optional[tuple] = None
 
         # Build the initial empty body (just a hint).
         self._render_empty()
@@ -303,6 +342,12 @@ class PropertiesPanel(QWidget):
         """Attach a project for provenance lookups. Not used yet for writes."""
         self._project = project
 
+    def set_shims(self, shims: Optional[dict]) -> None:
+        """The shim settings of the shown scan's series (series uid ->
+        values, from the classifier's features): the fieldmap links preview
+        matches them the way the conversion matches the sidecars'."""
+        self._shims = dict(shims or {})
+
     def set_sources(self, sources) -> None:
         """Where the shown scan's data is (``inventory.sources.ScanSources``,
         ``None`` for nothing): the PSD and preview buttons find each row's
@@ -323,6 +368,30 @@ class PropertiesPanel(QWidget):
         """
         self.set_selected_row(self._row)
 
+    def request_row(self, row: Optional[int]) -> None:
+        """Show ``row`` once the selection settles: arrow keys held down
+        through a table render the row they stop on, not every row passed.
+        The header follows at once."""
+        self._row = row
+        self._pending = True
+        if row is None:
+            self._set_header("Properties · no row selected")
+        else:
+            self._set_header(f"Properties · row {row + 1} selected")
+        self._render_timer.start()
+
+    def flush(self) -> None:
+        """Render a pending selection now (tests, and before a grab)."""
+        if self._pending:
+            self._render_timer.stop()
+            self._pending = False
+            self.set_selected_row(self._row)
+
+    def _on_render_timer(self) -> None:
+        if self._pending:
+            self._pending = False
+            self.set_selected_row(self._row)
+
     def set_selected_row(self, row: Optional[int]) -> None:
         """Render the form for ``row`` (or blank if ``None``).
 
@@ -331,7 +400,12 @@ class PropertiesPanel(QWidget):
         body is rebuilt from scratch each time so we don't have to
         track per-row deltas.
         """
+        same_row = row is not None and row == self._rendered_row
+        keep = self._scroll.verticalScrollBar().value() if same_row else 0
         self._row = row
+        self._pending = False
+        self._render_timer.stop()
+        self._rendered_row = row
         if self._model is None or row is None:
             self._render_empty()
             self._set_header("Properties · no row selected")
@@ -341,18 +415,31 @@ class PropertiesPanel(QWidget):
             return
         self._set_header(f"Properties · row {row + 1} selected")
         self._render_for_row(row)
+        if keep:
+            # The same row again (an edit to it): stay where the user was.
+            QTimer.singleShot(0, lambda v=keep: self._scroll.verticalScrollBar().setValue(v))
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
 
     def _clear_body(self) -> None:
-        while self._body_layout.count():
-            item = self._body_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
+        """A fresh, empty body in place of the old one. Swapping the whole
+        container costs one deletion; taking its widgets out one by one
+        re-parented each of them (a third of a render). The old body is
+        deleted later: the edit that triggered this render may be a signal
+        from one of its own controls."""
+        body = QWidget()
+        body.setObjectName("props-panel")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(7)
+        old = self._body
+        old.hide()
+        self._holder_layout.removeWidget(old)
+        old.deleteLater()
+        self._body, self._body_layout = body, layout
+        self._holder_layout.addWidget(body)
         self._entity_rows = []
 
     def _render_empty(self) -> None:
@@ -436,6 +523,15 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._build_path_preview(row, datatype, suffix, entities))
         if self._cell(row, "series_uid").strip() or self._cell(row, "source_file").strip():
             self._body_layout.addWidget(self._build_preview_row(row, datatype, suffix))
+        if datatype == "fmap":
+            section = self._build_fieldmap_links(row)
+            if section is not None:
+                self._body_layout.addSpacing(6)
+                self._body_layout.addWidget(section)
+        why = self._build_why_this_name(row)
+        if why is not None:
+            self._body_layout.addSpacing(6)
+            self._body_layout.addWidget(why)
 
         # 4. Row-state notice (from the scanner's issues) +
         # schema validation. Two distinct sources of "what's wrong with
@@ -445,6 +541,9 @@ class PropertiesPanel(QWidget):
         self._body_layout.addSpacing(8)
         for vmsg in self._build_row_issue_messages(row):
             self._body_layout.addWidget(vmsg)
+        renumber = self._build_renumber_offer(row)
+        if renumber is not None:
+            self._body_layout.addWidget(renumber)
         for vmsg in self._build_validation_messages(datatype, suffix, entities):
             self._body_layout.addWidget(vmsg)
 
@@ -463,7 +562,10 @@ class PropertiesPanel(QWidget):
                 f"{_datatype_label(datatype)} only", agnostic=False)
             self._append_pet_dose_section(row)
             self._append_blood_section(row)
-        if datatype in _EEG_MEG_DATATYPES:
+        if self._cell(row, "modality").strip() == "eyetrack":
+            self._append_region_label("Eye tracking only", agnostic=False)
+            self._append_eyetrack_section(row)
+        elif datatype in _EEG_MEG_DATATYPES:
             self._append_region_label(
                 f"{_datatype_label(datatype)} only", agnostic=False)
             self._append_recording_section(row, datatype)
@@ -643,6 +745,31 @@ class PropertiesPanel(QWidget):
             rule = f"SCANNER · {state}" if i == 0 else ""
             msgs.append(ValMessage(sev, rule, text, None))
         return msgs
+
+    def _build_renumber_offer(self, row: int) -> Optional[QWidget]:
+        """Under the "this subject already exists" warning: the fix, one
+        click away."""
+        from ..inventory.dataset_identity import EXISTING_SUBJECT_TOKEN
+        from ..inventory.renumber import rows_of_person
+
+        if EXISTING_SUBJECT_TOKEN not in self._cell(row, "issues"):
+            return None
+        holder = QWidget()
+        holder.setObjectName("meta-row")
+        holder.setStyleSheet("#meta-row { background: transparent; }")
+        h = QHBoxLayout(holder)
+        h.setContentsMargins(0, 2, 0, 2)
+        btn = QPushButton("Give this person a new subject number...")
+        btn.setObjectName("tb-btn")
+        btn.setToolTip("Number this person (all of their series) with the next free "
+                       "subject number, so they are not merged into the existing subject.")
+        df = self._model.dataframe()
+        btn.clicked.connect(lambda _c=False: self.renumber_requested.emit(
+            rows_of_person(df, row)))
+        self.renumber_button = btn
+        h.addWidget(btn)
+        h.addStretch(1)
+        return holder
 
     def _build_validation_messages(
         self, datatype: str, suffix: str, entities: dict[str, str],
@@ -872,6 +999,183 @@ class PropertiesPanel(QWidget):
                 self._body_layout.addWidget(self._montage_hint(suggestion))
 
     # ------------------------------------------------------------------
+    # Eye tracking: the run it belongs to, the screen, the timing
+    # ------------------------------------------------------------------
+
+    def _runs_of(self, row: int) -> list[int]:
+        """The runs an eye tracker can sit beside (a recording with a task,
+        not physio): this participant's first, then everyone's (the scan
+        rarely knows whose eye-tracking file it is), each in acquisition
+        order."""
+        df = self._model.dataframe()
+        me = self._cell(row, "participant_id")
+        out = []
+        for i in range(len(df)):
+            if i == row or self._cell(i, "modality") == "eyetrack":
+                continue
+            if not self._model.entities(i).get("task") or \
+                    self._model.datatype_suffix(i)[1] in ("physio", "sbref", "events"):
+                continue
+            if self._cell(i, "datatype") not in ("func", "eeg", "meg", "ieeg", "nirs", "beh",
+                                                 "pet", "motion"):
+                continue
+            out.append(i)
+        return sorted(out, key=lambda i: (self._cell(i, "participant_id") != me,
+                                          self._cell(i, "participant_id"),
+                                          self._cell(i, "study_date"), self._cell(i, "acq_time")))
+
+    def _run_label(self, i: int) -> str:
+        ents = self._model.entities(i)
+        bits = [self._cell(i, "participant_id"), self._cell(i, "datatype")]
+        if ents.get("session"):
+            bits.append(f"ses-{ents['session']}")
+        bits.append(f"task-{ents['task']}")
+        if ents.get("run"):
+            bits.append(f"run-{ents['run']}")
+        when = self._cell(i, "acq_time")
+        if len(when) >= 4 and when[:4].isdigit():
+            bits.append(f"{when[:2]}:{when[2:4]}")
+        return " · ".join(bits)
+
+    def pair_with_run(self, row: int, other: int) -> None:
+        """Name this eye-tracking recording after the run it was recorded
+        during: its datatype folder, session, task, acquisition and run, as
+        one undoable change."""
+        if self._model is None:
+            return
+        m = self._model
+        theirs = m.entities(other)
+        datatype = self._cell(other, "datatype")
+        with m.edit_group():
+            m.set_datatype_suffix(row, datatype, "physio")
+            for key in ("subject", "session", "task", "acquisition", "run"):
+                m.set_entity(row, key, theirs.get(key) or None)
+        self.set_selected_row(row)
+
+    def _eye_row(self, label: str, tip: str, widget: QWidget) -> QWidget:
+        holder = QWidget()
+        holder.setObjectName("meta-row")
+        holder.setStyleSheet("#meta-row { background: transparent; }")
+        h = QHBoxLayout(holder)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL, fixed=True)
+        lbl.setToolTip(tip)
+        widget.setToolTip(tip)
+        h.addWidget(lbl)
+        h.addWidget(widget, 1)
+        return holder
+
+    def _eye_edit(self, row: int, field: str, *, scale: float = 1.0, pair: bool = False,
+                  hint: str = "") -> QLineEdit:
+        """A field of the eye-tracking block, shown in the unit people use
+        (``scale`` from the stored one: cm for metres), the dataset default
+        as its placeholder."""
+        def show(value) -> str:
+            if value in (None, "", []):
+                return ""
+            if pair:
+                return " x ".join(f"{float(v) * scale:g}" for v in value)
+            if isinstance(value, (int, float)):
+                return f"{float(value) * scale:g}"
+            return str(value)
+
+        edit = QLineEdit(show(self._model.eyetrack_override(row, field)))
+        edit.setObjectName("ent-input")
+        default = show(self._model.eyetrack_default(field))
+        edit.setPlaceholderText(f"{default} (dataset default)" if default else hint)
+
+        def commit() -> None:
+            text = edit.text().strip().replace(",", " ").replace("x", " ").replace("X", " ")
+            value = None
+            if text:
+                if field in ("sync_message",):
+                    value = edit.text().strip()
+                else:
+                    try:
+                        numbers = [float(n) / scale for n in text.split()]
+                    except ValueError:
+                        edit.setStyleSheet(f"border-color: {CUR()['error']};")
+                        return
+                    if pair:
+                        if len(numbers) != 2:
+                            edit.setStyleSheet(f"border-color: {CUR()['error']};")
+                            return
+                        value = [round(n, 6) for n in numbers]
+                    else:
+                        value = round(numbers[0], 6)
+            edit.setStyleSheet("")
+            if self._model is not None:
+                self._model.set_eyetrack_override(row, field, value)
+
+        edit.editingFinished.connect(commit)
+        return edit
+
+    def _append_eyetrack_section(self, row: int) -> None:
+        """The eye tracker's file knows the tracker, the eye, the calibration
+        and the screen's resolution. Not the run it belongs to, the screen's
+        size and distance (which the standard requires for gaze on a
+        screen), nor where the run starts on its clock."""
+        if self._model is None:
+            return
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "EYE TRACKING", "physio sidecar + the run's events.json",
+            agnostic=False, tag="this recording"))
+
+        runs = self._runs_of(row)
+        pick = QComboBox()
+        pick.setObjectName("ent-input")
+        # A combo asks for its longest entry as its minimum width; a run's
+        # label would set a floor under the whole panel.
+        pick.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        pick.setMinimumContentsLength(8)
+        pick.addItem("(choose the run)" if runs else "(no run to choose)", -1)
+        for i in runs:
+            pick.addItem(self._run_label(i), i)
+        pick.setEnabled(bool(runs))
+        pick.activated.connect(
+            lambda idx: (pick.itemData(idx) is not None and pick.itemData(idx) >= 0
+                         and self.pair_with_run(row, int(pick.itemData(idx)))))
+        self.eyetrack_run_pick = pick
+        self._body_layout.addWidget(self._eye_row(
+            "Run",
+            "The run this eye tracker recorded during. Choosing it names the files after "
+            "it (folder, session, task, run), so they sit beside the run in BIDS.", pick))
+
+        self.eyetrack_fields = {
+            "screen_size": self._eye_edit(row, "screen_size", scale=100, pair=True,
+                                          hint="width x height, cm"),
+            "screen_distance": self._eye_edit(row, "screen_distance", scale=100,
+                                              hint="eye to screen, cm"),
+            "eye_tracker_distance": self._eye_edit(row, "eye_tracker_distance", scale=100,
+                                                   hint="eye to camera, cm"),
+            "sync_message": self._eye_edit(row, "sync_message",
+                                           hint="a message, e.g. the first trigger"),
+            "start_time": self._eye_edit(row, "start_time", hint="seconds"),
+        }
+        rows = (
+            ("Screen (cm)", "screen_size",
+             "The visible screen, width x height in centimetres (ScreenSize, in metres "
+             "in the file). Required with gaze measured on a screen."),
+            ("Distance (cm)", "screen_distance",
+             "From the eye to the screen, in centimetres (ScreenDistance)."),
+            ("Tracker (cm)", "eye_tracker_distance",
+             "From the eye to the tracker's camera, in centimetres (EyeTrackerDistance)."),
+            ("Sync message", "sync_message",
+             "The text of the message the experiment logged when the run started (the "
+             "scanner's first trigger, say). StartTime becomes the first sample's time "
+             "before it. Left empty, the recording is taken to start the run."),
+            ("Start (s)", "start_time",
+             "StartTime outright, in seconds from the run's start (negative when the eye "
+             "tracker started first). Takes precedence over the message."),
+        )
+        for label, field, tip in rows:
+            self._body_layout.addWidget(self._eye_row(label, tip, self.eyetrack_fields[field]))
+
+    # ------------------------------------------------------------------
     # The schema-driven sidecar section, for this recording alone
     # ------------------------------------------------------------------
 
@@ -909,16 +1213,36 @@ class PropertiesPanel(QWidget):
         stated = self._model.row_template(row)
         filename = section.target.rpartition("/")[2]
 
+        # Built when opened, not on every click: it is the largest part of
+        # the panel (a few hundred controls) and closed by default.
         box = CollapsibleSection(
             "Sidecar fields",
             subtitle=filename,
             badge=f"{len(section.fields)} to answer",
             expanded=self._sidecar_expanded,
+            body_factory=lambda r=row, s=section, a=answered, res=resolved, st=stated:
+                self._build_sidecar_body(r, datatype, s, a, res, st),
         )
         box.toggled_by_user.connect(self._remember_sidecar_expanded)
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(box)
 
+    def _build_sidecar_body(self, row: int, datatype: str, section, answered: dict,
+                            resolved: dict, stated: dict) -> QWidget:
+        """The sidecar section's content (built on first opening)."""
+        holder_all = QWidget()
+        holder_all.setObjectName("meta-row")
+        holder_all.setStyleSheet("#meta-row { background: transparent; }")
+        col = QVBoxLayout(holder_all)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+
+        class _Box:                          # the old ``box.add`` call sites
+            @staticmethod
+            def add(widget):
+                col.addWidget(widget)
+
+        box = _Box()
         # Settled first, in green: this recording's header and entities answer
         # these, and the user needs to see what they need NOT fill in.
         settled = {
@@ -964,6 +1288,7 @@ class PropertiesPanel(QWidget):
             # rather than in a block of its own.
             if field.name == "PowerLineFrequency" and datatype in _EEG_MEG_DATATYPES:
                 box.add(self._build_psd_row(row))
+        return holder_all
 
     def _build_answered_block(self, row: int, section, settled: dict) -> QWidget:
         """The fields this recording already answers, folded away and editable.
@@ -1081,7 +1406,7 @@ class PropertiesPanel(QWidget):
             btn.setEnabled(False)
             btn.setToolTip("No readable source recording found for this row.")
         else:
-            btn.clicked.connect(lambda _=False, r=row: self._on_compute_psd(r))
+            btn.clicked.connect(lambda _=False, r=row: self.compute_psd(r))
         h.addWidget(btn)
 
         spinner = BusySpinner()
@@ -1109,9 +1434,326 @@ class PropertiesPanel(QWidget):
             self._jobs.failed.connect(self._on_job_failed)
         return self._jobs
 
+    def _build_fieldmap_links(self, row: int) -> Optional[QWidget]:
+        """Which runs this fieldmap corrects, as the conversion will link
+        them (``fixups.intended_for.plan_links``), with the reason; ticking
+        and unticking makes it the user's own choice."""
+        links = self._fieldmap_links(row)
+        if links is None:
+            return None
+        candidates, chosen, own, reason = links
+        box = CollapsibleSection(
+            "Corrects these runs",
+            subtitle=("your own choice" if own else "chosen by BIDS Manager"),
+            badge=f"{len(chosen)} of {len(candidates)}",
+            expanded=True,
+        )
+        pal = CUR()
+        why = QLabel(reason if not own else
+                     "Your own choice. The conversion writes exactly these.")
+        why.setObjectName("dlg-hint")
+        why.setWordWrap(True)
+        why.setStyleSheet(f"color:{pal['dim']};")
+        box.add(why)
+        if not candidates:
+            none = QLabel("No BOLD, diffusion or ASL run of this subject and session to "
+                          "correct.")
+            none.setObjectName("dlg-hint")
+            none.setWordWrap(True)
+            box.add(none)
+            return box
+        self.fieldmap_checks: dict[int, QCheckBox] = {}
+        for r in candidates:
+            name = self._cell(r, "bids_name") or self._cell(r, "sequence")
+            check = QCheckBox(name)
+            check.setChecked(r in chosen)
+            check.setToolTip(f"{self._cell(r, 'sequence')}  ({self._cell(r, 'acq_time')})")
+            check.toggled.connect(lambda _on, rr=row: self._on_fieldmap_choice(rr))
+            box.add(check)
+            self.fieldmap_checks[r] = check
+        if own:
+            back = QPushButton("Let BIDS Manager choose again")
+            back.setObjectName("tb-btn-ghost")
+            back.setToolTip("Forget your choice: the conversion links this fieldmap by "
+                            "shim settings and acquisition times.")
+            back.clicked.connect(lambda _c=False, rr=row: self._on_fieldmap_reset(rr))
+            self.fieldmap_reset = back
+            box.add(back)
+        return box
+
+    def _build_why_this_name(self, row: int) -> Optional[QWidget]:
+        """What the acquisition parameters made of this series: the name and
+        how sure, who decided, the evidence for and against, and the other
+        names worth a click (each one undoable edit)."""
+        info = self._model.classification(row) if self._model is not None else {}
+        if not info:
+            return None
+        pal = CUR()
+        chosen = info.get("chosen") or ""
+        who = {"agreement": "the parameters and dcm2niix agree",
+               "parameters": "named from the acquisition parameters",
+               "dcm2niix": "dcm2niix's guess (the parameters were not sure)",
+               "names": "the series name"}.get(info.get("decided_by", ""),
+                                               "the parameters did not decide")
+        box = CollapsibleSection(
+            "Why this name", subtitle=who, badge=f"{info['confidence']:.2f}",
+            expanded=bool(info.get("check")),
+        )
+        box.setToolTip("How the parameter classifier read this series: each line is one "
+                       "piece of evidence and what it counted for or against. Settings > "
+                       "Classification tunes it.")
+        self.why_box = box
+        head = QLabel(f"{chosen}" + (" · worth a look" if info.get("check") else ""))
+        head.setObjectName("why-head")
+        head.setStyleSheet(f"color:{pal['warning'] if info.get('check') else pal['text']};"
+                           "font-weight:600; background:transparent;")
+        box.add(head)
+        if info.get("note"):
+            note = QLabel(info["note"][0].upper() + info["note"][1:] + ".")
+            note.setObjectName("dlg-hint")
+            note.setWordWrap(True)
+            box.add(note)
+        from .viz import fonts
+
+        self.why_lines = []
+        for line in info.get("for", [])[:6]:
+            holder = QWidget()
+            holder.setObjectName("meta-row")
+            holder.setStyleSheet("#meta-row { background: transparent; }")
+            h = QHBoxLayout(holder)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+            points = QLabel(f"{line['points']:+.1f}")
+            points.setFont(fonts.font(11, mono=True))
+            points.setFixedWidth(fonts.px(38))
+            points.setStyleSheet(
+                f"color:{pal['success'] if line['points'] > 0 else pal['error']};"
+                "background:transparent;")
+            text = QLabel(line["text"])
+            text.setWordWrap(True)
+            text.setToolTip({"parameters": "From the acquisition parameters",
+                             "names": "From the series name",
+                             "context": "From the series beside it"}.get(line["source"], ""))
+            text.setStyleSheet(f"color:{pal['text']}; background:transparent;")
+            h.addWidget(points)
+            h.addWidget(text, 1)
+            box.add(holder)
+            self.why_lines.append(line["text"])
+        # Entities the acquisition decided (ce- from the contrast agent),
+        # whoever named the suffix.
+        short = {"ceagent": "ce", "direction": "dir", "inversion": "inv", "part": "part"}
+        entities = self._model.entities(row) if self._model is not None else {}
+        for key, reason in (info.get("entities") or {}).items():
+            value = entities.get(key)
+            if not value:
+                continue
+            chip = QLabel(f"{short.get(key, key)}-{value}")
+            chip.setFont(fonts.font(11, mono=True))
+            chip.setStyleSheet(f"color:{pal['accent']}; background:transparent;")
+            text = QLabel(reason[0].upper() + reason[1:] + ".")
+            text.setWordWrap(True)
+            text.setStyleSheet(f"color:{pal['text']}; background:transparent;")
+            holder = QWidget()
+            holder.setObjectName("meta-row")
+            holder.setStyleSheet("#meta-row { background: transparent; }")
+            h = QHBoxLayout(holder)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+            h.addWidget(chip)
+            h.addWidget(text, 1)
+            box.add(holder)
+            self.why_lines.append(f"{short.get(key, key)}-{value}: {reason}")
+        # Alternatives worth a click: the next names with some weight, and
+        # dcm2niix's own guess.
+        options = self._alternative_names(row, info)
+        self.why_alternatives = {}
+        if options:
+            row_w = QWidget()
+            row_w.setObjectName("meta-row")
+            row_w.setStyleSheet("#meta-row { background: transparent; }")
+            from .widgets.flow_layout import flow
+
+            bar = flow(row_w, h_spacing=6, v_spacing=4)
+            for name, share in options:
+                label = f"Use {name}" + (f" ({share:.2f})" if share is not None else
+                                        " (dcm2niix)")
+                button = QPushButton(label)
+                button.setObjectName("tb-btn-ghost")
+                button.setToolTip(f"Name this series {name} instead (one Undo takes it "
+                                  "back)")
+                button.clicked.connect(lambda _c=False, r=row, n=name: self.use_alternative(r, n))
+                bar.addWidget(button)
+                self.why_alternatives[name] = button
+            box.add(row_w)
+        return box
+
+    def add_row_actions(self, menu, row: int, *, extra: Optional[list] = None) -> None:
+        """What this panel offers for ``row``, as entries of a menu (the
+        inspection table's right-click): the same wording, the same reasons
+        an action is unavailable, the same handlers, so the two surfaces
+        cannot drift apart."""
+        if self._model is None or not (0 <= row < self._model.rowCount()):
+            return
+        from . import icons
+
+        datatype, suffix = self._model.datatype_suffix(row)
+        added = False
+        # ``extra``: the caller's own actions on this row (the Converter's
+        # DICOM header) join these, ahead of what names and links the row.
+        if self._cell(row, "series_uid").strip() or self._cell(row, "source_file").strip():
+            text, tip = self._preview_wording(datatype, suffix)
+            act = menu.addAction(icons.icon("preview"), text + "...")
+            blocker = self._preview_blocker(row)
+            busy = self._preview_row_id is not None
+            act.setEnabled(not blocker and not busy)
+            act.setToolTip(blocker or ("A preview is already being made." if busy else
+                                       tip + " Nothing is written to the dataset."))
+            act.triggered.connect(lambda _c=False, r=row: self.preview(r))
+            added = True
+        if datatype in _EEG_MEG_DATATYPES:
+            act = menu.addAction(icons.icon("psd"), "Compute the power spectrum")
+            found = self._resolve_source_path(row) is not None
+            act.setEnabled(found and self._psd_row_id is None)
+            act.setToolTip("Welch power spectrum per channel and per channel type" if found
+                           else "The recording of this row was not found.")
+            act.triggered.connect(lambda _c=False, r=row: self.compute_psd(r))
+            added = True
+        for act in extra or []:
+            menu.addAction(act)
+            added = True
+        sections = []
+        options = self._alternative_names(row)
+        if options:
+            sub = menu.addMenu(icons.icon("settings_classify"), "Name it instead")
+            for name, share in options:
+                label = name + (f"   ({share:.2f})" if share is not None else "   (dcm2niix)")
+                act = sub.addAction(label)
+                act.setToolTip(f"Name this series {name} (one Undo takes it back)")
+                act.triggered.connect(lambda _c=False, r=row, n=name: self.use_alternative(r, n))
+            sections.append(sub)
+        if datatype == "fmap":
+            links = self._fieldmap_links(row)
+            if links is not None:
+                candidates, chosen, own, reason = links
+                sub = menu.addMenu(icons.icon("channels"), "Corrects these runs")
+                sub.setToolTipsVisible(True)
+                for r in candidates:
+                    act = sub.addAction(self._cell(r, "bids_name") or self._cell(r, "sequence"))
+                    act.setCheckable(True)
+                    act.setChecked(r in chosen)
+                    act.setToolTip(f"{self._cell(r, 'sequence')}  ({self._cell(r, 'acq_time')})")
+                    act.toggled.connect(lambda on, f=row, run=r: self._toggle_fieldmap_run(f, run, on))
+                if not candidates:
+                    none = sub.addAction("No BOLD, diffusion or ASL run to correct")
+                    none.setEnabled(False)
+                if own:
+                    sub.addSeparator()
+                    back = sub.addAction("Let BIDS Manager choose again")
+                    back.triggered.connect(lambda _c=False, r=row: self._on_fieldmap_reset(r))
+                sections.append(sub)
+        if self._cell(row, "modality").strip() == "eyetrack":
+            runs = self._runs_of(row)
+            sub = menu.addMenu(icons.icon("events"), "Pair with a run")
+            for i in runs[:40]:
+                act = sub.addAction(self._run_label(i))
+                act.setToolTip("Take this run's subject, session, task, acquisition and run "
+                               "(one Undo)")
+                act.triggered.connect(lambda _c=False, r=row, other=i: self.pair_with_run(r, other))
+            if not runs:
+                none = sub.addAction("No run with a task to pair with")
+                none.setEnabled(False)
+            sections.append(sub)
+        if sections and added:
+            # The actions first, then what names and links the row.
+            menu.insertSeparator(sections[0].menuAction())
+
+    def _alternative_names(self, row: int, info: Optional[dict] = None) -> list[tuple[str, Optional[float]]]:
+        """The other names worth offering for ``row``: the classifier's next
+        candidates with some weight (and their share), then dcm2niix's own
+        guess (share ``None``); never the current name or a leave-out."""
+        info = info if info is not None else (
+            self._model.classification(row) if self._model is not None else {})
+        if not info:
+            return []
+        shares = {a["name"]: a.get("p", 0) for a in info.get("alternatives", [])}
+        options = [a["name"] for a in info.get("alternatives", [])[:2] if a.get("p", 0) >= 0.05]
+        # When the name or dcm2niix decided, the parameters' own best name is
+        # an alternative too (with their confidence).
+        ours = info.get("ours") or ""
+        if ours and ours != (info.get("chosen") or "") and ours not in options:
+            shares[ours] = info.get("confidence", 0.0)
+            options.insert(0, ours)
+        other = info.get("other") or ""
+        if other and other != (info.get("chosen") or "") and other not in options:
+            options.append(other)
+        current = f"{self._cell(row, 'datatype')}/{self._cell(row, 'bids_guess_suffix')}"
+        return [(o, shares.get(o) if o != other or o in shares else None) for o in options
+                if o and o != current and not o.startswith("exclude/")]
+
+    def use_alternative(self, row: int, name: str) -> None:
+        if self._model is not None and self._model.use_alternative(row, name):
+            QTimer.singleShot(0, lambda: self.set_selected_row(row))
+
+    def _session_runs(self, df, who: tuple[str, str]) -> list[int]:
+        from ..fixups.intended_for import is_target_row
+
+        out = []
+        for r in range(len(df)):
+            if (self._cell(r, "participant_id"), self._cell(r, "session")) != who:
+                continue
+            suffix = self._cell(r, "bids_guess_suffix") or \
+                self._cell(r, "bids_name").rsplit("_", 1)[-1]
+            if is_target_row(self._cell(r, "datatype"), suffix) and \
+                    self._cell(r, "include") not in ("0", "false", "False"):
+                out.append(r)
+        return out
+
+    def _fieldmap_links(self, row: int) -> Optional[tuple[list[int], set[int], bool, str]]:
+        """``(candidate runs, chosen runs, the user's own choice?, reason)``
+        for a fieldmap row, by the conversion's rule (``fixups.intended_for.
+        plan_links``, computed once per table state); ``None`` otherwise."""
+        from ..fixups.intended_for import plan_links
+
+        key = (id(self._model), self._model.revision, id(self._shims))
+        if self._links_cache is None or self._links_cache[0] != key:
+            df = self._model.dataframe()
+            self._links_cache = (key, df, *plan_links(df, shims=self._shims))
+        _key, df, plan, reasons = self._links_cache
+        if row not in plan:
+            return None
+        me = (self._cell(row, "participant_id"), self._cell(row, "session"))
+        candidates = ({x for v in plan.values() for x in v} | set(self._session_runs(df, me)))
+        candidates.discard(row)
+        ordered = sorted(candidates, key=lambda r: self._cell(r, "bids_name"))
+        own = reasons.get(row) == "your own choice"
+        return ordered, set(plan.get(row, [])), own, reasons.get(row, "")
+
+    def _toggle_fieldmap_run(self, row: int, run: int, on: bool) -> None:
+        """The user ticks or unticks one run this fieldmap corrects (one Undo)."""
+        links = self._fieldmap_links(row)
+        if links is None or self._model is None:
+            return
+        _candidates, chosen, _own, _reason = links
+        chosen = (chosen | {run}) if on else (chosen - {run})
+        self._model.set_fieldmap_targets(row, [self._model.row_id(r) for r in sorted(chosen)])
+        if self._row == row:
+            QTimer.singleShot(0, lambda: self.set_selected_row(row))
+
+    def _on_fieldmap_choice(self, row: int) -> None:
+        if self._model is None:
+            return
+        ids = [self._model.row_id(r) for r, c in self.fieldmap_checks.items() if c.isChecked()]
+        self._model.set_fieldmap_targets(row, ids)
+        QTimer.singleShot(0, lambda: self.set_selected_row(row))
+
+    def _on_fieldmap_reset(self, row: int) -> None:
+        if self._model is not None:
+            self._model.set_fieldmap_targets(row, None)
+            QTimer.singleShot(0, lambda: self.set_selected_row(row))
+
     def _preview_blocker(self, row: int) -> str:
         """Why this row cannot be previewed now, or ``""``."""
-        from ..cli.scan import NONIMAGE_ISSUE_TOKEN
+        from ..inventory.types import NONIMAGE_ISSUE_TOKEN
 
         if NONIMAGE_ISSUE_TOKEN in self._cell(row, "issues"):
             return ("This series holds no image (a report or another non-image object), "
@@ -1172,7 +1814,7 @@ class PropertiesPanel(QWidget):
         elif self._preview_row_id is not None:
             btn.setEnabled(False)
         else:
-            btn.clicked.connect(lambda _=False, r=row: self._on_preview(r))
+            btn.clicked.connect(lambda _=False, r=row: self.preview(r))
         self.preview_button = btn
         h.addWidget(btn)
         spinner = BusySpinner()
@@ -1182,10 +1824,9 @@ class PropertiesPanel(QWidget):
         h.addStretch(1)
         return row_w
 
-    def _on_preview(self, row: int) -> None:
+    def preview(self, row: int) -> None:
+        """Convert ``row`` now into a temporary folder and show what it makes."""
         import tempfile
-
-        from ..cli.convert import preview_row
 
         if self._model is None or self._preview_row_id or self._preview_blocker(row):
             return
@@ -1196,7 +1837,7 @@ class PropertiesPanel(QWidget):
         title = (self._cell(row, "SeriesDescription").strip()
                  or self._cell(row, "bids_name").strip()
                  or Path(self._cell(row, "source_file")).name)
-        self._runner().start("preview", self._preview_generation, preview_row,
+        self._runner().start("preview", self._preview_generation, _preview_job,
                              record, self._preview_dir, self._sources)
         # The window opens NOW, on the click, with a spinner, and fills when
         # the row is converted: opened when it finished, it came up seconds
@@ -1251,7 +1892,7 @@ class PropertiesPanel(QWidget):
         if self._row is not None:
             self.set_selected_row(self._row)
 
-    def _on_compute_psd(self, row: int) -> None:
+    def compute_psd(self, row: int) -> None:
         """The spectrum of this row's recording: THE spectrum the Editor's
         viewer computes (``viz.compute.spectral.psd``, Welch over every
         channel's samples), so the same file gives the same answer in both
@@ -1353,9 +1994,12 @@ class PropertiesPanel(QWidget):
         ctl = QWidget()
         ctl.setObjectName("companion-ctl")
         ctl.setStyleSheet("#companion-ctl { background: transparent; }")
-        h = QHBoxLayout(ctl)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(6)
+        # Wraps rather than sets a floor: in a row, the three controls were
+        # wider than the panel at a larger font and pushed everything in it
+        # past the right edge.
+        from .widgets.flow_layout import flow
+
+        h = flow(ctl, h_spacing=6, v_spacing=4)
         self._companion_suffix = QComboBox()
         self._companion_suffix.setObjectName("ent-input")  # opaque popup styling
         self._companion_suffix.addItems(
@@ -1368,7 +2012,6 @@ class PropertiesPanel(QWidget):
         h.addWidget(self._companion_suffix)
         h.addWidget(link)
         h.addWidget(rem)
-        h.addStretch(1)
         self._body_layout.addWidget(ctl)
 
     def _append_pet_dose_section(self, row: int) -> None:
@@ -1787,14 +2430,21 @@ class PropertiesPanel(QWidget):
         if self._model is None or self._row is None:
             return
         if top_left.row() <= self._row <= bottom_right.row():
-            # Re-render but suppress the writeback that the rebuilt
-            # ``QLineEdit`` widgets would trigger via ``editingFinished``
-            # on focus loss during the rebuild.
-            self._suppress_writeback = True
-            try:
-                self.set_selected_row(self._row)
-            finally:
-                self._suppress_writeback = False
+            # One render for the whole burst: an edit fires dataChanged for
+            # every cell it touches (and a bulk edit for every row).
+            self._refresh_timer.start()
+
+    def _on_refresh_timer(self) -> None:
+        if self._model is None or self._row is None or self._pending:
+            return
+        # Re-render but suppress the writeback that the rebuilt
+        # ``QLineEdit`` widgets would trigger via ``editingFinished``
+        # on focus loss during the rebuild.
+        self._suppress_writeback = True
+        try:
+            self.set_selected_row(self._row)
+        finally:
+            self._suppress_writeback = False
 
 
 __all__ = ["PropertiesPanel"]

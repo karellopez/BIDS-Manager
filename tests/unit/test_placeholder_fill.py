@@ -65,6 +65,19 @@ def test_a_field_that_accepts_na_takes_na() -> None:
     assert _todo_value_for(field) == "n/a"
 
 
+@pytest.mark.parametrize("datatype, suffix, name", [
+    ("fmap", "epi", "B0FieldIdentifier"), ("func", "bold", "B0FieldSource"),
+    ("func", "sbref", "B0FieldSource"),
+])
+def test_a_field_that_links_files_gets_no_marker(datatype, suffix, name) -> None:
+    """The same "TODO" on a fieldmap and a run IS a link for sdcflows and
+    fMRIPrep (measured 2026-10-12 on the Shayam and MRI_sample_2
+    conversions): a run with no fieldmap must say nothing, not name one."""
+    field = _spec(datatype, suffix, name)
+    assert _todo_value_for(field) is _NO_TODO
+    assert "link" in unmarkable_reason(field)
+
+
 def test_an_array_of_strings_takes_a_marker_in_a_list() -> None:
     field = next(
         f for f in sc.dataset_description_fields() if f.name == "Authors"

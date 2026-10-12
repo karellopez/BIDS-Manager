@@ -87,6 +87,7 @@ class TestWhatCountsAsARecording:
             "sampling_frequency": 100.0,
             "start_time": -3.5,
             "units": "",
+            "physio_type": "",
         }
 
     def test_a_table_of_onsets_is_not(self, tmp_path):

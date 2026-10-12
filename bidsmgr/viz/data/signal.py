@@ -390,6 +390,26 @@ def open_meeg(path, root=None, *, cancel=None) -> SignalSource:
     return _with_events(src, root)
 
 
+def _eye_events(paths, origin: float) -> list:
+    """The blinks and messages of the eye trackers among ``paths``, on the
+    combined clock (which starts at ``origin``, run time)."""
+    from . import physio
+    from .events import Event
+
+    out = []
+    for p in paths:
+        timing = physio.read_timing(p)
+        if timing is None or timing.get("physio_type") != "eyetrack":
+            continue
+        columns, _total, step = physio.read_columns(p)
+        _cols, timing, stamps = physio.split_timestamps(columns, timing)
+        shift = float(timing.get("start_time", 0.0)) - origin
+        out += [Event(e.onset + shift, e.duration, e.label, e.kind)
+                for e in physio.eyetrack_events(p, stamps, float(timing["sampling_frequency"]),
+                                                step)]
+    return out
+
+
 def open_physio(path, root=None, *, together: bool = False) -> SignalSource:
     """A continuous BIDS table (physio, stim), or every physio file of the
     run on one clock (``together``)."""
@@ -402,7 +422,10 @@ def open_physio(path, root=None, *, together: bool = False) -> SignalSource:
             raw, gaps, start = physio.build_combined_raw(siblings)
             src = SignalSource(path=path, raw=raw, kind="physio", gaps=gaps,
                                start_time=start, paths=siblings)
-            return _with_events(src, root)
+            src = _with_events(src, root)
+            src.events_annotations = list(src.events_annotations) + _eye_events(
+                siblings, start)
+            return src
     timing = physio.read_timing(path)
     if timing is None:
         raise ValueError(f"{path.name} has no sidecar stating SamplingFrequency "
@@ -410,6 +433,7 @@ def open_physio(path, root=None, *, together: bool = False) -> SignalSource:
     columns, total, step = physio.read_columns(path)
     if not columns:
         raise ValueError(f"no numeric columns could be read from {path.name}")
+    columns, timing, stamps = physio.split_timestamps(columns, timing)
     raw, gaps = physio.build_raw(columns, timing, step)
     note = ""
     if step > 1:
@@ -418,7 +442,12 @@ def open_physio(path, root=None, *, together: bool = False) -> SignalSource:
     src = SignalSource(path=path, raw=raw, kind="physio", gaps=gaps,
                        start_time=float(timing.get("start_time", 0.0)),
                        paths=[path], note=note)
-    return _with_events(src, root)
+    src = _with_events(src, root)
+    if stamps is not None:
+        # An eye tracker's blinks and the experiment's messages.
+        src.events_annotations = list(src.events_annotations) + physio.eyetrack_events(
+            path, stamps, float(timing["sampling_frequency"]), step)
+    return src
 
 
 def resampled(src: SignalSource, sfreq: float) -> SignalSource:

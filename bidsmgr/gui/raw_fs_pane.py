@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QLabel,
@@ -53,6 +53,7 @@ _MAX_PER_FOLDER = 300
 
 _PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 _PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 2
+_FILE_ROLE = Qt.ItemDataRole.UserRole + 3
 
 # Skip junk directories that pollute the tree without carrying any
 # scanner-relevant content.
@@ -76,7 +77,13 @@ class RawFsPane(QWidget):
 
     Pass an inventory model via :meth:`bind_model` so the tree can mark
     rows the scanner kept vs. skipped.
+
+    A double-click on a file, or "Show the DICOM header" on its right-click
+    menu, announces it (:attr:`file_activated`); the Converter opens a
+    DICOM's header in a window.
     """
+
+    file_activated = pyqtSignal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -100,6 +107,9 @@ class RawFsPane(QWidget):
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
         self._tree.itemExpanded.connect(self._on_item_expanded)
+        self._tree.itemDoubleClicked.connect(self._on_double_click)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_menu)
         toggle_on_click(self._tree)
         from .theme_manager import scaled_px
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
@@ -216,6 +226,29 @@ class RawFsPane(QWidget):
             Path(folder), item, kept=self._kept, skipped=self._skipped,
         )
 
+    def file_of(self, item: Optional[QTreeWidgetItem]) -> Optional[Path]:
+        """The file a tree item is (``None`` for a folder)."""
+        path = item.data(0, _FILE_ROLE) if item is not None else None
+        return Path(path) if path else None
+
+    def _on_double_click(self, item: QTreeWidgetItem, _column: int) -> None:
+        path = self.file_of(item)
+        if path is not None:
+            self.file_activated.emit(path)
+
+    def _on_menu(self, pos) -> None:
+        from ..inventory.mri_dicom import is_dicom_file
+        from .viz.menus import popup_menu
+
+        path = self.file_of(self._tree.itemAt(pos))
+        if path is None or not is_dicom_file(str(path)):
+            return
+        menu = popup_menu(self._tree)
+        menu.addAction(icons.icon("tree_dicom"), "Show the DICOM header").triggered.connect(
+            lambda: self.file_activated.emit(path))
+        menu.popup(self._tree.viewport().mapToGlobal(pos))
+        self._menu = menu
+
     def _populate(
         self,
         folder: Path,
@@ -267,6 +300,7 @@ class RawFsPane(QWidget):
                 placeholder.setData(0, _PLACEHOLDER_ROLE, True)
                 child.addChild(placeholder)
             else:
+                child.setData(0, _FILE_ROLE, entry.path)
                 abs_path = str(Path(entry.path).resolve())
                 if abs_path in skipped:
                     # Visually mark as skipped — struck-through + muted.

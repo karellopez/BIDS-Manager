@@ -52,6 +52,7 @@ from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 import bidsmgr
 
+from ..util.oplog import add_log_arguments, dataset_root_for, log_keywords, logged
 from ..converter import (
     ConvertResult,
     ConvertTask,
@@ -70,6 +71,7 @@ from ..fixups import (
     enrich_pet_sidecars,
     enrich_physio_sidecars,
     enrich_recording_sidecars,
+    place_stimulus_presentation,
     populate_intended_for,
     repair_converter_output,
     update_scans_tsv,
@@ -84,6 +86,8 @@ from ..recording_meta import (
     resolve_effective,
     scaffold_sidecar_path,
 )
+from ..converter.sourcedata import MODALITIES as SOURCEDATA_MODALITIES
+from ..converter.sourcedata import SourcedataOptions
 from ..util.cancel import OperationCancelled, is_cancelled
 from ..util.paths import safe_path_component
 from ._scaffold import ensure_bidsignore, ensure_dataset_description
@@ -253,6 +257,14 @@ def _apply_pet_metadata_json(spec, path: Path, df) -> object:
     return spec.model_copy(update={"pet_overrides": overrides})
 
 
+@logged("convert", lambda a: (
+    dataset_root_for(Path(a["tsv"]).parent)
+    or (Path(a["bids_parent"]) / a["dataset"] if a["dataset"] else None),
+    {"inventory": a["tsv"], "output": a["bids_parent"], "dataset": a["dataset"],
+     "source data": a["raw_root"], "workers": a["n_jobs"],
+     "existing files": a["on_existing"] or ("replace" if a["overwrite"] else "skip"),
+     "dry run": a["dry_run"], "deface": a["deface"],
+     "source data kept": a["sourcedata"]}))
 def run_convert(
     tsv: Path,
     bids_parent: Path,
@@ -273,6 +285,10 @@ def run_convert(
     deface: bool = False,
     deface_engine: str = DEFACE_DEFAULT_ENGINE,
     cancel_check=None,
+    intended_for: str = "uri",
+    b0_field: bool = True,
+    sourcedata: str = "none",
+    sourcedata_modalities=SOURCEDATA_MODALITIES,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
 
@@ -296,8 +312,14 @@ def run_convert(
     ``*_scans.tsv`` field by field instead of overwriting, so metadata somebody
     curated in the Editor survives a re-conversion of the same subject. Pass
     False to have the fresh conversion win outright.
+
+    ``sourcedata`` (``none``, ``copy``, ``archive``) keeps each subject's
+    source files in ``<dataset>/sourcedata/`` for ``sourcedata_modalities``
+    (``converter/sourcedata``). Refused before anything is written when the
+    disk cannot hold them.
     """
     tsv = Path(tsv)
+    src_options = SourcedataOptions.parse(sourcedata, sourcedata_modalities)
     bids_parent = Path(bids_parent)
 
     # Resolve the existing-subject policy. ``--overwrite`` is the back-compat
@@ -434,6 +456,26 @@ def run_convert(
     primary = select_backend("mri", dcm2niix_bin=dcm2niix_bin)
     dcm2niix_version = _dcm2niix_version_string(primary.binary)
 
+    if src_options.enabled and not dry_run:
+        # Nothing is written before the copies are known to fit.
+        from ..converter import sourcedata as _sd
+
+        needed = 0
+        for _name, dataset_df in df.groupby("dataset"):
+            for _subject, subject_df in dataset_df.groupby("participant_id"):
+                needed += _sd.estimate(_sd.plan(_build_tasks_for_subject(
+                    subject_df, bids_parent, files_by_uid,
+                    source_search_roots=source_search_roots,
+                    skip_residuals=skip_residuals, force_edf=force_edf, spec=spec,
+                ), src_options))[1]
+        problem = _sd.space_problem(bids_parent, needed)
+        if problem:
+            log.error("%s Nothing was converted.", problem)
+            return 1
+        log.info("source data kept in sourcedata/ (%s, %s): %s", src_options.form,
+                 ", ".join(m for m in SOURCEDATA_MODALITIES if m in src_options.modalities),
+                 _sd.human_size(needed))
+
     n_failed = 0
     n_new = 0
     n_merged = 0
@@ -501,6 +543,9 @@ def run_convert(
                     preserve_curation=preserve_curation,
                     deface=deface,
                     deface_engine=deface_engine,
+                    intended_for=intended_for,
+                    b0_field=b0_field,
+                    sourcedata=src_options,
                 )
                 if existed:
                     n_merged += 1
@@ -552,8 +597,12 @@ def _convert_subject(
     preserve_curation: bool = True,
     deface: bool = False,
     deface_engine: str = DEFACE_DEFAULT_ENGINE,
+    intended_for: str = "uri",
+    b0_field: bool = True,
+    sourcedata: Optional[SourcedataOptions] = None,
 ) -> None:
-    """Run Phases 1–3 for a single (dataset, subject, session) group."""
+    """Run Phases 1–3 for a single (dataset, subject, session) group, then
+    keep its source data when asked."""
     subject = tasks[0].subject
     # Subject label is inventory-derived (user-editable). Sanitise into
     # a portable path component so a stray ``|``, ``:`` or trailing dot
@@ -561,6 +610,7 @@ def _convert_subject(
     subj_segment = f"sub-{safe_path_component(subject)}"
     staging = bids_root / ".tmp_bidsmgr" / subj_segment
     staging.mkdir(parents=True, exist_ok=True)
+    source_staging = bids_root / ".tmp_bidsmgr" / "sourcedata" / subj_segment
 
     results: list[ConvertResult] = []
     failed_phase: Optional[str] = None
@@ -577,6 +627,8 @@ def _convert_subject(
         n_scans_tsv = update_scans_tsv(staging, rename_map)
         n_intended_for = populate_intended_for(
             staging, subject=subject, session=tasks[0].session,
+            form=intended_for, b0_field=b0_field,
+            links=_user_fieldmap_links(results, rename_map),
         )
         # EEG/MEG sidecar/channels/events enrichment from the recording-
         # metadata spec (no-op for MRI-only subjects or when spec is None).
@@ -604,6 +656,9 @@ def _convert_subject(
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
+        # The screen an eye tracker measured gaze on, beside the run's events
+        # (which the line above may just have attached).
+        n_enriched += place_stimulus_presentation(staging, tasks)
         # A PET run's blood curves, which ARE converted: PMOD exports become the
         # BIDS blood tables, named for the run they belong to. Source data the
         # user pointed at, so it belongs to the conversion.
@@ -668,6 +723,9 @@ def _convert_subject(
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
         )
         log.info("committed sub-%s to %s", subject, target)
+        if sourcedata is not None and sourcedata.enabled:
+            _keep_source_data(tasks, sourcedata, bids_root, subj_segment, source_staging,
+                              on_existing=on_existing, cancel_check=cancel_check)
 
     except OperationCancelled:
         # User Stop, not a failure: no forensic error log. The ``finally``
@@ -697,6 +755,12 @@ def _convert_subject(
         # Always wipe staging (success or fail; forensic data is in the error log).
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+        if source_staging.exists():
+            shutil.rmtree(source_staging, ignore_errors=True)
+        try:
+            source_staging.parent.rmdir()
+        except OSError:
+            pass
         # Try to remove the empty .tmp_bidsmgr container too.
         # mne-bids may have written dataset-level files there (README,
         # dataset_description.json, participants.tsv/json) when it
@@ -772,8 +836,9 @@ def _phase1_parallel_dcm2niix(
     # data" -> IndexError). dcm2niix (MRI) and physio tasks write only their
     # own independent outputs and are safe to parallelise. So split the work:
     # mne-bids-backed tasks run sequentially, the rest run in the pool.
-    serial = [t for t in tasks if t.datatype in _MNE_BIDS_DATATYPES]
-    parallel_tasks = [t for t in tasks if t.datatype not in _MNE_BIDS_DATATYPES]
+    serial = [t for t in tasks if t.datatype in _MNE_BIDS_DATATYPES
+              and t.modality != "eyetrack"]
+    parallel_tasks = [t for t in tasks if t not in serial]
 
     out: list[ConvertResult] = []
 
@@ -922,6 +987,65 @@ def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str)
     log.info(msg)
 
 
+def sourcedata_estimate(df: pd.DataFrame, sources, options: SourcedataOptions
+                        ) -> tuple[int, int, list[str]]:
+    """``(files, bytes, modalities)`` that keeping the source data of the
+    rows a conversion would convert adds, for the confirmation before Run.
+    ``sources`` is the scan's :class:`~bidsmgr.inventory.sources.ScanSources`
+    (where the data is now)."""
+    from ..converter import sourcedata as _sd
+
+    if not options.enabled:
+        return 0, 0, []
+    rows = _filter_convertible_rows(df.fillna("").astype(str))
+    n = size = 0
+    kinds: set[str] = set()
+    for _, row in rows.iterrows():
+        kind = _sd.kind_for(row.get("modality", ""), row.get("datatype", ""),
+                            str(row.get("bids_name", "")).rsplit("_", 1)[-1])
+        if kind not in options.modalities:
+            continue
+        uid = str(row.get("series_uid", "")).strip()
+        if uid:
+            files = sources.series_files(uid)
+        else:
+            found = sources.file(str(row.get("source_file", "")))
+            files = _sd.recording_files(found) if found is not None else []
+        if not files:
+            continue
+        kinds.add(kind)
+        items = [_sd.Item(kind=kind, destination="", files=[(f, f.name) for f in files])]
+        count, nbytes = _sd.estimate(items)
+        n += count
+        size += nbytes
+    return n, size, [k for k in _sd.MODALITIES if k in kinds]
+
+
+def _keep_source_data(tasks, options: SourcedataOptions, bids_root: Path, subj_segment: str,
+                      staging: Path, *, on_existing: str, cancel_check=None) -> None:
+    """Keep the subject's source data in ``sourcedata/``, after the subject
+    itself committed. A failure here is said and does not undo the
+    conversion; a stop is a stop."""
+    from ..converter import sourcedata as _sd
+
+    try:
+        report = _sd.keep_subject(
+            tasks, options, staging=staging,
+            target=bids_root / _sd.SOURCEDATA / subj_segment, on_existing=on_existing,
+            backup_root=bids_root / ".bidsmgr" / "backup", stamp=_utc_stamp(),
+            cancel_check=cancel_check)
+    except OperationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the conversion itself succeeded
+        log.warning("%s: the source data could not be kept in sourcedata/ (%s: %s)",
+                    subj_segment, type(exc).__name__, exc)
+        return
+    if report is not None:
+        log.info("%s: source data in sourcedata/: %s", subj_segment, report.summary())
+        for line in report.failed[:10]:
+            log.warning("%s: not copied to sourcedata/: %s", subj_segment, line)
+
+
 def _merge_commit(
     staging_subject: Path, target: Path, *, on_existing: str,
     preserve_curation: bool = True,
@@ -1026,6 +1150,29 @@ def _merge_commit(
 # ---------------------------------------------------------------------------
 # Task construction from TSV rows
 # ---------------------------------------------------------------------------
+
+
+def _user_fieldmap_links(results: list[ConvertResult],
+                         rename_map: dict) -> dict[str, list[str]]:
+    """The user's own fieldmap choices, from row ids to the image names the
+    conversion produced: ``{fieldmap image: [run images]}``."""
+    images: dict[str, list[str]] = {}
+    for res in results:
+        names = []
+        for path in res.staged_files:
+            final = Path(rename_map.get(path, path))
+            if final.name.endswith((".nii", ".nii.gz")):
+                names.append(final.name)
+        images[res.task.row_id] = names
+    links: dict[str, list[str]] = {}
+    for res in results:
+        chosen = res.task.fieldmap_targets
+        if not chosen:
+            continue
+        targets = [name for rid in chosen for name in images.get(rid, [])]
+        for name in images.get(res.task.row_id, []):
+            links[name] = targets
+    return links
 
 
 def _filter_convertible_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -1181,13 +1328,28 @@ def _row_to_task_mri(
         session=session,
         datatype=datatype,
         suffix=suffix,
+        modality=str(row.get("modality", "")).strip().lower(),
         entities=entities_dict,
         basename=basename,
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
         skip_residuals=skip_residuals,
         companion_files=_parse_companion(row),
+        fieldmap_targets=_parse_fieldmap_targets(row),
     )
+
+
+def _parse_fieldmap_targets(row: pd.Series) -> tuple[str, ...]:
+    """The runs the user chose for a fieldmap row (``fieldmap_targets``, a
+    JSON list of row ids); ``()`` when the rule decides."""
+    raw = str(row.get("fieldmap_targets", "") or "").strip()
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return ()
+    return tuple(str(x) for x in data) if isinstance(data, list) else ()
 
 
 def _parse_companion(row: pd.Series) -> tuple[tuple[str, str], ...]:
@@ -1262,7 +1424,8 @@ def _row_to_task_file_based(
         session = None
 
     datatype = str(row.get("datatype", "")).strip().lower()
-    if datatype not in _FILE_BASED_DATATYPES:
+    eyetrack = str(row.get("modality", "")).strip().lower() == "eyetrack"
+    if datatype not in _FILE_BASED_DATATYPES and not eyetrack:
         # Either not actually a file-based row, or the user clobbered the
         # column. Skip.
         return None
@@ -1383,6 +1546,7 @@ def _row_to_task_file_based(
         session=session,
         datatype=datatype,
         suffix=suffix,
+        modality=str(row.get("modality", "")).strip().lower(),
         entities=entities,
         basename=basename,
         expected_outputs=expected_outputs,
@@ -1393,7 +1557,17 @@ def _row_to_task_file_based(
         eeg_ground=eeg_ground,
         force_edf=force_edf,
         companion_files=_parse_companion(row),
+        eyetrack=_eyetrack_settings(spec, source_file) if eyetrack else {},
     )
+
+
+def _eyetrack_settings(spec: Optional[RecordingMetaSpec], row_id: str) -> dict:
+    """What the user said about an eye-tracking recording (screen, timing)."""
+    from ..recording_meta import resolve_eyetrack
+
+    if spec is None:
+        return {}
+    return resolve_eyetrack(spec, row_id).model_dump(exclude_none=True)
 
 
 def _suffix_from_basename(basename: str) -> str:
@@ -1434,7 +1608,11 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
         path = sources.file(source_file)
         if path is None:
             raise FileNotFoundError(f"{source_file} is not in {sources.root}")
-        if is_recording_path(path):
+        # An EyeLink .edf shares its extension with an EEG recording and is
+        # nothing like one: it is converted (to the BEP020 physio tables the
+        # signal viewer plots), not read as it is.
+        eyetrack = str(row.get("modality", "")).strip().lower() == "eyetrack"
+        if is_recording_path(path) and not eyetrack:
             return [path]
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1767,6 +1945,25 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--intended-for", choices=("uri", "relative"), default="uri",
+        help="How a fieldmap's IntendedFor names its runs: BIDS URIs (default) or "
+             "paths relative to the subject (with the session). Older fMRIPrep "
+             "(sdcflows 2.10 and earlier) ignores URIs; B0FieldIdentifier is read by "
+             "every version.")
+    parser.add_argument(
+        "--no-b0-field-identifier", action="store_true",
+        help="Do not write B0FieldIdentifier / B0FieldSource next to IntendedFor.")
+    parser.add_argument(
+        "--sourcedata", choices=("none", "copy", "archive"), default="none",
+        help="Keep each subject's source files in <dataset>/sourcedata/: as they are "
+             "(copy) or one .tar.gz per series (archive). Default: none. The copies are "
+             "not anonymised.")
+    parser.add_argument(
+        "--sourcedata-modalities", default=",".join(SOURCEDATA_MODALITIES),
+        metavar="LIST",
+        help="Which source data --sourcedata keeps, comma separated, from "
+             f"{', '.join(SOURCEDATA_MODALITIES)} (default: all).")
+    parser.add_argument(
         "--raw-root", default=None, type=Path,
         help=(
             "Folder the scan was run against. Used as the first "
@@ -1832,6 +2029,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
 
+    add_log_arguments(parser)
     args = parser.parse_args(argv)
     # One version for the whole run, adopted before any schema question is
     # asked. Without this the flag would reach the validator alone and a
@@ -1902,6 +2100,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
             force_edf=args.force_edf,
             deface=args.deface,
             deface_engine=args.deface_engine,
+            intended_for=args.intended_for,
+            b0_field=not args.no_b0_field_identifier,
+            sourcedata=args.sourcedata,
+            sourcedata_modalities=args.sourcedata_modalities,
+            **log_keywords(args),
         )
 
     if not args.tsv or not args.bids_parent:
@@ -1925,6 +2128,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
         force_edf=args.force_edf,
         deface=args.deface,
         deface_engine=args.deface_engine,
+        intended_for=args.intended_for,
+        b0_field=not args.no_b0_field_identifier,
+        sourcedata=args.sourcedata,
+        sourcedata_modalities=args.sourcedata_modalities,
+        **log_keywords(args),
     )
 
 

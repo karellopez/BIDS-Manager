@@ -669,6 +669,12 @@ QFrame#panel-frame-header[foldable="true"]:hover { background: $surface3; }
 QFrame[card="true"] QWidget#pane,
 QFrame[card="true"] QWidget#pane-dark { background: transparent; border: none; }
 QFrame[card="true"] QLabel#pane-h5 { background: transparent; }
+/* A list, a tree or a log inside a card is the card: no second box. */
+QFrame[card="true"] QTreeWidget#log-history,
+QFrame[card="true"] QTreeWidget#renumber-table {
+    background: transparent;
+    border: none;
+}
 QSplitter#card-split::handle { background: transparent; }
 QSplitter#card-split::handle:hover { background: $subtle; border-radius: 3px; }
 
@@ -688,12 +694,14 @@ QFrame#panel-frame-header QLabel#pane-h5 {
     padding: 0px 2px;
 }
 QToolButton#panel-frame-caret,
+QToolButton#dock-corner-btn,
 QToolButton#panel-frame-detach {
     background: transparent;
     border: none;
     padding: 2px;
 }
 QToolButton#panel-frame-caret:hover,
+QToolButton#dock-corner-btn:hover,
 QToolButton#panel-frame-detach:hover {
     background: $border;
     border-radius: 3px;
@@ -835,6 +843,52 @@ QTableView#tsv-view::item {
     border-bottom: 1px solid $subtle;
 }
 QTableView#tsv-view::item:selected { background: $accent_bg; }
+
+/* DICOM header pane: a tree of modules and elements, the frames and a
+   comparison as tables. No item colour here: identifying values and tags
+   are coloured by the model (ForegroundRole), which an ::item color would
+   override. */
+QTreeView#dicom-header-tree,
+QTableView#dicom-frames,
+QTableView#dicom-compare {
+    background: transparent;
+    alternate-background-color: transparent;
+    border: none;
+    outline: 0;
+    color: $text;
+    selection-background-color: $accent_bg;
+    selection-color: $text;
+    font-size: 11px;
+}
+QTreeView#dicom-header-tree::item {
+    padding: 3px 4px;
+    min-height: 20px;
+    border: none;
+}
+QTreeView#dicom-header-tree::item:hover { background: $surface3; }
+QTreeView#dicom-header-tree::item:selected { background: $accent_bg; }
+QTableView#dicom-frames::item,
+QTableView#dicom-compare::item {
+    padding: 4px 8px;
+    border-bottom: 1px solid $subtle;
+}
+QTableView#dicom-frames::item:selected,
+QTableView#dicom-compare::item:selected { background: $accent_bg; }
+QFrame#dicom-rule { background: $subtle; border: none; }
+/* Settings > Convert > Source data: what keeping it means. */
+QLabel#sourcedata-note { color: $warning; font-size: 11px; background: transparent; }
+QLabel#sourcedata-note:disabled { color: $dim; }
+QLabel#dicom-fact {
+    color: $dim;
+    font-size: 11px;
+    background: transparent;
+}
+QLabel#dicom-fact-strong {
+    color: $text;
+    font-size: 11px;
+    font-weight: 600;
+    background: transparent;
+}
 
 QHeaderView { background: transparent; }
 QHeaderView::section {
@@ -1752,3 +1806,6 @@ QPushButton#glyph-btn:disabled { color: $muted; }
 
 /* The validation pane's own severity filter row. */
 QFrame#val-filter-row { background: transparent; border: none; }
+
+/* The Log tab's corner icons sit on the tab bar, not in a header. */
+QWidget#dock-corner { background: transparent; }

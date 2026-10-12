@@ -21,6 +21,7 @@ Planned later: ``derivatives`` (DWI map relocation: FA/ADC/TRACE/ColFA →
 
 from .companion import attach_companion_files
 from .eeg_sidecar import enrich_recording_sidecars
+from .eyetrack import place_stimulus_presentation
 from .identifiers import prune_identifiers
 from .mrs_header import clean_mrs_file, clean_mrs_outputs, read_mrs_header
 from .pet_sidecar import enrich_pet_sidecars
@@ -33,6 +34,7 @@ from .deface import deface_staged
 from .sidecar_schema import apply_stated_metadata, repair_converter_output
 
 __all__ = [
+    "place_stimulus_presentation",
     "convert_blood_files",
     "apply_fieldmap_renames",
     "populate_intended_for",

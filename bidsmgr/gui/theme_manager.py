@@ -489,6 +489,22 @@ class ThemeManager:
         self.apply(self._theme)
 
     # --------------------------------------------------------------- actions
+    def _follow_native_scheme(self, dark: bool) -> None:
+        """Tell the platform which scheme the theme is. Without it Qt follows
+        the system: on a Mac in dark mode every window of a light theme had
+        a black title bar and frame (a spectrum window most visibly), and
+        native dialogs followed macOS instead of the theme. Qt 6.8+ (the
+        call is absent before); on Linux it is a hint the platform may
+        ignore."""
+        try:
+            from PyQt6.QtCore import Qt as _Qt
+
+            hints = self._app.styleHints()
+            if hasattr(hints, "setColorScheme"):
+                hints.setColorScheme(_Qt.ColorScheme.Dark if dark else _Qt.ColorScheme.Light)
+        except Exception:  # noqa: BLE001 - a hint, never a failure
+            pass
+
     def apply(self, theme: str) -> None:
         if theme not in PALETTES:
             return
@@ -519,6 +535,7 @@ class ThemeManager:
         tokens = {**pal, **write_theme_images(pal, theme)}
         self._app.setStyleSheet(scaled_template.safe_substitute(**tokens))
         self._update_qpalette(pal)
+        self._follow_native_scheme(info.dark)
         try:
             app_font = QFont(self._app.font())
             app_font.setPixelSize(

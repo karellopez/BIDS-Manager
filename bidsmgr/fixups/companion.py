@@ -59,6 +59,12 @@ def attach_companion_files(subject_staging_dir: Path, tasks) -> int:
         if sidecar is None:
             continue
         prefix = basename.rsplit("_", 1)[0] if "_" in basename else basename
+        if getattr(task, "modality", "") == "eyetrack":
+            # The eye (recording-eye1) names the eye tracker's files only; the
+            # run's events are the run's.
+            from ..converter.backends.eyelink import match_of
+
+            prefix = match_of(basename)
 
         for suffix, src in companions:
             if is_blood_role(str(suffix)):
