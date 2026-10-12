@@ -186,15 +186,19 @@ class _EntityRow(QWidget):
         # as an instruction, which is why this is a button and not a hint.
         # Offered only where the schema allows the entity to go, and only
         # while there is something to take away.
-        self.remove = QToolButton()
+        # Parented, and shown only once in the row: a widget with no parent
+        # made visible is a top-level window for that moment, which took the
+        # focus from a floating Inspection or Filter window on every click
+        # (macOS then raised the main window over it).
+        self.remove = QToolButton(self)
         self.remove.setObjectName("tb-btn")
         self.remove.setText("\u00d7")
         self.remove.setToolTip(
             f"Remove {entity_name} from this recording, so it stops "
             f"appearing in its BIDS name."
         )
-        self.remove.setVisible(removable and bool(value))
         h.addWidget(self.remove, 0)
+        self.remove.setVisible(removable and bool(value))
 
     def value(self) -> str:
         return self.edit.text().strip()

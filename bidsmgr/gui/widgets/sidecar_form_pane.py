@@ -775,6 +775,7 @@ class SidecarFormPane(QWidget):
         # until ``deleteLater`` processes on the next event-loop tick.
         for row in self._rows:
             self._body_layout.removeWidget(row)
+            row.hide()
             row.setParent(None)
             row.deleteLater()
         self._rows.clear()

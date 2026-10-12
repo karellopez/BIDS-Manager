@@ -95,8 +95,9 @@ def test_the_converter_marks_runs_and_offers_the_logs(qtbot, isolated_settings,
     assert panel._log_view.lines()[0][0] == "run", "emptied: the setting is on by default"
     panel._begin_run("Validation", first=False)
     assert [k for k, _ in panel._log_view.lines()] == ["run", "run"], "a chained step keeps it"
-    corner = panel._left_tabs.cornerWidget()
-    assert corner is not None and set(panel._log_buttons) == {
-        "log_clear", "log_file", "log_history"}
+    assert set(panel._log_buttons) == {"log_clear", "log_file", "log_history"}
+    # In the Log panel's own header, not on a tab bar of their own.
+    assert all(b.window() is panel.window() and panel._log_frame._bar.isAncestorOf(b)
+               for b in panel._log_buttons.values())
     panel._log_buttons["log_clear"].click()
     assert panel._log_view.lines() == []

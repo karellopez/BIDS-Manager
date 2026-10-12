@@ -117,6 +117,7 @@ class _RowList(QWidget):
         def drop() -> None:
             if entry in self._rows:
                 self._rows.remove(entry)
+            row.hide()
             row.setParent(None)
             if not self._rows:
                 self.add_row()
@@ -138,6 +139,7 @@ class _RowList(QWidget):
 
     def set_value(self, values) -> None:
         for row, _read, _write in list(self._rows):
+            row.hide()
             row.setParent(None)
         self._rows.clear()
         for item in values or []:

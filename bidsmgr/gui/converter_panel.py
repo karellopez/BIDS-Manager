@@ -1491,28 +1491,40 @@ class ConverterPanel(QWidget):
         split.setChildrenCollapsible(False)
 
         # ---------- left: Log ----------
-        left_tabs = QTabWidget()
-        left_tabs.setDocumentMode(True)
-        left_tabs.setMovable(False)
-
-        # Log — append-only stream from worker progress signals.
-        # Styling lives in theme.qss under ``QPlainTextEdit#dock-log``.
-        # Runs with headings, warnings and errors in colour, emptied for
-        # each run when the setting says so; every run also writes a file.
+        # Log: append-only stream from worker progress signals, styled in
+        # theme.qss (``QPlainTextEdit#dock-log``). Runs with headings,
+        # warnings and errors in colour, emptied for each run when the
+        # setting says so; every run also writes a file.
+        #
+        # One header, the panel's: its buttons (clear, the run's file, every
+        # log) sit in it, named HEADER_EXTRAS so the frame lifts them there
+        # and hands them back when the Log floats. A tab bar holding the one
+        # tab "Log" under a title "LOG" said it twice, and its rule broke
+        # where the buttons sat beside it.
+        from .widgets.panel_frame import HEADER_EXTRAS
         from .widgets.run_log import RunLog
 
         self._log_view = RunLog()
-        left_tabs.addTab(self._log_view, "Log")
-        icons.apply_tab(left_tabs, 0, "log")
-        left_tabs.setCornerWidget(self._build_log_corner(), Qt.Corner.TopRightCorner)
+        log_box = QWidget()
+        log_box.setObjectName("dock-log-box")
+        col = QVBoxLayout(log_box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        home = QWidget()
+        home_row = QHBoxLayout(home)
+        home_row.setContentsMargins(0, 0, 0, 0)
+        home_row.setSpacing(0)
+        home_row.addStretch(1)
+        corner = self._build_log_corner()
+        corner.setObjectName(HEADER_EXTRAS)
+        home_row.addWidget(corner)
+        col.addWidget(home)
+        col.addWidget(self._log_view, 1)
 
         # Detach-only wrappers so the Log and the preview/stats group can
         # each pop out into their own window (no collapse here -- the whole
         # dock collapses together via the surrounding ``_dock_frame``).
-        self._log_frame = PanelFrame(
-            left_tabs, "Log", collapsible=False, detachable=True,
-            hide_inner_header=False,
-        )
+        self._log_frame = PanelFrame(log_box, "Log", collapsible=False, detachable=True)
         split.addWidget(self._log_frame)
 
         # ---------- right: BIDS preview + Statistics ----------
@@ -1525,7 +1537,7 @@ class ConverterPanel(QWidget):
         self._bids_preview.setRootIsDecorated(False)
         self._bids_preview.setIndentation(14)
         self._bids_preview.setObjectName("dock-bids-preview")
-        right_tabs.addTab(self._bids_preview, "BIDS preview")
+        right_tabs.addTab(self._bids_preview, "BIDS tree")
         icons.apply_tab(right_tabs, 0, "preview")
 
         stats = QLabel("(statistics fill in after a scan)")
@@ -1535,12 +1547,12 @@ class ConverterPanel(QWidget):
         right_tabs.addTab(stats, "Statistics")
         icons.apply_tab(right_tabs, 1, "statistics")
 
-        # Keep references for ``repaint_for_palette`` re-tinting.
-        self._left_tabs = left_tabs
+        # Keep a reference for ``repaint_for_palette`` re-tinting.
         self._right_tabs = right_tabs
 
+        # Titled for both of its views, so its title does not repeat a tab.
         self._preview_frame = PanelFrame(
-            right_tabs, "BIDS preview", collapsible=False, detachable=True,
+            right_tabs, "Preview", collapsible=False, detachable=True,
             hide_inner_header=False,
         )
         split.addWidget(self._preview_frame)
@@ -2456,8 +2468,6 @@ class ConverterPanel(QWidget):
             "stop" if convert_running else "run",
             color=pal.get("primary_btn_text"),
         )
-        if hasattr(self, "_left_tabs"):
-            icons.apply_tab(self._left_tabs, 0, "log")
         if hasattr(self, "_right_tabs"):
             icons.apply_tab(self._right_tabs, 0, "preview")
             icons.apply_tab(self._right_tabs, 1, "statistics")
@@ -2631,6 +2641,9 @@ class ConverterPanel(QWidget):
         if index.isValid() and index.row() not in rows:
             self._table.selectRow(index.row())
             rows = [index.row()]
+            # Properties follows now, before the menu opens: rebuilt under an
+            # open menu, it could close it.
+            self._properties.flush()
         if not rows:
             return
         menu = popup_menu(self._table)

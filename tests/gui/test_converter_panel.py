@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from PyQt6.QtCore import Qt
 
 from bidsmgr.gui.converter_panel import ConverterPanel
 from bidsmgr.gui.models import COLUMNS
@@ -355,15 +354,18 @@ def test_bottom_dock_split_layout(qtbot) -> None:
 
     # The dock's two tab groups are wrapped in detach PanelFrames; read the
     # tab titles directly off the (kept) QTabWidget references.
-    left_tabs = panel._left_tabs
     right_tabs = panel._right_tabs
-    left_titles = [left_tabs.tabText(i) for i in range(left_tabs.count())]
     right_titles = [right_tabs.tabText(i) for i in range(right_tabs.count())]
-    assert any("Log" in t for t in left_titles)
-    # The Conflicts tab was removed; Log is the only left-hand tab now.
-    assert not any("Conflicts" in t for t in left_titles)
-    assert any("BIDS preview" in t for t in right_titles)
-    assert any("Statistics" in t for t in right_titles)
+    # The Log is one panel with one header (no tab bar repeating its name);
+    # its buttons sit in that header.
+    from bidsmgr.gui.widgets.panel_frame import HEADER_EXTRAS
+    from PyQt6.QtWidgets import QTabWidget, QWidget
+
+    assert panel._log_frame._title == "Log"
+    assert panel._log_frame.findChild(QTabWidget) is None
+    assert panel._log_frame._bar.findChild(QWidget, HEADER_EXTRAS) is not None
+    assert panel._preview_frame._title == "Preview"
+    assert right_titles == ["BIDS tree", "Statistics"]
 
     # The Log + preview groups are each independently detachable, and the
     # whole dock collapses toward the bottom.

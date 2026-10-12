@@ -233,7 +233,10 @@ class PanelFrame(QFrame):
         return self
 
     def _build_controls(self) -> None:
-        self._caret = QToolButton()
+        # Parented: a side panel never puts its caret in a layout (the strip
+        # is its handle), and a parentless widget made visible is a window
+        # of its own (a stray 28 px window after every re-dock).
+        self._caret = QToolButton(self)
         self._caret.setObjectName("panel-frame-caret")
         self._caret.setAutoRaise(True)
         self._caret.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -484,7 +487,7 @@ class PanelFrame(QFrame):
         self._inner.setVisible(True)
         self._take_extras()
         self._placeholder.setVisible(False)
-        self._caret.setVisible(self._collapsible)
+        self._caret.setVisible(self._collapsible and not self._vertical_fold)
         self._detach_btn.setVisible(self._detachable)
         self._detach_btn.setToolTip("Detach into a floating window")
         self._refresh_icons()

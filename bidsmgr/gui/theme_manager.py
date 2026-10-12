@@ -579,4 +579,11 @@ class ThemeManager:
         p.setColor(QPalette.ColorRole.Link,            QColor(pal['accent']))
         p.setColor(QPalette.ColorRole.ToolTipBase,     QColor(pal['surface2']))
         p.setColor(QPalette.ColorRole.ToolTipText,     QColor(pal['text']))
+        # The lines Qt draws itself (a document-mode tab bar's base, frame
+        # bevels) read these; left at Qt's defaults they were pure white in
+        # every dark theme (the Log's rule over its tabs).
+        for role in (QPalette.ColorRole.Light, QPalette.ColorRole.Midlight,
+                     QPalette.ColorRole.Mid, QPalette.ColorRole.Dark):
+            p.setColor(role, QColor(pal['border']))
+        p.setColor(QPalette.ColorRole.Shadow, QColor(pal['bg']))
         self._app.setPalette(p)

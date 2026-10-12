@@ -379,11 +379,13 @@ class ValidationPane(QWidget):
     def _render(self) -> None:
         """Tear down + rebuild the three sections from current state."""
         self._allowed = self._allowed_severities()
-        # Drop existing section widgets. ``setParent(None)`` is the
-        # critical detach — otherwise the deleteLater is deferred and
-        # the old sections paint over the new ones briefly.
+        # Drop existing section widgets: hidden (so a show Qt queued when
+        # they were added cannot open them as windows once detached), then
+        # detached, so the old sections never paint over the new ones while
+        # their deleteLater waits.
         for w in self._section_widgets:
             self._body_layout.removeWidget(w)
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         self._section_widgets.clear()

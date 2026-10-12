@@ -410,6 +410,7 @@ class PathBar(QFrame):
         """A chip after the path saying what it is; ``text`` empty hides it."""
         if self._chip is not None:
             self._lay.removeWidget(self._chip)
+            self._chip.hide()
             self._chip.setParent(None)
             self._chip.deleteLater()
             self._chip = None
