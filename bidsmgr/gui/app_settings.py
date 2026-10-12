@@ -26,10 +26,11 @@ from PyQt6.QtCore import QSettings
 KEYS = {
     "theme":              "ui/theme",                # a theme_manager.THEMES id
     # The user's touches on any theme (gui/appearance.py).
-    "accent":             "ui/accent",               # "" | preset | "#rrggbb"
+    "accent":             "ui/accent",               # "" | preset | "custom"
+    "custom_accent":      "ui/custom_accent",        # JSON: {"dark"|"light": "#rrggbb"}
     "tint":               "ui/tint",                 # 0..12 percent
     "icon_style":         "ui/icon_style",           # monochrome|accent|colourful
-    "tree_colours":       "ui/tree_colours",         # JSON: kind -> "#rrggbb"
+    "tree_colours":       "ui/tree_colours",         # JSON: kind -> {"dark"|"light": hex}
     "raw_root":           "paths/raw_root",          # last raw input dir
     "bids_parent":        "paths/bids_parent",       # last BIDS output dir
     "scan_tsv_filename":  "scan/tsv_filename",       # filename of the scan TSV
@@ -110,6 +111,7 @@ class AppSettings:
     theme: str = "dark"
     # Appearance on top of the theme (gui/appearance.Appearance).
     accent: str = ""
+    custom_accent: dict = field(default_factory=dict)
     tint: int = 0
     icon_style: str = "monochrome"
     tree_colours: dict = field(default_factory=dict)
@@ -273,7 +275,8 @@ class AppSettings:
         """The accent, tint, icon style and tree colours, as one value."""
         from .appearance import Appearance
 
-        return Appearance(accent=self.accent, tint=self.tint, icons=self.icon_style,
+        return Appearance(accent=self.accent, custom_accent=dict(self.custom_accent),
+                          tint=self.tint, icons=self.icon_style,
                           tree=dict(self.tree_colours)).normalised()
 
     @classmethod
@@ -321,16 +324,18 @@ class AppSettings:
         out.accent = _as_str(s.value(KEYS["accent"]), out.accent)
         out.tint = _as_int(s.value(KEYS["tint"]), out.tint)
         out.icon_style = _as_str(s.value(KEYS["icon_style"]), out.icon_style)
-        try:
-            raw = s.value(KEYS["tree_colours"], "")
-            parsed = json.loads(raw) if raw else {}
-            out.tree_colours = dict(parsed) if isinstance(parsed, dict) else {}
-        except (TypeError, ValueError):
-            out.tree_colours = {}
+        for attr in ("custom_accent", "tree_colours"):
+            try:
+                raw = s.value(KEYS[attr], "")
+                parsed = json.loads(raw) if raw else {}
+                setattr(out, attr, dict(parsed) if isinstance(parsed, dict) else {})
+            except (TypeError, ValueError):
+                setattr(out, attr, {})
         # A hand-edited value cannot stop the app opening.
         look = out.appearance()
-        out.accent, out.tint, out.icon_style, out.tree_colours = (
-            look.accent, look.tint, look.icons, dict(look.tree))
+        out.accent, out.custom_accent, out.tint, out.icon_style, out.tree_colours = (
+            look.accent, dict(look.custom_accent), look.tint, look.icons,
+            {k: dict(v) for k, v in look.tree.items()})
         out.active_view = _as_str(s.value(KEYS["active_view"]), out.active_view)
         if out.active_view not in ("converter", "editor"):
             out.active_view = "converter"
@@ -489,6 +494,7 @@ class AppSettings:
         # Strings.
         s.setValue(KEYS["theme"], self.theme)
         s.setValue(KEYS["accent"], self.accent)
+        s.setValue(KEYS["custom_accent"], json.dumps(self.custom_accent))
         s.setValue(KEYS["tint"], int(self.tint))
         s.setValue(KEYS["icon_style"], self.icon_style)
         s.setValue(KEYS["tree_colours"], json.dumps(self.tree_colours))

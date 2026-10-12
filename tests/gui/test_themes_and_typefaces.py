@@ -80,8 +80,9 @@ def manager(qapp):
 
 def test_every_theme_is_whole_and_grouped() -> None:
     ids = [t.id for t in THEMES]
-    assert len(ids) == len(set(ids)) == len(PALETTES) == 17
+    assert len(ids) == len(set(ids)) == len(PALETTES) == 19
     assert "monokai" in ids and theme_info("monokai").dark
+    assert theme_info("original-dark").partner == "original-light"
     # Neutral greys beside the blue-cast Dark (user request, 2026-10-09).
     assert {"graphite", "carbon", "ash", "porcelain"} <= set(ids)
     groups = [t.group for t in THEMES]
@@ -110,34 +111,48 @@ def test_plot_colours_stay_apart_in_every_theme(theme_id) -> None:
 
 
 @pytest.mark.parametrize("theme_id", [t.id for t in THEMES])
-def test_file_names_take_the_theme_s_colours(theme_id) -> None:
-    """Images, sidecars, tables and recordings are coloured by the THEME
-    (switching it changes them; none is the plain text colour), read at the
-    status colours' contrast on every surface, and stay apart from each
-    other and from the folders: OKLab 14 for normal vision, 4.5 under
-    red-green colour blindness. Their icons differ too, so colour is never
-    the only cue."""
+def test_file_names_follow_the_theme_s_palette(theme_id) -> None:
+    """Images, sidecars, tables and recordings are ONE family per theme:
+    hues on an arc around the accent (within 80 degrees), at one lightness
+    (within 0.03 OKLab), gently coloured. Round 4's hand-picked sets were
+    vivid, of every lightness and of hues the theme did not have, and read as
+    heterogeneous. They still read on every surface, differ from the text
+    and from each other, and their icons differ too."""
     import itertools
+
+    from bidsmgr.gui import tones
 
     p = PALETTES[theme_id]
     strong = theme_id.startswith("hc-")
-    kinds = ("folder", "image", "sidecar", "table", "recording")
+    kinds = ("image", "sidecar", "table", "recording")
     colours = {k: p[f"tree_{k}"] for k in kinds}
-    assert colours["folder"] == p["accent"] and p["tree_other"] == p["dim"]
-    for kind in kinds[1:]:
-        assert _separation(colours[kind], p["text"])[0] >= 15, kind
+    assert p["tree_folder"] == p["accent"] and p["tree_other"] == p["dim"]
+    lightness = [tones.oklch(c)[0] for c in colours.values()]
+    assert max(lightness) - min(lightness) <= 0.03, (theme_id, lightness)
+    accent_hue = tones.oklch(p["accent"])[2]
+    for kind, colour in colours.items():
+        _l, chroma, hue = tones.oklch(colour)
+        gap = abs(hue - accent_hue) % 360
+        assert min(gap, 360 - gap) <= 80, (kind, colour)
+        assert chroma <= 0.14, (kind, colour, "gently coloured")
+        assert _separation(colour, p["text"])[0] >= 10, kind
         for surface in ("bg", "surface", "surface2", "surface3"):
             floor = 7 if strong else (4.0 if surface == "surface3" else 4.5)
-            assert _contrast(colours[kind], p[surface]) >= floor, (kind, surface)
-    for a, b in itertools.combinations(kinds, 2):
-        normal, cvd = _separation(colours[a], colours[b])
-        assert normal >= 14 and cvd >= 4.5, (a, b, round(normal, 1), round(cvd, 1))
+            assert _contrast(colour, p[surface]) >= floor, (kind, surface)
+    for a, b in itertools.combinations(("folder",) + kinds, 2):
+        normal = _separation(p[f"tree_{a}"], p[f"tree_{b}"])[0]
+        assert normal >= 4, (a, b, round(normal, 1))
 
 
-def test_every_theme_colours_file_names_its_own_way() -> None:
-    sets = {tuple(PALETTES[t.id][f"tree_{k}"] for k in ("image", "sidecar", "table"))
-            for t in THEMES}
-    assert len(sets) == len(THEMES), "two themes share their file colours"
+def test_the_original_themes_are_the_first_ones() -> None:
+    """Dark and Light as they were before the 2026-10-09 restyle (only the
+    input outline moved, to reach 3:1 on the card)."""
+    dark, light = PALETTES["original-dark"], PALETTES["original-light"]
+    assert (dark["bg"], dark["surface"], dark["text"], dark["accent"]) == (
+        "#0a0e13", "#11161d", "#e6edf3", "#58a6ff")
+    assert (light["bg"], light["surface"], light["surface2"], light["text"], light["accent"]) \
+        == ("#ffffff", "#f6f8fa", "#ffffff", "#1f2328", "#0969da")
+    assert not theme_info("original-light").dark and theme_info("original-dark").dark
 
 
 def test_every_token_the_stylesheet_names_is_given() -> None:

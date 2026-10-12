@@ -1329,8 +1329,9 @@ class SettingsDialog(QDialog):
         s.scan_exclusions = exclusions
         s.theme = self._theme_combo.currentData() or "dark"
         look = self._appearance_editor.appearance()
-        s.accent, s.tint, s.icon_style, s.tree_colours = (
-            look.accent, look.tint, look.icons, dict(look.tree))
+        s.accent, s.custom_accent, s.tint, s.icon_style, s.tree_colours = (
+            look.accent, dict(look.custom_accent), look.tint, look.icons,
+            {k: dict(v) for k, v in look.tree.items()})
         s.editor_show_hidden = self._editor_show_hidden.isChecked()
         s.editor_autosave = self._editor_autosave.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[

@@ -11,6 +11,7 @@ from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import QLabel
 
 from bidsmgr.gui import appearance as ap
+from bidsmgr.gui import tones
 from bidsmgr.gui.theme_manager import PALETTES, THEMES, ThemeManager, theme_info
 from bidsmgr.gui.widgets import PanelFrame
 
@@ -154,31 +155,68 @@ def test_an_accent_preset_reads_on_every_theme_of_its_kind() -> None:
         for key, (_label, on_dark, on_light) in ap.ACCENTS.items():
             accent = on_dark if t.dark else on_light
             for s in ("bg", "surface", "surface2"):
-                assert ap.contrast(accent, p[s]) >= 4.5, (t.id, key, s)
-            assert ap.contrast(accent, p["surface3"]) >= 4.0, (t.id, key)
+                assert tones.contrast(accent, p[s]) >= 4.5, (t.id, key, s)
+            assert tones.contrast(accent, p["surface3"]) >= 4.0, (t.id, key)
 
 
 def test_the_appearance_is_laid_over_the_theme() -> None:
     base = PALETTES["graphite"]
-    look = ap.Appearance(accent="pink", tint=8, icons="accent", tree={"sidecar": "#123456"})
+    look = ap.Appearance(accent="pink", tint=8, icons="accent",
+                         tree={"sidecar": {"dark": "#e0a458"}})
     pal = ap.apply(base, look, dark=True)
     assert pal["accent"] == ap.ACCENTS["pink"][1]
     assert pal["accent_bg"].startswith("rgba(") and pal["accent_bg"] != base["accent_bg"]
     assert pal["surface"] != base["surface"], "the tint reached the surfaces"
-    assert ap.contrast(pal["text"], pal["surface"]) >= 7, "and kept the text readable"
-    assert pal["tree_sidecar"] == "#123456"
+    assert tones.contrast(pal["text"], pal["surface"]) >= 7, "and kept the text readable"
+    assert pal["tree_sidecar"] == "#e0a458"
     assert pal["tree_folder"] == pal["accent"], "folders follow the accent"
-    assert ap.contrast(pal["primary_btn_text"], pal["accent"]) >= 4.5
+    # The other file kinds follow it too: their arc moved to the pink.
+    pink_hue = tones.oklch(pal["accent"])[2]
+    image_hue = tones.oklch(pal["tree_image"])[2]
+    assert min(abs(image_hue - pink_hue) % 360, 360 - abs(image_hue - pink_hue) % 360) < 60
+    assert tones.contrast(pal["primary_btn_text"], pal["accent"]) >= 4.5
     # Nothing chosen changes nothing.
     assert ap.apply(base, ap.Appearance(), dark=True) == {**base}
 
 
+def test_a_colour_chosen_on_a_dark_theme_reads_on_a_light_one() -> None:
+    """White file names chosen on a dark theme vanished on a light one."""
+    look = ap.Appearance(tree={"image": {"dark": "#ffffff"}, "table": {"dark": "#a0e0ff"}},
+                         accent="custom", custom_accent={"dark": "#f0f0f0"})
+    for t in THEMES:
+        pal = ap.apply(PALETTES[t.id], look, dark=t.dark, strong=t.id.startswith("hc-"))
+        for kind in ("image", "table"):
+            assert tones.contrast(pal[f"tree_{kind}"], pal["surface"]) >= 4.5, (t.id, kind)
+        assert tones.contrast(pal["accent"], pal["surface"]) >= 3.0, t.id
+        if not t.dark:
+            assert tones.oklch(pal["tree_image"])[0] < 0.35, "white became near black"
+    # A colour chosen for light themes is used there, not the equivalent.
+    both = ap.Appearance(tree={"image": {"dark": "#ffffff", "light": "#7a1fa2"}})
+    assert ap.apply(PALETTES["light"], both, dark=False)["tree_image"] == "#7a1fa2"
+    assert ap.apply(PALETTES["dark"], both, dark=True)["tree_image"] == "#ffffff"
+
+
+def test_the_equivalent_keeps_the_hue_and_mirrors_the_lightness() -> None:
+    for colour in ("#ffffff", "#7db4ff", "#f8ac6a", "#6dd796"):
+        light = tones.equivalent(colour, to_dark=False)
+        assert tones.contrast(light, "#ffffff") >= 4.5, colour
+        if tones.oklch(colour)[1] > 0.05:
+            dh = abs(tones.oklch(light)[2] - tones.oklch(colour)[2]) % 360
+            assert min(dh, 360 - dh) < 15, (colour, light)
+        back = tones.equivalent(light, to_dark=True)
+        assert tones.contrast(back, tones.REFERENCE[True]) >= 4.5
+    assert tones.oklch(tones.equivalent("#1a1a1a", to_dark=True))[0] > 0.8
+
+
 def test_a_bad_stored_appearance_is_made_valid() -> None:
     look = ap.Appearance(accent="chartreuse", tint=99, icons="neon",
-                         tree={"folder": "#zzz", "nope": "#ffffff", "table": "#00aa00"})
+                         tree={"folder": {"dark": "#zzz"}, "nope": {"dark": "#ffffff"},
+                               "table": {"light": "#00AA00", "sepia": "#111111"},
+                               "image": "#ffffff"})
     clean = look.normalised()
     assert (clean.accent, clean.tint, clean.icons) == ("", ap.MAX_TINT, "monochrome")
-    assert clean.tree == {"table": "#00aa00"}
+    assert clean.tree == {"table": {"light": "#00aa00"}}
+    assert ap.Appearance(accent="custom").normalised().accent == "", "custom with no colour"
 
 
 def test_the_icon_style_colours_action_icons_only() -> None:
@@ -200,13 +238,16 @@ def test_the_icon_style_colours_action_icons_only() -> None:
 def test_the_theme_manager_applies_the_appearance(qapp) -> None:
     from bidsmgr.gui.theme_manager import CUR
 
-    m = ThemeManager(qapp, appearance=ap.Appearance(accent="#cc5500"))
+    m = ThemeManager(qapp, appearance=ap.Appearance(accent="custom",
+                                                    custom_accent={"light": "#cc5500"}))
     try:
         m.apply("porcelain")
         assert CUR()["accent"] == "#cc5500" and m.palette["accent"] == "#cc5500"
         assert "#cc5500" in qapp.styleSheet()
+        m.apply("graphite")
+        assert tones.contrast(CUR()["accent"], CUR()["surface"]) >= 4.5, "its dark equivalent"
         m.set_appearance(ap.Appearance())
-        assert CUR()["accent"] == PALETTES["porcelain"]["accent"]
+        assert CUR()["accent"] == PALETTES["graphite"]["accent"]
     finally:
         m.set_appearance(ap.Appearance(), apply=False)
         m.apply("dark")
@@ -222,13 +263,18 @@ def test_settings_edits_and_saves_the_appearance(qtbot) -> None:
     editor.accent.setCurrentIndex(editor.accent.findData("teal"))
     editor.tint.setValue(5)
     editor.icons.setCurrentIndex(editor.icons.findData("colourful"))
-    editor.set_tree_colour("table", "#336699")
-    assert editor.tree_buttons["table"].text() == "#336699"
+    editor.set_theme("graphite")
+    editor.set_tree_colour("table", "#a8d8ff")
+    assert editor.tree_buttons["table"].text() == "#a8d8ff"
     assert editor.tree_resets["table"].isEnabled()
+    # On a light theme the button shows the equivalent, and says so.
+    editor.set_theme("porcelain")
+    assert editor.tree_buttons["table"].text() != "#a8d8ff"
+    assert "equivalent" in editor.tree_buttons["table"].toolTip()
     dlg._on_save()
     saved = AppSettings.load()
     assert (saved.accent, saved.tint, saved.icon_style) == ("teal", 5, "colourful")
-    assert saved.tree_colours == {"table": "#336699"}
+    assert saved.tree_colours == {"table": {"dark": "#a8d8ff"}}
     # Restore defaults covers it.
     dlg._on_restore_defaults()
     assert editor.appearance() == ap.Appearance()
@@ -240,7 +286,7 @@ def test_a_hard_to_read_accent_says_so(qtbot) -> None:
     editor = AppearanceEditor()
     qtbot.addWidget(editor)
     editor.set_theme("porcelain")
-    editor.load(ap.Appearance(accent="#f0f0a0"))
+    editor.load(ap.Appearance(accent="custom", custom_accent={"light": "#f0f0a0"}))
     assert editor.warning.isVisibleTo(editor) and ":1" in editor.warning.text()
     editor.load(ap.Appearance(accent="blue"))
     assert not editor.warning.isVisibleTo(editor)

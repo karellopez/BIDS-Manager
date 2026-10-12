@@ -5,6 +5,10 @@ The values are an :class:`~bidsmgr.gui.appearance.Appearance`; this widget
 only edits one. Colours shown are always the EFFECTIVE ones for the theme
 chosen in the dialog (a tree kind left alone shows that theme's colour), and
 an accent hard to read on that theme says so beside it.
+
+A colour picked here is kept for the KIND of theme the dialog shows (dark or
+light); the other kind takes its equivalent until one is picked there too,
+so white file names chosen on a dark theme become near black on a light one.
 """
 
 from __future__ import annotations
@@ -19,9 +23,10 @@ from PyQt6.QtWidgets import (
 )
 
 from . import appearance as ap
+from . import tones
 from .theme_manager import PALETTES, theme_info
 
-_CUSTOM = "__custom__"
+_CUSTOM = "custom"
 
 
 def colour_dot(colour: str, side: int) -> QIcon:
@@ -52,8 +57,8 @@ class AppearanceEditor(QWidget):
         from .viz import fonts
 
         self._theme = "dark"
-        self._custom: str = ""
-        self._tree: dict[str, str] = {}
+        self._custom: dict[str, str] = {}
+        self._tree: dict[str, dict[str, str]] = {}
         side = fonts.px(14)
         self._side = side
         form = QFormLayout(self)
@@ -105,7 +110,8 @@ class AppearanceEditor(QWidget):
         for kind, label in ap.TREE_KINDS.items():
             btn = QPushButton()
             btn.setObjectName("tb-btn")
-            btn.setToolTip(f"The colour of {label.lower()} in the file trees. Click to choose.")
+            btn.setToolTip(f"The colour of {label.lower()} in the file trees. Click to choose; "
+                           "it is kept for this kind of theme (dark or light).")
             btn.clicked.connect(lambda _c=False, k=kind: self._pick_tree(k))
             reset = QPushButton("Reset")
             reset.setObjectName("tb-btn-ghost")
@@ -135,10 +141,10 @@ class AppearanceEditor(QWidget):
 
     def load(self, look: ap.Appearance) -> None:
         look = look.normalised()
-        self._custom = look.accent if look.accent.startswith("#") else ""
-        self._tree = dict(look.tree)
+        self._custom = dict(look.custom_accent)
+        self._tree = {k: dict(v) for k, v in look.tree.items()}
         self._fill_accents()
-        key = _CUSTOM if self._custom else look.accent
+        key = look.accent
         self.accent.blockSignals(True)
         self.accent.setCurrentIndex(max(0, self.accent.findData(key)))
         self.accent.blockSignals(False)
@@ -151,17 +157,19 @@ class AppearanceEditor(QWidget):
         self._sync()
 
     def appearance(self) -> ap.Appearance:
-        key = self.accent.currentData() or ""
-        accent = self._custom if key == _CUSTOM else key
-        return ap.Appearance(accent=accent, tint=self.tint.value(),
+        return ap.Appearance(accent=self.accent.currentData() or "",
+                             custom_accent=dict(self._custom), tint=self.tint.value(),
                              icons=self.icons.currentData() or "monochrome",
-                             tree=dict(self._tree)).normalised()
+                             tree={k: dict(v) for k, v in self._tree.items()}).normalised()
 
     def effective(self) -> dict:
         """The palette these choices make on the dialog's theme."""
         info = theme_info(self._theme)
         return ap.apply(PALETTES[self._theme], self.appearance(), dark=info.dark,
                         strong=self._theme.startswith("hc-"))
+
+    def _dark(self) -> bool:
+        return theme_info(self._theme).dark
 
     # -- building ----------------------------------------------------------------
 
@@ -174,9 +182,9 @@ class AppearanceEditor(QWidget):
         self.accent.addItem(colour_dot(own, self._side), "Theme's own", "")
         for key, (label, on_dark, on_light) in ap.ACCENTS.items():
             self.accent.addItem(colour_dot(on_dark if dark else on_light, self._side), label, key)
-        custom = self._custom or own
-        self.accent.addItem(colour_dot(custom, self._side),
-                            f"Custom ({custom})" if self._custom else "Custom...", _CUSTOM)
+        mine = tones.for_kind(self._custom, dark)
+        self.accent.addItem(colour_dot(mine or own, self._side),
+                            f"Custom ({mine})" if mine else "Custom...", _CUSTOM)
         if current is not None:
             self.accent.setCurrentIndex(max(0, self.accent.findData(current)))
         self.accent.blockSignals(False)
@@ -187,22 +195,34 @@ class AppearanceEditor(QWidget):
         self.warning.setText(message)
         self.warning.setVisible(bool(message))
         self.tint_value.setText(f"{self.tint.value()} %")
+        here, there = ("dark", "light") if self._dark() else ("light", "dark")
         for kind, btn in self.tree_buttons.items():
             colour = pal[f"tree_{kind}"]
+            choice = self._tree.get(kind, {})
             btn.setIcon(colour_dot(colour, self._side))
-            btn.setText(colour if kind in self._tree else "Theme's own")
-            btn.setToolTip(f"{colour}. Click to choose another colour for "
-                           f"{ap.TREE_KINDS[kind].lower()} in the file trees.")
-            self.tree_resets[kind].setEnabled(kind in self._tree)
+            btn.setText(colour if choice else "Theme's own")
+            label = ap.TREE_KINDS[kind].lower()
+            if choice and here not in choice:
+                note = (f"{colour}, the equivalent on {here} themes of your colour for "
+                        f"{there} themes ({choice[there]}). Click to choose one for {here} "
+                        "themes.")
+            elif choice:
+                note = (f"{colour}, your colour on {here} themes. Click to choose another "
+                        f"colour for {label}.")
+            else:
+                note = f"{colour}. Click to choose another colour for {label}."
+            btn.setToolTip(note)
+            self.tree_resets[kind].setEnabled(bool(choice))
 
     # -- edits ---------------------------------------------------------------------
 
     def _on_accent(self, _index: int) -> None:
         if self.accent.currentData() == _CUSTOM:
-            start = QColor(self._custom or PALETTES[self._theme]["accent"])
+            mine = tones.for_kind(self._custom, self._dark())
+            start = QColor(mine or PALETTES[self._theme]["accent"])
             chosen = QColorDialog.getColor(start, self, "Accent colour")
             if chosen.isValid():
-                self._custom = chosen.name()
+                self._custom[ap.kind_key(self._dark())] = chosen.name()
                 self._fill_accents()
                 self.accent.blockSignals(True)
                 self.accent.setCurrentIndex(self.accent.findData(_CUSTOM))
@@ -226,8 +246,10 @@ class AppearanceEditor(QWidget):
             self.set_tree_colour(kind, chosen.name())
 
     def set_tree_colour(self, kind: str, colour: Optional[str]) -> None:
+        """Choose ``kind``'s colour for the kind of theme shown; ``None``
+        goes back to the theme's colour on both kinds."""
         if colour:
-            self._tree[kind] = colour
+            self._tree.setdefault(kind, {})[ap.kind_key(self._dark())] = colour.lower()
         else:
             self._tree.pop(kind, None)
         self._sync()
