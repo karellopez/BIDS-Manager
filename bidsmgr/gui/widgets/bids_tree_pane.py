@@ -200,6 +200,7 @@ def _sweep(
     dirs: list[str],
     counts: dict[str, tuple[int, int, int]],
     show_hidden: bool,
+    watchable: bool = True,
 ) -> tuple[int, int]:
     """One scandir pass: every directory, and what is inside each.
 
@@ -218,6 +219,18 @@ def _sweep(
     A directory with nothing visible inside counts as one file, and a
     folder-recording (a CTF ``.ds``, an EGI ``.mff``) counts as one file
     rather than being descended into. Both match what the tree draws.
+
+    ``watchable`` is how a :data:`_SKIP_DIRS` subtree gets DRAWN but never
+    WATCHED. A watch is an open handle on the directory, and conversion
+    stages each subject in ``.tmp_bidsmgr/sub-<id>/`` inside the dataset:
+    on Windows a directory cannot be moved while a handle is open anywhere
+    inside it, so one watch there failed every commit with ``WinError 5``
+    for as long as the pane lived. Measured, with "Show hidden files" on:
+    4 watches land under ``.tmp_bidsmgr`` and the commit is refused;
+    ``removePaths`` and the same commit succeeds. Showing the folder costs
+    nothing, so only the handle is withheld — and on Linux that also stops
+    a transient staging tree from spending the inotify watches ``_watch``
+    is careful to cap.
     """
     if depth >= _MAX_DEPTH:
         return (0, 1)
@@ -235,10 +248,13 @@ def _sweep(
             continue
         seen += 1
         if entry.is_dir() and not _is_folder_recording(entry.name):
-            dirs.append(entry.path)
+            # Machinery, and everything below it: drawn, never handed a watch.
+            child_watchable = watchable and entry.name not in _SKIP_DIRS
+            if child_watchable:
+                dirs.append(entry.path)
             sub_sessions, sub_files = _sweep(
                 Path(entry.path), depth=depth + 1, dirs=dirs, counts=counts,
-                show_hidden=show_hidden,
+                show_hidden=show_hidden, watchable=child_watchable,
             )
             sessions += sub_sessions
             files += sub_files

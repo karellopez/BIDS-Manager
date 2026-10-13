@@ -16,6 +16,8 @@ Pipeline per (dataset, subject, session)::
 
     Phase 3   sequential per-subject merge commit:
               new subject  -> os.rename(<staging>/sub-<id>, <bids_root>/sub-<id>)
+              (on Windows, retried while a reader holds the tree
+              open; see _retry_while_held)
               existing subject -> merge staged files in (add new ses/datatype;
               keep or, with --overwrite, back-up-and-replace colliding files)
 
@@ -43,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Iterable, Optional
@@ -1047,6 +1050,80 @@ def _keep_source_data(tasks, options: SourcedataOptions, bids_root: Path, subj_s
             log.warning("%s: not copied to sourcedata/: %s", subj_segment, line)
 
 
+#: How long the commit keeps trying to move a staged file or tree into place
+#: while Windows reports it as held open, and how long it waits between tries.
+#: Windows only; see :func:`_retry_while_held`. Ten seconds is two orders of
+#: magnitude more than any blocker measured here (worst case 156 ms, under a
+#: load harsher than a real session's) and still bounded, so a handle that is
+#: genuinely stuck — a staged file open in another program — is reported
+#: rather than waited on forever.
+_COMMIT_RETRY_DEADLINE_S = 10.0
+_COMMIT_RETRY_SLEEP_S = 0.05
+
+
+def _retry_while_held(move, what: Path) -> None:
+    """Run ``move`` and, on Windows only, retry it while the OS says "held".
+
+    Everywhere else ``move`` is called exactly once and its exception
+    propagates untouched, which is what the commit has always done: POSIX
+    renames a path no matter who is reading it.
+
+    Windows refuses with ``WinError 5`` while ANY process holds a handle
+    anywhere inside the tree being moved, and merely ENUMERATING a directory
+    holds one. Conversion stages into ``<bids_root>/.tmp_bidsmgr/``, which
+    lives inside the dataset the GUI is watching, so a single tree refresh,
+    validation pass, antivirus scan or open Explorer window is enough to break
+    the commit. Measured on this machine: with one background
+    ``schema.warm_dataset`` pass running — which the Editor now does on every
+    tree refresh — 4 of 12 commits failed. That is the bug this exists for.
+
+    Such a blocker is transient, so the move is simply retried. Past the
+    deadline the original error is raised, so a stuck handle still fails the
+    subject the way it did before, with nothing half-committed.
+    """
+    if os.name != "nt":
+        move()
+        return
+    deadline = time.monotonic() + _COMMIT_RETRY_DEADLINE_S
+    while True:
+        try:
+            move()
+            return
+        except PermissionError:
+            # WinError 5 (access denied) and 32 (sharing violation) both land
+            # here. A target that already exists raises FileExistsError and is
+            # NOT retried: that is a logic error, not a held handle.
+            if time.monotonic() >= deadline:
+                log.error(
+                    "%s is still held open by another program after %.0fs; on "
+                    "Windows a directory cannot be moved while anything is "
+                    "reading inside it. Close anything open under the dataset "
+                    "(a viewer, an Explorer window, a backup or antivirus "
+                    "scan) and convert again.",
+                    what, _COMMIT_RETRY_DEADLINE_S,
+                )
+                raise
+            time.sleep(_COMMIT_RETRY_SLEEP_S)
+
+
+def _rename_into_place(staging_subject: Path, target: Path) -> None:
+    """Move a staged subject tree wholesale onto its final name.
+
+    The atomic fast path of :func:`_merge_commit`, kept atomic: one
+    ``os.rename``, retried on Windows while a reader holds the tree open.
+    """
+    _retry_while_held(lambda: os.rename(staging_subject, target), staging_subject)
+
+
+def _move_staged_file(src: Path, dst: Path) -> None:
+    """Move one staged file to its place in the dataset.
+
+    ``shutil.move`` everywhere but Windows, where a reader holding this one
+    file gets the same patience the wholesale move gets.
+    """
+    _retry_while_held(lambda: shutil.move(str(src), str(dst)), src)
+
+
 def _merge_commit(
     staging_subject: Path, target: Path, *, on_existing: str,
     preserve_curation: bool = True,
@@ -1082,7 +1159,7 @@ def _merge_commit(
 
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(staging_subject, target)
+        _rename_into_place(staging_subject, target)
         return (len(staged), 0, 0)
 
     colliding = [p for p in staged if (target / p.relative_to(staging_subject)).exists()]
@@ -1102,7 +1179,7 @@ def _merge_commit(
         dst = target / rel
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
+            _move_staged_file(src, dst)
             added += 1
             continue
         # Colliding file.
@@ -1127,7 +1204,7 @@ def _merge_commit(
         # ordinary replace, with the original already backed up above.
         dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
+        _move_staged_file(src, dst)
         replaced += 1
     if preserved:
         shown = ", ".join(preserved[:6])
