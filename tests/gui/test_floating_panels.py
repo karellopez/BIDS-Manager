@@ -118,8 +118,7 @@ def test_a_floating_panel_keeps_the_focus_through_clicks(qtbot, qapp, window, fr
 
 def test_every_panel_docks_back_without_a_stray_window(qtbot, window) -> None:
     conv = window.converter
-    for frame in (conv._filter_frame, conv._inspection_unit, conv._log_frame,
-                  conv._preview_frame):
+    for frame in (conv._filter_frame, conv._inspection_unit, conv._log_frame):
         frame.detach()
         qtbot.addWidget(frame._detached)
         _settle(qtbot, 60)

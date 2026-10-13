@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +33,7 @@ from PyQt6.QtWidgets import (
 from ...editor import bidsignore as bi
 from ..theme_manager import CUR
 from .primitives import PaneHeader
+from .splitter import Splitter
 
 
 class BidsIgnorePane(QWidget):
@@ -72,7 +72,7 @@ class BidsIgnorePane(QWidget):
         bl.addWidget(self._save_btn)
         v.addWidget(bar)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
 
         # Left: the patterns.
         left = QWidget()

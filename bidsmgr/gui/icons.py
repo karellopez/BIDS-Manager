@@ -107,6 +107,12 @@ NAMES: dict[str, tuple[str, str]] = {
     # ---- Editor MEG/EEG recording viewer ----
     "load_signal":  ("mdi6.play-circle-outline",      "success"),
     "filter":       ("mdi6.tune-variant",             "accent"),
+    # Filter / structure: hide the rows left out of the conversion.
+    "hide_left_out": ("mdi6.eye-off-outline",         "text"),
+    # Filter panel modes.
+    "mode_structure":  ("mdi6.file-tree-outline",     "text"),
+    "mode_recordings": ("mdi6.layers-triple-outline", "text"),
+    "mode_preview":    ("mdi6.folder-eye-outline",    "text"),
     "resample":     ("mdi6.sine-wave",                "accent"),
     "psd":          ("mdi6.chart-bell-curve",         "purple"),
     "reset_view":   ("mdi6.backup-restore",           "text"),
@@ -268,6 +274,30 @@ def _recording_tree_icon() -> QIcon:
     return ico
 
 
+#: Folder-shaped recordings (CTF ``.ds``, EGI ``.mff``): drawn and coloured as
+#: recordings, not as folders.
+FOLDER_RECORDING_SUFFIXES: tuple[str, ...] = (".ds", ".mff")
+
+
+def color_token_for(name: str, *, is_dir: bool = False) -> str:
+    """The palette token a file tree colours an entry with: the ``tree_*``
+    token of its kind (folder, image, sidecar, table, recording, other),
+    which the user can change in Settings > Display. One rule for every tree
+    (the Editor's, the Converter's output tree, the BIDS preview)."""
+    lower = name.lower()
+    if is_dir and not lower.endswith(FOLDER_RECORDING_SUFFIXES):
+        return "tree_folder"
+    if lower.endswith(".nii.gz") or lower.endswith(".nii"):
+        return "tree_image"
+    if lower.endswith(".json"):
+        return "tree_sidecar"
+    if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
+        return "tree_table"
+    if lower.endswith(FOLDER_RECORDING_SUFFIXES) or lower.endswith(RECORDING_TREE_EXTS):
+        return "tree_recording"
+    return "tree_other"
+
+
 def icon_for_path(name: str, *, is_dir: bool = False) -> QIcon:
     """Return the tree-node ``QIcon`` for a file path / name.
 
@@ -375,8 +405,10 @@ def apply_tab(
 
 
 __all__ = [
+    "FOLDER_RECORDING_SUFFIXES",
     "NAMES",
     "RECORDING_TREE_EXTS",
+    "color_token_for",
     "set_style",
     "styled_key",
     "DEFAULT_BUTTON_ICON_SIZE",

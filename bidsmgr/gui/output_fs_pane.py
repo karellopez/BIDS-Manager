@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import icons
+from .icons import color_token_for
 from .theme_manager import CUR
 from .widgets import PaneHeader
 from .widgets.tree_click import toggle_on_click
@@ -79,25 +80,6 @@ _IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 2
 _NODE_ROLE = Qt.ItemDataRole.UserRole + 3
 #: Marks the single stand-in child that keeps the expander arrow alive.
 _PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 4
-
-
-def _color_token_for(path_name: str) -> str:
-    """Pick the palette token used to color a leaf file: the ``tree_*``
-    token of its kind (image, sidecar, table, recording, other), the same
-    as the Editor's tree; the user can change each in Settings > Display.
-    """
-    from .icons import RECORDING_TREE_EXTS
-
-    lower = path_name.lower()
-    if lower.endswith(".nii.gz") or lower.endswith(".nii"):
-        return "tree_image"
-    if lower.endswith(".json"):
-        return "tree_sidecar"
-    if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
-        return "tree_table"
-    if lower.endswith(RECORDING_TREE_EXTS):
-        return "tree_recording"
-    return "tree_other"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +209,7 @@ def _walk_dir(
             node = _TreeNode(
                 name=entry.name,
                 is_dir=False,
-                color_token=_color_token_for(entry.name),
+                color_token=color_token_for(entry.name),
             )
             parent.children.append(node)
 

@@ -39,7 +39,6 @@ from PyQt6.QtWidgets import (
     QGraphicsRectItem,
     QHBoxLayout,
     QScrollBar,
-    QSplitter,
     QToolTip,
     QWidget,
 )
@@ -53,6 +52,7 @@ from ....viz.theme import parse_colour
 from .. import fonts
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
+from ...widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -289,7 +289,7 @@ class TracesCanvas(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
 
         self._strip = _LabelStrip()

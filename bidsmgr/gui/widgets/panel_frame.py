@@ -17,10 +17,12 @@ to get two affordances:
   ``QSplitter``, so two panes (inspection + properties) detach as one unit.
 
 The frame hides the pane's own ``PaneHeader`` so there is a single header.
-A pane that has buttons belonging NEXT to its title can name a child widget
-:data:`HEADER_EXTRAS` and the frame lifts it into that one header; it is
-handed back when the pane detaches, so the buttons travel with the pane.
-State is not persisted across restarts.
+A pane that has controls belonging in that header can name child widgets for
+it: :data:`HEADER_LEAD` sits right after the title (what the panel shows, a
+view switch) and :data:`HEADER_EXTRAS` in the corner before the detach button
+(what to do with it). The frame lifts them into its header and hands them back
+to the slot they came from when the pane detaches, so they travel with the
+pane. State is not persisted across restarts.
 """
 
 from __future__ import annotations
@@ -67,6 +69,25 @@ def card_canvas(content: QWidget) -> QWidget:
 # frame's title instead of inside the pane. One name rather than a per-pane
 # argument, so a pane stays buildable on its own and the frame stays generic.
 HEADER_EXTRAS = "pane-header-extras"
+#: The same for a control that belongs right AFTER the title, on the left of
+#: the bar: what the panel shows (the Inspection's Table / Overview switch).
+HEADER_LEAD = "pane-header-lead"
+
+
+def _layout_holding(widget: QWidget):
+    """The layout ``widget`` actually sits in: its parent's layout or one
+    nested inside it. Taking the parent's top layout put a control kept in a
+    row of its own at the BOTTOM of a floating pane, stretched across it."""
+    top = widget.parentWidget().layout()
+    stack = [top]
+    while stack:
+        layout = stack.pop()
+        if layout is None:
+            continue
+        if layout.indexOf(widget) >= 0:
+            return layout
+        stack.extend(layout.itemAt(i).layout() for i in range(layout.count()))
+    return top
 
 
 class FoldStrip(QWidget):
@@ -194,10 +215,14 @@ class PanelFrame(QFrame):
         self._grow_target: Optional[QWidget] = None
         self._saved_extent: Optional[int] = None
 
-        # Buttons the pane wants beside the title rather than under it. Kept
-        # with the layout they came from, so detaching can hand them back.
+        # Controls the pane wants in the title bar rather than under it. Kept
+        # with the layout and slot they came from, so detaching can hand them
+        # back where they were.
         self._extras: Optional[QWidget] = None
         self._extras_home = None
+        self._lead: Optional[QWidget] = None
+        self._lead_home = None
+        self._homes: dict[int, int] = {}
 
         if hide_inner_header:
             hdr = inner.findChild(PaneHeader)
@@ -206,7 +231,13 @@ class PanelFrame(QFrame):
             extras = inner.findChild(QWidget, HEADER_EXTRAS)
             if extras is not None:
                 self._extras = extras
-                self._extras_home = extras.parentWidget().layout()
+                self._extras_home = _layout_holding(extras)
+                self._homes[id(extras)] = self._extras_home.indexOf(extras)
+            lead = inner.findChild(QWidget, HEADER_LEAD)
+            if lead is not None:
+                self._lead = lead
+                self._lead_home = _layout_holding(lead)
+                self._homes[id(lead)] = self._lead_home.indexOf(lead)
 
         # Placeholder shown in place of the body while detached.
         self._placeholder = QLabel("Detached - close the window to dock it back.")
@@ -264,7 +295,11 @@ class PanelFrame(QFrame):
         bl.setSpacing(4)
         if not self._vertical_fold:
             bl.addWidget(self._caret)
-        bl.addWidget(self._title_lbl, 1)
+        bl.addWidget(self._title_lbl)
+        if self._lead is not None:
+            bl.addSpacing(6)
+            bl.addWidget(self._lead)
+        bl.addStretch(1)
         if self._extras is not None:
             bl.addWidget(self._extras)
         bl.addWidget(self._detach_btn)
@@ -324,6 +359,20 @@ class PanelFrame(QFrame):
                 outer.addWidget(self._inner, 1)
                 outer.addWidget(self._placeholder, 1)
                 self._content_index = 1
+
+    def set_title(self, title: str) -> None:
+        """Rename the panel (a pane whose title follows what it shows): the
+        title bar, the fold strip, the tooltip and a floating window's title."""
+        self._title = title
+        self._title_lbl.setText(title.upper())
+        if self._strip is not None:
+            self._strip.title = title
+            self._strip._sync_tip()
+            self._strip.update()
+        if self._collapsible and not self._vertical_fold:
+            self._bar.setToolTip(f"Fold or open {title or 'this panel'}")
+        if self._detached is not None:
+            self._detached.setWindowTitle(f"BIDS-Manager - {title}" if title else "BIDS-Manager")
 
     # ------------------------------------------------------------------
     # Splitter wiring
@@ -461,19 +510,24 @@ class PanelFrame(QFrame):
     # ------------------------------------------------------------------
 
     def _return_extras(self) -> None:
-        """Put the pane's buttons back where the pane built them."""
-        if self._extras is None or self._extras_home is None:
-            return
-        self._extras_home.addWidget(self._extras)
-        self._extras.setVisible(True)
+        """Put the pane's controls back in the slots the pane built them in."""
+        for widget, home in ((self._lead, self._lead_home), (self._extras, self._extras_home)):
+            if widget is None or home is None:
+                continue
+            home.insertWidget(self._homes.get(id(widget), home.count()), widget)
+            widget.setVisible(True)
 
     def _take_extras(self) -> None:
-        """Lift them back into the title bar."""
-        if self._extras is None:
-            return
+        """Lift them back into the title bar: the lead after the title, the
+        extras before the detach button."""
         layout = self._bar.layout()
-        layout.insertWidget(layout.count() - 1, self._extras)
-        self._extras.setVisible(True)
+        if self._lead is not None:
+            # After the title and the spacing that follows it.
+            layout.insertWidget(layout.indexOf(self._title_lbl) + 2, self._lead)
+            self._lead.setVisible(True)
+        if self._extras is not None:
+            layout.insertWidget(layout.indexOf(self._detach_btn), self._extras)
+            self._extras.setVisible(True)
 
     def reattach(self) -> None:
         if not self.is_detached():
@@ -519,4 +573,5 @@ class PanelFrame(QFrame):
         )
 
 
-__all__ = ["CARD_GAP_PX", "FoldStrip", "PanelFrame", "card_canvas"]
+__all__ = ["CARD_GAP_PX", "FoldStrip", "HEADER_EXTRAS", "HEADER_LEAD", "PanelFrame",
+           "card_canvas"]

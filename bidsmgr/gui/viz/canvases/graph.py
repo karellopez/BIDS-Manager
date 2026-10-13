@@ -33,7 +33,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ....viz import views
@@ -43,6 +43,7 @@ from ...widgets.primitives import CappedLabel
 from .. import fonts
 from ..bridge import connect_while_alive
 from ..context import ViewerContext
+from ...widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -398,7 +399,7 @@ class TimecourseGraph(QWidget):
         pi.layout.setContentsMargins(1, _TOP_PX, 1, 1)
         self.plot.setMinimumHeight(70)
         # Graph above, physio below, the divider the user's to drag.
-        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split = Splitter(Qt.Orientation.Vertical)
         self.split.setChildrenCollapsible(False)
         self.split.setHandleWidth(6)
         self.split.addWidget(self.plot)

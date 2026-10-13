@@ -31,13 +31,13 @@ from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..widgets.primitives import ElidedLabel
 from .link import ViewerLink
 from .viewer import Viewer
+from ..widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -101,14 +101,14 @@ class ComparePanes(QWidget):
         self._bar_slot.setSpacing(0)
         outer.addLayout(self._bar_slot)
 
-        self._body = QSplitter(Qt.Orientation.Horizontal)
+        self._body = Splitter(Qt.Orientation.Horizontal)
         self._body.setHandleWidth(2)
         self._body.setChildrenCollapsible(False)
         images = QWidget()
         self._tab_row = QHBoxLayout(images)
         self._tab_row.setContentsMargins(0, 0, 0, 0)
         self._tab_row.setSpacing(0)
-        self._split = QSplitter(Qt.Orientation.Horizontal)
+        self._split = Splitter(Qt.Orientation.Horizontal)
         self._split.setChildrenCollapsible(False)
         self._left_head, self.left = self._half(left_title)
         self._right_head, self.right = self._half(right_title)

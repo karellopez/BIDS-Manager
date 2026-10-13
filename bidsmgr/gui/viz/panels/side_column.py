@@ -13,9 +13,10 @@ from __future__ import annotations
 from typing import Callable
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QSplitter, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QWidget
 
 from .side_tab import SideTab
+from ...widgets.splitter import Splitter
 
 #: The share of the width the column takes when it opens.
 COLUMN_FRACTION = 0.26
@@ -28,7 +29,7 @@ class SideColumn:
                  remember: Callable[[bool], None], changed: Callable[[], None]) -> None:
         self._remember = remember
         self._changed = changed
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
         split.setHandleWidth(2)
         split.setChildrenCollapsible(False)
         left = QWidget()

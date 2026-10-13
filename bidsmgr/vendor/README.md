@@ -80,7 +80,7 @@ one that gets silently deleted the next time.
    the string `"n/a"`, `EchoTime` a number or an array of them, and `type` is
    empty for all of those. `_item_type` also had to resolve through `anyOf`,
    since the array branch carries its own `items`. Without it,
-   `bidsmgr.metadata.engine._todo_value_for` read "no item type", assumed
+   `bidsmgr.metadata.engine.todo_value_for` read "no item type", assumed
    strings, and wrote `["TODO"]` into `EchoTime`, turning a missing field into
    a validation error.
 

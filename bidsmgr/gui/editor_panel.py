@@ -36,7 +36,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QHBoxLayout,
     QPushButton,
-    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -67,6 +66,7 @@ from .widgets import (
     VSep,
 )
 from ..viz.data.formats import is_mrs_path, is_recording_path
+from .widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class EditorPanel(QWidget):
         # The three panels are cards on the canvas, a gap between them.
         from .widgets.panel_frame import CARD_GAP_PX
 
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = Splitter(Qt.Orientation.Horizontal)
         self._splitter.setObjectName("card-split")
         self._splitter.setHandleWidth(CARD_GAP_PX)
         self._splitter.setChildrenCollapsible(False)

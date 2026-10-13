@@ -115,7 +115,7 @@ class FieldSpec:
     # _accepted_types / _accepts_free_text / _accepts_na, plus the anyOf
     # lookup added to _item_type). NOT in upstream bidsval 0.1.1: it is a
     # local addition, so refreshing this tree wholesale from upstream would
-    # delete it and break bidsmgr.metadata.engine._todo_value_for, which
+    # delete it and break bidsmgr.metadata.engine.todo_value_for, which
     # reads all three. Re-apply it, or better, get it upstream: "which types
     # does this field accept" is a fact about the schema, and CLAUDE.md guard
     # 8 says those are interpreted once, in bidsval. See vendor/README.md.

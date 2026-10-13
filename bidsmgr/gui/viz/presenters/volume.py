@@ -24,8 +24,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout,
-    QLabel, QMenu, QPushButton, QScrollArea, QSplitter,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QLabel, QMenu, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ....viz import layouts, views
@@ -38,6 +37,7 @@ from ....viz.scene import (
 )
 from ..context import ViewerContext
 from ..menus import popup_menu, submenu
+from ...widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def _caption(text: str) -> QLabel:
     return lbl
 
 
-class _SideSplit(QSplitter):
+class _SideSplit(Splitter):
     """The images-and-controls splitter, saying when it was resized (the
     controls column gives way when the viewer gets narrow)."""
 
@@ -231,7 +231,7 @@ class VolumePresenter:
     # ------------------------------------------------------------------
 
     def _build_content(self) -> QWidget:
-        self.vsplit = QSplitter(Qt.Orientation.Vertical)
+        self.vsplit = Splitter(Qt.Orientation.Vertical)
         self.vsplit.setHandleWidth(2)
         self.vsplit.setChildrenCollapsible(False)
         self.pages = QStackedWidget()
@@ -264,7 +264,7 @@ class VolumePresenter:
 
         # The quality panel beside the views and the time course (a report
         # is a tall list), or below them: two hosts, one panel.
-        self.qsplit = QSplitter(Qt.Orientation.Horizontal)
+        self.qsplit = Splitter(Qt.Orientation.Horizontal)
         self.qsplit.setHandleWidth(2)
         self.qsplit.setChildrenCollapsible(False)
         self.qsplit.addWidget(self.vsplit)
@@ -276,7 +276,7 @@ class VolumePresenter:
         self.qsplit.setStretchFactor(1, 1)
         self.qsplit.splitterMoved.connect(
             lambda *_a: self.remember_sizes("volume.quality", self.qsplit))
-        self.qouter = QSplitter(Qt.Orientation.Vertical)
+        self.qouter = Splitter(Qt.Orientation.Vertical)
         self.qouter.setHandleWidth(2)
         self.qouter.setChildrenCollapsible(False)
         self.qouter.addWidget(self.qsplit)

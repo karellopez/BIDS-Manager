@@ -32,11 +32,12 @@ from PyQt6.QtCore import QPointF, QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ...qc.config import DEFAULT
 from .primitives import ElidedLabel, PaneHeader
+from .splitter import Splitter
 
 #: Viewing axis -> (horizontal axis, vertical axis, the axis looked along).
 VIEWS = {"z": (0, 1, 2), "y": (0, 2, 1), "x": (1, 2, 0)}
@@ -354,12 +355,12 @@ class GradientPane(QWidget):
         v.addWidget(self._findings)
 
         # Directions and b-values in a column, the volumes beside them.
-        self._split = QSplitter(Qt.Orientation.Horizontal)
+        self._split = Splitter(Qt.Orientation.Horizontal)
         self._split.setObjectName("viz-tracks")
         self._split.setChildrenCollapsible(False)
         self._split_moved = False
         self._split.splitterMoved.connect(lambda *_: setattr(self, "_split_moved", True))
-        plots = QSplitter(Qt.Orientation.Vertical)
+        plots = Splitter(Qt.Orientation.Vertical)
         plots.setObjectName("viz-tracks")
         plots.setChildrenCollapsible(False)
         self._dir_card = _Card(

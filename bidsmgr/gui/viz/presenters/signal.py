@@ -38,6 +38,7 @@ from ...widgets.primitives import ElidedLabel
 from ..context import ViewerContext
 from ..controls import NumberControl
 from ..menus import popup_menu
+from ...widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -153,9 +154,8 @@ class SignalPresenter:
         v.addWidget(self.annotation_bar)
         # The traces and, under them, the QC plots: a splitter, so the QC can
         # be given room (or all of it: Maximise).
-        from PyQt6.QtWidgets import QSplitter
 
-        self.qc_split = QSplitter(Qt.Orientation.Vertical)
+        self.qc_split = Splitter(Qt.Orientation.Vertical)
         self.qc_split.setChildrenCollapsible(False)
         self.qc_split.setHandleWidth(6)
         holder = QWidget()

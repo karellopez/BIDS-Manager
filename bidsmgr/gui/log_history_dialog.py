@@ -16,7 +16,7 @@ from typing import Optional
 from PyQt6.QtCore import QUrl, Qt
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPushButton, QSplitter, QStackedWidget, QTreeWidget,
+    QDialog, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -24,6 +24,7 @@ from ..util import oplog
 from .widgets.card import card
 from .widgets.run_log import RunLog
 from .window_flags import give_window_buttons
+from .widgets.splitter import Splitter
 
 #: The tail of a file read to learn how the run ended.
 _TAIL_BYTES = 4096
@@ -92,7 +93,7 @@ class LogHistoryDialog(QDialog):
         intro.setWordWrap(True)
         v.addWidget(intro)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
         split.setObjectName("card-split")
         self.list = QTreeWidget()
         self.list.setObjectName("log-history")

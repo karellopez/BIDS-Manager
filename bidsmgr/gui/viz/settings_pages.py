@@ -30,14 +30,14 @@ from PyQt6.QtGui import QColor, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QKeySequenceEdit,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ...viz import actions as A
 from ...viz import inputmap, keynames
 from ...viz.compute import colormaps
 from ...viz.settings import QC_SECTIONS, VIEWER_SECTIONS, VizSettings
+from ..widgets.splitter import Splitter
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +397,7 @@ class ShortcutsPage(QWidget):
         self._mousemap: dict[str, str] = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
-        split = QSplitter(Qt.Orientation.Vertical)
+        split = Splitter(Qt.Orientation.Vertical)
         split.setChildrenCollapsible(False)
         split.addWidget(self._build_keys())
         split.addWidget(self._build_mouse())

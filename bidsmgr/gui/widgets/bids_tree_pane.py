@@ -56,6 +56,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import icons
+from ..icons import FOLDER_RECORDING_SUFFIXES, color_token_for
 from ..delegates.bids_tree import (
     BADGE_ROLE,
     COUNT_ROLE,
@@ -90,7 +91,6 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 
 # Directories whose contents are *one* BIDS recording — collapse them
 # to a leaf node and stop recursing.
-_FOLDER_RECORDING_SUFFIXES: tuple[str, ...] = (".ds", ".mff")
 
 # Item data roles.
 PATH_ROLE = Qt.ItemDataRole.UserRole          # absolute path string
@@ -106,33 +106,8 @@ PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
 # the tree.
 
 
-def _color_token_for(entry_name: str, is_dir: bool) -> str:
-    """Pick the palette token used to color a row (a ``tree_*`` token: the
-    user can change each in Settings > Display).
-
-    Folder-recordings (``.ds`` / ``.mff``) are colored like data files
-    (``text``) even though they're directories on disk, because the
-    user thinks of them as recordings.
-    """
-    from ..icons import RECORDING_TREE_EXTS
-
-    lower = entry_name.lower()
-    if is_dir and not lower.endswith(_FOLDER_RECORDING_SUFFIXES):
-        return "tree_folder"
-    if lower.endswith(".nii.gz") or lower.endswith(".nii"):
-        return "tree_image"
-    if lower.endswith(".json"):
-        return "tree_sidecar"
-    if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
-        return "tree_table"
-    if lower.endswith(_FOLDER_RECORDING_SUFFIXES) or lower.endswith(RECORDING_TREE_EXTS):
-        # CTF .ds / EGI .mff (folder-shaped) and every other recording.
-        return "tree_recording"
-    return "tree_other"
-
-
 def _is_folder_recording(name: str) -> bool:
-    return name.lower().endswith(_FOLDER_RECORDING_SUFFIXES)
+    return name.lower().endswith(FOLDER_RECORDING_SUFFIXES)
 
 
 def _norm_path(p) -> str:
@@ -746,7 +721,7 @@ class BidsTreePane(QWidget):
                 continue
             is_dir = entry.is_dir()
             item = QTreeWidgetItem([entry.name])
-            token = _color_token_for(entry.name, is_dir)
+            token = color_token_for(entry.name, is_dir=is_dir)
             item.setData(0, PATH_ROLE, entry.path)
             item.setData(0, COLOR_TOKEN_ROLE, token)
             item.setData(0, IS_DIR_ROLE, is_dir)

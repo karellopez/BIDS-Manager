@@ -345,6 +345,32 @@ QPushButton#view-pill:checked {
     border: 1px solid $border;
     font-weight: 600;
 }
+/* The same, made small for a panel's 30 px title bar (Table | Overview):
+ * widgets/primitives.Segmented. A groove in the card, the chosen segment
+ * raised and neutral. */
+QFrame#seg-track {
+    background: $bg;
+    border: 1px solid $border;
+    border-radius: 7px;
+}
+QPushButton#seg-pill {
+    background: transparent;
+    color: $dim;
+    border: 1px solid transparent;
+    padding: 1px 12px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    min-height: 0px;
+}
+QPushButton#seg-pill:hover { color: $text; }
+QPushButton#seg-pill[iconOnly="true"] { padding: 1px 6px; }
+QPushButton#seg-pill:checked {
+    background: $surface3;
+    color: $text;
+    border: 1px solid $border;
+    font-weight: 600;
+}
 QPushButton#theme-toggle {
     background: transparent;
     border: 1px solid transparent;
@@ -675,8 +701,8 @@ QFrame[card="true"] QTreeWidget#renumber-table {
     background: transparent;
     border: none;
 }
-QSplitter#card-split::handle { background: transparent; }
-QSplitter#card-split::handle:hover { background: $subtle; border-radius: 3px; }
+/* Splitter handles paint themselves (widgets/splitter.Splitter): a three-dot
+ * grip, and the accent wash under the mouse. */
 
 /* Collapsible / detachable panel-frame header bar. Mirrors the pane-h5
  * look (surface background + bottom rule) but carries a collapse caret on
@@ -705,6 +731,69 @@ QToolButton#dock-corner-btn:hover,
 QToolButton#panel-frame-detach:hover {
     background: $border;
     border-radius: 3px;
+}
+
+/* A toggle among a panel's corner icons (Filter's Hide rows left out):
+ * when on it carries the accent's wash, as a toggle that is ON does. */
+QToolButton#dock-corner-btn:checked {
+    background: $accent_bg;
+    border-radius: 3px;
+}
+
+/* ---------- Inspection > Overview (gui/overview_pane.py) ----------
+ * Inside the Inspection card: flat, divided by hairlines, no boxes. The
+ * grid's cells and headers are painted from the palette. */
+QScrollArea#overview-scroll,
+QWidget#overview-body { background: transparent; border: none; }
+QFrame#overview-rule { background: $subtle; border: none; }
+QLabel#overview-finding { color: $text; font-size: 12px; }
+/* A section title that folds its section (Worth a look): the section-title
+ * voice, with the chevron the panels fold with. */
+QToolButton#overview-fold {
+    color: $muted;
+    background: transparent;
+    border: none;
+    padding: 0px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+QToolButton#overview-fold:hover { color: $text; }
+QPushButton#inline-link {
+    color: $accent;
+    background: transparent;
+    border: none;
+    padding: 0px 2px;
+    font-size: 11px;
+    font-weight: 600;
+    min-height: 0px;
+}
+QPushButton#inline-link:hover { text-decoration: underline; }
+QTableView#overview-grid {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+QHeaderView#overview-header,
+QHeaderView#overview-header::section {
+    background: transparent;
+    border: none;
+}
+
+/* ---------- Filter > BIDS preview (gui/output_preview.py) ---------- */
+QTreeWidget#plan-tree { background: transparent; border: none; }
+QWidget#plan-file { background: transparent; }
+QLabel#plan-file-name { color: $text; font-size: 12px; font-weight: 600; }
+QTextBrowser#plan-preview {
+    background: $bg;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: "JetBrains Mono";
+    font-size: 11px;
+    selection-background-color: $accent_bg;
 }
 
 /* Bottom-dock log view. Uses a slightly tinted background so the
@@ -775,6 +864,7 @@ QWidget#pane-dark {
 }
 
 /* ---------- Splitter handles ---------- */
+/* Only a splitter that is not a widgets/splitter.Splitter reaches these. */
 QSplitter::handle:horizontal { background: $subtle; width: 1px; }
 QSplitter::handle:vertical   { background: $subtle; height: 1px; }
 QSplitter::handle:hover      { background: $accent; }

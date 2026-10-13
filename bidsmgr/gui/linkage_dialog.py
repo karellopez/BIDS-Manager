@@ -52,7 +52,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -62,6 +61,7 @@ from PyQt6.QtWidgets import (
 from ..editor import linkage
 from ..editor import values as ev
 from .dialog_chrome import build_footer_with, build_header, card, hint
+from .widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ class LinkageDialog(QDialog):
 
         bl.addWidget(self._build_controls())
 
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
         split.addWidget(self._build_left())
         split.addWidget(self._build_middle())
         split.addWidget(self._build_right())

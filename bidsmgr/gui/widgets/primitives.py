@@ -15,6 +15,8 @@ Object-name conventions (consumed by ``theme.qss``):
   ``path-field`` (readonly QLineEdit), ``tb-btn-ghost`` (change button).
 * ``ElidedLabel``   → keeps the object name it is given; used wherever
   runtime text (a path, a log line) must never widen the window.
+* ``Segmented``     → ``seg-track`` / ``seg-pill``: a compact segmented
+  control for a panel's title bar.
 
 All four respect palette swaps through the QSS alone; no per-widget
 ``repaint_for_palette`` is needed.
@@ -37,8 +39,9 @@ from PyQt6.QtWidgets import (
 )
 
 
-def _chip_qcolor(token: str) -> QColor:
-    """Parse a palette token (hex or ``rgba(r,g,b,a)``) into a QColor.
+def qcolor(token: str) -> QColor:
+    """Parse a palette token (hex or ``rgba(r,g,b,a)``) into a QColor, for
+    anything painted with the palette.
 
     ``QColor`` cannot parse the CSS ``rgba(...)`` strings the palette uses
     for translucent tints, so handle those explicitly.
@@ -126,9 +129,9 @@ class Chip(QLabel):
         bg_t, fg_t, br_t = self._KIND_TOKENS.get(
             self._kind, self._KIND_TOKENS["default"]
         )
-        bg = _chip_qcolor(pal.get(bg_t, "#1c2128"))
-        fg = _chip_qcolor(pal.get(fg_t, "#8b949e"))
-        border = _chip_qcolor(pal.get(br_t, "#21262d"))
+        bg = qcolor(pal.get(bg_t, "#1c2128"))
+        fg = qcolor(pal.get(fg_t, "#8b949e"))
+        border = qcolor(pal.get(br_t, "#21262d"))
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -140,6 +143,75 @@ class Chip(QLabel):
         p.setPen(QPen(fg))
         p.setFont(self.font())
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+
+
+class Segmented(QFrame):
+    """A compact segmented control: one choice of a few, the chosen one
+    raised in its track.
+
+    Sized for a panel's 30 px title bar (QSS ``seg-track`` / ``seg-pill``),
+    the header's view switcher made small. The chosen segment is neutral
+    (``surface3`` and the text colour): the accent is for actions.
+    """
+
+    #: The key of the segment chosen by a click.
+    changed = pyqtSignal(str)
+
+    def __init__(self, options: Sequence[tuple], current: str = "", parent=None) -> None:
+        """``options`` are ``(key, text, tooltip)``, or ``(key, text, tooltip,
+        icon)`` with an icon name from :mod:`bidsmgr.gui.icons`; an empty text
+        makes an icon-only segment (its tooltip names it)."""
+        super().__init__(parent)
+        from PyQt6.QtWidgets import QButtonGroup
+
+        self.setObjectName("seg-track")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self.buttons: dict[str, QPushButton] = {}
+        self._icons: dict[str, str] = {}
+        for option in options:
+            key, text, tip = option[:3]
+            btn = QPushButton(text, self)
+            btn.setObjectName("seg-pill")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            if len(option) > 3 and option[3]:
+                self._icons[key] = option[3]
+                btn.setProperty("iconOnly", not text)
+            btn.clicked.connect(lambda _c=False, k=key: self._on_clicked(k))
+            self._group.addButton(btn)
+            lay.addWidget(btn)
+            self.buttons[key] = btn
+        self.refresh_icons()
+        self.set_current(current or (options[0][0] if options else ""))
+
+    def refresh_icons(self) -> None:
+        """Re-make the icons in the current palette (after a theme change)."""
+        from PyQt6.QtCore import QSize
+
+        from .. import icons
+        from ..theme_manager import scaled_px
+
+        for key, name in self._icons.items():
+            btn = self.buttons[key]
+            btn.setIcon(icons.icon(name))
+            btn.setIconSize(QSize(scaled_px(14), scaled_px(14)))
+
+    def current(self) -> str:
+        return next((k for k, b in self.buttons.items() if b.isChecked()), "")
+
+    def set_current(self, key: str) -> None:
+        """Choose ``key`` without announcing it."""
+        btn = self.buttons.get(key)
+        if btn is not None:
+            btn.setChecked(True)
+
+    def _on_clicked(self, key: str) -> None:
+        self.changed.emit(key)
 
 
 class VSep(QFrame):
@@ -437,5 +509,7 @@ __all__ = [
     "ElidedPushButton",
     "PaneHeader",
     "PathBar",
+    "Segmented",
     "VSep",
+    "qcolor",
 ]

@@ -54,12 +54,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QToolButton,
     QPushButton,
-    QSplitter,
     QStackedWidget,
     QTableView,
-    QTabWidget,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -82,8 +78,11 @@ from .models import COLUMNS, MANDATORY_COLUMN_KEYS, InventoryTableModel
 from .output_fs_pane import OutputFsPane
 from .properties_panel import PropertiesPanel
 from .raw_fs_pane import RawFsPane
+from .overview_pane import OverviewPane
 from .widgets import BusySpinner, Chip, PaneHeader, PanelFrame, PathBar, VSep
-from .widgets.panel_frame import CARD_GAP_PX, card_canvas
+from .widgets.panel_frame import CARD_GAP_PX, HEADER_EXTRAS, HEADER_LEAD, card_canvas
+from .widgets.primitives import Segmented
+from .widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +92,17 @@ log = logging.getLogger(__name__)
 #: section widths are, but the TEXT is measured with font metrics, so this
 #: stays right at any font scale (see cross-platform rule 4.1).
 _HEADER_PADDING_PX = 26
+
+
+#: Which view the Inspection area last showed: "table" or "overview".
+_INSPECTION_VIEW_KEY = "inspector/view"
+
+
+def _mtime(path) -> float:
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _repolish_combo(combo: QComboBox) -> None:
@@ -228,12 +238,12 @@ class ConverterPanel(QWidget):
         # The panels are cards on the window's canvas: the two top-level
         # splitters leave a gap between them (``card-split``); the ones
         # inside a card keep a hairline.
-        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split = Splitter(Qt.Orientation.Vertical)
         v_split.setObjectName("card-split")
         v_split.setHandleWidth(CARD_GAP_PX)
         v_split.setChildrenCollapsible(False)
 
-        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split = Splitter(Qt.Orientation.Horizontal)
         h_split.setObjectName("card-split")
         h_split.setHandleWidth(CARD_GAP_PX)
         h_split.setChildrenCollapsible(False)
@@ -256,7 +266,7 @@ class ConverterPanel(QWidget):
         self._output_pane = OutputFsPane()
         self._raw_frame = PanelFrame(self._raw_pane, "Raw data tree", edge="top")
         self._output_frame = PanelFrame(self._output_pane, "Output data tree", edge="top")
-        col1_inner = QSplitter(Qt.Orientation.Vertical)
+        col1_inner = Splitter(Qt.Orientation.Vertical)
         col1_inner.setHandleWidth(1)
         col1_inner.setChildrenCollapsible(False)
         col1_inner.addWidget(self._raw_frame)
@@ -275,7 +285,11 @@ class ConverterPanel(QWidget):
         self._filter_pane = FilterPane()
         self._filter_pane.row_chosen.connect(self._jump_to_row)
         self._filter_pane.rename_requested.connect(self.rename_from_tree)
-        self._filter_frame = PanelFrame(self._filter_pane, "Filter / structure", edge="left")
+        self._filter_pane.preview.set_context(self._plan_context)
+        # Its title says which of its three views it shows.
+        self._filter_frame = PanelFrame(self._filter_pane, self._filter_pane.mode_title(),
+                                        edge="left")
+        self._filter_pane.mode_changed.connect(lambda _m, title: self._filter_frame.set_title(title))
         h_split.addWidget(self._filter_frame)
 
         # Inspection (work surface, never collapsible) + Properties (folds
@@ -287,7 +301,7 @@ class ConverterPanel(QWidget):
         self._properties_frame = PanelFrame(
             self._properties, "Properties", edge="right", detachable=False,
         )
-        right_inner = QSplitter(Qt.Orientation.Horizontal)
+        right_inner = Splitter(Qt.Orientation.Horizontal)
         right_inner.setHandleWidth(1)
         right_inner.setChildrenCollapsible(False)
         self._inspection_pane = self._build_inspection_pane()
@@ -301,6 +315,9 @@ class ConverterPanel(QWidget):
         self._inspection_unit = PanelFrame(
             right_inner, "Inspection", collapsible=False, detachable=True,
         )
+        # Floating, the Inspection has no title bar and its view switch sits
+        # back in the pane's own row, which then needs room around it.
+        self._inspection_unit.state_changed.connect(self._fit_view_switch_home)
         h_split.addWidget(self._inspection_unit)
 
         # Collapsing the left column or the filter hands width to the
@@ -317,22 +334,23 @@ class ConverterPanel(QWidget):
         h_split.setSizes([240, 220, 1040])
         v_split.addWidget(h_split)
 
-        # The whole bottom dock (Log / BIDS preview / Statistics) folds down
-        # as one and its panes detach; wrap it so it grows the panes above
-        # when collapsed.
-        self._dock_frame = PanelFrame(
-            self._build_bottom_dock(), "Output panels", edge="bottom",
-            detachable=False, hide_inner_header=False,
+        # The Log, under the columns: one card, folded from anywhere on its
+        # header (the title bar sits on top of it like every other card's;
+        # folded, only that bar is left at the bottom of the window), and
+        # detachable. What the conversion will write is the Inspection's
+        # Overview, beside the table.
+        self._log_frame = PanelFrame(
+            self._build_log_dock(), "Log", edge="top", collapsible=True, detachable=True,
         )
-        self._panel_frames.append(self._dock_frame)
-        v_split.addWidget(self._dock_frame)
-        # Collapsing the bottom dock hands its height to the panes above.
-        self._dock_frame.attach_splitter(v_split, grow_target=h_split)
+        self._panel_frames.append(self._log_frame)
+        v_split.addWidget(self._log_frame)
+        # Folding the Log hands its height to the panes above.
+        self._log_frame.attach_splitter(v_split, grow_target=h_split)
         v_split.setStretchFactor(0, 1)
         v_split.setStretchFactor(1, 0)
-        v_split.setSizes([560, 200])
+        v_split.setSizes([600, 160])
         for frame in (self._col1_frame, self._filter_frame, self._inspection_unit,
-                      self._dock_frame):
+                      self._log_frame):
             frame.make_card()
         v.addWidget(card_canvas(v_split), 1)
 
@@ -476,19 +494,18 @@ class ConverterPanel(QWidget):
         self._source_check = None
         self._properties.set_sources(None)
         self._filter_pane.bind_model(None)
+        self._overview.bind_model(None)
         self._raw_pane.bind_model(None)
         self._raw_pane.set_root(None)
         # Raw input bar back to "nothing picked".
         self._raw_pathbar.set_value("(no folder selected)", ok=False)
         self._clear_source_state()
-        # Inspection back to the placeholder; clear previews + chips + stats.
+        # Inspection back to the placeholder; clear the chips.
         self._inspection_stack.setCurrentIndex(0)
-        self._bids_preview.clear()
         self._chip_valid.setText("0 valid")
         self._chip_warn.setText("0 warnings")
         self._chip_err.setText("0 error")
         self._chip_skip.setText("0 skipped")
-        self._update_stats_label()
         self._run_btn.setEnabled(False)
         self._revalidate_btn.setEnabled(False)
 
@@ -685,6 +702,7 @@ class ConverterPanel(QWidget):
         self._properties.set_shims(self._series_shims())
         self._resolve_sources(df)
         self._filter_pane.bind_model(self._model)
+        self._overview.bind_model(self._model)
         self._raw_pane.bind_model(self._model)
         if self._raw_root is not None:
             self._raw_pane.set_root(self._raw_root)
@@ -693,18 +711,13 @@ class ConverterPanel(QWidget):
         # Swap the inspection-pane stack from placeholder → table.
         self._inspection_stack.setCurrentWidget(self._table)
         self._update_status_chips()
-        self._rebuild_bids_preview()
-        self._update_stats_label()
         self._update_meta_button_state()
         # Seed the model's dataset-wide defaults so inheritance columns show
         # the global value (muted) in rows that have no per-row override.
         self._model.set_global_spec(self._load_global_spec())
-        # Refresh chips + previews when the model edits a row.
-        def _on_model_changed(*_a):
-            self._update_status_chips()
-            self._rebuild_bids_preview()
-            self._update_stats_label()
-        self._model.dataChanged.connect(_on_model_changed)
+        # Refresh the chips when the model edits a row (the Overview follows
+        # the model itself).
+        self._model.dataChanged.connect(lambda *_a: self._update_status_chips())
         # A fresh user edit invalidates the redo stack (timeline diverged).
         self._model.userEdited.connect(self._on_user_edited)
         # Per-row acquisition overrides (device / institution) live in the
@@ -1027,7 +1040,31 @@ class ConverterPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         # No header of its own: the frame around it (with Properties) is
-        # titled Inspection, and a second one read as a stutter.
+        # titled Inspection, and a second one read as a stutter. Its view
+        # switch is named HEADER_LEAD, so the frame lifts it into that title
+        # bar, after the title; floating, it comes back to this row.
+        home = QWidget(pane)
+        self._view_switch_home = QHBoxLayout(home)
+        self._view_switch_home.setContentsMargins(0, 0, 0, 0)
+        switch_holder = QWidget(home)
+        switch_holder.setObjectName(HEADER_LEAD)
+        sh = QHBoxLayout(switch_holder)
+        sh.setContentsMargins(0, 0, 0, 0)
+        self._view_switch = Segmented((
+            ("table", "Table", "Every recording, one row each: what will be converted and how"),
+            ("overview", "Overview",
+             "What each subject will have, and where one differs from the others"),
+        ), parent=switch_holder)
+        self._view_switch.changed.connect(self.set_inspection_view)
+        sh.addWidget(self._view_switch)
+        self._view_switch_home.addWidget(switch_holder)
+        self._view_switch_home.addStretch(1)
+        v.addWidget(home)
+        self._inspection_views = QStackedWidget()
+        table_page = QWidget()
+        tv = QVBoxLayout(table_page)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(0)
 
         # Use QStackedWidget so we can swap between "empty placeholder"
         # and the actual table without recreating widgets — keeps view
@@ -1044,7 +1081,7 @@ class ConverterPanel(QWidget):
         self._table = self._build_table()
         self._inspection_stack.addWidget(self._table)
 
-        v.addWidget(self._inspection_stack, 1)
+        tv.addWidget(self._inspection_stack, 1)
 
         # Footer: per-pane controls that act on the table's selection.
         # "Highlight aborts" toggles row-tint on the model;
@@ -1061,8 +1098,110 @@ class ConverterPanel(QWidget):
         fl.addWidget(self._meta_btn)
         fl.addWidget(self._columns_btn)
         fl.addWidget(self._bulk_btn)
-        v.addWidget(footer)
+        tv.addWidget(footer)
+        self._inspection_views.addWidget(table_page)
+
+        # The Overview: what each subject will have. A count picked there
+        # selects its rows here (Properties follows); Show opens the table.
+        self._overview = OverviewPane()
+        self._overview.rows_chosen.connect(self.select_rows)
+        self._overview.rows_shown.connect(
+            lambda rows: (self.set_inspection_view("table"), self.select_rows(rows)))
+        self._inspection_views.addWidget(self._overview)
+        v.addWidget(self._inspection_views, 1)
+        view = str(QSettings().value(_INSPECTION_VIEW_KEY, "table") or "table")
+        self.set_inspection_view(view if view in ("table", "overview") else "table",
+                                 remember=False)
         return pane
+
+    # ------------------------------------------------------------------
+    # Inspection: Table or Overview
+    # ------------------------------------------------------------------
+
+    def inspection_view(self) -> str:
+        """``"table"`` or ``"overview"``."""
+        return "overview" if self._inspection_views.currentWidget() is self._overview else "table"
+
+    def set_inspection_view(self, view: str, *, remember: bool = True) -> None:
+        """Show the table or the Overview in the Inspection area."""
+        page = self._overview if view == "overview" else self._inspection_views.widget(0)
+        self._inspection_views.setCurrentWidget(page)
+        self._view_switch.set_current("overview" if view == "overview" else "table")
+        if remember:
+            QSettings().setValue(_INSPECTION_VIEW_KEY, self.inspection_view())
+
+    def select_rows(self, rows: list) -> None:
+        """Select inventory ``rows`` in the table, the first one current (so
+        Properties and Filter follow it) and scrolled into view."""
+        if self._model is None or not rows:
+            return
+        from PyQt6.QtCore import QItemSelection, QItemSelectionModel
+
+        count = self._model.rowCount()
+        wanted = sorted({int(r) for r in rows if 0 <= int(r) < count})
+        if not wanted:
+            return
+        last_column = max(self._model.columnCount() - 1, 0)
+        selection = QItemSelection()
+        start = prev = wanted[0]
+        for row in [*wanted[1:], None]:
+            if row is not None and row == prev + 1:
+                prev = row
+                continue
+            selection.select(self._model.index(start, 0), self._model.index(prev, last_column))
+            if row is not None:
+                start = prev = row
+        sel = self._table.selectionModel()
+        flags = QItemSelectionModel.SelectionFlag
+        sel.select(selection, flags.ClearAndSelect | flags.Rows)
+        first = self._model.index(wanted[0], 0)
+        sel.setCurrentIndex(first, flags.NoUpdate)
+        self._table.scrollTo(first, self._table.ScrollHint.PositionAtCenter)
+
+    def _plan_context(self) -> tuple:
+        """What the BIDS preview needs beside the table: the settings that
+        change what is written, the scan's series features and the recording
+        metadata."""
+        from .. import __version__
+        from ..converter.output_plan import PlanOptions
+        from ..schema import loader
+
+        s = self._app_settings
+        dataset = (self._bids_root.name if self._bids_root is not None else
+                   (str(self._model.dataframe()["dataset"].iloc[0])
+                    if self._model is not None and "dataset" in self._model.dataframe().columns
+                    and len(self._model.dataframe()) else ""))
+        options = PlanOptions(
+            dataset=dataset,
+            run_metadata=bool(s.post_run_metadata),
+            fill_todos=bool(s.post_run_metadata and s.post_metadata_fill_todos),
+            fill_scope=s.metadata_fill_scope,
+            intended_for=s.convert_intended_for,
+            b0_field=bool(s.convert_b0_field),
+            sourcedata=s.convert_sourcedata,
+            sourcedata_modalities=tuple(m.strip() for m in s.convert_sourcedata_modalities.split(",")
+                                        if m.strip()),
+            force_edf=bool(s.convert_force_edf),
+            bids_version=loader.bids_version(),
+            version=str(__version__),
+        )
+        features = {}
+        if self._output_tsv is not None:
+            from ..classifier.acquisition import cache
+
+            key = (str(self._output_tsv), _mtime(cache.features_path(self._output_tsv)))
+            if getattr(self, "_features_cache", (None,))[0] != key:
+                try:
+                    self._features_cache = (key, cache.read(self._output_tsv))
+                except Exception:  # noqa: BLE001 - the preview shows less
+                    self._features_cache = (key, {})
+            features = self._features_cache[1]
+        spec = self._model.global_spec() if self._model is not None else None
+        return options, features, spec
+
+    def _fit_view_switch_home(self) -> None:
+        floating = self._inspection_unit.is_detached()
+        self._view_switch_home.setContentsMargins(*((10, 8, 10, 6) if floating else (0, 0, 0, 0)))
 
     def _build_table(self) -> QTableView:
         t = QTableView()
@@ -1474,34 +1613,18 @@ class ConverterPanel(QWidget):
     # Internals — bottom dock
     # ------------------------------------------------------------------
 
-    def _build_bottom_dock(self) -> QSplitter:
-        """Bottom dock split into two tabbed halves.
+    def _build_log_dock(self) -> QWidget:
+        """The Log: the live output of scans and conversions.
 
-        Left half:  Log              — the "what happened" pane (live
-                                        output from workers).
-        Right half: BIDS preview + Statistics — the "what will be
-                                         produced" pane (predicted tree
-                                         + row counts).
+        Append-only from the workers' progress signals, styled in theme.qss
+        (``QPlainTextEdit#dock-log``): runs with headings, warnings and errors
+        in colour, emptied for each run when the setting says so; every run
+        also writes a file.
 
-        Each half is its own ``QTabWidget``; a horizontal ``QSplitter``
-        between them lets the user re-balance widths.
+        One header, the panel's: its buttons (clear, the run's file, every
+        log) sit in it, named HEADER_EXTRAS so the frame lifts them there
+        and hands them back when the Log floats (GUI_LOOK_AND_FEEL 4.26).
         """
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setHandleWidth(1)
-        split.setChildrenCollapsible(False)
-
-        # ---------- left: Log ----------
-        # Log: append-only stream from worker progress signals, styled in
-        # theme.qss (``QPlainTextEdit#dock-log``). Runs with headings,
-        # warnings and errors in colour, emptied for each run when the
-        # setting says so; every run also writes a file.
-        #
-        # One header, the panel's: its buttons (clear, the run's file, every
-        # log) sit in it, named HEADER_EXTRAS so the frame lifts them there
-        # and hands them back when the Log floats. A tab bar holding the one
-        # tab "Log" under a title "LOG" said it twice, and its rule broke
-        # where the buttons sat beside it.
-        from .widgets.panel_frame import HEADER_EXTRAS
         from .widgets.run_log import RunLog
 
         self._log_view = RunLog()
@@ -1520,50 +1643,7 @@ class ConverterPanel(QWidget):
         home_row.addWidget(corner)
         col.addWidget(home)
         col.addWidget(self._log_view, 1)
-
-        # Detach-only wrappers so the Log and the preview/stats group can
-        # each pop out into their own window (no collapse here -- the whole
-        # dock collapses together via the surrounding ``_dock_frame``).
-        self._log_frame = PanelFrame(log_box, "Log", collapsible=False, detachable=True)
-        split.addWidget(self._log_frame)
-
-        # ---------- right: BIDS preview + Statistics ----------
-        right_tabs = QTabWidget()
-        right_tabs.setDocumentMode(True)
-        right_tabs.setMovable(False)
-
-        self._bids_preview = QTreeWidget()
-        self._bids_preview.setHeaderHidden(True)
-        self._bids_preview.setRootIsDecorated(False)
-        self._bids_preview.setIndentation(14)
-        self._bids_preview.setObjectName("dock-bids-preview")
-        right_tabs.addTab(self._bids_preview, "BIDS tree")
-        icons.apply_tab(right_tabs, 0, "preview")
-
-        stats = QLabel("(statistics fill in after a scan)")
-        stats.setObjectName("pane-hint")
-        stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._stats_label = stats
-        right_tabs.addTab(stats, "Statistics")
-        icons.apply_tab(right_tabs, 1, "statistics")
-
-        # Keep a reference for ``repaint_for_palette`` re-tinting.
-        self._right_tabs = right_tabs
-
-        # Titled for both of its views, so its title does not repeat a tab.
-        self._preview_frame = PanelFrame(
-            right_tabs, "Preview", collapsible=False, detachable=True,
-            hide_inner_header=False,
-        )
-        split.addWidget(self._preview_frame)
-        # Register the dock's two detach frames for theme re-tinting.
-        self._panel_frames.extend([self._log_frame, self._preview_frame])
-
-        # Equal split by default; user can drag the handle to rebalance.
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 1)
-        split.setSizes([700, 700])
-        return split
+        return log_box
 
     def _build_log_corner(self) -> QWidget:
         """Clear, the last run's file and every log, as the panel's corner
@@ -1641,85 +1721,6 @@ class ConverterPanel(QWidget):
         # One append for the whole batch: one repaint.
         self._log_view.append_lines(self._log_buffer)
         self._log_buffer.clear()
-
-    def _rebuild_bids_preview(self) -> None:
-        """Repopulate the BIDS-preview tree from the current model.
-
-        Groups included rows by ``dataset / sub / ses / datatype`` and
-        lists the basenames. Skipped rows are omitted so the preview
-        reflects what conversion will actually emit.
-        """
-        self._bids_preview.clear()
-        if self._model is None:
-            return
-        df = self._model.dataframe()
-        if df.empty:
-            return
-
-        # tree[dataset][subject][session][datatype] = [basename, ...]
-        tree: dict = {}
-        for idx in df.index:
-            include_val = df.at[idx, "include"] if "include" in df.columns else 1
-            included = True
-            if isinstance(include_val, str):
-                included = include_val.strip() not in ("0", "false", "False", "")
-            else:
-                try:
-                    included = bool(include_val)
-                except Exception:
-                    included = True
-            if not included:
-                continue
-            basename = str(df.at[idx, "bids_name"] or "")
-            if not basename:
-                continue
-            datatype = str(df.at[idx, "datatype"] or "")
-            subject = str(df.at[idx, "participant_id"] or "")
-            session = str(df.at[idx, "session"] or "")
-            dataset = str(df.at[idx, "dataset"] or "") if "dataset" in df.columns else ""
-
-            ds_key = dataset or "(no dataset)"
-            sub_key = subject or "(no subject)"
-            ses_key = session or ""
-            tree.setdefault(ds_key, {}).setdefault(sub_key, {}).setdefault(
-                ses_key, {}
-            ).setdefault(datatype or "(no datatype)", []).append(basename)
-
-        for ds_key in sorted(tree.keys()):
-            ds_item = QTreeWidgetItem([f"{ds_key}/"])
-            self._bids_preview.addTopLevelItem(ds_item)
-            for sub_key in sorted(tree[ds_key].keys()):
-                sub_item = QTreeWidgetItem([f"{sub_key}/"])
-                ds_item.addChild(sub_item)
-                for ses_key in sorted(tree[ds_key][sub_key].keys()):
-                    ses_parent = sub_item
-                    if ses_key:
-                        ses_item = QTreeWidgetItem([f"{ses_key}/"])
-                        sub_item.addChild(ses_item)
-                        ses_parent = ses_item
-                    for dt_key in sorted(tree[ds_key][sub_key][ses_key].keys()):
-                        dt_item = QTreeWidgetItem([f"{dt_key}/"])
-                        ses_parent.addChild(dt_item)
-                        for bn in sorted(tree[ds_key][sub_key][ses_key][dt_key]):
-                            dt_item.addChild(QTreeWidgetItem([bn]))
-        self._bids_preview.expandToDepth(2)
-
-    def _update_stats_label(self) -> None:
-        if self._model is None:
-            self._stats_label.setText("(statistics fill in after a scan)")
-            return
-        df = self._model.dataframe()
-        n_rows = len(df)
-        # Unique subjects + sessions across all rows.
-        subs = sorted({str(s) for s in df.get("participant_id", []) if s})
-        ses = sorted({
-            f"{s}/{x}" for s, x in zip(
-                df.get("participant_id", []), df.get("session", []),
-            ) if s and x
-        })
-        self._stats_label.setText(
-            f"{n_rows} rows · {len(subs)} subjects · {len(ses)} session(s)"
-        )
 
     # ------------------------------------------------------------------
     # Slots
@@ -2468,9 +2469,9 @@ class ConverterPanel(QWidget):
             "stop" if convert_running else "run",
             color=pal.get("primary_btn_text"),
         )
-        if hasattr(self, "_right_tabs"):
-            icons.apply_tab(self._right_tabs, 0, "preview")
-            icons.apply_tab(self._right_tabs, 1, "statistics")
+        if hasattr(self, "_overview"):
+            self._overview.repaint_for_palette(pal)
+            _repolish_combo(self._overview.level_box)
         # The scan-table dropdown (and any QComboBox) does not re-read the
         # re-applied stylesheet on a global ``setStyleSheet`` swap on its own:
         # its popup view is a separate top-level widget Qt does not re-polish.
@@ -2524,6 +2525,8 @@ class ConverterPanel(QWidget):
         before_classifier = self._app_settings.classifier_config
         self._app_settings = AppSettings.load()
         self._sync_confidence_bands()
+        # The BIDS preview follows the settings that change what is written.
+        self._filter_pane.preview.refresh()
         if self._model is not None and self._app_settings.scan_exclusions != before:
             self._offer_exclusions()
         if self._model is not None and self._app_settings.classifier_config != before_classifier:
@@ -2614,9 +2617,11 @@ class ConverterPanel(QWidget):
         if not current.isValid():
             self._properties.request_row(None)
             self._filter_pane.reveal_row(None)
+            self._overview.reveal_row(None)
             return
         self._properties.request_row(current.row())
         self._filter_pane.reveal_row(current.row())
+        self._overview.reveal_row(current.row())
 
     def _on_selection_changed(self, *_args) -> None:
         """Enable the bulk-edit button only when ≥ 2 rows are selected."""
@@ -3025,8 +3030,6 @@ class ConverterPanel(QWidget):
         # react to), but call them directly so the refresh is immediate and
         # self-contained even if a listener was ever detached.
         self._update_status_chips()
-        self._rebuild_bids_preview()
-        self._update_stats_label()
         self.log_message.emit("Re-validated inventory against the BIDS schema")
 
     def _update_status_chips(self) -> None:

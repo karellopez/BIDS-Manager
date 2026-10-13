@@ -30,8 +30,8 @@ from bidsmgr.metadata.engine import (
     FILL_RECOMMENDED,
     FILL_REQUIRED,
     FILL_SCOPES,
-    _NO_TODO,
-    _todo_value_for,
+    NO_TODO,
+    todo_value_for,
     run_metadata,
     scope_levels,
     unmarkable_reason,
@@ -51,7 +51,7 @@ def _spec(datatype: str, suffix: str, name: str):
 
 
 def test_a_free_text_field_takes_the_todo_marker() -> None:
-    assert _todo_value_for(_spec("eeg", "eeg", "TaskName")) == "TODO"
+    assert todo_value_for(_spec("eeg", "eeg", "TaskName")) == "TODO"
 
 
 def test_a_field_that_accepts_na_takes_na() -> None:
@@ -62,7 +62,7 @@ def test_a_field_that_accepts_na_takes_na() -> None:
     assert field.accepts == ("number", "string")
     assert field.accepts_na
     assert not field.accepts_free_text, "its string variant is only 'n/a'"
-    assert _todo_value_for(field) == "n/a"
+    assert todo_value_for(field) == "n/a"
 
 
 @pytest.mark.parametrize("datatype, suffix, name", [
@@ -74,7 +74,7 @@ def test_a_field_that_links_files_gets_no_marker(datatype, suffix, name) -> None
     fMRIPrep (measured 2026-10-12 on the Shayam and MRI_sample_2
     conversions): a run with no fieldmap must say nothing, not name one."""
     field = _spec(datatype, suffix, name)
-    assert _todo_value_for(field) is _NO_TODO
+    assert todo_value_for(field) is NO_TODO
     assert "link" in unmarkable_reason(field)
 
 
@@ -82,7 +82,7 @@ def test_an_array_of_strings_takes_a_marker_in_a_list() -> None:
     field = next(
         f for f in sc.dataset_description_fields() if f.name == "Authors"
     )
-    assert _todo_value_for(field) == ["TODO"]
+    assert todo_value_for(field) == ["TODO"]
 
 
 @pytest.mark.parametrize("name", [
@@ -95,21 +95,21 @@ def test_a_number_or_array_of_numbers_gets_no_marker(name: str) -> None:
     strings" wrote ``["TODO"]`` into them, turning a gap into a type error."""
     field = _spec("anat", "T1w", name)
     assert field.item_type == "number", "the item type must survive anyOf"
-    assert _todo_value_for(field) is _NO_TODO
+    assert todo_value_for(field) is NO_TODO
 
 
 def test_a_real_vocabulary_gets_no_marker() -> None:
     """Nothing in a controlled vocabulary means "unanswered"."""
     field = _spec("anat", "T1w", "MRAcquisitionType")
     assert field.enum
-    assert _todo_value_for(field) is _NO_TODO
+    assert todo_value_for(field) is NO_TODO
 
 
 def test_every_unmarkable_field_says_why() -> None:
     for datatype, suffix in (("anat", "T1w"), ("pet", "pet"), ("eeg", "eeg")):
         for field in sc.sidecar_fields(datatype, suffix):
             reason = unmarkable_reason(field)
-            if _todo_value_for(field) is _NO_TODO:
+            if todo_value_for(field) is NO_TODO:
                 assert reason, f"{field.name} is skipped with no reason"
             else:
                 assert not reason
