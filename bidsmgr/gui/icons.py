@@ -74,6 +74,9 @@ NAMES: dict[str, tuple[str, str]] = {
 
     # ---- Converter toolbar ----
     "scan":         ("mdi6.magnify-scan",             "accent"),
+    # The magnifier at the start of a search field. Muted: it labels the box,
+    # it is not a button.
+    "search":       ("mdi6.magnify",                  "muted"),
     "settings":     ("mdi6.cog-outline",              "text"),
     # A toolbox, not the settings cog: they are different things and
     # sharing a glyph made the Tools menu read as a second Settings.

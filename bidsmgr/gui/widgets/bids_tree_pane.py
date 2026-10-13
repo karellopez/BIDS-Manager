@@ -359,6 +359,9 @@ class BidsTreePane(QWidget):
     links_requested = pyqtSignal(list)
     #: Draw the clicked image over another: ``(overlay, base)`` paths.
     overlay_requested = pyqtSignal(object, object)
+    #: The dataset on disk may have changed: a new root, or a refresh after an
+    #: operation or a change the watcher saw. ``Path``, the root.
+    tree_changed = pyqtSignal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -630,6 +633,7 @@ class BidsTreePane(QWidget):
         # to go down anyway.
         self.collapse_all()
         self._stack.setCurrentIndex(1)
+        self.tree_changed.emit(path)
 
     def refresh(self) -> None:
         """Re-walk the current root, preserving the user's view.
@@ -660,6 +664,7 @@ class BidsTreePane(QWidget):
         # markers are still valid for files that survived the change).
         if self._last_badges:
             self._apply_badge_map(self._last_badges, self._last_counts)
+        self.tree_changed.emit(self._root)
 
     def _populate(self, path: Path) -> list[str]:
         """Sweep ``path``, draw its first level, return the dirs to watch.

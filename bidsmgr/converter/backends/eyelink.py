@@ -179,7 +179,7 @@ def physio_sidecar(rec, eye: str, settings: dict) -> dict:
     return side
 
 
-_EVENTS_SIDECAR = {
+EVENTS_SIDECAR = {
     "Columns": ["onset", "duration", "trial_type", "message"],
     "Description": "Fixations, saccades and blinks as the EyeLink tracker parsed them, "
                    "and the messages it logged.",
@@ -233,7 +233,7 @@ def write_bids(rec, out_dir: Path, basename: str, *, settings: Optional[dict] = 
             np.array([r[3] for r in rows], dtype=object),
         ])
         events_side = out_dir / f"{events_name}.json"
-        events_side.write_text(json.dumps(_EVENTS_SIDECAR, indent=2) + "\n", encoding="utf-8")
+        events_side.write_text(json.dumps(EVENTS_SIDECAR, indent=2) + "\n", encoding="utf-8")
         written += [events, events_side]
     return written
 

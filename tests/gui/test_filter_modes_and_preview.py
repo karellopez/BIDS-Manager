@@ -350,3 +350,203 @@ def test_nothing_opens_a_window(qtbot, qapp, panel) -> None:
     finally:
         qapp.removeEventFilter(spy)
     assert spy.shown == [], spy.shown
+
+
+# ---------------------------------------------------------------------------
+# One click folds a row, in every view, as in every other tree
+# ---------------------------------------------------------------------------
+
+
+def _click_row(qtbot, tree, item) -> None:
+    """A real click on the row's name, past the arrow and any checkbox."""
+    from PyQt6.QtTest import QTest
+
+    rect = tree.visualItemRect(item)
+    tree.scrollToItem(item)
+    rect = tree.visualItemRect(item)
+    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    # A second gesture on the same row must wait out the double-click time.
+    qtbot.wait(QApplication.doubleClickInterval() + 40)
+
+
+def test_one_click_opens_a_preview_folder(qtbot, panel) -> None:
+    pane = panel._filter_pane
+    pane.set_mode("preview")
+    _planned(qtbot, pane)
+    tree = pane.preview.tree
+    assert not tree.expandsOnDoubleClick()
+    sub = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+               if tree.topLevelItem(i).text(0) == "sub-02")
+    _click_row(qtbot, tree, sub)
+    assert sub.isExpanded(), "a click on the row opens the folder"
+    assert {sub.child(i).text(0) for i in range(sub.childCount())} >= {"anat", "func"}
+    _click_row(qtbot, tree, sub)
+    assert not sub.isExpanded()
+
+
+def test_one_click_folds_a_filter_row_and_a_tick_does_not(qtbot, panel) -> None:
+    from PyQt6.QtTest import QTest
+
+    pane = panel._filter_pane
+    for mode, tree in (("structure", pane._tree), ("recordings", pane._kinds)):
+        pane.set_mode(mode)
+        qtbot.wait(20)
+        from PyQt6.QtWidgets import QTreeWidgetItemIterator
+
+        tree.expandAll()
+        it, item = QTreeWidgetItemIterator(tree), None
+        while it.value() is not None:
+            node = it.value()
+            if node.childCount() and node.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                item = node
+                break
+            it += 1
+        assert item is not None, f"{mode}: no foldable row with a checkbox"
+        tree.collapseAll()
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        _click_row(qtbot, tree, item)
+        assert item.isExpanded(), mode
+        _click_row(qtbot, tree, item)
+        assert not item.isExpanded(), mode
+
+        # The checkbox ticks and folds nothing.
+        before = item.checkState(0)
+        rect = tree.visualItemRect(item)
+        # The middle of the indicator, styled or not (it spans 7-22 px in).
+        box = rect.topLeft() + type(rect.topLeft())(13, rect.height() // 2)
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=box)
+        qtbot.wait(QApplication.doubleClickInterval() + 40)
+        assert item.checkState(0) != before, f"{mode}: the tick did not land"
+        assert not item.isExpanded(), f"{mode}: a tick folded the row"
+
+
+# ---------------------------------------------------------------------------
+# Right-click in Structure and Recordings: the table's menu for those rows
+# ---------------------------------------------------------------------------
+
+
+def _menu_at(qtbot, panel, tree, item) -> list[str]:
+    tree.setCurrentItem(item)
+    pos = tree.visualItemRect(item).center()
+    panel._filter_pane._on_tree_menu(pos, tree)
+    menu = panel._filter_menu
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    menu.close()
+    return texts
+
+
+def _first(tree, test):
+    from PyQt6.QtWidgets import QTreeWidgetItemIterator
+
+    tree.expandAll()
+    it = QTreeWidgetItemIterator(tree)
+    while it.value() is not None:
+        if test(it.value()):
+            return it.value()
+        it += 1
+    raise AssertionError("no such row")
+
+
+def test_a_recording_in_the_tree_offers_the_tables_menu(qtbot, panel) -> None:
+    from bidsmgr.gui.filter_pane import _ROW_IDS_ROLE
+
+    pane = panel._filter_pane
+    pane.set_mode("structure")
+    leaf = _first(pane._tree, lambda i: bool(i.data(0, _ROW_IDS_ROLE)))
+    row = int(leaf.data(0, _ROW_IDS_ROLE)[0])
+    from_tree = _menu_at(qtbot, panel, pane._tree, leaf)
+
+    panel._table.selectRow(row)
+    panel._on_table_menu(panel._table.visualRect(panel._model.index(row, 1)).center())
+    from_table = [a.text() for a in panel._table_menu.actions() if not a.isSeparator()]
+    panel._table_menu.close()
+    assert from_tree == from_table
+    assert "Give a new subject number..." in from_tree
+
+
+def test_a_subject_offers_its_rename_and_its_rows(qtbot, panel) -> None:
+    from bidsmgr.gui.filter_pane import _KIND_ROLE
+
+    pane = panel._filter_pane
+    pane.set_mode("structure")
+    subject = _first(pane._tree, lambda i: i.data(0, _KIND_ROLE) == "subject")
+    texts = _menu_at(qtbot, panel, pane._tree, subject)
+    assert texts[0] == f"Rename subject {subject.data(0, Qt.ItemDataRole.UserRole + 12)}..."
+    assert "Give a new subject number..." in texts
+
+    # And the rename acts on every row under it.
+    seen: list = []
+    panel.rename_from_tree = lambda *a, **k: seen.append(a)
+    pane._on_tree_menu(pane._tree.visualItemRect(subject).center(), pane._tree)
+    panel._filter_menu.actions()[0].trigger()
+    panel._filter_menu.close()
+    assert seen and seen[0][0] == "subject" and len(seen[0][1]) == 3
+
+
+def test_a_kind_of_recording_offers_new_numbers_for_everyone(qtbot, panel) -> None:
+    from bidsmgr.gui.filter_pane import _KIND_ROLE
+
+    pane = panel._filter_pane
+    pane.set_mode("recordings")
+    kind = _first(pane._kinds, lambda i: i.data(0, _KIND_ROLE) == "kind")
+    texts = _menu_at(qtbot, panel, pane._kinds, kind)
+    assert "Give new subject numbers..." in texts, "four people under one kind"
+    assert not any(t.startswith("Rename") for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# The preview follows the metadata answers and the settings that write files
+# ---------------------------------------------------------------------------
+
+
+def test_a_template_reaches_the_preview_without_a_table_edit(qtbot, panel) -> None:
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    pane = panel._filter_pane
+    pane.set_mode("preview")
+    _planned(qtbot, pane)
+    spec = panel._model.global_spec() or RecordingMetaSpec()
+    spec.sequence_templates["func/bold"] = {"TaskDescription": "Fixate the cross"}
+    panel._model.set_global_spec(spec)
+    panel._model.recordingSpecChanged.emit()
+    qtbot.waitUntil(lambda: not pane.preview.is_planning(), timeout=5000)
+    assert pane.preview.select_path("sub-02/func/sub-02_task-rest_bold.json")
+    qtbot.waitUntil(lambda: "Fixate the cross" in pane.preview.content.toPlainText(),
+                    timeout=5000)
+    from bidsmgr.gui.output_preview import _colour
+    from bidsmgr.gui.theme_manager import CUR
+
+    assert _colour("stated", CUR()).lower() in pane.preview.content.toHtml().lower(), \
+        "the user's own answer in its own colour"
+
+
+def test_the_companion_setting_adds_the_stubs(qtbot, panel) -> None:
+    pane = panel._filter_pane
+    pane.set_mode("preview")
+    plan = _planned(qtbot, pane)
+    assert plan.find("sub-01/func/sub-01_task-rest_events.tsv") is None
+    panel._app_settings.post_fixup_companions = True
+    pane.preview.refresh()
+    qtbot.waitUntil(lambda: pane.preview.plan() is not None and pane.preview.plan().find(
+        "sub-01/func/sub-01_task-rest_events.tsv") is not None, timeout=5000)
+    assert pane.preview.select_path("sub-01/func/sub-01_task-rest_events.tsv")
+    qtbot.waitUntil(lambda: "TODO" in pane.preview.content.toPlainText(), timeout=5000)
+
+
+def test_the_legend_names_every_source(qtbot, panel) -> None:
+    from bidsmgr.converter.output_plan import SOURCES
+    from bidsmgr.gui.output_preview import _LEGEND
+
+    assert {key for key, _t, _token in _LEGEND} == set(SOURCES)
+
+
+def test_a_purple_accent_moves_the_answers_to_teal() -> None:
+    from bidsmgr.gui.output_preview import _colour
+
+    pal = {"accent": "#a371f7", "purple": "#a371f7", "teal": "#39c5cf", "text": "#ffffff"}
+    assert _colour("stated", pal) == "#39c5cf"
+    pal["accent"] = "#2f81f7"
+    assert _colour("stated", pal) == "#a371f7"

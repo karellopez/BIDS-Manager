@@ -133,6 +133,7 @@ class EditorPanel(QWidget):
         self._tree_pane.compare_requested.connect(self._on_compare_images)
         self._tree_pane.links_requested.connect(self._on_links)
         self._tree_pane.overlay_requested.connect(self._on_overlay_requested)
+        self._tree_pane.tree_changed.connect(self._on_tree_changed)
         self._tree_pane.overlay_base = self._overlay_base
         #: The last two images shown in the volume viewer, newest last: what a
         #: right-clicked image would be drawn over (the right-click itself
@@ -873,6 +874,22 @@ class EditorPanel(QWidget):
         if persist:
             from .app_settings import AppSettings
             AppSettings.remember_editor_bids_root(path)
+
+    def _on_tree_changed(self, root) -> None:
+        """The dataset changed on disk: re-read what the field levels depend on.
+
+        ``Authors`` is recommended only while there is no CITATION.cff, so a
+        level read before a citation file was written would stay wrong in
+        every form. Read again on a pool thread: it is a walk of the tree
+        (no computation, guard 8b) and the first form must not pay for it.
+        """
+        from PyQt6.QtCore import QThreadPool
+
+        from .. import schema
+
+        schema.forget_dataset()
+        if root is not None:
+            QThreadPool.globalInstance().start(lambda: schema.warm_dataset(Path(root)))
 
     # ------------------------------------------------------------------
     # Worker callbacks

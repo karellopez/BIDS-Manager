@@ -343,9 +343,7 @@ def test_rename_a_subject_and_a_session_from_the_tree(qtbot, isolated_settings,
         r["entities"] = json.dumps({**ents, "session": "pre"}, sort_keys=True)
     panel = _panel(qtbot, tmp_path, rows)
     sub_node = panel._filter_pane._tree.topLevelItem(0).child(0)
-    asked: list = []
-    panel._filter_pane.rename_requested.connect(lambda *a: asked.append(a))
-    panel._filter_pane._rows_under(sub_node)
+    assert panel._filter_pane._rows_under(sub_node)
     assert panel.rename_from_tree("subject", [0, 1], "sub-001", new="077") == 2
     assert list(panel._model.dataframe()["participant_id"])[:2] == ["sub-077", "sub-077"]
     assert panel.rename_from_tree("session", [0, 1, 2], "ses-pre", new="baseline") == 3

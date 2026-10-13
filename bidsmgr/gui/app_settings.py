@@ -532,6 +532,17 @@ class AppSettings:
         out.recent_projects = _as_json_list(s.value(KEYS["recent_projects"]), [])
         return out
 
+    def placeholder_scope(self) -> str:
+        """Which fields the metadata step leaves a TODO in: the one value the
+        checkbox and the scope beside it amount to.
+
+        Read here, once, because reading them separately is how the chain
+        marked fields with the checkbox off: the scope alone switched it on.
+        Off is ``"none"``, which also takes back placeholders a run with it on
+        wrote, so the dataset carries what the setting says.
+        """
+        return self.metadata_fill_scope if self.post_metadata_fill_todos else "none"
+
     def classifier(self):
         """The parameter-based classifier's settings (defaults when unset or
         unreadable)."""
@@ -576,7 +587,6 @@ class AppSettings:
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
-            ("metadata_fill_scope",      self.metadata_fill_scope),
             ("post_validate_strict",     self.post_validate_strict),
             ("post_validate_html",       self.post_validate_html),
             ("post_fixup_companions",    self.post_fixup_companions),
@@ -595,6 +605,9 @@ class AppSettings:
         # that list, every conversion loaded the engine id "1", and the lookup
         # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
+        # Was in the bool loop above, so every scope was saved as "1" and read
+        # back as the default: choosing "Required fields only" never stuck.
+        s.setValue(KEYS["metadata_fill_scope"], self.metadata_fill_scope)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
         s.setValue(KEYS["convert_intended_for"], self.convert_intended_for)
         s.setValue(KEYS["convert_sourcedata"], self.convert_sourcedata)

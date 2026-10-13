@@ -41,6 +41,7 @@ from .theme_manager import CUR, scaled_px
 from .widgets.flow_layout import FlowBar
 from .widgets.primitives import ElidedLabel, qcolor
 from .widgets.splitter import Splitter
+from .widgets.tree_click import toggle_on_click
 
 _PATH_ROLE = Qt.ItemDataRole.UserRole + 30
 _PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 31
@@ -49,18 +50,35 @@ _SETTLE_MS = 150
 _LEGEND = (
     ("scan", "read by the scan", "text"),
     ("settings", "written by BIDS Manager", "accent"),
+    ("stated", "your answers", "purple"),
     ("converter", f"{UNKNOWN} read at conversion", "dim"),
     ("todo", "TODO placeholder", "warning"),
 )
 _SOURCE_TOKEN = {key: token for key, _t, token in _LEGEND}
 
 
+def _colour(source: str, pal: dict) -> str:
+    """A source's colour in this theme.
+
+    The accent is the user's to choose and can be a purple, which would make
+    "written by BIDS Manager" and "your answers" one colour; then the answers
+    take the teal.
+    """
+    token = _SOURCE_TOKEN.get(source, "text")
+    if source == "stated":
+        accent, purple = qcolor(pal["accent"]), qcolor(pal["purple"])
+        gap = abs(accent.hslHue() - purple.hslHue())
+        if accent.hslSaturation() > 40 and min(gap, 360 - gap) < 45:
+            token = "teal"
+    return pal[token]
+
+
 class _LegendDot(QWidget):
     """A dot in a source's colour and its name."""
 
-    def __init__(self, token: str, text: str, parent=None) -> None:
+    def __init__(self, source: str, text: str, parent=None) -> None:
         super().__init__(parent)
-        self._token, self._text = token, text
+        self._source, self._text = source, text
 
     def _font(self) -> QFont:
         from .viz import fonts
@@ -80,7 +98,7 @@ class _LegendDot(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         d = scaled_px(6)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(qcolor(pal[self._token]))
+        p.setBrush(qcolor(_colour(self._source, pal)))
         p.drawEllipse(0, (self.height() - d) // 2, d, d)
         p.setFont(self._font())
         p.setPen(qcolor(pal["dim"]))
@@ -134,6 +152,8 @@ class OutputPreview(QWidget):
         self.tree.setIndentation(14)
         self.tree.itemExpanded.connect(self._fill)
         self.tree.currentItemChanged.connect(self._on_current)
+        # One click on a folder row opens or closes it, as in every other tree.
+        toggle_on_click(self.tree)
         split.addWidget(self.tree)
 
         box = QWidget(split)
@@ -157,8 +177,8 @@ class OutputPreview(QWidget):
         self.file_note.setTextFormat(Qt.TextFormat.PlainText)
         bl.addWidget(self.file_note)
         legend = FlowBar(box, h_spacing=10, v_spacing=2)
-        for _key, text, token in _LEGEND:
-            legend.addWidget(_LegendDot(token, text, legend))
+        for key, text, _token in _LEGEND:
+            legend.addWidget(_LegendDot(key, text, legend))
         bl.addWidget(legend)
         split.addWidget(box)
         split.setStretchFactor(0, 3)
@@ -173,7 +193,8 @@ class OutputPreview(QWidget):
         if model is self._model:
             return
         if self._model is not None:
-            for signal in (self._model.dataChanged, self._model.modelReset):
+            for signal in (self._model.dataChanged, self._model.modelReset,
+                           self._model.recordingSpecChanged):
                 try:
                     signal.disconnect(self.refresh)
                 except (TypeError, RuntimeError):
@@ -183,11 +204,15 @@ class OutputPreview(QWidget):
         if model is not None:
             model.dataChanged.connect(self.refresh)
             model.modelReset.connect(self.refresh)
+            # A per-file answer or a template changes what a file holds and
+            # touches no cell of the table.
+            model.recordingSpecChanged.connect(self.refresh)
         self.refresh()
 
     def set_context(self, provider: Callable[[], tuple]) -> None:
-        """``provider()`` returns ``(PlanOptions, features, spec)``: the
-        settings, the scan's series features, the recording metadata."""
+        """``provider()`` returns ``(PlanOptions, features, spec, first
+        files)``: the settings, the scan's series features, the recording
+        metadata, and each series' first DICOM by uid."""
         self._context = provider
         self.refresh()
 
@@ -227,7 +252,8 @@ class OutputPreview(QWidget):
             self._empty.setText("Scan first: the preview shows what the conversion will write.")
             self._stack.setCurrentIndex(0)
             return
-        options, features, spec = self._context() if self._context else (None, None, None)
+        options, features, spec, first_files = (self._context() if self._context
+                                                else (None, None, None, None))
         from ..converter.output_plan import PlanOptions
 
         options = options or PlanOptions()
@@ -236,7 +262,7 @@ class OutputPreview(QWidget):
         self._snapshot = (snapshot, included, options, features, spec)
         self._ticket = self._ticket % 1_000_000 + 1
         self._runner().start("plan", self._ticket, plan_output, snapshot, included, options,
-                             features)
+                             features, spec, first_files)
 
     def _on_done(self, tag: str, ticket: int, result) -> None:
         if tag == "plan":
@@ -318,11 +344,13 @@ class OutputPreview(QWidget):
                 item.setIcon(0, icons.icon_for_path(name))
                 item.setData(0, _PATH_ROLE, f.path)
                 tip = f"{f.path}\nWritten by {f.origin}."
-                if f.warning:
-                    # Written, but not a name BIDS allows: say so where it is.
+                if f.warning or f.renamed:
+                    # Written, but not a name BIDS allows, or not the name in
+                    # the table: say so where it is.
                     item.setForeground(0, QBrush(qcolor(pal["warning"])))
                     item.setIcon(0, icons.icon("warn"))
-                    tip += f"\nNot valid BIDS: {f.warning}"
+                    tip += (f"\nNot valid BIDS: {f.warning}" if f.warning
+                            else f"\n{f.renamed}")
                 elif f.conditional:
                     font = item.font(0)
                     font.setItalic(True)
@@ -419,7 +447,7 @@ class OutputPreview(QWidget):
         self.file_origin.setText(origin + ". A prediction.")
         self.content.setHtml(_html(preview, pal))
         note = " ".join(x for x in (f"Not valid BIDS: {planned.warning}" if planned.warning else "",
-                                    preview.note) if x)
+                                    planned.renamed, preview.note) if x)
         self.file_note.setText(note)
         self.file_note.setVisible(bool(note))
 
@@ -449,7 +477,7 @@ def _html(preview, pal: dict) -> str:
         lines.append(_span("{", pal["dim"]))
         n = len(preview.fields)
         for k, (key, value, source) in enumerate(preview.fields):
-            colour = pal[_SOURCE_TOKEN.get(source, "text")]
+            colour = _colour(source, pal)
             text = json.dumps(value, ensure_ascii=False)
             comma = "," if k < n - 1 else ""
             lines.append("&nbsp;&nbsp;" + _span(json.dumps(key), pal["text"]) + _span(": ", pal["dim"])

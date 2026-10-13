@@ -52,6 +52,7 @@ from .output_preview import OutputPreview
 from .widgets import PaneHeader
 from .widgets.panel_frame import HEADER_EXTRAS, HEADER_LEAD
 from .widgets.primitives import Segmented
+from .widgets.tree_click import toggle_on_click
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +91,11 @@ class FilterPane(QWidget):
 
     #: A sequence (an inventory row) picked in the tree.
     row_chosen = pyqtSignal(int)
-    #: Rename a subject or a session: (kind, its rows, the current label).
-    rename_requested = pyqtSignal(str, list, str)
+    #: A right-click in Structure or Recordings: (the rows under what was
+    #: clicked, the global position, and ``(kind, label)`` when it was a
+    #: subject or a session, else ``None``). The panel builds the menu, the
+    #: same one the inspection table offers for those rows.
+    rows_menu_requested = pyqtSignal(list, object, object)
     #: The mode changed: (mode, the panel's title for it).
     mode_changed = pyqtSignal(str, str)
 
@@ -152,6 +156,7 @@ class FilterPane(QWidget):
         self._tree.setIndentation(16)
         self._tree.setUniformRowHeights(True)
         self._tree.itemChanged.connect(self._on_item_changed)
+        toggle_on_click(self._tree)
         # A sequence picked here is picked in the inspection table (and so
         # in Properties); one picked there is shown here.
         self._tree.currentItemChanged.connect(self._on_current_changed)
@@ -167,6 +172,10 @@ class FilterPane(QWidget):
         self._kinds.setUniformRowHeights(True)
         self._kinds.itemChanged.connect(self._on_item_changed)
         self._kinds.currentItemChanged.connect(self._on_current_changed)
+        toggle_on_click(self._kinds)
+        self._kinds.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._kinds.customContextMenuRequested.connect(
+            lambda pos: self._on_tree_menu(pos, self._kinds))
 
         self.preview = OutputPreview(self)
         self.preview.row_chosen.connect(self.row_chosen)
@@ -545,22 +554,24 @@ class FilterPane(QWidget):
         finally:
             self._suppress_writeback = False
 
-    def _on_tree_menu(self, pos) -> None:
-        """Right-click on a subject or session: rename it, every row under
-        it at once."""
-        item = self._tree.itemAt(pos)
-        kind = item.data(0, _KIND_ROLE) if item is not None else None
-        if kind not in ("subject", "session"):
-            return
-        from .viz.menus import popup_menu
+    def _on_tree_menu(self, pos, tree: Optional[QTreeWidget] = None) -> None:
+        """Right-click on any row of a view: announce the rows under it.
 
+        A recording is its row; a subject, session, datatype or kind of
+        recording is every row under it. A subject or session can also be
+        renamed, so that is said too.
+        """
+        tree = tree or self._tree
+        item = tree.itemAt(pos)
+        if item is None:
+            return
         rows = self._rows_under(item)
-        label = str(item.data(0, _LABEL_ROLE) or "")
-        menu = popup_menu(self._tree)
-        action = menu.addAction(f"Rename {kind} {label}...")
-        action.triggered.connect(lambda: self.rename_requested.emit(kind, rows, label))
-        menu.popup(self._tree.viewport().mapToGlobal(pos))
-        self._menu = menu
+        if not rows:
+            return
+        kind = item.data(0, _KIND_ROLE)
+        rename = ((kind, str(item.data(0, _LABEL_ROLE) or ""))
+                  if tree is self._tree and kind in ("subject", "session") else None)
+        self.rows_menu_requested.emit(rows, tree.viewport().mapToGlobal(pos), rename)
 
     def _rows_under(self, item: QTreeWidgetItem) -> list[int]:
         rows: list[int] = []

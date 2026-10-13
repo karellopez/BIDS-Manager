@@ -19,7 +19,7 @@ Planned later: ``derivatives`` (DWI map relocation: FA/ADC/TRACE/ColFA →
 ``derivatives/<pipeline>/sub-/ses-/dwi/``).
 """
 
-from .companion import attach_companion_files
+from .companion import attach_companion_files, parse_companions
 from .eeg_sidecar import enrich_recording_sidecars
 from .eyetrack import place_stimulus_presentation
 from .identifiers import prune_identifiers
@@ -50,4 +50,5 @@ __all__ = [
     "enrich_physio_sidecars",
     "enrich_recording_sidecars",
     "attach_companion_files",
+    "parse_companions",
 ]

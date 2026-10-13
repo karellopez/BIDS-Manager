@@ -13,6 +13,7 @@ from the recording's triggers (the curated file wins, per the agreed precedence)
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -27,7 +28,32 @@ ALLOWED_COMPANION_SUFFIXES: frozenset[str] = frozenset(
 )
 
 
-def _src_extension(path: Path) -> str:
+def parse_companions(raw) -> tuple[tuple[str, str], ...]:
+    """An inventory row's ``companion_files`` cell as ``(suffix, path)`` pairs.
+
+    Format: a JSON list of ``{"suffix": "events", "path": "/abs/file.tsv"}``.
+    Returns ``()`` on missing or malformed input. One parser, for the
+    conversion and for the BIDS preview of it.
+    """
+    raw = str(raw or "").strip()
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return ()
+    out: list[tuple[str, str]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                suffix = str(item.get("suffix", "")).strip()
+                path = str(item.get("path", "")).strip()
+                if suffix and path:
+                    out.append((suffix, path))
+    return tuple(out)
+
+
+def src_extension(path: Path) -> str:
     """Return the source file's extension, preserving ``.tsv.gz`` etc."""
     name = path.name.lower()
     if name.endswith(".tsv.gz"):
@@ -79,7 +105,7 @@ def attach_companion_files(subject_staging_dir: Path, tasks) -> int:
             if not src_path.is_file():
                 log.warning("companion: source not found %s (%s); skipped", src_path, suffix)
                 continue
-            ext = _src_extension(src_path)
+            ext = src_extension(src_path)
             dest = sidecar.with_name(f"{prefix}_{suffix}{ext}")
             try:
                 shutil.copyfile(src_path, dest)
@@ -91,4 +117,5 @@ def attach_companion_files(subject_staging_dir: Path, tasks) -> int:
     return n_copied
 
 
-__all__ = ["attach_companion_files", "ALLOWED_COMPANION_SUFFIXES"]
+__all__ = ["attach_companion_files", "ALLOWED_COMPANION_SUFFIXES", "parse_companions",
+           "src_extension"]

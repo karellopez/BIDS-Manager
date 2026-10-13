@@ -1010,18 +1010,22 @@ class SettingsDialog(QDialog):
 
         self._post_run_metadata = QCheckBox("Generate metadata")
         self._post_run_metadata.setToolTip(
-            "dataset_description.json, participants.tsv, the *_scans.tsv tables and an "
+            "dataset_description.json, participants.tsv, the *_scans.tsv tables, "
+            "what your metadata templates and per-file answers state, and an "
             "audit of every sidecar."
         )
         pv.addWidget(self._post_run_metadata)
-        self._post_metadata_fill_todos = QCheckBox(
-            "Mark missing metadata with a placeholder"
-        )
+        self._post_metadata_fill_todos = QCheckBox("Write TODO into missing fields")
         self._post_metadata_fill_todos.setToolTip(
-            "Writes a placeholder into every declared field the file does "
-            "not carry, so the gap is visible in the file and reported by "
-            "validation instead of being an absence nobody notices. Existing "
-            "values are never overwritten."
+            "Only placeholders, nothing else. Every field the standard declares "
+            "for a file that nothing filled (not the converter, not the scanner "
+            "header, not your templates) gets the literal TODO, or n/a where the "
+            "field accepts it, so the gap is visible in the file and reported "
+            "by validation instead of being an absence nobody notices. No value "
+            "is invented and an existing value is never overwritten.\n\n"
+            "The TODOs follow this setting on every run: a narrower choice "
+            "below takes back the ones a wider one wrote, and turning this off "
+            "takes them all back."
         )
         pv.addWidget(_indented(self._post_metadata_fill_todos))
 
@@ -1030,19 +1034,23 @@ class SettingsDialog(QDialog):
         # amounts of work and different amounts of noise.
         scope_row = QHBoxLayout()
         scope_row.setSpacing(8)
-        scope_label = QLabel("Mark which fields:")
+        scope_label = QLabel("In which fields:")
         self._metadata_fill_scope = QComboBox()
         for value, label in (
-            ("required", "Required only"),
-            ("recommended", "Required and recommended (default)"),
-            ("optional", "Everything declared, including optional"),
+            ("required", "Required fields only"),
+            ("recommended", "Required and recommended fields (default)"),
+            ("optional", "Every declared field, including optional"),
         ):
             self._metadata_fill_scope.addItem(label, userData=value)
         self._metadata_fill_scope.setToolTip(
-            "The scopes nest. A field whose type admits no honest marker (a "
-            "number, a boolean, a controlled vocabulary) is left absent and "
-            "reported rather than given a value nobody stated, so a wider "
-            "scope never introduces a validation error.\n\n"
+            "The levels are the ones the Editor's sidecar form shows, read for "
+            "each file: a T1w without a task is not asked for a TaskName. The "
+            "choices nest.\n\n"
+            "Some fields never get a TODO, because a placeholder there would "
+            "itself be an error: numbers, booleans and controlled vocabularies, "
+            "fields that name another file (IntendedFor, AssociatedEmptyRoom) "
+            "and fields that link files (B0FieldIdentifier). They stay absent "
+            "and are listed in the metadata report.\n\n"
             "Used by the post-convert chain and by the Editor's Fix ups, so "
             "both do the same thing."
         )

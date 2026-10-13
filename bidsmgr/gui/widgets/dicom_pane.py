@@ -33,11 +33,12 @@ from PyQt6.QtCore import QSortFilterProxyModel
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QDialog, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPushButton, QStackedWidget, QTableView, QTreeView, QVBoxLayout, QWidget,
+    QLabel, QPushButton, QStackedWidget, QTableView, QTreeView, QVBoxLayout, QWidget,
 )
 
 from ...inventory.dicom_header import DicomHeader, Difference, Element, count_identifying
 from .primitives import PaneHeader
+from .search_field import SearchField, find_shortcut
 
 #: Where the shown value of a hidden identifier is.
 HIDDEN = "hidden"
@@ -404,25 +405,6 @@ def _button(text: str, tip: str) -> QPushButton:
     return b
 
 
-class _SearchField(QLineEdit):
-    """A search field that asks for room to show its prompt (a bare
-    ``QLineEdit`` asks for 17 characters) and can still shrink."""
-
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
-        from ..viz import fonts
-
-        hint = super().sizeHint()
-        return QSize(max(hint.width(), fonts.px(250)), hint.height())
-
-
-def _search(placeholder: str) -> QLineEdit:
-    s = _SearchField()
-    s.setObjectName("dicom-search")
-    s.setPlaceholderText(placeholder)
-    s.setClearButtonEnabled(True)
-    return s
-
-
 def _message_page(text_label: QLabel) -> QWidget:
     page = QWidget()
     page.setObjectName("pane")
@@ -516,7 +498,7 @@ class DicomPane(QWidget):
         self.frames_pill.setToolTip("One row per frame of this enhanced (multi-frame) file: "
                                     "where it is, its b-value, echo time and time point")
         self._pills.idClicked.connect(self._on_pill)
-        self.search = _search("Find a name, keyword, tag or value")
+        self.search = SearchField("Find a name, keyword, tag or value")
         self.search.setToolTip("Shows the elements whose name, keyword, tag or value "
                                "contains this, with the sequences that hold them")
         self.search.textChanged.connect(self._on_search)
@@ -571,9 +553,7 @@ class DicomPane(QWidget):
         self._stack.addWidget(self._message_page)
         v.addWidget(self._stack, 1)
 
-        find = QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self)
-        find.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        find.activated.connect(self._focus_search)
+        find_shortcut(self, self.search)
         copy = QShortcut(QKeySequence(QKeySequence.StandardKey.Copy), self.tree)
         copy.setContext(Qt.ShortcutContext.WidgetShortcut)
         copy.activated.connect(self.copy_selection)
@@ -776,11 +756,6 @@ class DicomPane(QWidget):
             want = self.tree.sizeHintForColumn(READ_FOR) + fonts.px(8)
             self.tree.setColumnWidth(READ_FOR, min(want, int(room * 0.28)))
 
-    def _focus_search(self) -> None:
-        if self.search.isVisible() and self.search.isEnabled():
-            self.search.setFocus()
-            self.search.selectAll()
-
     def _on_search(self, text: str) -> None:
         self.proxy.set_text(text)
         self._expand()
@@ -965,6 +940,7 @@ class DicomPane(QWidget):
         from ..viz import fonts
 
         self.model.refresh_style()
+        self.search.refresh_icon()
         side = fonts.px(16)
         self.tree.setIconSize(QSize(side, side))
         self.tree.setIndentation(fonts.px(16))
@@ -1019,9 +995,13 @@ class DicomCompareDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.search = _search("Find an element or a value")
+        self.search = SearchField("Find an element or a value")
         self.search.textChanged.connect(lambda _t: self._fill())
         row.addWidget(self.search, 1)
+        from ..viz.bridge import ThemeHub, connect_while_alive
+
+        connect_while_alive(ThemeHub.instance().changed, self,
+                            lambda w, _t: w.search.refresh_icon())
         self.routine_toggle = _toggle(
             "Hide UIDs, times and positions",
             "UIDs, instance numbers, clocks and slice positions differ between any two "

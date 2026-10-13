@@ -40,7 +40,7 @@ from typing import Optional
 
 import pandas as pd
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -284,7 +284,7 @@ class ConverterPanel(QWidget):
 
         self._filter_pane = FilterPane()
         self._filter_pane.row_chosen.connect(self._jump_to_row)
-        self._filter_pane.rename_requested.connect(self.rename_from_tree)
+        self._filter_pane.rows_menu_requested.connect(self._on_filter_menu)
         self._filter_pane.preview.set_context(self._plan_context)
         # Its title says which of its three views it shows.
         self._filter_frame = PanelFrame(self._filter_pane, self._filter_pane.mode_title(),
@@ -1160,8 +1160,9 @@ class ConverterPanel(QWidget):
 
     def _plan_context(self) -> tuple:
         """What the BIDS preview needs beside the table: the settings that
-        change what is written, the scan's series features and the recording
-        metadata."""
+        change what is written, the scan's series features, the recording
+        metadata, and each series' first DICOM (it names the series'
+        ``sourcedata/`` folder, so it is looked up only when that is on)."""
         from .. import __version__
         from ..converter.output_plan import PlanOptions
         from ..schema import loader
@@ -1173,11 +1174,16 @@ class ConverterPanel(QWidget):
                     and len(self._model.dataframe()) else ""))
         options = PlanOptions(
             dataset=dataset,
+            root=str(self._bids_root) if self._bids_root is not None else "",
+            inventory_dir=str(self._output_tsv.parent) if self._output_tsv is not None else "",
             run_metadata=bool(s.post_run_metadata),
-            fill_todos=bool(s.post_run_metadata and s.post_metadata_fill_todos),
-            fill_scope=s.metadata_fill_scope,
+            fill_scope=s.placeholder_scope(),
+            companions=bool(s.post_fixup_companions),
+            citation=bool(s.post_fixup_citation),
             intended_for=s.convert_intended_for,
             b0_field=bool(s.convert_b0_field),
+            deface=bool(s.convert_deface),
+            deface_engine=s.convert_deface_engine,
             sourcedata=s.convert_sourcedata,
             sourcedata_modalities=tuple(m.strip() for m in s.convert_sourcedata_modalities.split(",")
                                         if m.strip()),
@@ -1197,7 +1203,17 @@ class ConverterPanel(QWidget):
                     self._features_cache = (key, {})
             features = self._features_cache[1]
         spec = self._model.global_spec() if self._model is not None else None
-        return options, features, spec
+        first_files: dict[str, str] = {}
+        if s.convert_sourcedata in ("copy", "archive") and self._sources is not None \
+                and self._model is not None:
+            df = self._model.dataframe()
+            for uid in (df["series_uid"] if "series_uid" in df.columns else []):
+                uid = str(uid or "").split("|", 1)[0].strip()
+                if uid and uid not in first_files:
+                    files = self._sources.series_files(uid)
+                    if files:
+                        first_files[uid] = str(files[0])
+        return options, features, spec, first_files
 
     def _fit_view_switch_home(self) -> None:
         floating = self._inspection_unit.is_detached()
@@ -2344,8 +2360,7 @@ class ConverterPanel(QWidget):
             # Metadata-engine name defaults to each BIDS root's folder
             # name (i.e. the dataset slug) when ``name`` is None.
             name=None,
-            fill_todos=s.post_metadata_fill_todos,
-            fill_scope=s.metadata_fill_scope,
+            fill_scope=s.placeholder_scope(),
             generate_companions=s.post_fixup_companions,
             write_citation_file=s.post_fixup_citation,
             parent=self,
@@ -2638,9 +2653,6 @@ class ConverterPanel(QWidget):
         chosen (the clicked row when it is not among them)."""
         if self._model is None:
             return
-        from ..inventory.renumber import identity
-        from .viz.menus import popup_menu
-
         index = self._table.indexAt(pos)
         rows = self._selected_rows()
         if index.isValid() and index.row() not in rows:
@@ -2651,10 +2663,46 @@ class ConverterPanel(QWidget):
             self._properties.flush()
         if not rows:
             return
-        menu = popup_menu(self._table)
+        menu = self._row_menu(self._table, rows)
+        menu.popup(self._table.viewport().mapToGlobal(pos))
+        self._table_menu = menu
+
+    def _on_filter_menu(self, rows: list, where, rename) -> None:
+        """Right-click in Filter / structure or recordings: the table's menu
+        for the rows under what was clicked, led by renaming the subject or
+        session when that is what was clicked."""
+        if self._model is None or not rows:
+            return
+        # The press made a recording current, and so the table's row; let
+        # Properties follow before the menu opens, as the table's menu does.
+        self._properties.flush()
+        menu = self._row_menu(self._filter_pane, rows)
+        if rename is not None:
+            from . import icons
+
+            kind, label = rename
+            act = QAction(icons.icon("bulk_edit"), f"Rename {kind} {label}...", menu)
+            act.setToolTip(f"A new label for {label}, on every row under it, as one Undo")
+            act.triggered.connect(lambda: self.rename_from_tree(kind, rows, label))
+            first = menu.actions()[0] if menu.actions() else None
+            menu.insertAction(first, act)
+            menu.insertSeparator(first)
+        menu.popup(where)
+        self._filter_menu = menu
+
+    def _row_menu(self, parent, rows: list):
+        """The menu for inventory ``rows``, wherever they were right-clicked.
+
+        One row: what Properties offers for it (preview, spectrum, other
+        names, fieldmap runs, eye-tracker pairing), then its DICOM header.
+        Any rows: new subject numbers for the people they belong to.
+        """
+        from ..inventory.renumber import identity
+        from . import icons
+        from .viz.menus import popup_menu
+
+        menu = popup_menu(parent)
         menu.setToolTipsVisible(True)
-        # One row: what Properties offers for it (preview, spectrum, other
-        # names, fieldmap runs, eye-tracker pairing), then its DICOM header.
         if len(rows) == 1:
             dicom = self._dicom_header_action(menu, rows[0])
             self._properties.add_row_actions(menu, rows[0],
@@ -2663,16 +2711,13 @@ class ConverterPanel(QWidget):
             menu.addSeparator()
         df = self._model.dataframe()
         people = len({identity(df, r) for r in rows})
-        from . import icons
-
         renumber = menu.addAction(
             icons.icon("bulk_edit"),
             "Give new subject numbers..." if people > 1 else "Give a new subject number...")
         renumber.setToolTip("Number the people of the chosen rows with the next free "
                             "subject numbers")
         renumber.triggered.connect(lambda: self.open_renumber(rows))
-        menu.popup(self._table.viewport().mapToGlobal(pos))
-        self._table_menu = menu
+        return menu
 
     def _dicom_header_action(self, menu, row: int):
         """"Show the DICOM header" for a DICOM row (not yet in ``menu``), or

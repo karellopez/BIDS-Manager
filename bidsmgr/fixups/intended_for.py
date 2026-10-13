@@ -233,7 +233,7 @@ def _link_one_root(root: Path, subject: str, session: Optional[str], *, form: st
     sources: dict[Path, list[str]] = {}
     for idx, (members, targets) in enumerate(groups, start=1):
         names = [_name_run(subject, session, run, form) for run in targets]
-        ident = f"fmap{re.sub(r'[^0-9A-Za-z]', '', session or '')}{idx}"
+        ident = fieldmap_identifier(session, idx)
         for sidecar in members:
             meta = _load_json(sidecar)
             if names and not _is_phase_part(sidecar.name):
@@ -350,6 +350,13 @@ def _time_of(meta: Mapping) -> Optional[float]:
 
 #: The kind of fieldmap each suffix belongs to; sdcflows never mixes kinds.
 _KIND = {"epi": "epi", "fieldmap": "fieldmap", "magnitude": "fieldmap"}
+
+
+def fieldmap_identifier(session: Optional[str], index: int) -> str:
+    """The ``B0FieldIdentifier`` of a session's ``index``-th fieldmap
+    acquisition (from 1), counting them in :func:`group_key` order, the ones
+    that correct no run included."""
+    return f"fmap{re.sub(r'[^0-9A-Za-z]', '', session or '')}{index}"
 
 
 def group_key(stem: str) -> str:
@@ -609,5 +616,6 @@ def _reason_for(fieldmap: Fieldmap, runs: list, why: str, everyone: list) -> str
 
 
 __all__ = ["FORMS", "Fieldmap", "LINKS_COLUMN", "Run", "TARGETS", "acquisitions", "bind",
+           "fieldmap_identifier",
            "group_key", "is_target_row", "plan_links", "populate_intended_for", "serves_of", "shim_of",
            "suggest_intended_for"]

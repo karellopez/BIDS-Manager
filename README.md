@@ -324,7 +324,7 @@ can be removed.
 
 ```
 López Vilaret, K. M. and Rieger, J.
-BIDS Manager (v1.4.1). 2026. https://github.com/ANCPLabOldenburg/BIDS-Manager
+BIDS Manager (v1.5.0). 2026. https://github.com/ANCPLabOldenburg/BIDS-Manager
 ```
 
 <p align="center">

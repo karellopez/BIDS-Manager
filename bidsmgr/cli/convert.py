@@ -64,6 +64,7 @@ from ..metadata.preserve import is_mergeable, merge_file
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    parse_companions,
     clean_mrs_outputs,
     prune_identifiers,
     convert_blood_files,
@@ -1334,7 +1335,7 @@ def _row_to_task_mri(
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
         skip_residuals=skip_residuals,
-        companion_files=_parse_companion(row),
+        companion_files=parse_companions(row.get("companion_files", "")),
         fieldmap_targets=_parse_fieldmap_targets(row),
     )
 
@@ -1350,30 +1351,6 @@ def _parse_fieldmap_targets(row: pd.Series) -> tuple[str, ...]:
     except (ValueError, TypeError):
         return ()
     return tuple(str(x) for x in data) if isinstance(data, list) else ()
-
-
-def _parse_companion(row: pd.Series) -> tuple[tuple[str, str], ...]:
-    """Parse the row's ``companion_files`` JSON column into (suffix, path) pairs.
-
-    Format: a JSON list of ``{"suffix": "events", "path": "/abs/file.tsv"}``.
-    Returns ``()`` on missing/malformed input.
-    """
-    raw = str(row.get("companion_files", "") or "").strip()
-    if not raw:
-        return ()
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
-        return ()
-    out: list[tuple[str, str]] = []
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                suffix = str(item.get("suffix", "")).strip()
-                path = str(item.get("path", "")).strip()
-                if suffix and path:
-                    out.append((suffix, path))
-    return tuple(out)
 
 
 def _parse_entities_json(row: pd.Series) -> dict[str, str]:
@@ -1556,7 +1533,7 @@ def _row_to_task_file_based(
         eeg_reference=eeg_reference,
         eeg_ground=eeg_ground,
         force_edf=force_edf,
-        companion_files=_parse_companion(row),
+        companion_files=parse_companions(row.get("companion_files", "")),
         eyetrack=_eyetrack_settings(spec, source_file) if eyetrack else {},
     )
 
