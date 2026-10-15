@@ -1291,8 +1291,9 @@ QFrame#about-footer {
 }
 
 /* What's new: shown once per release (gui/whats_new.py). The animation is
- * painted on the dialog's own background; the text sits beside it. */
-QDialog#whatsnew-dialog { background: $bg; }
+ * painted on the dialog's own background; the text sits beside it. The
+ * request for a GitHub star (gui/star_request.py) uses the same styles. */
+QDialog#whatsnew-dialog, QDialog#star-dialog { background: $bg; }
 QLabel#whatsnew-kicker {
     color: $dim;
     font-size: 11px;

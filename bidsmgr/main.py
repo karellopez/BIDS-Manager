@@ -109,13 +109,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         win._on_project_opened(project, bids_root)
     win.show()
 
-    # The first time this release opens: what it brings, once. From here and
-    # not from the window, so a test that builds a window never gets it.
+    # The first time this release opens: what it brings, once. Otherwise, on
+    # the first launch of a day, a request for a star on GitHub; never both in
+    # one launch. From here and not from the window, so a test that builds a
+    # window gets neither.
     from PyQt6.QtCore import QTimer
 
-    from .gui.whats_new import maybe_show
+    from .gui import star_request, whats_new
 
-    QTimer.singleShot(600, lambda: maybe_show(win))
+    def greet() -> None:
+        if whats_new.maybe_show(win) is None:
+            star_request.maybe_show(win)
+
+    QTimer.singleShot(600, greet)
     return app.exec()
 
 

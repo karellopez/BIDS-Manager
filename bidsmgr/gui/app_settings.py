@@ -102,6 +102,12 @@ KEYS = {
     # The release whose "What's new" dialog was last shown (``whats_new.NEWS_FOR``,
     # e.g. "1.5"). Not a setting the user sees: it keeps the dialog to once.
     "whats_new_seen": "ui/whats_new_seen",
+    # Now and then, ask for a star on GitHub (gui/star_request.py). The switch
+    # is in Settings > Display and in the dialog ("Don't ask me again").
+    "ask_for_star": "ui/ask_for_star",
+    # When to ask: not settings the user sees (``star_request.StarSchedule``).
+    "star_last_asked": "ui/star_last_asked",
+    "star_opened": "ui/star_opened",
     # Recently opened/created project dataset roots (JSON list, most-recent
     # first), shown on the Welcome tab.
     "recent_projects": "project/recent",
@@ -122,6 +128,8 @@ class AppSettings:
     # Appearance on top of the theme (gui/appearance.Appearance).
     #: Empty the Converter's Log when a scan or a conversion starts.
     log_clear_on_run: bool = True
+    #: Now and then, ask for a star on GitHub (gui/star_request.py).
+    ask_for_star: bool = True
     accent: str = ""
     custom_accent: dict = field(default_factory=dict)
     tint: int = 0
@@ -383,6 +391,7 @@ class AppSettings:
         )
         out.log_clear_on_run = _as_bool(s.value(KEYS["log_clear_on_run"]),
                                         out.log_clear_on_run)
+        out.ask_for_star = _as_bool(s.value(KEYS["ask_for_star"]), out.ask_for_star)
         out.editor_strict_validate = _as_bool(
             s.value(KEYS["editor_strict_validate"]),
             out.editor_strict_validate,
@@ -600,6 +609,7 @@ class AppSettings:
             ("editor_show_hidden",       self.editor_show_hidden),
             ("editor_autosave",          self.editor_autosave),
             ("log_clear_on_run",         self.log_clear_on_run),
+            ("ask_for_star",             self.ask_for_star),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
         # Strings. Keep them OUT of the loop above: it writes "1" for anything
@@ -682,6 +692,24 @@ class AppSettings:
     @classmethod
     def remember_whats_new_seen(cls, release: str) -> None:
         cls._settings().setValue(KEYS["whats_new_seen"], release)
+
+    @classmethod
+    def remember_ask_for_star(cls, ask: bool) -> None:
+        cls._settings().setValue(KEYS["ask_for_star"], "1" if ask else "0")
+
+    @classmethod
+    def star_schedule(cls) -> dict:
+        """What decides when to ask for a star (``star_request.StarSchedule``)."""
+        s = cls._settings()
+        last, opened = s.value(KEYS["star_last_asked"]), s.value(KEYS["star_opened"])
+        return {"last_asked": str(last) if last is not None else "",
+                "opened": str(opened or "").lower() in ("1", "true")}
+
+    @classmethod
+    def remember_star_schedule(cls, *, last_asked: str, opened: bool) -> None:
+        s = cls._settings()
+        s.setValue(KEYS["star_last_asked"], last_asked)
+        s.setValue(KEYS["star_opened"], "1" if opened else "0")
 
     @classmethod
     def remember_theme(cls, theme: str) -> None:

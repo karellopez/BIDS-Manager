@@ -404,6 +404,15 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Editor saving:", self._editor_autosave)
 
+        # A request for a star on GitHub (gui/star_request.py).
+        self._ask_for_star = QCheckBox("Ask for a star on GitHub")
+        self._ask_for_star.setToolTip(
+            "BIDS Manager collects no usage data, so a star is how its authors know "
+            "it is useful. It asks at most once a day, on the first launch of the day, "
+            "and stops once you have opened the project's page from it. Home's Help us "
+            "button opens the request at any time.")
+        form.addRow("GitHub star:", self._ask_for_star)
+
         hint = QLabel(
             "The header's sun or moon button lists every theme and switches at once. "
             "Everything on this page applies on Save."
@@ -1328,6 +1337,7 @@ class SettingsDialog(QDialog):
         self._editor_show_hidden.setChecked(s.editor_show_hidden)
         self._editor_autosave.setChecked(s.editor_autosave)
         self._log_clear_on_run.setChecked(s.log_clear_on_run)
+        self._ask_for_star.setChecked(s.ask_for_star)
         self._font_scale_combo.setCurrentIndex(
             self._closest_font_scale_index(s.font_scale)
         )
@@ -1445,6 +1455,7 @@ class SettingsDialog(QDialog):
         s.editor_show_hidden = self._editor_show_hidden.isChecked()
         s.editor_autosave = self._editor_autosave.isChecked()
         s.log_clear_on_run = self._log_clear_on_run.isChecked()
+        s.ask_for_star = self._ask_for_star.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()
         ][1]

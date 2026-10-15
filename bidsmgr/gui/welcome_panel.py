@@ -452,6 +452,20 @@ class WelcomePanel(QWidget):
             "Compare them, and see what each one demonstrates",
             _SAMPLE_DATASETS_URL,
         ))
+        # In the card's bottom-right corner: a request for a star on GitHub,
+        # the one sign of use BIDS Manager gets (gui/star_request.py).
+        from . import icons
+
+        self._star_button = QPushButton("Help us")
+        self._star_button.setObjectName("tb-btn")
+        self._star_button.setToolTip("Give BIDS Manager a star on GitHub: why it helps, and how")
+        icons.apply_button(self._star_button, "star")
+        self._star_button.clicked.connect(self._show_star_request)
+        lay.addStretch(1)
+        corner = QHBoxLayout()
+        corner.addStretch(1)
+        corner.addWidget(self._star_button)
+        lay.addLayout(corner)
         return card
 
     def _build_updates_card(self) -> QFrame:
@@ -475,6 +489,11 @@ class WelcomePanel(QWidget):
 
     def _show_whats_new(self) -> None:
         from .whats_new import show_dialog
+
+        show_dialog(self.window())
+
+    def _show_star_request(self) -> None:
+        from .star_request import show_dialog
 
         show_dialog(self.window())
 
@@ -873,6 +892,10 @@ class WelcomePanel(QWidget):
         for lbl in self.findChildren(QLabel):
             if lbl.objectName() == "welcome-link" and lbl.property("link_url"):
                 lbl.setText(self._link_html(lbl.property("link_text"), lbl.property("link_url")))
+        if hasattr(self, "_star_button"):
+            from . import icons
+
+            icons.apply_button(self._star_button, "star")
         # The recent-list delegate reads palette tokens at paint time; nudge
         # the viewport so the rows recolour immediately.
         if hasattr(self, "_recent"):
