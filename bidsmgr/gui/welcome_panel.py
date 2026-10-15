@@ -23,8 +23,8 @@ from typing import Optional
 
 import shutil
 
-from PyQt6.QtCore import QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPixmap
+from PyQt6.QtCore import QRect, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -64,7 +64,7 @@ _RECENT_MISSING_ROLE = Qt.ItemDataRole.UserRole + 2
 # anchors that read ``QPalette.Link`` (set by the theme manager).
 _RESOURCE_LINKS: tuple[tuple[str, str], ...] = (
     ("Documentation website", "https://ancplaboldenburg.github.io/bids_manager_documentation/"),
-    ("Tutorial walkthrough", "https://ancplaboldenburg.github.io/bids_manager_documentation/tutorial.html"),
+    ("Learn BIDS Manager, step by step", "https://ancplaboldenburg.github.io/bids_manager_documentation/learn/"),
     ("Source code on GitHub", "https://github.com/ANCPLabOldenburg/BIDS-Manager"),
 )
 # Sample datasets, offered two ways: straight to the download for somebody who
@@ -72,23 +72,27 @@ _RESOURCE_LINKS: tuple[tuple[str, str], ...] = (
 # does not. The section says what each dataset demonstrates and what a full run
 # of it produces, which a bare link cannot.
 #
-# These are hosted on the UOL cloud and must be kept in step with the "Pick a
-# dataset" section of the tutorial page. They have drifted before: the list here
-# had four while the documentation offered six, and one share link was reissued
-# when its dataset changed, so the application handed out a stale file. If you
-# add or replace a dataset, change both.
+# These are hosted on the UOL cloud and must be kept in step with the Sample
+# data page of the documentation (``site.yml`` there holds the same links). They
+# have drifted before: the list here had four while the documentation offered
+# six, and in October 2026 every share was reissued, which left all six links
+# here dead. If you add or replace a dataset, change both.
+#
+# An installed application cannot be corrected, so a share must keep its link:
+# replace a zip INSIDE its share on the cloud rather than making a new share.
+_SAMPLE_DATA_PAGE = (
+    "https://ancplaboldenburg.github.io/bids_manager_documentation/start/sample-data/"
+)
 _SAMPLE_DATASETS: tuple[tuple[str, str], ...] = (
-    ("MRI walkthrough dataset", "https://cloud.uol.de/s/g9gMPpwL7Xg49y9/download"),
-    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/ZxaZCtHJPLjtDbR/download"),
-    ("PET, DICOM and ECAT with blood", "https://cloud.uol.de/s/CGcjfTpxzFWnrdz/download"),
-    ("EEG motor-imagery dataset", "https://cloud.uol.de/s/T66zc5mN4eeZPGK/download"),
-    ("MEG Elekta sample dataset", "https://cloud.uol.de/s/btGeke5NNkDcs6G/download"),
-    ("Multimodal: MRI, PET, EEG and MEG", "https://cloud.uol.de/s/o6XCk6zH9DYpoes/download"),
+    ("MRI walkthrough dataset", "https://cloud.uol.de/s/qpE8KeBpqgTn2LB/download"),
+    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/KdFzsDtLA9ijNAb/download"),
+    ("PET, DICOM and ECAT with blood", "https://cloud.uol.de/s/Sfmdo6m2GCrKyfi/download"),
+    ("EEG motor-imagery dataset", "https://cloud.uol.de/s/8YcmPwFJ5qzfEAq/download"),
+    ("MEG Elekta sample dataset", "https://cloud.uol.de/s/XQoEqsa42bNQ4JX/download"),
+    ("Multimodal: MRI, MRS, PET, EEG, MEG, eye tracking",
+     "https://cloud.uol.de/s/kY9nQwdzgyQF6At/download"),
 )
-_SAMPLE_DATASETS_URL = (
-    "https://ancplaboldenburg.github.io/bids_manager_documentation/"
-    "tutorial.html#datasets"
-)
+_SAMPLE_DATASETS_URL = _SAMPLE_DATA_PAGE
 
 
 def _parse_qcolor(value: str) -> QColor:
@@ -426,10 +430,24 @@ class WelcomePanel(QWidget):
         sample = QLabel("Sample datasets")
         sample.setObjectName("welcome-subsection")
         lay.addWidget(sample)
+        # One button with a menu rather than six links: the card ran past the
+        # fold on a first run. Each item opens its download in the browser.
+        from .viz.menus import popup_menu
+
+        self._samples_button = QPushButton("Download a sample dataset")
+        self._samples_button.setObjectName("tb-btn")
+        self._samples_button.setToolTip("Pick one: the download opens in your browser")
+        menu = popup_menu(self._samples_button)
         for text, url in _SAMPLE_DATASETS:
-            lay.addWidget(self._link_label(text, url))
-        # One line rather than a paragraph: the card already runs past the fold
-        # on a first run, and the label says plainly enough what the link is for.
+            action = menu.addAction(text)
+            action.setData(url)
+            action.setToolTip(url)
+            action.triggered.connect(lambda _c=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+        self._samples_button.setMenu(menu)
+        row = QHBoxLayout()
+        row.addWidget(self._samples_button)
+        row.addStretch(1)
+        lay.addLayout(row)
         lay.addWidget(self._link_label(
             "Compare them, and see what each one demonstrates",
             _SAMPLE_DATASETS_URL,
@@ -437,16 +455,28 @@ class WelcomePanel(QWidget):
         return card
 
     def _build_updates_card(self) -> QFrame:
+        from .whats_new import NEWS_FOR
+
         card, lay = _section_card(
-            "Update notes",
-            "See what changed in each release: new features, fixes, and "
-            "anything worth knowing before you upgrade.",
+            "What's new",
+            f"What BIDS Manager {NEWS_FOR} brings, and the notes of every release: "
+            "new features, fixes, and anything worth knowing before you upgrade.",
         )
+        news = self._link_label(f"See what's new in BIDS Manager {NEWS_FOR}", "#whats-new")
+        news.setOpenExternalLinks(False)
+        news.setToolTip("The announcement shown when this release first opened")
+        news.linkActivated.connect(lambda _href: self._show_whats_new())
+        lay.addWidget(news)
         lay.addWidget(self._link_label(
             "Read the update notes",
-            "https://ancplaboldenburg.github.io/bids_manager_documentation/updates.html",
+            "https://ancplaboldenburg.github.io/bids_manager_documentation/updates/",
         ))
         return card
+
+    def _show_whats_new(self) -> None:
+        from .whats_new import show_dialog
+
+        show_dialog(self.window())
 
     @staticmethod
     def _link_html(text: str, url: str) -> str:

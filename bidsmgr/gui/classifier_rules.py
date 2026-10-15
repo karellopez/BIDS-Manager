@@ -28,6 +28,47 @@ from ..classifier.acquisition import engine
 from .viz.settings_pages import GeneratedSettingsPage
 
 
+#: What the classifier does and why, and where the idea comes from: behind
+#: the info icon at the top of Settings > Classification. Paragraphs are
+#: separated by a blank line.
+ABOUT = (
+    "For MRI only. An MRI series is named from how it was acquired: echo, repetition "
+    "and inversion times, the readout, the number of volumes, diffusion weighting and "
+    "phase encoding, and the series acquired beside it. MRI is where a name cannot be "
+    "trusted alone: series names are typed at the scanner by the people running it, "
+    "they differ between sites, and a mistyped or reused name labels a sequence as "
+    "something it is not. The parameters say what the scanner did. dcm2niix's guess "
+    "and the series name stay as second opinions, and every name keeps its evidence "
+    "(Properties, Why this name)."
+    "\n\n"
+    "Credit. Naming series from their acquisition parameters is not new: dcm2niix's "
+    "BIDS guess and earlier tools do it too. Part of the inspiration for this "
+    "classifier came from SWIFTCAT, a tool that converts mostly anatomical MRI to BIDS "
+    "from acquisition parameters, developed by Marta Loureiro, Rita G. Nunes and Rita "
+    "Reis Nunes (Evolutionary Systems and Biomedical Engineering Lab, LaSEEB, "
+    "University of Lisbon) and Patricia Clement (Department of Medical Imaging, Ghent "
+    "University Hospital, UZ Gent)."
+    "\n\n"
+    "BIDS Manager's classifier is its own early implementation of this idea. "
+    "It works well overall, and every name it gives can be checked and changed. The "
+    "SWIFTCAT team is putting a lot of effort into improving the approach for MRI, "
+    "testing it on clinical and heterogeneous data. SWIFTCAT is not public yet: stay "
+    "tuned for its release, which could also be plugged into BIDS Manager as a "
+    "classification algorithm."
+)
+
+#: The popup's title, wherever the note is opened from.
+ABOUT_TITLE = "Naming MRI series from their acquisition parameters"
+
+
+def show_about(anchor) -> None:
+    """Open the note on the classifier and its credit under ``anchor``: from
+    Settings > Classification and from the What's new dialog."""
+    from .viz.panels import explain_popup
+
+    explain_popup.show(anchor, "classifier.parameters", title=ABOUT_TITLE, fallback=ABOUT)
+
+
 class ClassifierSettingsPage(GeneratedSettingsPage):
     """The generated groups, then the evidence rules."""
 
@@ -37,6 +78,22 @@ class ClassifierSettingsPage(GeneratedSettingsPage):
         self.rules_state: Optional[QLabel] = None
         self.reset_button: Optional[QPushButton] = None
         super().__init__(sections, hint=hint, parent=parent, root=root)
+        # Under the page's description: how the classifier works, and credit.
+        from .viz.panels.panel_header import corner_button
+
+        row = QHBoxLayout()
+        self.about_button = corner_button(
+            "info", "How MRI series are named from their acquisition parameters, and "
+                    "where the idea comes from")
+        self.about_button.clicked.connect(lambda: self._explain(self.about_button))
+        about = QLabel("How MRI series are named, and credit to the SWIFTCAT team")
+        about.setObjectName("dlg-hint")
+        row.addWidget(self.about_button)
+        row.addWidget(about, 1)
+        self.body_layout.insertLayout(1 if hint else 0, row)
+
+    def _explain(self, anchor) -> None:
+        show_about(anchor)
 
     def extend(self, lay: QVBoxLayout) -> None:
         box = QGroupBox("Evidence rules")

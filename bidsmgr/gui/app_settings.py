@@ -99,6 +99,9 @@ KEYS = {
     # "default" → ``assets/logo.png`` (monochrome, palette-inverted on dark).
     # "app_icon" → ``assets/macos/AppIcon128.png`` (full-color BIDS-Manager logo).
     "header_logo": "ui/header_logo",
+    # The release whose "What's new" dialog was last shown (``whats_new.NEWS_FOR``,
+    # e.g. "1.5"). Not a setting the user sees: it keeps the dialog to once.
+    "whats_new_seen": "ui/whats_new_seen",
     # Recently opened/created project dataset roots (JSON list, most-recent
     # first), shown on the Welcome tab.
     "recent_projects": "project/recent",
@@ -669,6 +672,16 @@ class AppSettings:
         p = str(path)
         out = [x for x in cls.load().recent_projects if x != p]
         s.setValue(KEYS["recent_projects"], json.dumps(out))
+
+    @classmethod
+    def whats_new_seen(cls) -> str:
+        """The release whose "What's new" dialog was last shown ("" if never)."""
+        value = cls._settings().value(KEYS["whats_new_seen"])
+        return str(value) if value is not None else ""
+
+    @classmethod
+    def remember_whats_new_seen(cls, release: str) -> None:
+        cls._settings().setValue(KEYS["whats_new_seen"], release)
 
     @classmethod
     def remember_theme(cls, theme: str) -> None:

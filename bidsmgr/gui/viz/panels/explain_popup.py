@@ -56,8 +56,10 @@ def explanation_html(key: str, *, here: str = "", title: str = "", fallback: str
         out.append(f"<div style='margin-top:2px'>{esc(body)}</div>")
 
     if exp is None:
-        if fallback:
-            out.append(f"<div style='margin-top:{fonts.px(6)}px'>{esc(fallback)}</div>")
+        # A fallback may hold several paragraphs, separated by a blank line.
+        for paragraph in (fallback or "").split("\n\n"):
+            if paragraph.strip():
+                out.append(f"<div style='margin-top:{fonts.px(6)}px'>{esc(paragraph.strip())}</div>")
     else:
         out.append(f"<div style='margin-top:{fonts.px(6)}px'>{esc(exp.short)}</div>")
         for field, name in SECTIONS:

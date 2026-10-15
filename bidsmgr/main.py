@@ -108,6 +108,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if project is not None and bids_root is not None:
         win._on_project_opened(project, bids_root)
     win.show()
+
+    # The first time this release opens: what it brings, once. From here and
+    # not from the window, so a test that builds a window never gets it.
+    from PyQt6.QtCore import QTimer
+
+    from .gui.whats_new import maybe_show
+
+    QTimer.singleShot(600, lambda: maybe_show(win))
     return app.exec()
 
 

@@ -71,7 +71,7 @@ flag, and a tutorial per modality with a sample dataset you can download and
 work through.
 
 [docs]:    https://ancplaboldenburg.github.io/bids_manager_documentation/
-[install]: https://ancplaboldenburg.github.io/bids_manager_documentation/installation.html
+[install]: https://ancplaboldenburg.github.io/bids_manager_documentation/start/install/
 
 ## The workflow
 
@@ -330,7 +330,7 @@ BIDS Manager (v1.5.0). 2026. https://github.com/ANCPLabOldenburg/BIDS-Manager
 <p align="center">
   <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/">Documentation</a>
   &middot;
-  <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/updates.html">What changed</a>
+  <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/updates/">What changed</a>
   &middot;
   <a href="https://github.com/ANCPLabOldenburg/BIDS-Manager/issues">Report a bug</a>
   &middot;
