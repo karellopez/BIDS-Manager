@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <img src="miscellaneous/images/app-icon.png" alt="" width="132">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/images/app-icon.png" alt="" width="132">
   <br>
   BIDS Manager
   <br>
@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://pypi.org/project/bids-manager/"><img alt="PyPI" src="https://img.shields.io/pypi/v/bids-manager?color=4FC3F7&label=PyPI"></a>
   <a href="https://pypi.org/project/bids-manager/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/bids-manager?color=4FC3F7"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/pypi/l/bids-manager?color=4FC3F7"></a>
+  <a href="https://github.com/ANCPLabOldenburg/BIDS-Manager/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/pypi/l/bids-manager?color=4FC3F7"></a>
   <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4FC3F7"></a>
 </p>
 
 <p align="center">
-  <img src="miscellaneous/hero.gif" alt="Reviewing an inventory, editing a sidecar, and inspecting a volume, in one window" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/hero.gif" alt="Reviewing an inventory, editing a sidecar, and inspecting a volume, in one window" width="100%">
 </p>
 
 ## What is BIDS Manager?
@@ -78,7 +78,7 @@ work through.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/workflow-dark.svg">
-    <img src="docs/workflow.svg" alt="Raw MRI, MR spectroscopy, PET, EEG, MEG, physio and blood recordings enter at Scan, then Review, Convert, Enrich, Curate and Validate, producing one BIDS dataset with every step recorded in the project log" width="100%">
+    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/docs/workflow.svg" alt="Raw MRI, MR spectroscopy, PET, EEG, MEG, physio and blood recordings enter at Scan, then Review, Convert, Enrich, Curate and Validate, producing one BIDS dataset with every step recorded in the project log" width="100%">
   </picture>
 </p>
 
@@ -100,7 +100,7 @@ sets aside says why: a scanner report with no image data in it, a localiser, a
 series it cannot classify.
 
 <p align="center">
-  <img src="miscellaneous/see.gif" alt="The inventory table: every series, its proposed BIDS name, and the properties panel" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/see.gif" alt="The inventory table: every series, its proposed BIDS name, and the properties panel" width="100%">
 </p>
 
 ### 2. Convert with confidence
@@ -123,7 +123,7 @@ Conversion runs per subject into a staging folder and is committed only when
 that subject finishes, so a failure never leaves a half-converted tree.
 
 <p align="center">
-  <img src="miscellaneous/convert.gif" alt="Bulk-editing entities in the inventory and watching the predicted filenames update" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/convert.gif" alt="Bulk-editing entities in the inventory and watching the predicted filenames update" width="100%">
 </p>
 
 ### 3. Say what the files cannot say
@@ -146,7 +146,7 @@ is written as `n/a`, not as 50: 50 Hz is right in Europe and wrong across most
 of the Americas, and nothing in the file would say it had been assumed.
 
 <p align="center">
-  <img src="miscellaneous/fix.gif" alt="A JSON sidecar as a schema-aware form, colour-coded by requirement level" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/fix.gif" alt="A JSON sidecar as a schema-aware form, colour-coded by requirement level" width="100%">
 </p>
 
 ### 4. Curate the dataset you converted
@@ -196,7 +196,7 @@ metabolite positions, the chemical shift axis the right way round, line
 broadening, phasing, and the free induction decay on a second page.
 
 <p align="center">
-  <img src="miscellaneous/inspect.gif" alt="The NIfTI viewer: sagittal, coronal and axial sharing one crosshair" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/inspect.gif" alt="The NIfTI viewer: sagittal, coronal and axial sharing one crosshair" width="100%">
 </p>
 
 ### 6. Take out what identifies a person
@@ -235,7 +235,7 @@ entity the standard does not allow for that kind of file, a sidecar left behind
 next to no data file at all.
 
 <p align="center">
-  <img src="miscellaneous/validate.gif" alt="Validating a dataset: findings by scope, each naming its schema rule" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/validate.gif" alt="Validating a dataset: findings by scope, each naming its schema rule" width="100%">
 </p>
 
 A valid dataset can still hold a bad image. The quality check measures every
@@ -298,7 +298,7 @@ Carl von Ossietzky Universität Oldenburg.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](https://github.com/ANCPLabOldenburg/BIDS-Manager/blob/main/LICENSE).
 
 Physio conversion code under `bidsmgr/vendor/bidsphysio/` is derived
 from [`bidsphysio`](https://github.com/cbinyu/bidsphysio) by Pablo

@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+# 77: the first setuptools that reads `license = "MIT"` with `license-files`
+# (PEP 639); an older one rejects the project table outright.
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -47,7 +49,6 @@ classifiers = [
 dependencies = [
     # Schema engine. The keystone of the architecture.
     "bidsschematools>=1.0,<=1.2.2",
-    "ancpbids>=0.3,<=0.3.1",
 
     # bidsval, the BIDS validation engine and the interpreter of the schema,
     # is VENDORED at ``bidsmgr/vendor/bidsval`` rather than depended on. It is
@@ -150,13 +151,19 @@ dependencies = [
     # brainchop runs the mindgrab network on tinygrad, which is pure Python
     # (no torch, no onnxruntime).
     #
-    # The marker is load-bearing. niimath tags its wheels per Python version
-    # rather than abi3, and there is no 3.14 wheel yet, so an unconditional
-    # pin would make BIDS Manager itself UNINSTALLABLE on a Python we claim
-    # to support. On 3.14 the app installs, the menu entry greys out, and the
-    # tooltip says why. Drop the marker once the wheel exists.
+    # The markers are load-bearing. niimath tags its wheels per Python version
+    # rather than abi3, and there is no 3.14 wheel yet (1.0.20260924 ships
+    # cp37 to cp313), so an unconditional pin would make BIDS Manager itself
+    # UNINSTALLABLE on a Python we claim to support: pip falls back to the
+    # sdist, whose build needs CMake, a C compiler and OpenMP. brainchop needs
+    # the same marker, because it requires niimath itself on every Python;
+    # with niimath alone marked, a 3.14 install still failed through
+    # brainchop (measured 2026-10-15). On 3.14 the app installs, defacing and
+    # the quality check's brain models say they need brainchop, and the
+    # quality check uses its numpy fallback. Drop both markers once niimath
+    # publishes a 3.14 wheel.
     "niimath>=1.0.20250526; python_version < '3.14'",
-    "brainchop>=0.2.5",
+    "brainchop>=0.2.5; python_version < '3.14'",
 
     # EyeLink eye tracking (.edf). eyelinkio is one pure-Python wheel that
     # ships SR Research's EDF reader for macOS (x86_64 and arm64), Linux
