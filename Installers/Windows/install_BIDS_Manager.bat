@@ -14,7 +14,7 @@ exit /b %BIDSMGR_RC%
 # =======================================================================
 # BIDS Manager installer for Windows 10 and 11 (x64), and Windows 11 on
 # ARM through its x64 emulation
-# Installer version 2.0.0. History: Installers/CHANGELOG.md
+# Installer version 2.0.1. History: Installers/CHANGELOG.md
 # Licence: MIT, ANCP Lab, University of Oldenburg
 # https://github.com/ANCPLabOldenburg/BIDS-Manager
 #
@@ -43,7 +43,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$InstallerVersion = '2.0.0'
+$InstallerVersion = '2.0.1'
 $UvVersion = '0.13.1'
 $UvTarget = 'x86_64-pc-windows-msvc'
 $UvSha256 = '3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672'
@@ -144,13 +144,16 @@ function Invoke-Uv([string[]]$Arguments) {
 
 # The output of a short Python command, or '' when it fails. Windows
 # PowerShell 5.1 drops double quotes inside arguments it passes to a
-# program, so the Python code uses single quotes only.
+# program, so the Python code uses single quotes only. Every call to the
+# environment's Python uses -I: without it, Python looks in the current
+# folder first, and run from inside a BIDS Manager checkout it would read
+# that copy instead of the one just installed.
 function Ask-Python([string]$Code) {
     if (-not (Test-Path -LiteralPath $EnvPy)) { return '' }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $out = & $EnvPy -c $Code 2>$null
+        $out = & $EnvPy -I -c $Code 2>$null
         if ($LASTEXITCODE -ne 0) { return '' }
         return ("$out").Trim()
     } finally {
@@ -329,15 +332,24 @@ Info 'Python ready.'
 # =======================================================================
 # Step 3/5: the environment
 # =======================================================================
-# Kept on update when it runs the requested Python for this build; built
-# again otherwise (an installation from installer 1.x, another Python, a
-# broken environment).
+# Kept on update when it runs the requested Python for this build, or a
+# newer one (the update button may have moved it to a newer Python, and
+# moving it back would install an older BIDS Manager); built again
+# otherwise (an installation from installer 1.x, an older Python, a broken
+# environment).
 $envPython = Ask-Python 'import sys; print(''%d.%d'' % sys.version_info[:2])'
 $sameBuild = $false
 if (Test-Path -LiteralPath $Manifest) {
     try { $sameBuild = ((Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json).installer.target -eq $UvTarget) } catch { }
 }
-if ($Mode -eq 'update' -and $sameBuild -and $envPython -eq $PythonVersion) {
+$keep = $false
+if ($Mode -eq 'update' -and $sameBuild -and $envPython) {
+    try {
+        $wanted = [version]((($PythonVersion -split '\.')[0..1]) -join '.')
+        $keep = ([version]$envPython) -ge $wanted
+    } catch { }
+}
+if ($keep) {
     Info "Step 3/5: The environment is kept (Python $envPython)."
 } else {
     Step 'Step 3/5: Creating the environment...'
@@ -360,7 +372,7 @@ Step "Step 4/5: Installing $Package (a few minutes the first time)..."
 if (-not (Invoke-Uv @('pip', 'install', '--python', $EnvPy, '--upgrade', '--compile-bytecode', $Package))) {
     Die 'bids-manager could not be installed.'
 }
-if ((Invoke-Program $EnvPy @('-c', 'import bidsmgr, PyQt6.QtWidgets')) -ne 0) {
+if ((Invoke-Program $EnvPy @('-I', '-c', 'import bidsmgr, PyQt6.QtWidgets')) -ne 0) {
     Die 'bids-manager was installed but does not start.'
 }
 $BmVersion = Ask-Python 'from importlib.metadata import version; print(version(''bids-manager''))'
@@ -401,12 +413,12 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(record, fh, indent=2)
     fh.write("\n")
 '@, $Utf8)
-if ((Invoke-Program $EnvPy @($writer)) -ne 0) { Warn 'installation.json could not be written.' }
+if ((Invoke-Program $EnvPy @('-I', $writer)) -ne 0) { Warn 'installation.json could not be written.' }
 
 # EyeLink .edf files are read through a library built against the Visual
 # C++ 2008 runtime, which Windows does not include. Installing it needs an
 # administrator, so the installer says so and leaves it to the user.
-if ((Invoke-Program $EnvPy @('-c', 'from eyelinkio.edf import _edf2py')) -ne 0) {
+if ((Invoke-Program $EnvPy @('-I', '-c', 'from eyelinkio.edf import _edf2py')) -ne 0) {
     Warn 'EyeLink .edf files cannot be read on this computer yet. They need the'
     Write-Host '    "Microsoft Visual C++ 2008 SP1 Redistributable (x64)", which needs an'
     Write-Host '    administrator to install. Or export the recordings as .asc.'

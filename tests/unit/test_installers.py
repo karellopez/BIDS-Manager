@@ -131,3 +131,43 @@ def test_the_windows_script_is_ascii_with_crlf_line_endings():
 @pytest.mark.parametrize("path", UNIX, ids=lambda p: p.name)
 def test_unix_scripts_use_lf_line_endings(path):
     assert b"\r" not in path.read_bytes()
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.name)
+def test_every_call_to_the_new_environments_python_is_isolated(path):
+    """Without -I, Python looks in the current folder first: an installer
+    started from inside a BIDS Manager checkout checked, recorded and took
+    the icon from that copy instead of the one it had just installed
+    (2026-10-16, it recorded 1.5.0 over a fresh 1.4.1)."""
+    text = _text(path)
+    if path == WINDOWS:
+        calls = re.findall(r"& \$EnvPy (\S+)", text) + re.findall(
+            r"Invoke-Program \$EnvPy @\(([^,)]+)", text)
+        assert calls and all(call in ("-I", "'-I'") for call in calls), calls
+    else:
+        calls = re.findall(r'"\$ENV_PY" (-\S*)', text)
+        # "--python "$ENV_PY" --upgrade" is an argument to uv, not a call.
+        calls = [call for call in calls if not call.startswith("--")]
+        assert calls and all(call == "-I" for call in calls), calls
+
+
+@pytest.mark.parametrize(
+    ("have", "want", "kept"),
+    [("3.12", "3.12", True), ("3.13", "3.12", True), ("3.11", "3.12", False),
+     ("4.0", "3.12", True), ("3.12", "3.12.4", True), ("3.9", "3.12", False)],
+)
+def test_an_update_keeps_an_environment_on_the_requested_python_or_newer(have, want, kept):
+    """BIDS Manager's own update can move an installation to a newer Python;
+    re-running the installer must not move it back, which would install an
+    older BIDS Manager."""
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("needs bash to run the installer's own comparison")
+    text = _text(MACOS)
+    function = re.search(r"^version_at_least\(\) \{.*?^\}", text, re.M | re.S).group(0)
+    assert function in _text(LINUX), "the two Unix installers must compare alike"
+    rc = subprocess.run([bash, "-c", f"{function}\nversion_at_least {have} {want}"]).returncode
+    assert (rc == 0) is kept

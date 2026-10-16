@@ -35,6 +35,15 @@ called, and the user's uv settings (`uv.toml`, `UV_*` variables) do not
 reach it. The Python it downloads is not added to `PATH` or to the Windows
 registry, so other programs never see it.
 
+## Updating
+
+BIDS Manager's Check updates button, or running the installer again. From
+the release after BIDS Manager 1.5.0, the button updates through the
+installer's own uv, so an update leaves nothing outside the install folder;
+and when a new release needs a newer Python, it moves the installation to
+it, putting the previous one back if anything goes wrong. (1.5.0's button
+updates with pip, which works but keeps its download cache outside.)
+
 ## Removing it
 
 Run `uninstall_BIDS_Manager` (on the Desktop, in the menu, or in the install

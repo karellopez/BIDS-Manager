@@ -1,7 +1,7 @@
 #!/bin/bash
 # =======================================================================
 # BIDS Manager installer for macOS (Apple Silicon and Intel)
-# Installer version 2.0.0. History: Installers/CHANGELOG.md
+# Installer version 2.0.1. History: Installers/CHANGELOG.md
 # Licence: MIT, ANCP Lab, University of Oldenburg
 # https://github.com/ANCPLabOldenburg/BIDS-Manager
 #
@@ -26,7 +26,7 @@
 # =======================================================================
 set -euo pipefail
 
-INSTALLER_VERSION="2.0.0"
+INSTALLER_VERSION="2.0.1"
 UV_VERSION="0.13.1"
 UV_SHA256_aarch64_apple_darwin="cfe454573412ff7380d15fc7dae5997ab53ffce72fce0a78e91ddbc84001acd2"
 UV_SHA256_x86_64_apple_darwin="bb7b805bdcf3d0bc8c74ceb94569e6b3e8aa35bd492acdbb9d46bf46d9d4ff6b"
@@ -81,6 +81,13 @@ ask() {
     fi
     read -rp "$1" reply
     echo "${reply:-$2}"
+}
+
+# version_at_least A B: A is B or newer, comparing major.minor ("3.13" "3.12").
+version_at_least() {
+    local a_major="${1%%.*}" b_major="${2%%.*}" a_rest="${1#*.}" b_rest="${2#*.}"
+    local a_minor="${a_rest%%.*}" b_minor="${b_rest%%.*}"
+    (( a_major > b_major || (a_major == b_major && a_minor >= b_minor) ))
 }
 
 # -- Isolation --------------------------------------------------------------
@@ -240,15 +247,22 @@ log_info "Python ready: $("$UV" python find "$PYTHON_REQUEST")"
 # =======================================================================
 # Step 3/5: the environment
 # =======================================================================
-# Kept on update when it runs the requested Python for this build; built
+# Every call to the environment's Python uses -I: without it, Python looks
+# in the current folder first, and run from inside a BIDS Manager checkout
+# it would read that copy instead of the one just installed.
+#
+# Kept on update when it runs the requested Python for this build, or a
+# newer one (the update button may have moved it to a newer Python, and
+# moving it back would install an older BIDS Manager); built
 # again otherwise (an installation from installer 1.x, another Python, a
 # Mac migrated from Intel, a broken environment).
-env_python="$("$ENV_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+env_python="$("$ENV_PY" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
 same_build=0
 if [[ -f "$MANIFEST" ]] && grep -q "\"target\": \"$TARGET\"" "$MANIFEST"; then
     same_build=1
 fi
-if [[ "$MODE" == "update" && "$same_build" == "1" && "$env_python" == "$PYTHON_VERSION" ]]; then
+if [[ "$MODE" == "update" && "$same_build" == "1" && -n "$env_python" ]] \
+    && version_at_least "$env_python" "$PYTHON_VERSION"; then
     log_info "Step 3/5: The environment is kept (Python $env_python)."
 else
     log_step "Step 3/5: Creating the environment..."
@@ -271,9 +285,9 @@ log_step "Step 4/5: Installing ${PACKAGE} (a few minutes the first time)..."
 # --compile-bytecode: what pip does, and what keeps the first start quick.
 run_uv pip install --python "$ENV_PY" --upgrade --compile-bytecode "$PACKAGE" \
     || die "bids-manager could not be installed."
-"$ENV_PY" -c "import bidsmgr, PyQt6.QtWidgets" \
+"$ENV_PY" -I -c "import bidsmgr, PyQt6.QtWidgets" \
     || die "bids-manager was installed but does not start."
-BM_VERSION="$("$ENV_PY" -c 'from importlib.metadata import version; print(version("bids-manager"))')"
+BM_VERSION="$("$ENV_PY" -I -c 'from importlib.metadata import version; print(version("bids-manager"))')"
 "$UV" cache prune >/dev/null 2>&1 || true
 log_info "BIDS Manager ${BM_VERSION} installed."
 
@@ -282,7 +296,7 @@ log_info "BIDS Manager ${BM_VERSION} installed."
 BM_MANIFEST="$MANIFEST" BM_INSTALLER="$INSTALLER_VERSION" BM_TARGET="$TARGET" \
 BM_UV="$UV" BM_UV_VERSION="$UV_VERSION" BM_PYTHON="$PYTHON_VERSION" \
 BM_ENV="$ENV_DIR" BM_PACKAGE="$PACKAGE" BM_VERSION="$BM_VERSION" \
-"$ENV_PY" - << 'PYEOF' || log_warn "installation.json could not be written."
+"$ENV_PY" -I - << 'PYEOF' || log_warn "installation.json could not be written."
 import datetime, json, os, platform, sys
 e = os.environ
 path = e["BM_MANIFEST"]
@@ -375,7 +389,7 @@ APP_EXEC_EOF
 </plist>
 PLIST_EOF
 
-    PKG_DIR="$("$ENV_PY" -c 'import importlib.util, os; print(os.path.dirname(importlib.util.find_spec("bidsmgr").origin))' 2>/dev/null || true)"
+    PKG_DIR="$("$ENV_PY" -I -c 'import importlib.util, os; print(os.path.dirname(importlib.util.find_spec("bidsmgr").origin))' 2>/dev/null || true)"
     if [[ -n "$PKG_DIR" && -f "$PKG_DIR/gui/assets/macos/AppIcon.icns" ]]; then
         cp "$PKG_DIR/gui/assets/macos/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     else

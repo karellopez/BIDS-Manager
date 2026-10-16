@@ -6,6 +6,20 @@ itself. `INSTALLER_VERSION` in each script, the first heading below and the
 installers in `Installers.zip` always agree; `tests/unit/test_installers.py`
 checks it.
 
+## 2.0.1 (2026-10-16)
+
+- Every call to the new environment's Python uses `-I`. Without it Python
+  looks in the current folder first, so an installer started from inside a
+  BIDS Manager checkout checked, recorded and took the icon from that copy
+  instead of the one it had just installed.
+- An update keeps an environment whose Python is newer than the installer's
+  default. BIDS Manager's own update can now move an installation to a newer
+  Python, and re-running the installer must not move it back to an older
+  Python, and so to an older BIDS Manager.
+- Works with BIDS Manager's update button, which from the next release
+  updates an installer installation through this uv and keeps
+  `installation.json` current.
+
 ## 2.0.0 (2026-10-16)
 
 The installers are built on uv instead of a portable Python kept in this
