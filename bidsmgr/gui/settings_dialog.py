@@ -324,8 +324,8 @@ class SettingsDialog(QDialog):
 
     # Combo presets for the header brand mark.
     _HEADER_LOGO_PRESETS: list[tuple[str, str]] = [
-        ("Default (monochrome mark)", "default"),
-        ("App icon (full color)",     "app_icon"),
+        ("App icon (full colour)", "app_icon"),
+        ("Monochrome mark",        "mark"),
     ]
 
     def _build_display_tab(self) -> QWidget:

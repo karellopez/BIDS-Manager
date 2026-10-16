@@ -277,9 +277,9 @@ class AppSettings:
     font_scale: float = 1.0
 
     # Header brand artwork.
-    # "default"  → minimalist mark in ``assets/logo.png``, inverted on dark.
-    # "app_icon" → full-color BIDS-Manager app icon (``assets/macos/AppIcon128.png``).
-    header_logo: str = "default"
+    # "app_icon" → the full-colour BIDS Manager app icon (``assets/macos/``), the default.
+    # "mark"     → the monochrome mark in ``assets/logo.png``, inverted on dark.
+    header_logo: str = "app_icon"
 
     # Scan rules (JSON-serialisable list[dict]); converted to/from the
     # engine's frozen dataclasses at the boundary via ``to_user_hints`` /
@@ -537,8 +537,8 @@ class AppSettings:
         out.header_logo = _as_str(
             s.value(KEYS["header_logo"]), out.header_logo,
         )
-        if out.header_logo not in ("default", "app_icon"):
-            out.header_logo = "default"
+        if out.header_logo not in ("app_icon", "mark"):
+            out.header_logo = "app_icon"
         out.user_hints = _as_json_list(s.value(KEYS["user_hints"]), [])
         out.scan_exclusions = _as_json_list(s.value(KEYS["scan_exclusions"]), [])
         out.recent_projects = _as_json_list(s.value(KEYS["recent_projects"]), [])
