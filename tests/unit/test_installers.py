@@ -171,3 +171,47 @@ def test_an_update_keeps_an_environment_on_the_requested_python_or_newer(have, w
     assert function in _text(LINUX), "the two Unix installers must compare alike"
     rc = subprocess.run([bash, "-c", f"{function}\nversion_at_least {have} {want}"]).returncode
     assert (rc == 0) is kept
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.name)
+def test_every_installer_uses_python_3_10_by_default(path):
+    """The version installer 1.x used and every pin was tested with. On 3.12,
+    brainchop got tinygrad 0.14, and skull stripping failed from the app."""
+    pattern = (r"^\$PythonVersion = Setting 'BIDSMGR_PYTHON' '([^']+)'" if path == WINDOWS
+               else r'^PYTHON_VERSION="\$\{BIDSMGR_PYTHON:-([^}]+)\}"')
+    assert re.search(pattern, _text(path), re.M).group(1) == "3.10"
+
+
+def test_the_mac_app_starts_natively_on_apple_silicon():
+    """A script launcher was started under Rosetta, so every program Python
+    started ran as Intel and tinygrad's clang refused -mcpu=native."""
+    text = _text(MACOS)
+    assert "<key>LSRequiresNativeExecution</key>  <true/>" in text
+    assert "<array><string>arm64</string></array>" in text
+    assert "${ARCH_KEYS}" in text
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.name)
+def test_every_launcher_puts_the_environments_programs_first(path):
+    """As installer 1.x did by activating the environment."""
+    text = _text(path)
+    if path == WINDOWS:
+        assert "('set \"PATH=' + (Batch-Path (Join-Path $EnvDir 'Scripts')) + ';%PATH%\"')" in text
+    else:
+        assert 'export PATH="$ENV_DIR/bin:\\$PATH"' in text
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.name)
+def test_only_a_python_the_update_button_moved_to_is_kept_newer(path):
+    """Installer 2.0.1 kept any newer Python, so a 3.12 installation could
+    never return to the default. Only the update button's mark keeps one,
+    and the installer carries the mark over when it rewrites the record."""
+    text = _text(path)
+    assert "moved_by_update" in text
+    assert 'BM_KEEP_MOVE' in text
+    assert 'record["python"]["moved_by_update"] = True' in text
+
+
+def test_the_update_helper_marks_a_move_the_installers_look_for():
+    helper = (ROOT / "bidsmgr" / "gui" / "_update_helper.py").read_text(encoding="utf-8")
+    assert 'record["python"]["moved_by_update"] = True' in helper

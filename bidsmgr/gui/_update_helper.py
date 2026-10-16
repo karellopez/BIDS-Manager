@@ -264,7 +264,11 @@ def record_update(manifest: Path, record: dict, python: str, moved_to: str = "")
     record.setdefault("package", {})["version"] = package_version
     record.setdefault("python", {})["version"] = python_version
     if moved_to:
+        # The mark tells the installer this Python was needed by a release,
+        # so running it again keeps the environment rather than rebuilding
+        # it on the installer's older default.
         record["python"]["requested"] = moved_to
+        record["python"]["moved_by_update"] = True
     record["updated"] = datetime.datetime.now(datetime.timezone.utc).replace(
         microsecond=0).isoformat()
     try:

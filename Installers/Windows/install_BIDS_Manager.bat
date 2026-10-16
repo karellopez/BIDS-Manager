@@ -14,7 +14,7 @@ exit /b %BIDSMGR_RC%
 # =======================================================================
 # BIDS Manager installer for Windows 10 and 11 (x64), and Windows 11 on
 # ARM through its x64 emulation
-# Installer version 2.0.1. History: Installers/CHANGELOG.md
+# Installer version 2.0.2. History: Installers/CHANGELOG.md
 # Licence: MIT, ANCP Lab, University of Oldenburg
 # https://github.com/ANCPLabOldenburg/BIDS-Manager
 #
@@ -34,7 +34,7 @@ exit /b %BIDSMGR_RC%
 #
 # Optional settings, for testing and for administrators:
 #   BIDSMGR_INSTALL_DIR     where to install (default %USERPROFILE%\BIDS-Manager)
-#   BIDSMGR_PYTHON          Python version (default 3.12)
+#   BIDSMGR_PYTHON          Python version (default 3.10)
 #   BIDSMGR_PACKAGE         what to install: "bids-manager==1.5.0", a wheel file...
 #   BIDSMGR_YES=1           take the default answer to every question
 #   BIDSMGR_NO_SHORTCUTS=1  no shortcuts on the Desktop or in the Start menu
@@ -43,7 +43,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$InstallerVersion = '2.0.1'
+$InstallerVersion = '2.0.2'
 $UvVersion = '0.13.1'
 $UvTarget = 'x86_64-pc-windows-msvc'
 $UvSha256 = '3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672'
@@ -54,7 +54,11 @@ function Setting([string]$Name, [string]$Default) {
     return $value
 }
 
-$PythonVersion = Setting 'BIDSMGR_PYTHON' '3.12'
+# 3.10 is what installer 1.x used and what every version pin was tested on.
+# A newer Python brings newer libraries (brainchop gets tinygrad 0.12 or
+# newer on 3.11 and later, untested here). The update button moves an
+# installation to a newer Python when a release needs one.
+$PythonVersion = Setting 'BIDSMGR_PYTHON' '3.10'
 $Package = Setting 'BIDSMGR_PACKAGE' 'bids-manager'
 $InstallDir = Setting 'BIDSMGR_INSTALL_DIR' (Join-Path $env:USERPROFILE 'BIDS-Manager')
 $AssumeYes = (Setting 'BIDSMGR_YES' '0') -eq '1'
@@ -333,20 +337,28 @@ Info 'Python ready.'
 # Step 3/5: the environment
 # =======================================================================
 # Kept on update when it runs the requested Python for this build, or a
-# newer one (the update button may have moved it to a newer Python, and
-# moving it back would install an older BIDS Manager); built again
-# otherwise (an installation from installer 1.x, an older Python, a broken
-# environment).
+# newer one the update button moved it to because a release needed it (the
+# record says so: moving it back would install an older BIDS Manager);
+# built again otherwise (an installation from installer 1.x, another
+# Python, a broken environment).
 $envPython = Ask-Python 'import sys; print(''%d.%d'' % sys.version_info[:2])'
 $sameBuild = $false
+$moved = $false
 if (Test-Path -LiteralPath $Manifest) {
-    try { $sameBuild = ((Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json).installer.target -eq $UvTarget) } catch { }
+    try {
+        $priorRecord = Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json
+        $sameBuild = ($priorRecord.installer.target -eq $UvTarget)
+        $moved = ($priorRecord.python.moved_by_update -eq $true)
+    } catch { }
 }
 $keep = $false
+$keepMove = $false
 if ($Mode -eq 'update' -and $sameBuild -and $envPython) {
     try {
         $wanted = [version]((($PythonVersion -split '\.')[0..1]) -join '.')
-        $keep = ([version]$envPython) -ge $wanted
+        $have = [version]$envPython
+        $keep = ($have -eq $wanted) -or ($moved -and $have -gt $wanted)
+        $keepMove = $keep -and ($have -ne $wanted)
     } catch { }
 }
 if ($keep) {
@@ -361,6 +373,20 @@ if ($keep) {
         Die 'The environment could not be created.'
     }
     Info "Environment ready in $EnvDir"
+}
+
+# Pythons no environment uses any more (an earlier default, a move made by
+# the update button), about 70 MB each.
+$inUse = Ask-Python 'import sys; print(''%d.%d'' % sys.version_info[:2])'
+if ($inUse) {
+    foreach ($dir in @(Get-ChildItem -LiteralPath $env:UV_PYTHON_INSTALL_DIR -Directory -ErrorAction SilentlyContinue)) {
+        if ($dir.Name -match '^cpython-(\d+\.\d+)\.\d+[^-]*-(.+)$' -and $Matches[1] -ne $inUse) {
+            $minor = $Matches[1]
+            if ((Invoke-Program $Uv @('python', 'uninstall', "cpython-$minor-$($Matches[2])")) -eq 0) {
+                Info "Removed Python $minor, which nothing uses any more."
+            }
+        }
+    }
 }
 
 # =======================================================================
@@ -384,6 +410,7 @@ Info "BIDS Manager $BmVersion installed."
 $env:BM_MANIFEST = $Manifest; $env:BM_INSTALLER = $InstallerVersion; $env:BM_TARGET = $UvTarget
 $env:BM_UV = $Uv; $env:BM_UV_VERSION = $UvVersion; $env:BM_PYTHON = $PythonVersion
 $env:BM_ENV = $EnvDir; $env:BM_PACKAGE = $Package; $env:BM_VERSION = $BmVersion
+if ($keepMove) { $env:BM_KEEP_MOVE = '1' } else { $env:BM_KEEP_MOVE = '0' }
 $writer = Join-Path $Tmp 'manifest.py'
 [IO.File]::WriteAllText($writer, @'
 import datetime, json, os, platform, sys
@@ -392,9 +419,10 @@ path = e["BM_MANIFEST"]
 now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 try:
     with open(path, encoding="utf-8") as fh:
-        first = json.load(fh).get("installed", now)
+        previous = json.load(fh)
 except (OSError, ValueError):
-    first = now
+    previous = {}
+first = previous.get("installed", now)
 record = {
     "format": 1,
     "installed": first,
@@ -409,6 +437,10 @@ record = {
     "package": {"name": "bids-manager", "requested": e["BM_PACKAGE"],
                 "version": e["BM_VERSION"]},
 }
+if e.get("BM_KEEP_MOVE") == "1":
+    # A Python the update button moved to stays recorded as such.
+    record["python"]["requested"] = previous["python"]["requested"]
+    record["python"]["moved_by_update"] = True
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(record, fh, indent=2)
     fh.write("\n")
@@ -429,7 +461,9 @@ if ((Invoke-Program $EnvPy @('-I', '-c', 'from eyelinkio.edf import _edf2py')) -
 # Step 5/5: launcher, uninstaller and shortcuts
 # =======================================================================
 # Batch files read their text in the console's code page; chcp 65001 first
-# makes a user folder with accented letters read correctly.
+# makes a user folder with accented letters read correctly. The launcher
+# puts the environment's Scripts folder first on PATH, as activating it
+# would, so the programs installed with BIDS Manager are the ones found.
 function Batch-Path([string]$Path) { return $Path.Replace('%', '%%') }
 $RunBat = Join-Path $InstallDir 'run_BIDS_Manager.bat'
 $UninstallBat = Join-Path $InstallDir 'uninstall_BIDS_Manager.bat'
@@ -438,6 +472,7 @@ $UninstallBat = Join-Path $InstallDir 'uninstall_BIDS_Manager.bat'
     '@echo off'
     'chcp 65001 >nul'
     'title BIDS Manager'
+    ('set "PATH=' + (Batch-Path (Join-Path $EnvDir 'Scripts')) + ';%PATH%"')
     ('"' + (Batch-Path (Join-Path $EnvDir 'Scripts\bidsmgr.exe')) + '" %*')
     'if errorlevel 1 pause'
 ) -join "`r`n") + "`r`n", $Utf8)

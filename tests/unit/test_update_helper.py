@@ -137,6 +137,7 @@ def test_the_record_describes_what_is_really_installed(tmp_path):
     assert written["package"]["version"] == version("bids-manager")
     assert written["python"]["version"] == platform.python_version()
     assert written["python"]["requested"] == "3.13"
+    assert written["python"]["moved_by_update"] is True
     assert written["updated"]
 
 

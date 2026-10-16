@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =======================================================================
 # BIDS Manager installer for Linux (x86_64 and ARM64, glibc)
-# Installer version 2.0.1. History: Installers/CHANGELOG.md
+# Installer version 2.0.2. History: Installers/CHANGELOG.md
 # Licence: MIT, ANCP Lab, University of Oldenburg
 # https://github.com/ANCPLabOldenburg/BIDS-Manager
 #
@@ -20,7 +20,7 @@
 #
 # Optional settings, for testing and for administrators:
 #   BIDSMGR_INSTALL_DIR     where to install (default ~/BIDS-Manager)
-#   BIDSMGR_PYTHON          Python version (default 3.12)
+#   BIDSMGR_PYTHON          Python version (default 3.10)
 #   BIDSMGR_PACKAGE         what to install: "bids-manager==1.5.0", a wheel file...
 #   BIDSMGR_YES=1           take the default answer to every question
 #   BIDSMGR_NO_SHORTCUTS=1  no menu entry, no Desktop files, no icon
@@ -28,12 +28,18 @@
 # =======================================================================
 set -euo pipefail
 
-INSTALLER_VERSION="2.0.1"
+INSTALLER_VERSION="2.0.2"
 UV_VERSION="0.13.1"
 UV_SHA256_x86_64_unknown_linux_gnu="eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220"
 UV_SHA256_aarch64_unknown_linux_gnu="9041c73c99fdc5892cf128140beb354eca9231d502068cc36e6cb53a8e59ad14"
 
-PYTHON_VERSION="${BIDSMGR_PYTHON:-3.12}"
+# 3.10 is what installer 1.x used and what every version pin was tested on.
+# A newer Python brings newer libraries: on 3.11 and later brainchop gets
+# tinygrad 0.12 or newer, untested here (BIDS Manager pins 0.11.0 from its
+# next release). The update button moves an installation to a newer Python
+# when a release needs one.
+PYTHON_VERSION="${BIDSMGR_PYTHON:-3.10}"
+PYTHON_MINOR="$(echo "$PYTHON_VERSION" | cut -d. -f1-2)"
 PACKAGE="${BIDSMGR_PACKAGE:-bids-manager}"
 INSTALL_DIR="${BIDSMGR_INSTALL_DIR:-$HOME/BIDS-Manager}"
 ASSUME_YES="${BIDSMGR_YES:-0}"
@@ -286,17 +292,23 @@ log_info "Python ready: $("$UV" python find "$PYTHON_REQUEST")"
 # it would read that copy instead of the one just installed.
 #
 # Kept on update when it runs the requested Python for this build, or a
-# newer one (the update button may have moved it to a newer Python, and
-# moving it back would install an older BIDS Manager); built
+# newer one the update button moved it to because a release needed it
+# (the record says so: moving it back would install an older BIDS
+# Manager); built
 # again otherwise (an installation from installer 1.x, another Python, a
 # disk moved to another machine, a broken environment).
 env_python="$("$ENV_PY" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
 same_build=0
+moved=0
 if [[ -f "$MANIFEST" ]] && grep -q "\"target\": \"$TARGET\"" "$MANIFEST"; then
     same_build=1
+    if grep -q '"moved_by_update": true' "$MANIFEST"; then moved=1; fi
 fi
+KEEP_MOVE=0
 if [[ "$MODE" == "update" && "$same_build" == "1" && -n "$env_python" ]] \
-    && version_at_least "$env_python" "$PYTHON_VERSION"; then
+    && { [[ "$env_python" == "$PYTHON_MINOR" ]] \
+         || { [[ "$moved" == "1" ]] && version_at_least "$env_python" "$PYTHON_MINOR"; }; }; then
+    if [[ "$env_python" != "$PYTHON_MINOR" ]]; then KEEP_MOVE=1; fi
     log_info "Step 3/5: The environment is kept (Python $env_python)."
 else
     log_step "Step 3/5: Creating the environment..."
@@ -310,6 +322,18 @@ else
         || die "The environment could not be created."
     log_info "Environment ready in $ENV_DIR"
 fi
+
+# Pythons no environment uses any more (an earlier default, a move made by
+# the update button), about 70 MB each.
+in_use="$("$ENV_PY" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+for dir in "$UV_PYTHON_INSTALL_DIR"/cpython-*; do
+    name="$(basename "$dir")"
+    if [[ -n "$in_use" && "$name" =~ ^cpython-([0-9]+\.[0-9]+)\.[0-9]+[^-]*-(.+)$ \
+          && "${BASH_REMATCH[1]}" != "$in_use" ]]; then
+        "$UV" python uninstall "cpython-${BASH_REMATCH[1]}-${BASH_REMATCH[2]}" >/dev/null 2>&1 \
+            && log_info "Removed Python ${BASH_REMATCH[1]}, which nothing uses any more."
+    fi
+done
 
 # =======================================================================
 # Step 4/5: BIDS Manager
@@ -329,7 +353,7 @@ log_info "BIDS Manager ${BM_VERSION} installed."
 # the Python it was installed with.
 BM_MANIFEST="$MANIFEST" BM_INSTALLER="$INSTALLER_VERSION" BM_TARGET="$TARGET" \
 BM_UV="$UV" BM_UV_VERSION="$UV_VERSION" BM_PYTHON="$PYTHON_VERSION" \
-BM_ENV="$ENV_DIR" BM_PACKAGE="$PACKAGE" BM_VERSION="$BM_VERSION" \
+BM_ENV="$ENV_DIR" BM_PACKAGE="$PACKAGE" BM_VERSION="$BM_VERSION" BM_KEEP_MOVE="$KEEP_MOVE" \
 "$ENV_PY" -I - << 'PYEOF' || log_warn "installation.json could not be written."
 import datetime, json, os, platform, sys
 e = os.environ
@@ -337,9 +361,10 @@ path = e["BM_MANIFEST"]
 now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 try:
     with open(path, encoding="utf-8") as fh:
-        first = json.load(fh).get("installed", now)
+        previous = json.load(fh)
 except (OSError, ValueError):
-    first = now
+    previous = {}
+first = previous.get("installed", now)
 record = {
     "format": 1,
     "installed": first,
@@ -354,6 +379,10 @@ record = {
     "package": {"name": "bids-manager", "requested": e["BM_PACKAGE"],
                 "version": e["BM_VERSION"]},
 }
+if e.get("BM_KEEP_MOVE") == "1":
+    # A Python the update button moved to stays recorded as such.
+    record["python"]["requested"] = previous["python"]["requested"]
+    record["python"]["moved_by_update"] = True
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(record, fh, indent=2)
     fh.write("\n")
@@ -384,8 +413,11 @@ fi
 # Step 5/5: launcher, menu entry and uninstaller
 # =======================================================================
 RUN_SCRIPT="$INSTALL_DIR/run_BIDS_Manager.sh"
+# The environment's bin folder goes first on PATH, as activating it would,
+# so the programs installed with BIDS Manager are the ones found.
 cat > "$RUN_SCRIPT" << LAUNCHER_EOF
 #!/usr/bin/env bash
+export PATH="$ENV_DIR/bin:\$PATH"
 exec "$ENV_DIR/bin/bidsmgr" "\$@"
 LAUNCHER_EOF
 chmod +x "$RUN_SCRIPT"

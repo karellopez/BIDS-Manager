@@ -18,7 +18,7 @@ Windows):
 ```
 BIDS-Manager/
   uv/                 uv, checked against its published SHA-256
-  python/             Python 3.12, downloaded by that uv
+  python/             Python 3.10, downloaded by that uv
   env/                the environment BIDS Manager runs in
   cache/              uv's download cache, which makes updates quick
   installation.json   what is installed, with which versions
@@ -57,7 +57,7 @@ For testing and for administrators. Environment variables, all optional:
 | Variable | Effect |
 |---|---|
 | `BIDSMGR_INSTALL_DIR` | Install somewhere else (an absolute path to a folder of its own) |
-| `BIDSMGR_PYTHON` | Another Python version (default `3.12`) |
+| `BIDSMGR_PYTHON` | Another Python version (default `3.10`) |
 | `BIDSMGR_PACKAGE` | What to install: `bids-manager==1.5.0`, a wheel file, ... |
 | `BIDSMGR_YES=1` | Take the default answer to every question |
 | `BIDSMGR_NO_SHORTCUTS=1` | No app, menu entry or shortcuts |

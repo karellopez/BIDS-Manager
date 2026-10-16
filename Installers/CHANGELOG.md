@@ -6,6 +6,21 @@ itself. `INSTALLER_VERSION` in each script, the first heading below and the
 installers in `Installers.zip` always agree; `tests/unit/test_installers.py`
 checks it.
 
+## 2.0.2 (2026-10-16)
+
+- macOS: BIDS-Manager.app starts natively on Apple Silicon. Its launcher
+  is a script, and macOS started it under Rosetta; Python still ran
+  natively, but every program it started ran as Intel, so tinygrad 0.14's
+  `clang -mcpu=native` was refused and skull stripping failed from the app
+  while it worked from a Terminal. The app now declares
+  `LSRequiresNativeExecution` and `LSArchitecturePriority`. Installer 1.x's
+  app had the same flaw; its tinygrad never needed clang.
+- Python 3.10 by default again (it was 3.12 in 2.0.0 and 2.0.1), the version
+  installer 1.x used and every version pin was tested with: a newer Python
+  brings newer libraries, among them tinygrad 0.14 for brainchop.
+- The launchers put the environment's own programs first on PATH, as
+  installer 1.x's did by activating the environment.
+
 ## 2.0.1 (2026-10-16)
 
 - Every call to the new environment's Python uses `-I`. Without it Python
