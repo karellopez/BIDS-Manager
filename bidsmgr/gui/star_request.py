@@ -13,9 +13,10 @@ and the breathing, and a scanpath on a screen. They gather into the lines of
 the BIDS Manager logo, the logo becomes a star, still dim, and a small
 scientist walks up to a button and presses it: the star lights up.
 
-When it asks (:func:`due`): at most once a day, on the first launch of a day,
-starting with the first launch after What's new was seen (never in a launch
-that showed What's new), until the user has gone to GitHub from it.
+When it asks (:func:`due`): at most once a day, on the first launch of a day
+(the day is the computer's date, compared with the date of the last request),
+right after What's new when both are due, until the user has gone to GitHub
+from it. Opening it by hand counts as that day's request.
 "Don't ask me again" here and Settings > Display turn it off; Home's "Help
 us" button and the What's new dialog open it on request. Called from
 :func:`bidsmgr.main.main`, never from the window, so a test that builds a
@@ -78,8 +79,8 @@ WALK = 2.2
 REACH = 0.25
 PRESS_AT = WALK_AT + WALK + REACH
 LIGHT = 0.9                   # the star lights up
-CHEER_AT = PRESS_AT + 0.45
-SETTLED = PRESS_AT + LIGHT + 0.6
+CHEER_AT = PRESS_AT + 0.45   # three jumps, arms up
+SETTLED = CHEER_AT + 1.85
 GLINT_EVERY = 3.5             # once it shines, a glint crosses it this often
 GLINT = 0.7
 
@@ -97,23 +98,33 @@ SHINE_REACH = 0.66
 
 # The scientist and the button.
 GROUND = 0.9
-LEG = 0.15
-TORSO = 0.15
-ARM = 0.16
-HEAD_R = 0.062
+FOOT_H = 0.008                # the ankle above the ground: the shoe
+THIGH = SHIN = 0.08
+LEG = THIGH + SHIN
+TORSO = 0.16
+UPPER = FORE = 0.085          # upper arm, forearm
+ARM = UPPER + FORE
+PRESS_REACH = 0.16            # shoulder to hand when pressing: the elbow just bent
+HEAD_R = 0.066
+NECK = 0.014
 SHOULDER_DX = 0.01            # the shoulders sit a little forward of the hips
-BUTTON_X = 0.78              # the console's middle
+BUTTON_X = 0.78               # the console's middle
 BUTTON_HALF = 0.075
-CAP_Y = 0.73                  # the console's top, where the cap sits
+CAP_Y = 0.68                  # the console's top, where the cap sits
 CAP_RX, CAP_RY = 0.042, 0.022
 PRESS_DEPTH = 0.012
 #: Where the hand presses: the near side of the cap's top.
 PUSH_AT = (BUTTON_X - 0.02, CAP_Y - 0.8 * CAP_RY)
 START_X = -1.45
-_SHOULDER_Y = GROUND - LEG - TORSO
-#: Where the scientist stops: one arm's length from where the hand presses.
-STOP_X = (PUSH_AT[0] - float(np.sqrt(ARM ** 2 - (PUSH_AT[1] - _SHOULDER_Y) ** 2))
+#: The hips' height standing: the knees a little bent.
+HIP_Y = GROUND - FOOT_H - 0.94 * LEG
+_SHOULDER_Y = HIP_Y - TORSO
+#: Where the scientist stops: ``PRESS_REACH`` from where the hand presses.
+STOP_X = (PUSH_AT[0] - float(np.sqrt(PRESS_REACH ** 2 - (PUSH_AT[1] - _SHOULDER_Y) ** 2))
           - SHOULDER_DX)
+#: The celebration once the star lights: (start after ``CHEER_AT``, height).
+JUMPS = ((0.0, 0.07), (0.45, 0.095), (0.9, 0.065))
+JUMP = 0.42
 
 
 # ---------------------------------------------------------------------------
@@ -149,25 +160,24 @@ def _save(schedule: StarSchedule) -> None:
 
 
 def maybe_show(window: QWidget, today: Optional[date] = None) -> Optional["StarDialog"]:
-    """Ask over ``window`` if this is the first launch of the day to ask.
-
-    Called only when What's new did not open in this launch. The day is
-    remembered as soon as the dialog opens.
-    """
+    """Ask over ``window`` if no request was shown yet today."""
     from .app_settings import AppSettings
 
     today = today or date.today()
-    schedule = _load()
-    if not due(schedule, today, enabled=AppSettings.load().ask_for_star):
+    if not due(_load(), today, enabled=AppSettings.load().ask_for_star):
         return None
-    schedule.last_asked = today.isoformat()
-    _save(schedule)
-    return show_dialog(window, asked=True)
+    return show_dialog(window, asked=True, today=today)
 
 
-def show_dialog(parent: QWidget, *, asked: bool = False) -> "StarDialog":
+def show_dialog(parent: QWidget, *, asked: bool = False,
+                today: Optional[date] = None) -> "StarDialog":
     """Open the dialog over ``parent`` (the daily request, Home's Help us
-    button or the What's new dialog); it is deleted when closed."""
+    button or the What's new dialog); it is deleted when closed. The day is
+    remembered as soon as it opens, however it was opened, so it is never
+    asked twice in a day."""
+    schedule = _load()
+    schedule.last_asked = (today or date.today()).isoformat()
+    _save(schedule)
     dialog = StarDialog(parent, asked=asked)
     dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
     dialog.open()
@@ -575,19 +585,36 @@ class StarParticles:
 
 @dataclass
 class Pose:
-    """Where the scientist is and how they stand, in the unit frame. Angles
-    are from straight down, positive forward (towards the button)."""
+    """Where the scientist is, in the unit frame: the hips, the ankles and the
+    hands. The knees and elbows follow from them (:func:`joint`)."""
 
-    x: float                   # the hips
+    x: float                                                 # the hips
     hip_y: float
-    legs: tuple[float, float]  # back, front
-    back_arm: float
-    hand: tuple[float, float]  # the front hand
+    feet: tuple[tuple[float, float], tuple[float, float]]    # back, front
+    hands: tuple[tuple[float, float], tuple[float, float]]   # back, front
     looks_up: bool
+    smile: float                                             # 0..1
 
 
 def shoulder(pose: Pose) -> tuple[float, float]:
+    """The front shoulder (the back one is a little behind it)."""
     return pose.x + SHOULDER_DX, pose.hip_y - TORSO
+
+
+def joint(a: tuple[float, float], b: tuple[float, float], l1: float, l2: float,
+          bend: float) -> tuple[float, float]:
+    """The middle joint of a limb from ``a`` to ``b`` with segments ``l1`` and
+    ``l2``: ``bend`` +1 puts it behind the line (an elbow), -1 in front (a
+    knee). A limb asked to reach too far is straight."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    d = float(np.hypot(dx, dy))
+    if d < 1e-9:
+        return a[0], a[1] + l1
+    ux, uy = dx / d, dy / d
+    d = min(max(d, abs(l1 - l2) + 1e-6), l1 + l2 - 1e-6)
+    along = (l1 ** 2 - l2 ** 2 + d ** 2) / (2 * d)
+    h = float(np.sqrt(max(l1 ** 2 - along ** 2, 0.0)))
+    return a[0] + along * ux - bend * h * uy, a[1] + along * uy + bend * h * ux
 
 
 def cap_offset(t: float) -> float:
@@ -595,32 +622,62 @@ def cap_offset(t: float) -> float:
     return PRESS_DEPTH * _bump(t, PRESS_AT, 0.12, 0.25)
 
 
+def jump_at(t: float) -> tuple[float, float, float]:
+    """The celebration at ``t``: how high the hips are lifted, how far they
+    dip (before a jump and on landing), and how tucked the legs are."""
+    for start, height in JUMPS:
+        v = (t - CHEER_AT - start) / JUMP
+        if not 0.0 <= v < 1.0:
+            continue
+        if v < 0.18:
+            return 0.0, 0.025 * float(np.sin(np.pi * v / 0.18)), 0.0
+        if v < 0.82:
+            s = (v - 0.18) / 0.64
+            return height * float(np.sin(np.pi * s)), 0.0, float(np.sin(np.pi * s))
+        return 0.0, 0.025 * float(np.sin(np.pi * (v - 0.82) / 0.18)), 0.0
+    return 0.0, 0.0, 0.0
+
+
 def pose_at(t: float) -> Pose:
-    """The scientist at time ``t``: walking in, reaching, pressing, cheering."""
+    """The scientist at time ``t``: walking in, reaching, pressing, then
+    three jumps with arms up, then looking up at the star."""
     u = float(np.clip((t - WALK_AT) / WALK, 0.0, 1.0))
     x = START_X + (STOP_X - START_X) * (1 - (1 - u) ** 2)       # slows to a stop
-    stride = 0.42 * (1 - u ** 4) if 0 < u < 1 else 0.0
-    step = float(np.sin(2 * np.pi * 1.6 * (t - WALK_AT)))
-    hip_y = GROUND - LEG - 0.012 * abs(step) * stride / 0.42
-    legs = (-stride * step, stride * step)
-    swing = -0.5 * stride * step
-    back_arm = -swing
-    hip_y -= 0.045 * float(np.sin(np.pi * min(1.0, max(0.0, (t - CHEER_AT) / 0.45))))
+    walk = (1 - u ** 4) if 0 < u < 1 else 0.0                   # how much of a stride
+    phase = 2 * np.pi * 1.6 * (t - WALK_AT)
+    lift, dip, tuck = jump_at(t)
+    hip_y = HIP_Y - 0.008 * abs(float(np.sin(phase))) * walk + dip - lift
+
+    def foot(ph: float, side: float) -> tuple[float, float]:
+        if lift > 0:                                 # in the air: the legs tucked
+            return x + side * 0.012 + 0.015 * tuck, hip_y + 0.94 * LEG - 0.05 * tuck
+        return (x + side * 0.012 + 0.05 * walk * float(np.sin(ph)),
+                GROUND - FOOT_H - 0.03 * walk * max(0.0, float(np.cos(ph))))
+
+    feet = (foot(phase + np.pi, -1.0), foot(phase, 1.0))
     sx, sy = x + SHOULDER_DX, hip_y - TORSO
-    rest = (sx + ARM * np.sin(swing), sy + ARM * np.cos(swing))
-    cap = (PUSH_AT[0], PUSH_AT[1] + cap_offset(t))
+    bsx, bsy = sx - 0.022, sy + 0.004
+    swing = 0.06 * walk * float(np.sin(phase))
+    back = (bsx + swing - 0.01, bsy + 0.155)
+    front = (sx - swing + 0.012, sy + 0.155)
+    # Reach, press, let go.
+    target = (PUSH_AT[0], PUSH_AT[1] + cap_offset(t))
     reach = float(ease(np.array((t - (WALK_AT + WALK)) / REACH)))
-    back = float(ease(np.array((t - PRESS_AT - 0.2) / 0.25)))
-    touch = reach * (1 - back)
-    hand = (rest[0] + (cap[0] - rest[0]) * touch, rest[1] + (cap[1] - rest[1]) * touch)
-    cheer = min(_bump(t, CHEER_AT, 0.25, 1e9), 1.0) * (1.0 - float(np.clip((t - CHEER_AT - 0.85) / 0.4, 0, 1)))
+    release = float(ease(np.array((t - PRESS_AT - 0.2) / 0.25)))
+    touch = reach * (1 - release)
+    front = (front[0] + (target[0] - front[0]) * touch, front[1] + (target[1] - front[1]) * touch)
+    # Arms up for the jumps.
+    end = CHEER_AT + JUMPS[-1][0] + JUMP
+    cheer = float(np.clip((t - CHEER_AT + 0.1) / 0.15, 0, 1)) * float(np.clip(1 - (t - end) / 0.3, 0, 1))
     if cheer > 0:
-        up = (sx + ARM * np.sin(np.pi - 0.45), sy + ARM * np.cos(np.pi - 0.45))
-        hand = (hand[0] + (up[0] - hand[0]) * cheer, hand[1] + (up[1] - hand[1]) * cheer)
-        back_arm = back_arm + (-(np.pi - 0.45) - back_arm) * cheer
-    return Pose(x=float(x), hip_y=float(hip_y), legs=(float(legs[0]), float(legs[1])),
-                back_arm=float(back_arm), hand=(float(hand[0]), float(hand[1])),
-                looks_up=t >= PRESS_AT)
+        # A wide V, clear of the head.
+        up_front, up_back = (sx + 0.125, sy - 0.105), (bsx - 0.12, bsy - 0.105)
+        front = (front[0] + (up_front[0] - front[0]) * cheer, front[1] + (up_front[1] - front[1]) * cheer)
+        back = (back[0] + (up_back[0] - back[0]) * cheer, back[1] + (up_back[1] - back[1]) * cheer)
+    return Pose(x=float(x), hip_y=float(hip_y),
+                feet=tuple((float(a), float(b)) for a, b in feet),
+                hands=((float(back[0]), float(back[1])), (float(front[0]), float(front[1]))),
+                looks_up=t >= PRESS_AT, smile=float(np.clip((t - PRESS_AT) / 0.4, 0.0, 1.0)))
 
 
 def scene_alpha(t: float) -> float:
@@ -860,51 +917,121 @@ class StarCanvas(QWidget):
         cap.closeSubpath()
         p.drawPath(cap)
 
-        if t < WALK_AT:
-            p.setOpacity(1.0)
-            return
+        if t >= WALK_AT:
+            StarCanvas._paint_scientist(p, at, unit, t, palette, line)
+        p.setOpacity(1.0)
+
+    @staticmethod
+    def _paint_scientist(p: QPainter, at, unit: float, t: float, palette: dict,
+                         line: float) -> None:
+        """A small scientist in a lab coat, in line drawing: the theme's text
+        colour for lines, its card colour inside, the accent for the glasses,
+        the tie and a pen."""
+        ink = QColor(palette.get("text", "#e6edf3"))
+        paper = QColor(palette.get("surface", "#11161d"))
+        accent = QColor(palette.get("accent", "#58a6ff"))
+        quiet = QColor(palette.get("dim", palette.get("text", "#8b949e")))
         pose = pose_at(t)
         sx, sy = shoulder(pose)
-        pen = QPen(QColor(ink), line * 1.15, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+        bsx, bsy = sx - 0.022, sy + 0.004
+        pen = QPen(ink, line * 1.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                    Qt.PenJoinStyle.RoundJoin)
+        thin = QPen(ink, line * 0.75, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin)
 
-        def limb(x0: float, y0: float, angle: float, length: float) -> tuple[float, float]:
-            return x0 + length * np.sin(angle), y0 + length * np.cos(angle)
+        def seg(a, b) -> None:
+            p.drawLine(at(*a), at(*b))
 
-        def leg(angle: float) -> None:
-            fx, fy = limb(pose.x, pose.hip_y, angle, LEG)
-            p.drawLine(at(pose.x, pose.hip_y), at(fx, fy))
-            p.drawLine(at(fx, fy), at(fx + 0.028, fy))          # a shoe, pointing forward
+        def disc(c, r: float, fill) -> None:
+            p.setBrush(fill)
+            p.drawEllipse(at(*c), unit * r, unit * r)
 
+        def arm(shoulder_at, hand) -> None:
+            elbow = joint(shoulder_at, hand, UPPER, FORE, 1.0)
+            p.setPen(pen)
+            seg(shoulder_at, elbow)
+            seg(elbow, hand)
+            disc(hand, 0.011, paper)
+
+        arm((bsx, bsy), pose.hands[0])              # behind the body
+        # The legs and the shoes.
+        for side, foot in zip((-0.012, 0.012), pose.feet):
+            hip = (pose.x + side, pose.hip_y)
+            knee = joint(hip, foot, THIGH, SHIN, -1.0)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            seg(hip, knee)
+            seg(knee, foot)
+            p.setBrush(ink)
+            p.drawRoundedRect(QRectF(at(foot[0] - 0.012, foot[1] - 0.005),
+                                     at(foot[0] + 0.03, foot[1] + FOOT_H)),
+                              unit * 0.006, unit * 0.006)
+        # The lab coat: collar and lapels, a tie, two buttons, a pocket with pens.
+        hem = pose.hip_y + 0.06
+        p.setPen(pen)
+        p.setBrush(paper)
+        p.drawPolygon(QPolygonF([at(sx - 0.046, sy + 0.004), at(sx + 0.044, sy),
+                                 at(pose.x + 0.07, hem), at(pose.x - 0.07, hem)]))
+        v = (sx + 0.014, sy + 0.052)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(accent)
+        p.drawPolygon(QPolygonF([at(sx + 0.008, sy + 0.006), at(sx + 0.02, sy + 0.006),
+                                 at(sx + 0.017, sy + 0.014), at(sx + 0.021, sy + 0.044),
+                                 at(sx + 0.014, sy + 0.05), at(sx + 0.007, sy + 0.044),
+                                 at(sx + 0.011, sy + 0.014)]))
+        p.setPen(thin)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        seg((sx - 0.014, sy + 0.003), v)
+        seg((sx + 0.036, sy + 0.001), v)
+        front_edge = (pose.x + 0.02, hem)
+        seg(v, front_edge)
+        p.setBrush(ink)
+        for f in (0.35, 0.68):
+            bx = v[0] + (front_edge[0] - v[0]) * f + 0.01
+            by = v[1] + (front_edge[1] - v[1]) * f
+            p.drawEllipse(at(bx, by), unit * 0.0045, unit * 0.0045)
+        p.setBrush(paper)
+        p.drawRect(QRectF(at(sx - 0.038, sy + 0.04), at(sx - 0.014, sy + 0.062)))
+        for px_, colour, top in ((sx - 0.031, accent, 0.026), (sx - 0.022, quiet, 0.03)):
+            p.setPen(QPen(colour, line * 0.9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            seg((px_, sy + 0.04), (px_ + 0.001, sy + top))
+        # The head: neck, face, ear, hair, glasses, nose and a smile.
+        p.setPen(pen)
+        seg((sx + 0.004, sy), (sx + 0.006, sy - NECK))
+        hx, hy = sx + 0.008, sy - NECK - HEAD_R
+        disc((hx, hy), HEAD_R, paper)
+        # The ear: a small arc at the back of the head.
+        p.setPen(thin)
+        ear = QPainterPath(at(hx - 0.03, hy - 0.006))
+        ear.quadTo(at(hx - 0.052, hy + 0.004), at(hx - 0.032, hy + 0.018))
+        p.drawPath(ear)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        bx, by = limb(sx - 2 * SHOULDER_DX, sy, pose.back_arm, ARM)
-        p.drawLine(at(sx - 2 * SHOULDER_DX, sy), at(bx, by))
-        leg(pose.legs[0])
-        leg(pose.legs[1])
-        # The lab coat.
-        hem = pose.hip_y + 0.035
-        p.setBrush(QColor(paper))
-        p.drawPolygon(QPolygonF([at(sx - 0.042, sy), at(sx + 0.04, sy),
-                                 at(pose.x + 0.062, hem), at(pose.x - 0.062, hem)]))
-        p.drawLine(at(sx + 0.012, sy + 0.012), at(pose.x + 0.016, hem))
-        p.drawLine(at(pose.x + 0.03, pose.hip_y - 0.035), at(pose.x + 0.05, pose.hip_y - 0.035))
-        # The head, the hair and the glasses.
-        hx, hy = sx + 0.004, sy - 0.016 - HEAD_R
-        p.drawEllipse(at(hx, hy), unit * HEAD_R, unit * HEAD_R)
-        for dx0, dy0, dx1, dy1 in ((-0.05, -0.03, -0.075, -0.06), (-0.025, -0.055, -0.035, -0.09),
-                                   (0.0, -0.062, 0.006, -0.095), (-0.06, 0.0, -0.088, -0.012)):
-            p.drawLine(at(hx + dx0, hy + dy0), at(hx + dx1, hy + dy1))
-        look = -0.012 if pose.looks_up else 0.0
-        p.setPen(QPen(QColor(accent), line, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for k, deg in enumerate((165, 188, 210, 233, 256, 279)):
+            a = np.deg2rad(deg)
+            base = (hx + HEAD_R * np.cos(a), hy + HEAD_R * np.sin(a))
+            length = 0.026 + 0.01 * (k % 2)
+            tip = (base[0] + length * np.cos(a - 0.35), base[1] + length * np.sin(a - 0.35))
+            bend = (base[0] + 0.6 * length * np.cos(a + 0.25), base[1] + 0.6 * length * np.sin(a + 0.25))
+            tuft = QPainterPath(at(*base))
+            tuft.quadTo(at(*bend), at(*tip))
+            p.drawPath(tuft)
+        look = -0.008 if pose.looks_up else 0.0
+        eye = (hx + 0.033, hy - 0.008 + look)
+        p.setPen(Qt.PenStyle.NoPen)
+        disc(eye, 0.0055, ink)
+        p.setPen(QPen(accent, line * 0.9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        for gx in (0.018, 0.046):
-            p.drawEllipse(at(hx + gx, hy + look), unit * 0.013, unit * 0.013)
-        p.drawLine(at(hx + 0.031, hy + look), at(hx + 0.033, hy + look))
-        # The front arm, in front of the coat.
+        p.drawEllipse(at(*eye), unit * 0.018, unit * 0.018)
+        seg((eye[0] - 0.018, eye[1]), (hx - 0.01, hy - 0.002))       # the glasses' arm
         p.setPen(pen)
-        p.drawLine(at(sx, sy), at(*pose.hand))
-        p.setOpacity(1.0)
+        nose = QPainterPath(at(hx + 0.062, hy - 0.004))
+        nose.quadTo(at(hx + 0.084, hy + 0.012), at(hx + 0.061, hy + 0.017))
+        p.drawPath(nose)
+        smile = QPainterPath(at(hx + 0.03, hy + 0.034))
+        smile.quadTo(at(hx + 0.045, hy + 0.04 + 0.016 * pose.smile), at(hx + 0.058, hy + 0.03))
+        p.drawPath(smile)
+        arm((sx, sy), pose.hands[1])                # in front of the coat
 
 
 #: What the dialog says, item by item (also read by the tests).
@@ -1010,6 +1137,6 @@ class StarDialog(QDialog):
         self.accept()
 
 
-__all__ = ["COUNTS", "ITEMS", "REPO_URL", "Pose", "StarCanvas", "StarDialog", "StarParticles",
-           "StarSchedule", "dimness", "due", "form_points", "lit", "maybe_show", "pose_at",
-           "show_dialog", "star_outline"]
+__all__ = ["COUNTS", "ITEMS", "JUMPS", "REPO_URL", "Pose", "StarCanvas", "StarDialog",
+           "StarParticles", "StarSchedule", "dimness", "due", "form_points", "joint", "jump_at",
+           "lit", "maybe_show", "pose_at", "show_dialog", "star_outline"]
