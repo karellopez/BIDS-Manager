@@ -29,9 +29,9 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/editor-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/editor-light.webp">
-    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/editor-light.webp" alt="The BIDS Manager Editor: the dataset tree, a BOLD run in three planes and 3-D with its time course and physiological recordings, and validation" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/scan-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/scan-light.webp">
+    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/scan-light.webp" alt="The BIDS Manager Converter: the raw data, every recording with its proposed BIDS name in the scan table, and the properties of the selected one" width="100%">
   </picture>
 </p>
 
@@ -63,34 +63,43 @@ checked.
 | **Privacy** | Faces removed at conversion or afterwards, and participant identifiers removed from every sidecar. |
 | **Validation** | Every finding names the schema rule it comes from and opens the field or the cell that needs the fix. |
 
-<table>
-  <tr>
-    <td width="33%" valign="top">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/scan-dark.webp">
-        <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/scan-light.webp">
-        <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/scan-light.webp" alt="The scan table" width="100%">
-      </picture>
-      <p><b>The scan table.</b> Every recording, its proposed name and its properties, ready to edit.</p>
-    </td>
-    <td width="33%" valign="top">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/overview-dark.webp">
-        <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/overview-light.webp">
-        <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/overview-light.webp" alt="The overview of a scan" width="100%">
-      </picture>
-      <p><b>The overview.</b> What each subject has, and what is worth a look before converting.</p>
-    </td>
-    <td width="33%" valign="top">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/preview-dark.webp">
-        <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/preview-light.webp">
-        <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/preview-light.webp" alt="The BIDS preview" width="100%">
-      </picture>
-      <p><b>The BIDS preview.</b> Every file the conversion will write, and where each value will come from.</p>
-    </td>
-  </tr>
-</table>
+## The interface
+
+### The overview
+
+Headline counts, what is worth a look before converting, and a grid of what each subject has.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/overview-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/overview-light.webp">
+    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/overview-light.webp" alt="The overview of a scan" width="100%">
+  </picture>
+</p>
+
+### The BIDS preview
+
+Every file the conversion will write, and where each of its values will come from: the scan, BIDS Manager, your answers, or still to answer.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/preview-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/preview-light.webp">
+    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/preview-light.webp" alt="The BIDS preview" width="100%">
+  </picture>
+</p>
+
+### The Editor
+
+The converted dataset as a tree, every recording in its own viewer, and validation beside it.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="miscellaneous/readme/editor-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="miscellaneous/readme/editor-light.webp">
+    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/readme/editor-light.webp" alt="The Editor: the dataset tree, a BOLD run in three planes and 3-D with its time course and physiological recordings, and validation" width="100%">
+  </picture>
+</p>
 
 ## Supported data
 
