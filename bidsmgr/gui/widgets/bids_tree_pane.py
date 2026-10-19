@@ -110,7 +110,7 @@ def _is_folder_recording(name: str) -> bool:
     return name.lower().endswith(FOLDER_RECORDING_SUFFIXES)
 
 
-def _norm_path(p) -> str:
+def _norm_path(p) -> str:  # noqa: D401 - kept for paths outside the root
     """Resolve a path to a comparable string.
 
     Resolving both sides means macOS ``/private/var/...`` vs ``/var/...``
@@ -193,6 +193,31 @@ def _can_restructure(path: Path) -> bool:
     return any(part.startswith("sub-") for part in parts)
 
 
+def _can_delete(path: Path, root: Optional[Path]) -> bool:
+    """May what was clicked be offered for deletion? Anything inside the
+    dataset that is not hidden (the tool's own ``.bidsmgr/`` is)."""
+    if root is None:
+        return False
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return False
+    return bool(parts) and not any(is_hidden_name(part) for part in parts)
+
+
+def _hollow_tree(folder: Path) -> bool:
+    """A folder with no file in it at any depth, the operating system's
+    droppings aside: what the menu calls an empty folder."""
+    import os
+
+    from ...project.operations import is_os_junk
+
+    for _dirpath, _dirs, files in os.walk(folder):
+        if any(not is_os_junk(name) for name in files):
+            return False
+    return True
+
+
 def _sweep(
     folder: Path,
     *,
@@ -273,36 +298,53 @@ def _rollup(
 ) -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
     """Per-DIRECTORY worst severity and finding totals, from the file maps.
 
-    Each finding is walked up its own ancestry, so a folder's answer does not
+    Each finding counts toward every ancestor, so a folder's answer does not
     depend on whether the folder has been drawn. A folder gets the SUM over
     its descendants and not the worst of them, because the point of a number
     is to say how much work is in there: a subject with one missing
     recommended field should not look like a subject with ninety.
+
+    Folder by folder: the files are first summed into the folder that holds
+    them, and each FOLDER then walks its ancestors once. Walking every file's
+    ancestry (to the file system's root) was 0.77 s of every report on a
+    21,663-file dataset; there are some 1,800 folders.
     """
-    badges: dict[str, str] = {}
-    totals: dict[str, tuple[int, int]] = {}
-
-    def ancestors(key: str):
-        parent = os.path.dirname(key)
-        while parent and parent != os.path.dirname(parent):
-            yield parent
-            parent = os.path.dirname(parent)
-
+    own_rank: dict[str, int] = {}
+    own_total: dict[str, tuple[int, int]] = {}
     for key, severity in leaf_map.items():
         rank = _SEVERITY_RANK.get(severity)
         if rank is None:
             continue
-        for parent in ancestors(key):
-            current = badges.get(parent)
-            if current is None or rank > _SEVERITY_RANK[current]:
-                badges[parent] = severity
-
+        folder = os.path.dirname(key)
+        if rank > own_rank.get(folder, -1):
+            own_rank[folder] = rank
     for key, (errors, warnings) in count_map.items():
-        for parent in ancestors(key):
+        folder = os.path.dirname(key)
+        have = own_total.get(folder, (0, 0))
+        own_total[folder] = (have[0] + errors, have[1] + warnings)
+
+    by_rank = {rank: name for name, rank in _SEVERITY_RANK.items()}
+    best: dict[str, int] = {}
+    totals: dict[str, tuple[int, int]] = {}
+
+    def up(folder: str):
+        while folder:
+            yield folder
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return
+            folder = parent
+
+    for folder, rank in own_rank.items():
+        for parent in up(folder):
+            if best.get(parent, -1) >= rank:
+                break                   # an ancestor already as bad: so are its own
+            best[parent] = rank
+    for folder, (errors, warnings) in own_total.items():
+        for parent in up(folder):
             have = totals.get(parent, (0, 0))
             totals[parent] = (have[0] + errors, have[1] + warnings)
-
-    return badges, totals
+    return {k: by_rank[r] for k, r in best.items()}, totals
 
 
 def _annotate_folder(
@@ -952,9 +994,9 @@ class BidsTreePane(QWidget):
         """
         # Build a normalised lookup (string form) so we don't have to
         # construct ``Path`` for every tree item.
-        leaf_map = {_norm_path(p): s for p, s in severities.items()}
+        leaf_map = {self._key(str(p)): s for p, s in severities.items()}
         count_map = {
-            _norm_path(p): (int(c[0]), int(c[1]))
+            self._key(str(p)): (int(c[0]), int(c[1]))
             for p, c in (counts or {}).items()
         }
         # Remember so a live (watcher-driven) refresh can re-stamp the rebuilt
@@ -962,6 +1004,25 @@ class BidsTreePane(QWidget):
         self._last_badges = dict(leaf_map)
         self._last_counts = dict(count_map)
         self._apply_badge_map(leaf_map, count_map)
+
+    def update_badges(
+        self,
+        severities: dict[Path, str],
+        counts: Optional[dict[Path, tuple[int, int]]] = None,
+    ) -> None:
+        """Change the badges of SOME files (a re-validated file merged in),
+        keeping everyone else's, and roll the folders up again. Restamping
+        the whole tree for one file was most of a one-file re-validation."""
+        counts = counts or {}
+        for path, severity in severities.items():
+            key = self._key(str(path))
+            self._last_badges[key] = severity
+            found = counts.get(path)
+            if found and (found[0] or found[1]):
+                self._last_counts[key] = (int(found[0]), int(found[1]))
+            else:
+                self._last_counts.pop(key, None)
+        self._apply_badge_map(self._last_badges, self._last_counts)
 
     def _apply_badge_map(
         self,
@@ -992,12 +1053,30 @@ class BidsTreePane(QWidget):
         # Force the delegate to repaint with the new badge data.
         self._tree.viewport().update()
 
+    def _key(self, path_str: str) -> str:
+        """The comparable form of a path: the root resolved once, the rest a
+        string replacement. Resolving every row (and every report path) cost
+        64,000 ``resolve`` calls when a 21,663-file report arrived."""
+        root = self._root
+        if root is not None:
+            given = str(root)
+            if path_str == given or path_str.startswith(given + os.sep):
+                resolved = getattr(self, "_root_resolved", None)
+                if resolved is None or resolved[0] != given:
+                    self._root_resolved = (given, _norm_path(given))
+                return self._root_resolved[1] + path_str[len(given):]
+            resolved = getattr(self, "_root_resolved", None)
+            if resolved is not None and (path_str == resolved[1]
+                                         or path_str.startswith(resolved[1] + os.sep)):
+                return path_str
+        return _norm_path(path_str)
+
     def _stamp_badge(self, item: QTreeWidgetItem) -> None:
         """Put the badge and finding counts on one row, from the cached maps."""
         path_str = item.data(0, PATH_ROLE)
         if not path_str:
             return
-        key = _norm_path(path_str)
+        key = self._key(path_str)
         if item.data(0, IS_DIR_ROLE):
             badge = self._dir_badges.get(key)
             errors, warnings = self._dir_counts.get(key, (0, 0))
@@ -1268,10 +1347,16 @@ class BidsTreePane(QWidget):
                 lambda _c=False, s=scope: self.deface_revert_requested.emit(s)
             )
 
+        # Anything shown in the dataset can be offered for deletion, not only
+        # what is under a subject: an empty folder anywhere is worth removing.
+        # The engine still refuses the root, the tool's own folder and
+        # dataset_description.json, and says why.
+        if not self.read_only and _can_delete(clicked, self._root):
             menu_section(menu, "Remove")
             what = (
                 f"{len(scope)} items" if len(scope) > 1
-                else ("this folder and everything in it" if clicked.is_dir()
+                else ("this empty folder" if clicked.is_dir() and _hollow_tree(clicked)
+                      else "this folder and everything in it" if clicked.is_dir()
                       else "this recording")
             )
             delete = menu.addAction(f"Delete {what}...")

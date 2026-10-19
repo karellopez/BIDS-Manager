@@ -63,14 +63,10 @@ def validate(
     )
 
     _check_dataset_description(tree, report)
-    if not tree.subjects():
-        report.dataset_issues.add(
-            Issue(
-                code="NO_SUBJECTS",
-                severity=Severity.WARNING,
-                message="no sub-* directories found under the dataset root",
-            )
-        )
+    # VENDORED CHANGE: no bespoke NO_SUBJECTS. The schema's own SUBJECT_FOLDERS
+    # check says the same, scoped by DatasetType (a study or an atlas dataset
+    # has no subject folders and is right not to), so this one duplicated it
+    # and was wrong on those datasets.
 
     builder = ContextBuilder(schema_ns, tree, read_headers=read_headers, max_rows=max_rows)
     files = tree.files()
@@ -194,9 +190,14 @@ def _validate_one(
         context = builder.build(bids_file)
         verdict.issues.extend(bespoke_checks(bids_file, context, read_headers=builder.read_headers))
         verdict.issues.extend(integrity_checks(bids_file, context))
-        verdict.issues.extend(filename_checks(schema_ns, context, bids_file))
+        named = filename_checks(schema_ns, context, bids_file)
+        verdict.issues.extend(named)
         verdict.issues.extend(inheritance_checks(schema_ns, builder.tree, bids_file))
-        verdict.issues.extend(apply_rules(schema_ns, context))
+        # VENDORED CHANGE: a file no BIDS rule names is not given the rules of
+        # what it is not. Its sidecar-field findings (22 on one mutant) buried
+        # the one finding that matters, as the reference validator does not.
+        if not any(issue.code == "NOT_INCLUDED" for issue in named):
+            verdict.issues.extend(apply_rules(schema_ns, context))
     except Exception as error:  # never let one file abort the whole run
         verdict.issues.append(
             Issue(

@@ -61,6 +61,7 @@ KEYS = {
     "scan_converter_preview": "scan/converter_preview",
     "scan_skip_bids_guess": "scan/skip_bids_guess",
     "scan_index_widths":  "scan/index_widths",       # JSON: entity -> width
+    "scan_drop_entities": "scan/drop_entities",      # JSON: [short entity key]
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
@@ -84,6 +85,8 @@ KEYS = {
     "post_run_metadata":  "post_convert/run_metadata",
     "post_run_validate":  "post_convert/run_validate",
     "post_metadata_fill_todos": "post_convert/metadata_fill_todos",
+    "post_metadata_tables": "post_convert/metadata_tables",
+    "post_anonymise":     "post_convert/anonymise",          # off|recommended|strict
     "metadata_fill_scope": "post_convert/metadata_fill_scope",
     "post_validate_strict": "post_convert/validate_strict",
     "post_validate_html": "post_convert/validate_html",
@@ -154,12 +157,12 @@ class AppSettings:
     # was actually wanted was for the toolbar to SAY there are unsaved
     # changes from the first keystroke, which it now does regardless of this.
     editor_autosave: bool = False
-    # "Deep checks" toggle for the Editor's "Validate dataset". When True the
-    # validator (bidsval) reads NIfTI headers and file contents (slower, more
-    # thorough); when False it runs the fast structural pass used for live
-    # revalidation. (Historically this enabled a second bidsschematools pass;
-    # validation is now a single engine and the toggle maps to read_headers.)
-    editor_strict_validate: bool = False
+    # The Editor's "Deep checks" toggle, for Validate dataset, folder and file
+    # alike: the validator also reads the NIfTI headers and file contents
+    # (the toggle maps to read_headers). ON by default: the audit measured it
+    # at about 5 percent of a validation, and without it seven header defects
+    # (repetition time, volume count, a 4-D T1w...) were never reported.
+    editor_strict_validate: bool = True
     # Validation engine (bidsval) knobs. ``validate_schema_version`` selects the
     # BIDS schema version to validate against ("" = bidsval's bundled default);
     # ``validate_max_rows`` bounds how many rows of each TSV are scanned;
@@ -203,6 +206,10 @@ class AppSettings:
     # because QSettings has no dict type and a flat key per entity would need
     # editing here every time BIDS adds one.
     scan_index_widths: dict = field(default_factory=dict)
+    # Entities left out of the names a scan proposes, as short keys
+    # (``["acq"]``), where the standard does not require them and they do not
+    # tell two recordings apart (``inventory.leave_out``). Empty: none.
+    scan_drop_entities: list = field(default_factory=list)
     # Record what the conversion answers by itself, so the metadata form
     # shows it instead of an empty box for a field nobody has to fill in.
     scan_converter_preview: bool = True
@@ -261,6 +268,14 @@ class AppSettings:
     # output cannot be trusted.
     post_fixup_companions: bool = False
     post_fixup_citation: bool = False
+    # The *_scans.tsv and *_sessions.tsv tables, in the metadata step. ON:
+    # the standard makes both optional, but they are where a dataset says
+    # when each recording and session was acquired.
+    post_metadata_tables: bool = True
+    # Anonymise the dataset's metadata after every conversion
+    # (``bidsmgr.anonymise``): "off", "recommended" or "strict". OFF by
+    # default: it shifts every date, which a user must choose knowingly.
+    post_anonymise: str = "off"
     # The fast quality check of the anatomical and diffusion images
     # (bidsmgr.qc), last. OFF by default: seconds per image, minutes for a
     # study, and its results are a derivative the user should ask for.
@@ -438,6 +453,16 @@ class AppSettings:
             } if isinstance(parsed, dict) else {}
         except (TypeError, ValueError):
             out.scan_index_widths = {}
+        try:
+            from ..inventory.leave_out import offered
+
+            raw = s.value(KEYS["scan_drop_entities"], "")
+            parsed = json.loads(raw) if raw else []
+            out.scan_drop_entities = [
+                str(k) for k in parsed if str(k) in offered()
+            ] if isinstance(parsed, list) else []
+        except (TypeError, ValueError):
+            out.scan_drop_entities = []
         out.scan_converter_preview = _as_bool(
             s.value(KEYS["scan_converter_preview"]), out.scan_converter_preview,
         )
@@ -524,6 +549,12 @@ class AppSettings:
         out.post_fixup_citation = _as_bool(
             s.value(KEYS["post_fixup_citation"]), out.post_fixup_citation,
         )
+        out.post_metadata_tables = _as_bool(
+            s.value(KEYS["post_metadata_tables"]), out.post_metadata_tables,
+        )
+        anonymise = _as_str(s.value(KEYS["post_anonymise"]), out.post_anonymise)
+        out.post_anonymise = anonymise if anonymise in ("off", "recommended",
+                                                        "strict") else "off"
         out.skipped_update_version = _as_str(
             s.value(KEYS["skipped_update_version"]),
             out.skipped_update_version,
@@ -603,6 +634,7 @@ class AppSettings:
             ("post_validate_html",       self.post_validate_html),
             ("post_fixup_companions",    self.post_fixup_companions),
             ("post_fixup_citation",      self.post_fixup_citation),
+            ("post_metadata_tables",     self.post_metadata_tables),
             ("post_run_quality",         self.post_run_quality),
             ("editor_strict_validate",   self.editor_strict_validate),
             ("validate_flag_todos",      self.validate_flag_todos),
@@ -623,10 +655,12 @@ class AppSettings:
         s.setValue(KEYS["metadata_fill_scope"], self.metadata_fill_scope)
         s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
         s.setValue(KEYS["convert_intended_for"], self.convert_intended_for)
+        s.setValue(KEYS["post_anonymise"], self.post_anonymise)
         s.setValue(KEYS["convert_sourcedata"], self.convert_sourcedata)
         s.setValue(KEYS["classifier_config"], self.classifier_config)
         s.setValue(KEYS["convert_sourcedata_modalities"], self.convert_sourcedata_modalities)
         s.setValue(KEYS["scan_index_widths"], json.dumps(self.scan_index_widths))
+        s.setValue(KEYS["scan_drop_entities"], json.dumps(list(self.scan_drop_entities)))
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
         s.setValue(KEYS["validate_show"], self.validate_show)

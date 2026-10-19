@@ -108,6 +108,7 @@ def test_every_string_setting_round_trips_a_non_boolish_value():
         "convert_sourcedata": "copy", "convert_sourcedata_modalities": "mri,eeg",
         "metadata_fill_scope": "optional", "header_logo": "mark",
         "convert_deface_engine": "allineate-robust",
+        "post_anonymise": "strict",
     }
     probes = {
         str: "allineate-robust",

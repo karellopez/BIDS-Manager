@@ -216,6 +216,7 @@ bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
 bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
 bidsmgr-deface    = "bidsmgr.cli.deface:main"
+bidsmgr-anonymise = "bidsmgr.cli.anonymise:main"
 bidsmgr-view      = "bidsmgr.cli.view:main"
 bidsmgr-qc        = "bidsmgr.cli.qc:main"
 
