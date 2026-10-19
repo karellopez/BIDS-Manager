@@ -14,7 +14,7 @@ exit /b %BIDSMGR_RC%
 # =======================================================================
 # BIDS Manager installer for Windows 10 and 11 (x64), and Windows 11 on
 # ARM through its x64 emulation
-# Installer version 2.0.2. History: Installers/CHANGELOG.md
+# Installer version 2.0.3. History: Installers/CHANGELOG.md
 # Licence: MIT, ANCP Lab, University of Oldenburg
 # https://github.com/ANCPLabOldenburg/BIDS-Manager
 #
@@ -27,7 +27,7 @@ exit /b %BIDSMGR_RC%
 #   env\       an environment with bids-manager from PyPI
 #
 # and adds shortcuts to the Desktop and the Start menu. Running it again
-# updates BIDS Manager to the newest release.
+# updates BIDS Manager to the newest release, or uninstalls it.
 #
 # Windows on ARM uses the x64 build: dcm2niix, which converts MRI, has no
 # ARM64 build for Windows, and Windows 11 runs x64 programs on ARM.
@@ -38,12 +38,13 @@ exit /b %BIDSMGR_RC%
 #   BIDSMGR_PACKAGE         what to install: "bids-manager==1.5.0", a wheel file...
 #   BIDSMGR_YES=1           take the default answer to every question
 #   BIDSMGR_NO_SHORTCUTS=1  no shortcuts on the Desktop or in the Start menu
+#   BIDSMGR_UNINSTALL=1     remove BIDS Manager, without asking
 # =======================================================================
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$InstallerVersion = '2.0.2'
+$InstallerVersion = '2.0.3'
 $UvVersion = '0.13.1'
 $UvTarget = 'x86_64-pc-windows-msvc'
 $UvSha256 = '3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672'
@@ -241,33 +242,25 @@ try {
 }
 
 $Mode = 'install'
-if ((Test-Path -LiteralPath $Manifest) -or (Test-Path -LiteralPath $EnvDir)) {
+$UninstallNow = (Setting 'BIDSMGR_UNINSTALL' '0') -eq '1'
+if ($UninstallNow) {
+    $Mode = 'uninstall'
+} elseif ((Test-Path -LiteralPath $Manifest) -or (Test-Path -LiteralPath $EnvDir)) {
     Write-Host '  BIDS Manager is already installed in:' -ForegroundColor Yellow
     Write-Host "    $InstallDir"
     Write-Host ''
     Write-Host '  [u] Update: install the newest BIDS Manager (default)'
     Write-Host '  [r] Reinstall: remove this installation and start again'
+    Write-Host '  [x] Uninstall: remove BIDS Manager from this computer'
     Write-Host '  [a] Abort'
     Write-Host ''
     while ($true) {
-        $choice = Ask '  Your choice [U/r/a]' 'u'
+        $choice = Ask '  Your choice [U/r/x/a]' 'u'
         if ($choice -match '^[uU]') { $Mode = 'update'; break }
         if ($choice -match '^[rR]') { $Mode = 'reinstall'; break }
+        if ($choice -match '^[xX]') { $Mode = 'uninstall'; break }
         if ($choice -match '^[aA]') { Write-Host '  Nothing was changed.'; exit 0 }
-        Write-Host '  Please type u, r or a.'
-    }
-
-    # A running BIDS Manager holds its files open, and Windows cannot
-    # replace a file that is open.
-    while ($true) {
-        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -and $_.Path.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase) } catch { $false }
-        })
-        if ($running.Count -eq 0) { break }
-        if ($AssumeYes -or [Console]::IsInputRedirected) {
-            Write-Host '  BIDS Manager is running. Close it, then run the installer again.'; exit 1
-        }
-        Read-Host '  BIDS Manager is running. Close it, then press Enter' | Out-Null
+        Write-Host '  Please type u, r, x or a.'
     }
 } else {
     Write-Host '  The installer will:'
@@ -279,6 +272,54 @@ if ((Test-Path -LiteralPath $Manifest) -or (Test-Path -LiteralPath $EnvDir)) {
     Write-Host ''
     $confirm = Ask '  Continue? [Y/n]' 'y'
     if ($confirm -match '^[nN]') { Write-Host '  Nothing was changed.'; exit 0 }
+}
+
+# A running BIDS Manager holds its files open, and Windows cannot replace or
+# remove a file that is open.
+if ($Mode -ne 'install') {
+    while ($true) {
+        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and $_.Path.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+        })
+        if ($running.Count -eq 0) { break }
+        if ($AssumeYes -or $UninstallNow -or [Console]::IsInputRedirected) {
+            Write-Host '  BIDS Manager is running. Close it, then run the installer again.'; exit 1
+        }
+        Read-Host '  BIDS Manager is running. Close it, then press Enter' | Out-Null
+    }
+}
+
+# Uninstall: everything this installer (or installer 1.x) put on the
+# computer. Datasets and BIDS Manager's settings are not touched.
+if ($Mode -eq 'uninstall') {
+    Write-Host ''
+    Write-Host '  This removes BIDS Manager completely:'
+    Write-Host "    $InstallDir"
+    Write-Host '    and its shortcuts on the Desktop and in the Start menu'
+    Write-Host '  Your datasets and your settings are not touched.'
+    if (-not $UninstallNow) {
+        $confirm = Ask '  Remove it? [y/N]' 'n'
+        if ($confirm -notmatch '^[yY]') { Write-Host '  Nothing was removed.'; exit 0 }
+    }
+    foreach ($link in @((Join-Path $Desktop 'BIDS-Manager.lnk'), (Join-Path $Desktop 'Uninstall BIDS-Manager.lnk'))) {
+        Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $StartMenu -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $InstallDir) {
+        try { Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction Stop } catch { }
+    }
+    if (Test-Path -LiteralPath $InstallDir) {
+        # Very deep paths defeat Remove-Item on Windows PowerShell 5.1; rd does not.
+        # The path is passed as it is: PowerShell quotes it when it has spaces.
+        & cmd.exe /c rd /s /q $InstallDir 2>$null
+    }
+    try { & ie4uinit.exe -show 2>$null } catch { }
+    if (Test-Path -LiteralPath $InstallDir) {
+        Write-Host "[x] Some files could not be removed from $InstallDir. Close any program using them and run the installer again." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host '[ok] BIDS Manager has been removed.' -ForegroundColor Green
+    exit 0
 }
 
 if ($Mode -eq 'reinstall') {

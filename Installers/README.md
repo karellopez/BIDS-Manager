@@ -46,8 +46,9 @@ updates with pip, which works but keeps its download cache outside.)
 
 ## Removing it
 
-Run `uninstall_BIDS_Manager` (on the Desktop, in the menu, or in the install
-folder). It removes the install folder and the launchers. Datasets and
+Run the installer again and choose `[x] Uninstall`, or run
+`uninstall_BIDS_Manager` (on the Desktop, in the menu, or in the install
+folder). Either removes the install folder and the launchers. Datasets and
 BIDS Manager's settings are not touched.
 
 ## Options
@@ -61,6 +62,7 @@ For testing and for administrators. Environment variables, all optional:
 | `BIDSMGR_PACKAGE` | What to install: `bids-manager==1.5.0`, a wheel file, ... |
 | `BIDSMGR_YES=1` | Take the default answer to every question |
 | `BIDSMGR_NO_SHORTCUTS=1` | No app, menu entry or shortcuts |
+| `BIDSMGR_UNINSTALL=1` | Remove BIDS Manager without asking (`BIDSMGR_YES=1` alone never does) |
 | `BIDSMGR_TARGET` | macOS and Linux: force a build, for example `x86_64-apple-darwin` on an Apple Silicon Mac (it runs through Rosetta) |
 
 A test installation that leaves the real one alone, on macOS or Linux:

@@ -1,7 +1,7 @@
 #!/bin/bash
 # =======================================================================
 # BIDS Manager installer for macOS (Apple Silicon and Intel)
-# Installer version 2.0.2. History: Installers/CHANGELOG.md
+# Installer version 2.0.3. History: Installers/CHANGELOG.md
 # Licence: MIT, ANCP Lab, University of Oldenburg
 # https://github.com/ANCPLabOldenburg/BIDS-Manager
 #
@@ -14,7 +14,7 @@
 #   env/       an environment with bids-manager from PyPI
 #
 # and adds BIDS-Manager.app to ~/Applications. Running it again updates
-# BIDS Manager to the newest release.
+# BIDS Manager to the newest release, or uninstalls it.
 #
 # Optional settings, for testing and for administrators:
 #   BIDSMGR_INSTALL_DIR     where to install (default ~/BIDS-Manager)
@@ -23,10 +23,11 @@
 #   BIDSMGR_YES=1           take the default answer to every question
 #   BIDSMGR_NO_SHORTCUTS=1  no app, no Desktop uninstaller, nothing registered
 #   BIDSMGR_TARGET          force a build: aarch64-apple-darwin, x86_64-apple-darwin
+#   BIDSMGR_UNINSTALL=1     remove BIDS Manager, without asking
 # =======================================================================
 set -euo pipefail
 
-INSTALLER_VERSION="2.0.2"
+INSTALLER_VERSION="2.0.3"
 UV_VERSION="0.13.1"
 UV_SHA256_aarch64_apple_darwin="cfe454573412ff7380d15fc7dae5997ab53ffce72fce0a78e91ddbc84001acd2"
 UV_SHA256_x86_64_apple_darwin="bb7b805bdcf3d0bc8c74ceb94569e6b3e8aa35bd492acdbb9d46bf46d9d4ff6b"
@@ -162,21 +163,25 @@ if ! curl -fsS --max-time 8 -o /dev/null https://pypi.org/simple/ 2>/dev/null; t
 fi
 
 MODE="install"
-if [[ -f "$MANIFEST" || -d "$ENV_DIR" ]]; then
+if [[ "${BIDSMGR_UNINSTALL:-0}" == "1" ]]; then
+    MODE="uninstall"
+elif [[ -f "$MANIFEST" || -d "$ENV_DIR" ]]; then
     echo -e "${YELLOW}  BIDS Manager is already installed in:${RESET}"
     echo "    $INSTALL_DIR"
     echo ""
     echo "  [u] Update: install the newest BIDS Manager (default)"
     echo "  [r] Reinstall: remove this installation and start again"
+    echo "  [x] Uninstall: remove BIDS Manager from this computer"
     echo "  [a] Abort"
     echo ""
     while true; do
-        choice="$(ask "  Your choice [U/r/a]: " u)"
+        choice="$(ask "  Your choice [U/r/x/a]: " u)"
         case "$choice" in
             [uU]) MODE="update"; break ;;
             [rR]) MODE="reinstall"; break ;;
+            [xX]) MODE="uninstall"; break ;;
             [aA]) echo "  Nothing was changed."; exit 0 ;;
-            *)    echo "  Please type u, r or a." ;;
+            *)    echo "  Please type u, r, x or a." ;;
         esac
     done
 else
@@ -192,6 +197,37 @@ else
         echo "  Nothing was changed."
         exit 0
     fi
+fi
+
+# Removing a program while it runs would leave it to fail at random later.
+if [[ "$MODE" == "reinstall" || "$MODE" == "uninstall" ]] && command -v pgrep >/dev/null 2>&1 \
+    && pgrep -f "$ENV_DIR/" >/dev/null 2>&1; then
+    echo "  BIDS Manager is running. Close it, then run the installer again."
+    exit 1
+fi
+
+# Uninstall: everything this installer (or installer 1.x) put on the
+# computer. Datasets and BIDS Manager's settings are not touched.
+if [[ "$MODE" == "uninstall" ]]; then
+    echo ""
+    echo "  This removes BIDS Manager completely:"
+    echo "    $INSTALL_DIR"
+    echo "    $APP_BUNDLE"
+    echo "  Your datasets and your settings are not touched."
+    if [[ "${BIDSMGR_UNINSTALL:-0}" != "1" ]]; then
+        confirm="$(ask "  Remove it? [y/N] " n)"
+        if [[ "$confirm" != [yY]* ]]; then
+            echo "  Nothing was removed."
+            exit 0
+        fi
+    fi
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+        -u "$APP_BUNDLE" 2>/dev/null || true
+    rm -rf "$APP_BUNDLE"
+    rm -f "$DESKTOP_DIR/Uninstall_BIDS_Manager.command"
+    rm -rf "${INSTALL_DIR:?}"
+    log_info "BIDS Manager has been removed."
+    exit 0
 fi
 
 if [[ "$MODE" == "reinstall" ]]; then
@@ -373,6 +409,7 @@ if [[ "\$confirm" != [yY]* ]]; then
     echo "  Nothing was removed."
     exit 0
 fi
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP_BUNDLE" 2>/dev/null
 rm -rf "$APP_BUNDLE"
 rm -f "$DESKTOP_DIR/Uninstall_BIDS_Manager.command"
 rm -rf "$INSTALL_DIR"

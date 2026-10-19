@@ -215,3 +215,36 @@ def test_only_a_python_the_update_button_moved_to_is_kept_newer(path):
 def test_the_update_helper_marks_a_move_the_installers_look_for():
     helper = (ROOT / "bidsmgr" / "gui" / "_update_helper.py").read_text(encoding="utf-8")
     assert 'record["python"]["moved_by_update"] = True' in helper
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.name)
+def test_every_installer_offers_to_uninstall_and_asks_first(path):
+    text = _text(path)
+    assert "[x] Uninstall: remove BIDS Manager from this computer" in text
+    assert "BIDSMGR_UNINSTALL" in text
+    # The confirmation defaults to No, so BIDSMGR_YES=1 (take every
+    # default) can never uninstall anything.
+    if path == WINDOWS:
+        assert "$confirm = Ask '  Remove it? [y/N]' 'n'" in text
+    else:
+        assert 'confirm="$(ask "  Remove it? [y/N] " n)"' in text
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.name)
+def test_uninstalling_removes_every_launcher_the_installer_creates(path):
+    """Whatever starts BIDS Manager must not outlive it: a launcher left
+    behind points at a folder that is gone."""
+    text = _text(path)
+    block = text[text.index("Uninstall: everything this installer"):]
+    if path == MACOS:
+        for removed in ('rm -rf "$APP_BUNDLE"', "-u \"$APP_BUNDLE\"",
+                        'rm -f "$DESKTOP_DIR/Uninstall_BIDS_Manager.command"'):
+            assert removed in block, removed
+    elif path == LINUX:
+        for removed in ('"$APPS_DIR" "$DESKTOP_DIR" "$HOME/Desktop"', "BIDS-Manager.desktop",
+                        "Uninstall_BIDS_Manager.desktop", 'rm -f "$ICON_FILE"'):
+            assert removed in block, removed
+    else:
+        for removed in ("'BIDS-Manager.lnk'", "'Uninstall BIDS-Manager.lnk'",
+                        "Remove-Item -LiteralPath $StartMenu -Recurse"):
+            assert removed in block, removed

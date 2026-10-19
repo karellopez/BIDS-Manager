@@ -6,6 +6,22 @@ itself. `INSTALLER_VERSION` in each script, the first heading below and the
 installers in `Installers.zip` always agree; `tests/unit/test_installers.py`
 checks it.
 
+## 2.0.3 (2026-10-19)
+
+- The installer can uninstall. When BIDS Manager is already installed, the
+  menu offers `[x] Uninstall` beside Update, Reinstall and Abort, and asks
+  once more (No by default). It removes the install folder and everything
+  that starts BIDS Manager: the app on macOS (unregistered from Launch
+  Services first), the menu entries, Desktop files and icon on Linux, the
+  Desktop and Start-menu shortcuts on Windows. It does the same for an
+  installation made by installer 1.x. Datasets and settings are kept.
+  `BIDSMGR_UNINSTALL=1` uninstalls without asking; `BIDSMGR_YES=1` alone
+  never uninstalls.
+- Reinstall and Uninstall wait for BIDS Manager to be closed on macOS and
+  Linux too, as Windows already did: removing a program while it runs
+  leaves it to fail at random later.
+- The macOS uninstaller placed on the Desktop also unregisters the app.
+
 ## 2.0.2 (2026-10-16)
 
 - macOS: BIDS-Manager.app starts natively on Apple Silicon. Its launcher
