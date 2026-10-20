@@ -101,6 +101,9 @@ IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 6
 #: Marks the single stand-in child that keeps a folder's expander arrow
 #: alive until the folder is drawn.
 PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
+#: The ``.bidsignore`` line (or the standard's folder) that keeps the row out
+#: of validation; None when it is validated.
+IGNORED_ROLE = Qt.ItemDataRole.UserRole + 8
 # COUNT_ROLE and ISSUE_ROLE are defined by the delegate that paints them and
 # re-exported here, because every role the tree uses should be reachable from
 # the tree.
@@ -203,6 +206,19 @@ def _can_delete(path: Path, root: Optional[Path]) -> bool:
     except ValueError:
         return False
     return bool(parts) and not any(is_hidden_name(part) for part in parts)
+
+
+def _stop_tip(choice) -> str:
+    """What a "Stop ignoring" choice writes, for its tooltip."""
+    bits = []
+    if choice.patterns:
+        bits.append("removes " + ", ".join(choice.patterns))
+    if choice.exceptions:
+        bits.append("adds an exception for what a wider line also hides ("
+                    + ", ".join(choice.exceptions[:3])
+                    + (" ..." if len(choice.exceptions) > 3 else "") + ")")
+    return ("In .bidsignore, " + "; ".join(bits) + ". One step in the Editor's history."
+            if bits else "")
 
 
 def _hollow_tree(folder: Path) -> bool:
@@ -420,6 +436,14 @@ class BidsTreePane(QWidget):
     #: The dataset on disk may have changed: a new root, or a refresh after an
     #: operation or a change the watcher saw. ``Path``, the root.
     tree_changed = pyqtSignal(object)
+    #: An ``editor.bidsignore.IgnoreChoice`` to make: ignoring
+    #: (``ignore_requested``) or validating again (``unignore_requested``);
+    #: the list of what is ignored, to open.
+    #: Paths whose subjects and sessions to anonymise.
+    anonymise_requested = pyqtSignal(list)
+    ignore_requested = pyqtSignal(object)
+    unignore_requested = pyqtSignal(object)
+    ignore_list_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -758,9 +782,144 @@ class BidsTreePane(QWidget):
             show_hidden=self._show_hidden,
         )
         self._counts = counts
+        self._load_ignore(path)
         self._fill_level(top)
         self._stack.setCurrentIndex(1)
         return dirs
+
+    # ------------------------------------------------------------------
+    # What validation ignores
+    # ------------------------------------------------------------------
+
+    _ignore = None
+    _listing = None
+
+    def _load_ignore(self, root: Path) -> None:
+        """The validator's own matcher (the standard's folders included),
+        read with the tree; the file listing for the menu is taken when a
+        menu first needs it."""
+        from ...editor import bidsignore as bi
+
+        try:
+            self._ignore = bi.matcher(root)
+        except OSError:
+            self._ignore = None
+        self._listing = None
+
+    def ignored_reason(self, path) -> Optional[str]:
+        """Why ``path`` is not validated (its ``.bidsignore`` line, or the
+        standard's folder), or None."""
+        if self._ignore is None or self._root is None:
+            return None
+        try:
+            rel = Path(path).relative_to(self._root).as_posix()
+        except ValueError:
+            return None
+        if rel in ("", "."):
+            return None
+        return self._ignore.deciding(rel)
+
+    def _mark_ignored(self, item: QTreeWidgetItem, pal: dict) -> None:
+        line = self.ignored_reason(item.data(0, PATH_ROLE))
+        item.setData(0, IGNORED_ROLE, line)
+        if line is None:
+            return
+        from ...editor.bidsignore import STANDARD_FOLDERS
+
+        standard = line.rstrip("/") in STANDARD_FOLDERS
+        item.setData(0, COLOR_TOKEN_ROLE, "muted")
+        item.setForeground(0, QColor(pal["muted"]))
+        font = item.font(0)
+        font.setItalic(True)
+        item.setFont(0, font)
+        item.setToolTip(0, "Not validated: every validator ignores this folder."
+                        if standard else
+                        f"Not validated: .bidsignore says {line.strip()}")
+
+    def _ignore_listing(self):
+        from ...editor import bidsignore as bi
+
+        if self._listing is None and self._root is not None:
+            self._listing = bi.list_dataset(self._root)
+        return self._listing
+
+    def _add_ignore_entries(self, menu: QMenu, scope: list[Path], *,
+                            heading=None) -> bool:
+        """Ignore in validation / Stop ignoring, for what the click covers,
+        after ``heading()`` when anything is added. True when anything was."""
+        from ...editor import bidsignore as bi
+        from ..combo_popup import round_menu
+
+        rels: list[str] = []
+        for p in scope:
+            try:
+                rel = Path(p).relative_to(self._root).as_posix()
+            except ValueError:
+                continue
+            if rel in ("", "."):
+                continue
+            folder = Path(p).is_dir() and not _is_folder_recording(Path(p).name)
+            rels.append(rel + "/" if folder else rel)
+        if not rels:
+            return False
+        listing = self._ignore_listing()
+        if listing is None:
+            return False
+        stop = bi.stop_choices(rels, listing.paths, self._root)
+        all_ignored = all(self.ignored_reason(self._root / r.rstrip("/")) for r in rels)
+        choices = [] if all_ignored else bi.choices_for(rels, listing.paths)
+        if not (choices or stop or all_ignored):
+            return False
+        if heading is not None:
+            heading()
+        added = False
+        if not all_ignored:
+            if choices:
+                sub = menu.addMenu("Ignore in validation")
+                round_menu(sub)
+                sub.setToolTipsVisible(True)
+                for choice in choices:
+                    files = f"{choice.files} file" + ("" if choice.files == 1 else "s")
+                    action = sub.addAction(f"{choice.label}\t{files}")
+                    action.setToolTip("Adds " + ", ".join(choice.patterns)
+                                      + " to .bidsignore. One step in the Editor's "
+                                      "history, so it can be undone.")
+                    action.triggered.connect(
+                        lambda _c=False, c=choice: self.ignore_requested.emit(c))
+                sub.addSeparator()
+                sub.addAction("Ignored files...").triggered.connect(
+                    lambda _c=False: self.ignore_list_requested.emit())
+                added = True
+        if stop:
+            # Everything picked in one step first; removing a wider line, which
+            # brings back more than was picked, offered beside it.
+            first = stop[0] if stop[0].key == "stop" else None
+            rest = stop[1:] if first is not None else stop
+            if first is not None:
+                action = menu.addAction(first.label)
+                action.setToolTip(_stop_tip(first))
+                action.triggered.connect(
+                    lambda _c=False, c=first: self.unignore_requested.emit(c))
+            if len(rest) == 1 and first is None:
+                action = menu.addAction(rest[0].label)
+                action.setToolTip("Removes the line from .bidsignore: everything it hides "
+                                  "is validated again.")
+                action.triggered.connect(
+                    lambda _c=False, c=rest[0]: self.unignore_requested.emit(c))
+            elif rest:
+                sub = menu.addMenu("Stop ignoring" if first is None
+                                   else "Remove a line instead")
+                round_menu(sub)
+                for choice in rest:
+                    sub.addAction(choice.label).triggered.connect(
+                        lambda _c=False, c=choice: self.unignore_requested.emit(c))
+            added = True
+        elif all_ignored:
+            # Ignored by the standard (sourcedata/, code/): nothing to remove.
+            note = menu.addAction("Not validated (the standard ignores it)")
+            note.setEnabled(False)
+            added = True
+        return added
 
     def _fill_level(self, parent_item: QTreeWidgetItem) -> None:
         """Draw the contents of one folder, with the next level stubbed."""
@@ -796,6 +955,7 @@ class BidsTreePane(QWidget):
                 item.setForeground(0, QColor(pal["muted"]))
             else:
                 item.setForeground(0, QColor(pal[token]))
+                self._mark_ignored(item, pal)
             item.setIcon(0, icons.icon_for_path(entry.name, is_dir=is_dir))
             parent_item.addChild(item)
             if is_dir and not _is_folder_recording(entry.name):
@@ -1240,6 +1400,18 @@ class BidsTreePane(QWidget):
                         self.links_requested.emit([p])
                 )
 
+        # What validation reads: anything under the root but the tool's own
+        # folders. A right-click inside the selection covers the selection.
+        if (self._root is not None and not self.read_only
+                and _can_delete(clicked_path, self._root)):
+            picked = self.selected_paths()
+            ignore_scope = (picked if clicked_path in picked and len(picked) > 1
+                            else [clicked_path])
+            have = any(a.text() == "CHECK AND REPAIR" for a in menu.actions())
+            self._add_ignore_entries(
+                menu, ignore_scope,
+                heading=None if have else lambda: menu_section(menu, "Check and repair"))
+
         # Every entity the clicked row actually carries, so the menu offers
         # renaming exactly what is in front of the user. A folder named
         # sub-01 offers the subject; a func file offers task, run and echo.
@@ -1345,6 +1517,16 @@ class BidsTreePane(QWidget):
             )
             revert.triggered.connect(
                 lambda _c=False, s=scope: self.deface_revert_requested.emit(s)
+            )
+
+            anonymise = menu.addAction("Anonymise metadata...")
+            anonymise.setToolTip(
+                "Remove what identifies a participant from the metadata of these "
+                "subjects or sessions, by purpose. Every change is shown first; one "
+                "undoable step."
+            )
+            anonymise.triggered.connect(
+                lambda _c=False, s=scope: self.anonymise_requested.emit(s)
             )
 
         # Anything shown in the dataset can be offered for deletion, not only

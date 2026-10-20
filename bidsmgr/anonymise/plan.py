@@ -28,10 +28,11 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
 from . import carriers as c
 from .policy import AnonymisePolicy
+from .scope import Scope
 from .state import STATE_FILE, State, is_shifted, load
 
 #: Not walked into: the tool's own state, and the folders that are not the
@@ -81,6 +82,7 @@ class AnonymisePlan:
     root: Path
     policy: AnonymisePolicy
     state: State
+    scope: Scope = field(default_factory=Scope)
     files: list[FilePlan] = field(default_factory=list)
     reviews: list[tuple[Path, c.Review]] = field(default_factory=list)
     cannot: list[tuple[str, str]] = field(default_factory=list)   # (path, why)
@@ -102,6 +104,14 @@ class AnonymisePlan:
     @property
     def n_changes(self) -> int:
         return sum(len(f.changes) for f in self.files)
+
+    def by_category(self) -> dict[str, int]:
+        """How many changes each category makes."""
+        out: dict[str, int] = {}
+        for planned in self.files:
+            for change in planned.changes:
+                out[change.category] = out.get(change.category, 0) + 1
+        return out
 
     def rel(self, path: Path) -> str:
         try:
@@ -220,7 +230,7 @@ def _span(root: Path, files: list[Path]) -> dict[str, tuple[_dt.date, _dt.date]]
         if ext == ".json":
             data, _text = _read_json(path)
             for key, value in (data or {}).items():
-                if key not in c.REMOVED_ALWAYS:
+                if key not in c.IDENTITY_KEYS:
                     note(participant, value)
         elif path.name.endswith(("_scans.tsv", "_sessions.tsv")):
             for row in read_table(path)[1]:
@@ -245,26 +255,30 @@ def _span(root: Path, files: list[Path]) -> dict[str, tuple[_dt.date, _dt.date]]
 # ---------------------------------------------------------------------------
 
 def plan_anonymise(root: Path, policy: AnonymisePolicy, *,
-                   subjects: Optional[Iterable[str]] = None,
+                   scope: Optional[Scope] = None,
                    method: Optional[str] = None) -> AnonymisePlan:
     """Every change ``policy`` makes to the dataset at ``root``, nothing written.
 
-    ``subjects`` limits it to those ``sub-`` folders (and leaves the dataset
-    tables alone unless they list them); ``method`` is the text written into
-    ``DeidentificationMethod`` of MRI and PET image sidecars.
+    ``scope`` limits it to the dataset files and the subjects and sessions it
+    names (a table listing participants or sessions changes only in their
+    rows); ``method`` is the text written into ``DeidentificationMethod`` of
+    MRI and PET image sidecars.
     """
     root = Path(root)
+    scope = scope or Scope()
     state = load(root)
-    plan = AnonymisePlan(root, policy, state)
+    plan = AnonymisePlan(root, policy, state, scope)
     known = set(state.offsets)
-    files = _walk(root, plan)
-    wanted = None if subjects is None else set(subjects)
-    if wanted is not None:
-        files = [f for f in files if _participant(root, f) in wanted
-                 or _participant(root, f) is None]
-    spans = _span(root, files)
+    every = _walk(root, plan)
+    files = every if scope.whole else [f for f in every if scope.has_path(root, f)]
+    participants = sorted({p for p in (_participant(root, f) for f in files) if p}
+                          | ({p for p in _listed_participants(root)
+                              if scope.has_subject(p)} if scope.top else set()))
+    # A participant's offset is chosen from ALL their dates, whatever part
+    # of them is anonymised now: a later run over the rest moves with it.
+    spans = _span(root, [f for f in every if _participant(root, f) in set(participants)])
     days: dict[str, int] = {}
-    for participant in sorted({p for p in (_participant(root, f) for f in files) if p}):
+    for participant in participants:
         low, high = spans.get(participant, (None, None))
         days[participant] = state.days_back(participant, low, high)
     plan.state_changed = set(state.offsets) != known
@@ -286,6 +300,17 @@ def plan_anonymise(root: Path, policy: AnonymisePolicy, *,
                 "participant label", participant,
                 "a label made of letters can be a name or an ID from the source")))
     return plan
+
+
+def _listed_participants(root: Path) -> list[str]:
+    """The participants participants.tsv lists (rows without a folder too)."""
+    from ..metadata.tables import read_table
+
+    table = root / "participants.tsv"
+    if not table.is_file():
+        return []
+    return [r.get("participant_id", "") for r in read_table(table)[1]
+            if r.get("participant_id", "").startswith("sub-")]
 
 
 def _method(policy: AnonymisePolicy) -> str:
@@ -314,7 +339,7 @@ def _plan_file(root: Path, path: Path, policy: AnonymisePolicy, state: State, ba
         if data is None:
             return None
         if path.parent == root and name == "participants.json":
-            return _plan_participants_json(root, path, data, text)
+            return _plan_participants_json(root, path, data, text, policy, plan.scope)
         image = any((path.parent / (name[:-5] + e)).exists() for e in (".nii.gz", ".nii"))
         new, changes, reviews = c.clean_json(
             data, policy, state, back, method=method if image else None)
@@ -322,14 +347,22 @@ def _plan_file(root: Path, path: Path, policy: AnonymisePolicy, state: State, ba
                         content=_dump_like(new, text) if changes else None)
     if path.parent == root and name == "participants.tsv":
         header, rows = read_table(path)
-        header, rows, changes = c.clean_participants(header, rows, policy)
+        scope = plan.scope
+        header, rows, changes = c.clean_participants(
+            header, rows, policy,
+            in_scope=None if scope.subjects is None else scope.has_subject)
         return FilePlan(path, "tsv", changes,
                         content=table_text(header, rows) if changes else None)
     if name.endswith(("_scans.tsv", "_sessions.tsv")):
         header, rows = read_table(path)
         if "acq_time" not in header:
             return None
-        rows, changes = c.clean_acq_times(rows, policy, back)
+        in_scope = None
+        if name.endswith("_sessions.tsv") and plan.scope.sessions is not None:
+            subject = path.parent.name
+            in_scope = (lambda row, s=subject:
+                        plan.scope.has_session(s, row.get("session_id", "")))
+        rows, changes = c.clean_acq_times(rows, policy, back, in_scope)
         return FilePlan(path, "tsv", changes,
                         content=table_text(header, rows) if changes else None)
     if ext == ".vmrk":
@@ -350,15 +383,15 @@ def _plan_file(root: Path, path: Path, policy: AnonymisePolicy, state: State, ba
         descrip = c.nifti_descrip_change(path) if policy.times == "midnight" else None
         if descrip:
             changes.append(c.Change("NIfTI header text", descrip[0].decode("latin-1"),
-                                    descrip[1].decode("latin-1"), "a time of day"))
-        gz = c.gzip_header_change(path) if ext == ".nii.gz" and policy.gzip_headers else None
+                                    descrip[1].decode("latin-1"), "a time of day", "dates"))
+        gz = c.gzip_header_change(path) if ext == ".nii.gz" and policy.traces else None
         if gz:
             changes.append(gz)
         if not changes:
             return None
         writer = c.write_clean_nifti if descrip else c.write_clean_gzip
         return FilePlan(path, "nifti", changes, writer=writer)
-    if ext == ".tsv.gz" and policy.gzip_headers:
+    if ext == ".tsv.gz" and policy.traces:
         gz = c.gzip_header_change(path)
         return FilePlan(path, "gzip", [gz], writer=c.write_clean_gzip) if gz else None
     if ext in _FIF:
@@ -372,21 +405,33 @@ def _plan_file(root: Path, path: Path, policy: AnonymisePolicy, state: State, ba
         if cleaned is None:
             return None
         return FilePlan(path, "photo", [c.Change("photo metadata", "EXIF / text blocks", "",
-                                                 "can hold a date, a place, a device")],
+                                                 "can hold a date, a place, a device",
+                                                 "photos")],
                         writer=lambda src, dst, b=cleaned: Path(dst).write_bytes(b))
     return None
 
 
-def _plan_participants_json(root: Path, path: Path, data: dict, text: str) -> FilePlan:
-    gone = [k for k in data if k.lower() in c.IDENTITY_COLUMNS]
-    changes = [c.Change(f"{k} (description)", "described", "", "its column is removed")
-               for k in gone]
+def _plan_participants_json(root: Path, path: Path, data: dict, text: str,
+                            policy: AnonymisePolicy, scope: Scope) -> FilePlan:
+    """The descriptions of the columns participants.tsv loses: only when it
+    loses them (Names and IDs on, every row in scope)."""
+    whole = scope.subjects is None or set(_listed_participants(root)) <= set(scope.subjects)
+    gone = ([k for k in data if k.lower() in c.IDENTITY_COLUMNS]
+            if policy.identity and whole else [])
+    changes = [c.Change(f"{k} (description)", "described", "", "its column is removed",
+                        "identity") for k in gone]
     new = {k: v for k, v in data.items() if k not in gone}
     return FilePlan(path, "json", changes, content=_dump_like(new, text) if changes else None)
 
 
 def _plan_fif(path: Path, policy: AnonymisePolicy, back: int,
               plan: AnonymisePlan) -> Optional[FilePlan]:
+    if not policy.identity:
+        # MNE anonymises a FIF as a whole: names, devices and dates together.
+        plan.cannot.append((plan.rel(path), "a FIF recording is anonymised by MNE as a "
+                                            "whole, names and dates together: turn on "
+                                            "Names and IDs to anonymise it"))
+        return None
     if "_split-" in path.name:
         plan.cannot.append((plan.rel(path), "a FIF split across files: anonymise it with "
                                             "MNE before it is split"))
@@ -397,27 +442,31 @@ def _plan_fif(path: Path, policy: AnonymisePolicy, back: int,
         return None
     changes = []
     when = info["meas_date"]
-    if when is not None and policy.dates == "shift" and back and not is_shifted(when.date()):
-        moved = when - _dt.timedelta(days=back)
+    shift = policy.dates == "shift" and back and when is not None \
+        and not is_shifted(when.date())
+    if shift or (when is not None and policy.times == "midnight"
+                 and (when.hour, when.minute, when.second) != (0, 0, 0)):
+        moved = when - _dt.timedelta(days=back if shift else 0)
         if policy.times == "midnight":
             moved = moved.replace(hour=0, minute=0, second=0, microsecond=0)
         changes.append(c.Change("measurement date", when.isoformat(), moved.isoformat(),
-                                "a date"))
+                                "a date", "dates"))
     subject = info.get("subject_info") or {}
     personal = {k: v for k, v in subject.items()
                 if k in ("first_name", "middle_name", "last_name", "birthday", "his_id",
                          "weight", "height") and not _fif_anonymous(v)}
     if personal:
         changes.append(c.Change("subject_info", ", ".join(sorted(personal)), "",
-                                "names the participant"))
+                                "names the participant", "identity"))
     if info.get("experimenter") and not _fif_anonymous(info["experimenter"]):
         changes.append(c.Change("experimenter", str(info["experimenter"]), "",
-                                "names a person"))
+                                "names a person", "identity"))
     if not changes:
         return None
     midnight = policy.times == "midnight"
+    days = back if policy.dates == "shift" else 0
     return FilePlan(path, "fif", changes,
-                    writer=lambda src, dst, d=back, m=midnight: _write_fif(src, dst, d, m))
+                    writer=lambda src, dst, d=days, m=midnight: _write_fif(src, dst, d, m))
 
 
 def _fif_anonymous(value) -> bool:
@@ -431,12 +480,20 @@ def _fif_anonymous(value) -> bool:
 
 
 def _write_fif(src: Path, dst: Path, days_back: int, midnight: bool) -> None:
-    """The recording through MNE's own anonymisation, saved in FIF again."""
+    """The recording through MNE's own anonymisation, saved in FIF again.
+    ``days_back`` 0 keeps its dates (MNE moves them by exactly that)."""
     import mne
 
     raw = mne.io.read_raw_fif(src, preload=False, allow_maxshield=True, verbose="error")
     when = raw.info["meas_date"]
-    daysback = days_back if when is not None and not is_shifted(when.date()) else None
+    # None would move the date to 2000-01-01 (MNE's default): a date already
+    # shifted, or kept, is moved by 0 days instead.
+    if when is None:
+        daysback = None
+    elif is_shifted(when.date()) or not days_back:
+        daysback = 0
+    else:
+        daysback = days_back
     raw.anonymize(daysback=daysback, keep_his=False, verbose="error")
     if midnight and raw.info["meas_date"] is not None:
         raw.set_meas_date(raw.info["meas_date"].replace(hour=0, minute=0, second=0,
@@ -498,9 +555,9 @@ def _replace_text(path: Path, text: str) -> None:
 
 
 def anonymise(root: Path, policy: AnonymisePolicy, *, op=None,
-              subjects: Optional[Iterable[str]] = None) -> AnonymisePlan:
+              scope: Optional[Scope] = None) -> AnonymisePlan:
     """Plan and apply in one call (a conversion's post step, the CLI)."""
-    plan = plan_anonymise(root, policy, subjects=subjects)
+    plan = plan_anonymise(root, policy, scope=scope)
     apply_anonymise(plan, op=op)
     return plan
 

@@ -55,11 +55,11 @@ class Kind(str, Enum):
     SCANS_ROW_ORPHAN = "scans row names a missing file"
     SCANS_ROW_EXTRA = "scans row that should not be there"
     SCANS_ROW_MISSING = "recording has no scans row"
-    SCANS_TABLE_MISSING = "session has no scans table, others do"
+    SCANS_TABLE_MISSING = "scans table missing"
     SCANS_TIMES_DIFFER = "the parts of one recording have different times"
     SESSION_ROW_ORPHAN = "sessions row names a missing session"
     SESSION_ROW_MISSING = "session has no sessions row"
-    SESSIONS_TABLE_MISSING = "subject has no sessions table, others do"
+    SESSIONS_TABLE_MISSING = "sessions table missing"
     TABLE_BLANK_CELLS = "table with empty cells"
     PARTICIPANTS_TABLE_MISSING = "there is no participants.tsv"
     PARTICIPANT_ORPHAN = "participants row names a missing subject"
@@ -312,18 +312,31 @@ def _blank_fills(edit) -> dict[tuple[str, str], str]:
     return fills
 
 
-def _scans_findings(root: Path, edit, others_exist: bool) -> list[Finding]:
+def _row_text(name: str, when: str, verb: str) -> str:
+    """A row a new table will have, as the detail lists it."""
+    return f"{name}, {verb} {when}" if when and when != "n/a" else f"{name}, time not known"
+
+
+def _scans_findings(root: Path, edit, others_exist: bool, expect: bool) -> list[Finding]:
+    """``expect``: a missing table is a finding (Settings > Convert, "Write
+    scans and sessions tables", or another session already has one)."""
     out: list[Finding] = []
     table = edit.path
     table_rel = _rel(root, table)
     home = table.parent
     if edit.created:
-        if others_exist and edit.rows:
+        if expect and edit.rows:
             out.append(Finding(
                 kind=Kind.SCANS_TABLE_MISSING, path=table, about=_rel(root, home),
                 detail=(f"{_rel(root, home)} has {_count(len(edit.rows), 'recording')} "
-                        "and no scans table, while other sessions have one"),
+                        "and no scans table, while other sessions have one" if others_exist
+                        else f"{_rel(root, home)} has "
+                        f"{_count(len(edit.rows), 'recording')} and no scans table. The "
+                        "standard makes it optional; it is where a dataset says when each "
+                        "recording was acquired"),
                 repair=f"create {table.name} with {_count(len(edit.rows), 'row')}",
+                changes=tuple(("", _row_text(r["filename"], r.get("acq_time", "n/a"),
+                                             "acquired"), 1) for r in edit.rows),
                 files=tuple(home / r["filename"] for r in edit.rows),
                 safe=True,
                 _apply=lambda op, t=table, text=edit.text(): _table_create(op, t, text),
@@ -426,17 +439,22 @@ def _times_findings(root: Path, table: Path) -> list[Finding]:
     return out
 
 
-def _sessions_findings(root: Path, edit, others_exist: bool) -> list[Finding]:
+def _sessions_findings(root: Path, edit, others_exist: bool, expect: bool) -> list[Finding]:
     out: list[Finding] = []
     table = edit.path
     subject = table.parent
     if edit.created:
-        if others_exist and edit.rows:
+        if expect and edit.rows:
             out.append(Finding(
                 kind=Kind.SESSIONS_TABLE_MISSING, path=table, about=subject.name,
                 detail=(f"{subject.name} has {_count(len(edit.rows), 'session')} and no "
-                        "sessions table, while other subjects have one"),
+                        "sessions table, while other subjects have one" if others_exist
+                        else f"{subject.name} has {_count(len(edit.rows), 'session')} and "
+                        "no sessions table. The standard makes it optional; it lists the "
+                        "sessions, with when each began"),
                 repair=f"create {table.name} with {_count(len(edit.rows), 'row')}",
+                changes=tuple(("", _row_text(r["session_id"], r.get("acq_time", "n/a"),
+                                             "began"), 1) for r in edit.rows),
                 safe=True,
                 _apply=lambda op, t=table, text=edit.text(): _table_create(op, t, text),
             ))
@@ -474,13 +492,16 @@ def _sessions_findings(root: Path, edit, others_exist: bool) -> list[Finding]:
     return out
 
 
-def check_scans_tables(root: Path) -> list[Finding]:
+def check_scans_tables(root: Path, *, expect: bool = True) -> list[Finding]:
     """Scans and sessions tables against what is on disk, by the one rule the
-    metadata step writes them with (``metadata.tables``).
+    metadata step writes them with (``metadata.tables``): what Tools, Scans
+    and sessions tables would change is what this reports.
 
-    A dataset with no scans tables at all is coherent: the standard makes
-    them optional (Tools, Scans and sessions tables creates them). One where
-    some sessions have a table and some do not is not.
+    ``expect`` is Settings > Convert, "Write scans and sessions tables" (on
+    by default): every table that is not there is a finding. Off, a dataset
+    with none is coherent (the standard makes them optional), but one where
+    some sessions have a table and some do not is still not. Tables that are
+    there are checked either way.
     """
     from ..metadata.tables import plan_tables
 
@@ -488,14 +509,14 @@ def check_scans_tables(root: Path) -> list[Finding]:
     tree = _tree(root)
     has_scans = any(p.name.endswith("_scans.tsv") for p in tree.files)
     has_sessions = any(p.name.endswith("_sessions.tsv") for p in tree.files)
-    if not (has_scans or has_sessions):
+    if not (expect or has_scans or has_sessions):
         return []
     out: list[Finding] = []
     for edit in plan_tables(root):
         if edit.kind == "scans":
-            out.extend(_scans_findings(root, edit, has_scans))
+            out.extend(_scans_findings(root, edit, has_scans, expect or has_scans))
         else:
-            out.extend(_sessions_findings(root, edit, has_sessions))
+            out.extend(_sessions_findings(root, edit, has_sessions, expect or has_sessions))
     for table in sorted(p for p in tree.files if p.name.endswith("_scans.tsv")):
         out.extend(_times_findings(root, table))
     return out
@@ -1056,8 +1077,11 @@ CHECKS: tuple[Callable[[Path], list[Finding]], ...] = (
 )
 
 
-def check(root: Path) -> list[Finding]:
+def check(root: Path, *, tables: bool = True) -> list[Finding]:
     """Run every check. Read-only. Ordered by :class:`Kind`.
+
+    ``tables``: a scans or sessions table that is not there is a finding
+    (Settings > Convert, "Write scans and sessions tables").
 
     A check that raises is reported and does not stop the others: a coherence
     pass that gives up on the first malformed table is no use on exactly the
@@ -1069,7 +1093,8 @@ def check(root: Path) -> list[Finding]:
     try:
         for fn in CHECKS:
             try:
-                out.extend(fn(root))
+                out.extend(fn(root, expect=tables) if fn is check_scans_tables
+                           else fn(root))
             except Exception as exc:  # noqa: BLE001 - one bad check is not all of them
                 log.warning("coherence check %s failed: %s", fn.__name__, exc)
     finally:

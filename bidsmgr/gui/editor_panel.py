@@ -73,6 +73,16 @@ from .widgets.splitter import Splitter
 log = logging.getLogger(__name__)
 
 
+def ignore_message(choice, added: list, removed: list) -> str:
+    """What an ignore choice did, for the status bar."""
+    if choice.ignores:
+        return f"Ignored in validation: {', '.join(added)}. Undo takes it back."
+    n = choice.files
+    return (f"Validated again: {n} file" + ("" if n == 1 else "s")
+            + (f" ({', '.join(removed)} removed)" if removed else "")
+            + ". Undo takes it back.")
+
+
 class EditorPanel(QWidget):
     """Post-convert BIDS editor (Editor pill in the top header).
 
@@ -137,6 +147,10 @@ class EditorPanel(QWidget):
         self._tree_pane.strip_requested.connect(self._on_strip)
         self._tree_pane.compare_requested.connect(self._on_compare_images)
         self._tree_pane.links_requested.connect(self._on_links)
+        self._tree_pane.anonymise_requested.connect(self._on_anonymise)
+        self._tree_pane.ignore_requested.connect(self._on_ignore)
+        self._tree_pane.unignore_requested.connect(self._on_unignore)
+        self._tree_pane.ignore_list_requested.connect(self._on_ignore_list)
         self._tree_pane.overlay_requested.connect(self._on_overlay_requested)
         self._tree_pane.tree_changed.connect(self._on_tree_changed)
         self._tree_pane.overlay_base = self._overlay_base
@@ -210,7 +224,8 @@ class EditorPanel(QWidget):
         for pane in (self._sidecar_form, self._tsv_viewer, self._text_pane,
                      self._citation_pane):
             pane.file_saved.connect(self._sync_undo_redo)
-        self._bidsignore_pane.saved.connect(self._sync_undo_redo)
+        self._bidsignore_pane.changed.connect(
+            lambda message: self._after_ignore_change(message, from_pane=True))
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
         self._validation_pane.fix_group_requested.connect(
@@ -568,6 +583,14 @@ class EditorPanel(QWidget):
             "unanswered."
         )
         self._fixups_action.triggered.connect(self._on_fixups)
+
+        self._ignore_action = self._tools_menu.addAction("Ignored files...")
+        self._ignore_action.setToolTip(
+            "What validation leaves out (.bidsignore): every pattern with the "
+            "files it hides, and the dataset's files to pick from. Right-click "
+            "a file or folder in the tree to ignore it, or to stop."
+        )
+        self._ignore_action.triggered.connect(self._on_ignore_list)
 
         menu_section(self._tools_menu, "Names and structure")
 
@@ -1483,6 +1506,55 @@ class EditorPanel(QWidget):
         if self._report is not None:
             self.start_dataset_validation()
 
+    # -- what validation ignores (.bidsignore) ----------------------------
+
+    def _on_ignore(self, choice) -> None:
+        """Ignore in validation (the tree's right-click): one step of the
+        history, written at once, the dataset validated again."""
+        self._apply_ignore_choice(choice)
+
+    def _on_unignore(self, choice) -> None:
+        """Stop ignoring: the lines removed and the exceptions added in ONE
+        step, however many files were picked."""
+        self._apply_ignore_choice(choice)
+
+    def _apply_ignore_choice(self, choice) -> None:
+        from ..editor import bidsignore as bi
+
+        root = self.current_root()
+        if root is None or self._tree_pane.read_only:
+            return
+        added, removed = bi.apply_choice(root, choice)
+        if not (added or removed):
+            self._after_ignore_change("Nothing to change in .bidsignore.", changed=False)
+            return
+        self._after_ignore_change(ignore_message(choice, added, removed))
+
+    def _after_ignore_change(self, message: str, *, changed: bool = True,
+                             from_pane: bool = False) -> None:
+        """The tree dims what is now ignored, the list recounts (the list
+        recounts itself when the change was made there), and the findings
+        follow by validating again (only when there were some)."""
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(message, 6000)
+        if not changed:
+            return
+        self._tree_pane.refresh()
+        if not from_pane and self._center_stack.currentWidget() is self._bidsignore_pane:
+            self._bidsignore_pane.reload()
+        self._sync_undo_redo()
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_ignore_list(self) -> None:
+        """The ignore list in the centre, without "Show hidden files" (the
+        file itself is a dotfile the tree hides)."""
+        root = self.current_root()
+        if root is None:
+            return
+        self._on_file_selected(root / ".bidsignore")
+
     def _on_links(self, targets: Optional[list] = None) -> None:
         """Edit the fields that point from one file to another.
 
@@ -1585,14 +1657,17 @@ class EditorPanel(QWidget):
             if self._report is not None:
                 self.start_dataset_validation()
 
-    def _on_anonymise(self) -> None:
-        """Anonymise the dataset's metadata, after showing every change."""
+    def _on_anonymise(self, targets: Optional[list] = None) -> None:
+        """Anonymise the dataset's metadata, after showing every change. From
+        the tree's right-click, on the subjects and sessions clicked."""
+        from ..anonymise.scope import scope_of
         from .anonymise_dialog import AnonymiseDialog
 
         root = self.current_root()
         if root is None:
             return
-        dlg = AnonymiseDialog(root, parent=self)
+        scope = scope_of(root, [Path(t) for t in targets]) if targets else None
+        dlg = AnonymiseDialog(root, parent=self, scope=scope)
         if dlg.exec() and dlg.written():
             self._sidecar_form.set_file(None, None, None)
             self._tree_pane.set_root(root)

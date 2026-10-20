@@ -67,6 +67,7 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "Scans and sessions tables...",
         "References (IntendedFor, Sources...)...",
         "Fix ups...",
+        "Ignored files...",
 
         "NAMES AND STRUCTURE",
         "Rename entity...",

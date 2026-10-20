@@ -35,6 +35,9 @@ class Change:
     before: str
     after: str         # "" when it is removed
     reason: str
+    #: The policy category it belongs to (``policy.CATEGORIES``), or
+    #: ``policy.RECORD`` for the note saying what was done.
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,14 +103,12 @@ def _needs_shift(value: str, policy: AnonymisePolicy, days_back: int) -> bool:
 # JSON sidecars
 # ---------------------------------------------------------------------------
 
-#: Removed whatever the policy: they name a person or a path on a machine.
-_ALWAYS_REMOVE = IDENTIFYING_KEYS | PROVENANCE_PATH_KEYS | frozenset({
+#: What "Names and IDs" removes: they name a person. Public so a caller can
+#: tell a birth date (removed) from a date that is shifted.
+IDENTITY_KEYS = IDENTIFYING_KEYS | frozenset({
     "PatientComments", "OtherPatientIDs", "PatientAddress", "PatientTelephoneNumbers",
     "PatientMotherBirthName", "MilitaryRank", "EthnicGroup",
 })
-#: The keys every policy removes, public so a caller can tell which dates
-#: will be shifted rather than removed.
-REMOVED_ALWAYS = _ALWAYS_REMOVE
 _INSTITUTION_ADDRESS = frozenset({"InstitutionAddress", "InstitutionalDepartmentAddress"})
 _INSTITUTION_ALL = _INSTITUTION_ADDRESS | frozenset({"InstitutionName",
                                                     "InstitutionalDepartmentName"})
@@ -130,57 +131,61 @@ def clean_json(data: dict, policy: AnonymisePolicy, state: State, days_back: int
     out: dict = {}
     changes: list[Change] = []
     reviews: list[Review] = []
-    remove = set(_ALWAYS_REMOVE)
+    # What goes, and the category each removal belongs to.
+    remove: dict[str, str] = {}
+    if policy.identity:
+        remove.update(dict.fromkeys(IDENTITY_KEYS, "identity"))
+    if policy.traces:
+        remove.update(dict.fromkeys(PROVENANCE_PATH_KEYS, "traces"))
     if policy.institution == "address":
-        remove |= _INSTITUTION_ADDRESS
+        remove.update(dict.fromkeys(_INSTITUTION_ADDRESS, "site"))
     elif policy.institution == "all":
-        remove |= _INSTITUTION_ALL
+        remove.update(dict.fromkeys(_INSTITUTION_ALL, "site"))
     if policy.times == "midnight":
-        remove |= _SCANNER_TIMES
+        remove.update(dict.fromkeys(_SCANNER_TIMES, "dates"))
     for key, value in data.items():
         shown = json.dumps(value, ensure_ascii=False)[:80]
         if key in remove and key in _INSTITUTION_ALL and value != "n/a":
             # The standard RECOMMENDS these: "n/a" says "not given" and keeps
             # the sidecar as valid as it was, where removing them added a
             # missing-field warning to every image.
-            changes.append(Change(key, shown, '"n/a"', "the site's identity"))
+            changes.append(Change(key, shown, '"n/a"', "the site's identity", remove[key]))
             out[key] = "n/a"
             continue
         if key in remove and key in _INSTITUTION_ALL:
             out[key] = value
             continue
         if key in remove:
-            if key in _INSTITUTION_ALL:
-                why = "the site's identity"
-            elif key in _SCANNER_TIMES:
+            if key in _SCANNER_TIMES:
                 why = "the scanner's clock"
             elif key in PROVENANCE_PATH_KEYS:
                 why = "a path on the converting machine"
             else:
                 why = "names a person"
-            changes.append(Change(key, shown, "", why))
+            changes.append(Change(key, shown, "", why, remove[key]))
             continue
         if key in _DEVICES and policy.devices == "pseudonymise" and isinstance(value, str) \
                 and value and not value.startswith(_DEVICES[key] + "-"):
             new = state.label(_DEVICES[key], value)
-            changes.append(Change(key, shown, new, "identifies the machine"))
+            changes.append(Change(key, shown, new, "identifies the machine", "devices"))
             out[key] = new
             continue
         if key.endswith("UID") and policy.uids == "pseudonymise" and isinstance(value, str) \
                 and value and not value.startswith("2.25."):
             new = state.uid(value)
-            changes.append(Change(key, shown, new, "a UID can encode the scanner and time"))
+            changes.append(Change(key, shown, new, "a UID can encode the scanner and time",
+                                  "uids"))
             out[key] = new
             continue
         if isinstance(value, str) and _needs_shift(value, policy, days_back):
             new = shift_text(value, days_back, midnight=policy.times == "midnight")
-            changes.append(Change(key, shown, json.dumps(new), "a date"))
+            changes.append(Change(key, shown, json.dumps(new), "a date", "dates"))
             out[key] = new
             continue
         if isinstance(value, str) and policy.times == "midnight" and _DATETIME.match(value) \
                 and not value[11:19] == "00:00:00":
             new = shift_text(value, 0, midnight=True)
-            changes.append(Change(key, shown, json.dumps(new), "a time of day"))
+            changes.append(Change(key, shown, json.dumps(new), "a time of day", "dates"))
             out[key] = new
             continue
         if key in _FREE_TEXT and isinstance(value, str) and value.strip():
@@ -195,7 +200,7 @@ def clean_json(data: dict, policy: AnonymisePolicy, state: State, days_back: int
             new = listed + [method]
             out["DeidentificationMethod"] = new
             changes.append(Change("DeidentificationMethod", json.dumps(current or []),
-                                  json.dumps(new), "says what was done"))
+                                  json.dumps(new), "says what was done", "record"))
     return out, changes, reviews
 
 
@@ -211,50 +216,70 @@ IDENTITY_COLUMNS = frozenset({
 })
 
 
-def clean_participants(header: list[str], rows: list[dict],
-                       policy: AnonymisePolicy) -> tuple[list[str], list[dict], list[Change]]:
+def clean_participants(header: list[str], rows: list[dict], policy: AnonymisePolicy,
+                       in_scope=None) -> tuple[list[str], list[dict], list[Change]]:
+    """participants.tsv cleaned. ``in_scope(participant_id)`` limits it to
+    some rows: an identity column is then blanked (n/a) in those rows rather
+    than removed, since the others still hold their values."""
     changes: list[Change] = []
-    gone = [c for c in header if c.lower() in IDENTITY_COLUMNS]
+    mine = [r for r in rows if in_scope is None or in_scope(r.get("participant_id", ""))]
+    whole = len(mine) == len(rows)
+    columns = [c for c in header if c.lower() in IDENTITY_COLUMNS] if policy.identity else []
+    gone = columns if whole else []
+    blanked = [] if whole else columns
     for col in gone:
         changes.append(Change(f"column {col}", f"{sum(1 for r in rows if r.get(col))} values",
-                              "", "identifies the participant"))
+                              "", "identifies the participant", "identity"))
     header = [c for c in header if c not in gone]
     out = []
     for row in rows:
+        ours = in_scope is None or in_scope(row.get("participant_id", ""))
         row = {k: v for k, v in row.items() if k not in gone}
+        who = row.get("participant_id", "?")
+        if ours:
+            for col in blanked:
+                if row.get(col, "n/a") not in ("", "n/a"):
+                    changes.append(Change(f"{col} of {who}", row[col], "n/a",
+                                          "identifies the participant", "identity"))
+                    row[col] = "n/a"
         age = row.get("age")
         try:
             value = float(age)
         except (TypeError, ValueError):
             value = None
-        if value is not None:
+        if ours and value is not None and policy.ages != "keep":
             new = min(value, 89.0)
             if policy.ages == "bins":
                 new = 5 * int(new // 5)
             text = (str(int(new)) if float(new).is_integer() else str(new))
             if text != str(age):
-                changes.append(Change(f"age of {row.get('participant_id', '?')}", str(age),
-                                      text, "an exact age, or one over 89, identifies"))
+                changes.append(Change(f"age of {who}", str(age), text,
+                                      "an exact age, or one over 89, identifies", "ages"))
                 row["age"] = text
         out.append(row)
     return header, out, changes
 
 
-def clean_acq_times(rows: list[dict], policy: AnonymisePolicy,
-                    days_back: int) -> tuple[list[dict], list[Change]]:
-    """``acq_time`` of a scans or sessions table, shifted with its sidecars."""
+def clean_acq_times(rows: list[dict], policy: AnonymisePolicy, days_back: int,
+                    in_scope=None) -> tuple[list[dict], list[Change]]:
+    """``acq_time`` of a scans or sessions table, shifted with its sidecars;
+    ``in_scope(row)`` limits it to some rows (a sessions table, some
+    sessions)."""
     changes: list[Change] = []
     out = []
     for row in rows:
         value = row.get("acq_time", "")
         midnight = policy.times == "midnight"
+        if in_scope is not None and not in_scope(row):
+            out.append(row)
+            continue
         if isinstance(value, str) and (_needs_shift(value, policy, days_back)
                                        or (midnight and _DATETIME.match(value)
                                            and value[11:19] != "00:00:00")):
             shift = days_back if _needs_shift(value, policy, days_back) else 0
             new = shift_text(value, shift, midnight=midnight)
             key = row.get("filename") or row.get("session_id") or "row"
-            changes.append(Change(f"acq_time of {key}", value, new, "a date"))
+            changes.append(Change(f"acq_time of {key}", value, new, "a date", "dates"))
             row = dict(row, acq_time=new)
         out.append(row)
     return out, changes
@@ -277,7 +302,7 @@ def clean_vmrk(text: str, policy: AnonymisePolicy,
         new = m.group(1) + moved.strftime("%Y%m%d") + clock
         if new != m.group(0):
             changes.append(Change("New Segment date", m.group(2) + m.group(3),
-                                  moved.strftime("%Y%m%d") + clock, "a date"))
+                                  moved.strftime("%Y%m%d") + clock, "a date", "dates"))
         return new
 
     return _VMRK_SEGMENT.sub(sub, text), changes
@@ -325,7 +350,7 @@ def gzip_header_change(path: Path) -> Optional[Change]:
         start = 10 + (2 + struct.unpack("<H", head[10:12])[0] if flags & 0x04 else 0)
         parts.append(head[start:head.index(b"\x00", start)].decode("latin-1"))
     return Change("gzip header", ", ".join(parts), "", "the time it was written, its "
-                  "original name")
+                  "original name", "traces")
 
 
 def write_clean_gzip(src: Path, dst: Path) -> None:
@@ -407,25 +432,26 @@ def edf_header_changes(path: Path, policy: AnonymisePolicy) -> tuple[Optional[by
     recording = bytes(head[88:168]).decode("latin-1").strip()
     plus = recording.startswith("Startdate")
     anon_patient = "X X X X"
-    if patient and patient != anon_patient:
+    if policy.identity and patient and patient != anon_patient:
         head[8:88] = anon_patient.encode("latin-1").ljust(80)
-        changes.append(Change("patient field", patient, anon_patient, "names the participant"))
+        changes.append(Change("patient field", patient, anon_patient, "names the participant",
+                              "identity"))
     anon_recording = "Startdate X X X X" if plus else "X"
-    if recording and recording != anon_recording:
+    if policy.identity and recording and recording != anon_recording:
         head[88:168] = anon_recording.encode("latin-1").ljust(80)
         changes.append(Change("recording field", recording, anon_recording,
-                              "the date, the technician and the equipment"))
+                              "the date, the technician and the equipment", "identity"))
     date = bytes(head[168:176])
     if policy.dates == "shift" and date != EDF_DATE:
         head[168:176] = EDF_DATE
         changes.append(Change("start date", date.decode("latin-1"), EDF_DATE.decode(),
                               "a date; EDF holds none before 1985, so the EDF+ "
-                              "anonymous date"))
+                              "anonymous date", "dates"))
     clock = bytes(head[176:184])
     if policy.times == "midnight" and clock != b"00.00.00":
         head[176:184] = b"00.00.00"
         changes.append(Change("start time", clock.decode("latin-1"), "00.00.00",
-                              "a time of day"))
+                              "a time of day", "dates"))
     return (bytes(head) if changes else None), changes
 
 
@@ -495,7 +521,7 @@ def png_ok(data: bytes) -> bool:
     return True
 
 
-__all__ = ["Change", "EDF_DATE", "IDENTITY_COLUMNS", "REMOVED_ALWAYS", "Review",
+__all__ = ["Change", "EDF_DATE", "IDENTITY_COLUMNS", "IDENTITY_KEYS", "Review",
            "clean_acq_times",
            "clean_json", "clean_participants", "clean_photo", "clean_vmrk",
            "edf_header_changes", "gzip_body_offset", "gzip_header_change",

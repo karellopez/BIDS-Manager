@@ -159,14 +159,11 @@ def test_the_scans_and_sessions_tables_row_for_row(converted) -> None:
     assert not wrong, "\n".join(wrong)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Reported defect, not fixed here: the scan keeps the acq_time of whichever "
-    "DICOM file it reads first, not the earliest (inventory/mri_dicom.py, the "
-    "acq_times dict), so a multi-volume series can be a minute late. The scans "
-    "table itself is right: it takes the sidecar's AcquisitionDateTime."))
 def test_the_predicted_times_are_the_written_ones(converted) -> None:
     """Within the second or two the preview's note allows (the scan's time
-    against the first volume's, which dcm2niix writes)."""
+    against the first volume's, which dcm2niix writes). The scan kept the
+    time of whichever DICOM file it read first, and a multi-volume DWI came
+    out a minute late; it keeps the earliest now (2026-10-19)."""
     from datetime import datetime
 
     from bidsmgr.converter.output_plan import UNKNOWN

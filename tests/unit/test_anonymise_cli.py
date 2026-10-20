@@ -49,7 +49,7 @@ def test_applied_it_is_one_step_of_the_history(ds: Path) -> None:
     assert cli.main([str(ds), "--preset", "strict"]) == 0
     side = json.loads((ds / "sub-01/anat/sub-01_T1w.json").read_text())
     assert "PatientName" not in side and side["AcquisitionDateTime"].endswith("T00:00:00")
-    assert peek_undo(ds).label == "Anonymise metadata (strict)"
+    assert peek_undo(ds).label == "Anonymise metadata (Strict)"
 
 
 def test_not_a_dataset_is_refused(tmp_path: Path) -> None:

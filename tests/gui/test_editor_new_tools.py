@@ -501,9 +501,10 @@ class TestCoherenceDialog:
         seen = {}
         real = coherence.check
 
-        def spy(root):
+        def spy(root, **kwargs):
             seen["thread"] = threading.current_thread()
-            return real(root)
+            seen["tables"] = kwargs.get("tables")
+            return real(root, **kwargs)
 
         monkeypatch.setattr(coherence, "check", spy)
         dlg = CoherenceDialog(dataset)
@@ -511,6 +512,7 @@ class TestCoherenceDialog:
         assert dlg.checking() and "Checking" in dlg._status.text()
         qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
         assert seen["thread"] is not threading.main_thread()
+        assert seen["tables"] is True, "Settings > Convert writes tables by default"
 
     def test_only_safe_repairs_come_ticked(self, qtbot, dataset):
         (dataset / "participants.tsv").write_text("participant_id\nsub-999\n")

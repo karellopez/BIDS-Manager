@@ -175,7 +175,13 @@ class CoherenceDialog(QDialog):
         self._rescan_btn.setEnabled(False)
         self._ok.setEnabled(False)
         self._status.setText("Checking the dataset…")
-        self._jobs.start("check", self._generation, coherence.check, self._root)
+        from .app_settings import AppSettings
+
+        # A table that is not there is a finding when tables are written
+        # (Settings > Convert, on by default).
+        tables = AppSettings.load().post_metadata_tables
+        self._jobs.start("check", self._generation, coherence.check, self._root,
+                         tables=tables)
 
     def checking(self) -> bool:
         """Whether a check is still running."""

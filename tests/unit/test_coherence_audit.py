@@ -326,8 +326,45 @@ def test_sessions_rows_follow_the_session_folders(ds: Path) -> None:
     assert ids == ["ses-pre", "ses-post"]
 
 
-def test_no_tables_at_all_is_coherent(ds: Path) -> None:
-    assert not [k for k in _kinds(ds) if k.name.startswith(("SCANS", "SESSION"))]
+def test_no_tables_at_all_is_a_finding_unless_tables_are_off(ds: Path) -> None:
+    """What Tools, Scans and sessions tables would write, Check coherence
+    reports (2026-10-19: a dataset with none was called coherent)."""
+    _write(ds / "sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz")
+    _write(ds / "sub-02/ses-2/anat/sub-02_ses-2_T1w.nii.gz")
+    found = {(f.kind, f.about) for f in coherence.check(ds)}
+    assert (Kind.SCANS_TABLE_MISSING, "sub-01") in found
+    assert (Kind.SCANS_TABLE_MISSING, "sub-02/ses-1") in found
+    assert (Kind.SESSIONS_TABLE_MISSING, "sub-02") in found
+    missing = [f for f in coherence.check(ds) if f.kind is Kind.SCANS_TABLE_MISSING]
+    assert all(f.safe for f in missing), "creating a table loses nothing"
+    assert "optional" in missing[0].detail
+    tables = {Kind.SCANS_TABLE_MISSING, Kind.SESSIONS_TABLE_MISSING, Kind.SCANS_ROW_MISSING,
+              Kind.SESSION_ROW_MISSING}
+    assert not [f for f in coherence.check(ds, tables=False) if f.kind in tables], \
+        "tables switched off in Settings: none is coherent"
+
+
+@pytest.mark.parametrize("layout", ["none", "scans only", "half", "stale"])
+def test_after_its_repairs_the_tables_tool_has_nothing_left(ds: Path, layout: str) -> None:
+    """Whatever the tables tool would change is a finding, and repairing every
+    finding leaves it nothing to do."""
+    from bidsmgr.metadata.tables import plan_tables
+
+    _write(ds / "sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz")
+    _write(ds / "sub-02/ses-1/beh/sub-02_ses-1_task-quiz_beh.tsv", "trial\n1\n")
+    _write(ds / "sub-02/ses-2/func/sub-02_ses-2_task-x_bold.nii.gz")
+    if layout in ("scans only", "half", "stale"):
+        _scans(ds, "anat/sub-01_T1w.nii.gz\t2026-01-01T09:00:00\n")
+    if layout == "half":
+        _write(ds / "sub-02/sub-02_sessions.tsv", "session_id\tacq_time\nses-1\tn/a\n")
+    if layout == "stale":
+        _write(ds / "sub-02/ses-1/sub-02_ses-1_scans.tsv",
+               "filename\tacq_time\nanat/sub-02_ses-1_T1w.nii.gz\t\nanat/gone.nii.gz\tn/a\n")
+    assert plan_tables(ds), "the tool would change something"
+    findings = coherence.check(ds)
+    assert findings
+    coherence.apply(ds, [f for f in findings if f.fixable])
+    assert plan_tables(ds) == [], [e.summary() for e in plan_tables(ds)]
 
 
 # -- participants and citation ------------------------------------------------
@@ -371,7 +408,8 @@ def test_7_citation_compares_only_what_both_state(ds: Path) -> None:
 def test_22_the_tools_scratch_folder_is_not_walked(ds: Path) -> None:
     _write(ds / ".tmp_bidsmgr/sub-09/anat/sub-09_T1w.json", {})
     _write(ds / ".tmp_bidsmgr/sub-09/anat/sub-09_task-x_events.tsv", "onset\n")
-    assert coherence.check(ds) == []
+    assert coherence.check(ds, tables=False) == []
+    assert not [f for f in coherence.check(ds) if ".tmp_bidsmgr" in f"{f.path} {f.about}"]
 
 
 def test_only_safe_repairs_are_safe(ds: Path) -> None:

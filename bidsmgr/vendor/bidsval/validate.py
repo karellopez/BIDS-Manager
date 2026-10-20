@@ -171,6 +171,10 @@ def validate_file(
         )
         verdict.recompute_severity()
         return verdict
+    # VENDORED CHANGE: a file the dataset ignores is not validated, here as in
+    # the dataset pass. Validating one alone reported it as not BIDS.
+    if load_bidsignore(root).match(relpath):
+        return FileVerdict(path=Path(relpath))
     builder = ContextBuilder(schema_ns, tree, read_headers=read_headers, max_rows=max_rows)
     verdict, _context = _validate_one(schema_ns, builder, bids_file)
     return verdict

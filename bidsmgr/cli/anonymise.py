@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from ..anonymise import PRESETS, apply_anonymise, plan_anonymise
+from ..anonymise import CATEGORIES, PRESETS, apply_anonymise, plan_anonymise, policy_for
+from ..anonymise.scope import Scope
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -28,8 +29,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--preset", choices=sorted(PRESETS), default="recommended",
                         help="recommended (default) keeps times of day and the site name; "
                              "strict sets times to midnight, removes the site and bins ages.")
+    parser.add_argument("--keep", nargs="+", default=(), metavar="CATEGORY",
+                        choices=[c.key for c in CATEGORIES],
+                        help="Categories to leave alone: "
+                             + "; ".join(f"{c.key} ({c.title.lower()})" for c in CATEGORIES)
+                             + ".")
     parser.add_argument("--participant-label", nargs="+", default=None, metavar="LABEL",
                         help="Only these participants (sub- prefix optional).")
+    parser.add_argument("--session", nargs="+", default=None, metavar="LABEL",
+                        help="Only these sessions of the chosen participants (ses- prefix "
+                             "optional). Their dates move as the rest of the participant's "
+                             "will, so anonymising the others later keeps the intervals.")
+    parser.add_argument("--skip-dataset-files", action="store_true",
+                        help="Leave the files at the top (participants.tsv and the like) "
+                             "alone.")
     parser.add_argument("--dry-run", action="store_true",
                         help="List every change, the values to review by hand and what "
                              "cannot be changed. Nothing in the dataset is written; the "
@@ -44,21 +57,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error(f"{root} has no dataset_description.json: not a BIDS dataset")
     subjects = None
     if args.participant_label:
-        subjects = [s if s.startswith("sub-") else f"sub-{s}" for s in args.participant_label]
-    plan = plan_anonymise(root, PRESETS[args.preset], subjects=subjects)
+        subjects = frozenset(s if s.startswith("sub-") else f"sub-{s}"
+                             for s in args.participant_label)
+    sessions = None
+    if args.session:
+        labels = [s if s.startswith("ses-") else f"ses-{s}" for s in args.session]
+        chosen = subjects if subjects is not None else frozenset(
+            p.name for p in root.glob("sub-*") if p.is_dir())
+        sessions = frozenset(f"{sub}/{ses}" for sub in chosen for ses in labels
+                             if (root / sub / ses).is_dir())
+    scope = Scope(top=not args.skip_dataset_files, subjects=subjects, sessions=sessions)
+    policy = policy_for(args.preset, keep=tuple(args.keep))
+    plan = plan_anonymise(root, policy, scope=scope)
 
     if args.json:
         print(json.dumps({
             "preset": args.preset,
+            "categories": policy.categories_on(),
+            "scope": scope.describe(),
             "files": [{"path": plan.rel(f.path), "changes": [
-                {"what": c.what, "before": c.before, "after": c.after, "why": c.reason}
+                {"what": c.what, "before": c.before, "after": c.after, "why": c.reason,
+                 "category": c.category}
                 for c in f.changes]} for f in plan.files],
             "review": [{"path": plan.rel(p), "what": r.what, "value": r.value,
                         "why": r.reason} for p, r in plan.reviews],
             "cannot": [{"path": p, "why": w} for p, w in plan.cannot],
         }, indent=2, ensure_ascii=False))
     else:
-        print(f"{root.name} ({args.preset}): {plan.summary()}")
+        print(f"{root.name} ({policy.label}, {scope.describe()}): {plan.summary()}")
         for planned in plan.files:
             print(f"  {plan.rel(planned.path)}")
             for change in planned.changes:
@@ -88,7 +114,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     from ..project.operations import begin_operation
 
-    with begin_operation(root, f"Anonymise metadata ({args.preset})") as op:
+    with begin_operation(root, f"Anonymise metadata ({policy.label})") as op:
         written = apply_anonymise(plan, op=op)
     print(f"Anonymised {len(written)} file(s). The Editor's Undo takes it back, and keeps "
           "the originals under .bidsmgr/ until then: do not share that folder.")

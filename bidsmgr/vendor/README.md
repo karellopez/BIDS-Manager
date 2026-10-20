@@ -31,7 +31,7 @@ clean. The current motivation list:
 ### `bidsmgr.vendor.bidsval`
 
 **Upstream:** `bidsval` (`karellopez/bidsval`, MIT), vendored at **0.1.1 plus
-local additions**, so the copy reports `0.1.1+bidsmgr.2`.
+local additions**, so the copy reports `0.1.1+bidsmgr.3`.
 
 "Ahead of upstream" applies to exactly one of the three differences below.
 The other two are ADAPTATIONS that vendoring requires and that would be wrong
@@ -68,7 +68,8 @@ one that gets silently deleted the next time.
 | `context/entities.py` | speed | `parse_filename` memoised per schema (4.5 million parses on a 1,500-file folder) |
 | `files/tree.py` | speed | `BIDSFile.name` from the relpath; per-folder lists sorted once |
 | `rules/integrity.py` | **ahead** | the `INVALID_JSON_ENCODING` message |
-| `validate.py` | **ahead** | no bespoke `NO_SUBJECTS` (the schema's `SUBJECT_FOLDERS` says it, scoped by DatasetType); a file no rule names (`NOT_INCLUDED`) is not given sidecar rules |
+| `validate.py` | **ahead** | no bespoke `NO_SUBJECTS` (the schema's `SUBJECT_FOLDERS` says it, scoped by DatasetType); a file no rule names (`NOT_INCLUDED`) is not given sidecar rules; `validate_file` honours `.bidsignore` (an ignored file validated alone was reported as not BIDS) |
+| `files/bidsignore.py` | **ahead** | `compile_pattern` public and `BidsIgnore.deciding` names the line that hides a path, so the Editor's ignore list and tree use THIS matcher (it had one of its own that disagreed); `[...]` character classes read as gitignore reads them; a file inside an ignored folder stays ignored whatever a later `!` line says (gitignore's rule, and the reference validator's `ignore` package), folder answers cached |
 
 Measured against the reference validator (3.0.2, same schema) on the 61
 single-defect copies of a BIDS Manager dataset from the 1.5.1 audit: 55
@@ -86,7 +87,7 @@ IntendedFor. 1,000 files in one folder: 64.6 s before, 17.7 s after, the same
    without it, before the GUI could start.
 2. **The version lookup.** There is no `bidsval` distribution here, so
    `version("bidsval")` described the installed copy or fell back to
-   `"0.0.0"`. Stated literally now, as `0.1.1+bidsmgr.2`. The local segment
+   `"0.0.0"`. Stated literally now, as `0.1.1+bidsmgr.3`. The local segment
    is PEP 440's local version identifier and is load-bearing: plain `0.1.1`
    would name a PyPI artefact that does not contain change 3 below. Bump the
    local segment when the local delta changes, and drop it once upstream
@@ -212,7 +213,15 @@ entirely.
    labels against every schema the installed `bidsval` ships, so this
    claim is verified rather than asserted.
 
-5. Otherwise no behavioural changes. Every other function and class
+5. One correctness fix in `base/bidsphysio.py`, `save_bids_data`: a
+   missing sample is written `n/a`, the standard's word for it. numpy's
+   `savetxt` wrote `nan`, which a validator reads as a value of the wrong
+   type (`TSV_VALUE_INCORRECT_TYPE` on the multimodal sample's cardiac
+   channel). Written in chunks of 100,000 rows, so a 22-million-sample
+   recording is never all text at once. The viewers read `n/a` as a gap,
+   as they read `nan` (`tests/unit/test_physio_na.py`).
+
+6. Otherwise no behavioural changes. Every other function and class
    body is verbatim. Original per-file MIT headers are preserved.
 
 **What's in the tree:**
