@@ -140,6 +140,7 @@ class EditorPanel(QWidget):
         self._tree_pane.entities_requested.connect(self._on_edit_entities)
         self._tree_pane.delete_requested.connect(self._on_delete)
         self._tree_pane.deface_requested.connect(self._on_deface)
+        self._tree_pane.sidecars_requested.connect(self._on_sidecars)
         self._tree_pane.deface_compare_requested.connect(
             self._on_deface_compare
         )
@@ -563,6 +564,16 @@ class EditorPanel(QWidget):
             "anything is written; one Undo."
         )
         self._tables_action.triggered.connect(self._on_tables)
+
+        self._sidecars_action = self._tools_menu.addAction(
+            "Write sidecars from the recordings...")
+        self._sidecars_action.setToolTip(
+            "Write the .json sidecar a recording is missing, or add what one lacks, "
+            "from the data it was converted from, its own header, your answers and "
+            "the sidecars that link to it. A value already there is never changed. "
+            "Every field is shown with where it was read; one Undo."
+        )
+        self._sidecars_action.triggered.connect(lambda _c=False: self._on_sidecars())
 
         self._links_action = self._tools_menu.addAction(
             "References (IntendedFor, Sources...)..."
@@ -1702,6 +1713,37 @@ class EditorPanel(QWidget):
                     f"{'it' if n == 1 else 'them'} back.", 6000)
             if self._report is not None:
                 self.start_dataset_validation()
+
+    def _on_sidecars(self, targets: Optional[list] = None,
+                     complete: Optional[bool] = None) -> None:
+        """Write or complete sidecars from the recordings, after showing every
+        field. From the Tools menu it acts on the tree's selection, else the
+        dataset; from the tree's right-click, on what was clicked."""
+        from ..editor.sidecars import sidecar_path
+        from .sidecars_dialog import SidecarsDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = SidecarsDialog(root, chosen or None, parent=self, complete=complete)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.written():
+            return
+        written = dlg.written()
+        self._tree_pane.set_root(root)
+        if self._open_path is not None and (
+                self._open_path in written
+                or sidecar_path(self._open_path) in written):
+            self._on_file_selected(self._open_path)
+        self._sync_undo_redo()
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            n = len(written)
+            window.statusBar().showMessage(
+                f"Wrote {n} sidecar{'s' if n != 1 else ''}. Undo takes "
+                f"{'it' if n == 1 else 'them'} back.", 6000)
+        if self._report is not None:
+            self.start_dataset_validation()
 
     def _refresh_deface_action(self) -> None:
         """Grey the Deface entry out when it cannot run, and say why.

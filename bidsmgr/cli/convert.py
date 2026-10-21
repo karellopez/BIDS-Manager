@@ -1631,6 +1631,34 @@ def _suffix_from_basename(basename: str) -> str:
     return basename.rsplit("_", 1)[-1]
 
 
+def _row_data(row: pd.Series, sources) -> tuple[dict[str, list[str]], Optional[Path]]:
+    """Where one row's source data is now: ``(files_by_uid, None)`` for a
+    DICOM series, ``({}, path)`` for a recording file. Raises with the reason
+    when it cannot be found."""
+    from ..inventory.probe_convert import series_files
+
+    uid = str(row.get("series_uid", "")).strip()
+    source_file = str(row.get("source_file", "")).strip()
+    if not uid:
+        if not source_file:
+            raise ValueError("this row names no source data")
+        path = sources.file(source_file)
+        if path is None:
+            raise FileNotFoundError(f"{source_file} is not in {sources.root}")
+        return {}, path
+    uids = [u for u in uid.split("|") if u]
+    files_by_uid = {u: [str(p) for p in sources.series_files(u)] for u in uids}
+    if not any(files_by_uid.values()):
+        # A scan without its files_by_uid record: look in the row's folder.
+        folder = sources.folder(str(row.get("source_folder", "")))
+        if folder is not None:
+            files_by_uid = {u: series_files(folder, u) for u in uids}
+    if not any(files_by_uid.values()):
+        raise FileNotFoundError(
+            f"no DICOM of this series was found under {sources.root}")
+    return files_by_uid, None
+
+
 def preview_row(row, work_dir: Path, sources) -> list[Path]:
     """What converting this one row makes, for a look before the real thing.
 
@@ -1649,19 +1677,12 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
 
     Returns the files a viewer opens; raises with the reason otherwise.
     """
-    from ..fixups.fieldmaps import apply_fieldmap_renames
-    from ..inventory.probe_convert import preview_series, series_files
+    from ..inventory.probe_convert import preview_series
     from ..viz.data.formats import is_recording_path, kind_of
 
     row = pd.Series({k: ("" if v is None else v) for k, v in dict(row).items()})
-    uid = str(row.get("series_uid", "")).strip()
-    source_file = str(row.get("source_file", "")).strip()
-    if not uid:
-        if not source_file:
-            raise ValueError("this row names no source data")
-        path = sources.file(source_file)
-        if path is None:
-            raise FileNotFoundError(f"{source_file} is not in {sources.root}")
+    files_by_uid, path = _row_data(row, sources)
+    if path is not None:
         # An EyeLink .edf shares its extension with an EEG recording and is
         # nothing like one: it is converted (to the BEP020 physio tables the
         # signal viewer plots), not read as it is.
@@ -1670,22 +1691,10 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
             return [path]
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    files_by_uid: dict[str, list[str]] = {}
-    if uid:
-        uids = [u for u in uid.split("|") if u]
-        files_by_uid = {u: [str(p) for p in sources.series_files(u)] for u in uids}
-        if not any(files_by_uid.values()):
-            # A scan without its files_by_uid record: look in the row's folder.
-            folder = sources.folder(str(row.get("source_folder", "")))
-            if folder is not None:
-                files_by_uid = {u: series_files(folder, u) for u in uids}
-        if not any(files_by_uid.values()):
-            raise FileNotFoundError(
-                f"no DICOM of this series was found under {sources.root}")
     roots = (sources.root,) if sources.root is not None else ()
     task = _row_to_task(row, work_dir, files_by_uid, source_search_roots=roots)
     if task is None:
-        if uid:
+        if files_by_uid:
             return preview_series([f for files in files_by_uid.values() for f in files],
                                   work_dir)
         raise ValueError("the plan for this row converts nothing")
@@ -1698,6 +1707,49 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
     if not shown:
         raise RuntimeError("the conversion made no file that can be shown")
     return shown
+
+
+def sidecars_for_row(row, work_dir: Path, sources, *,
+                     spec: Optional[RecordingMetaSpec] = None) -> dict[str, dict]:
+    """The sidecars converting this one row writes, by file name.
+
+    The row goes through the conversion's own task builder and backend into
+    ``work_dir``, then the per-subject steps that shape a sidecar: fieldmap
+    names, PET and MR spectroscopy fields, physio fields, the converter
+    repairs and the identifiers. What the user stated is not applied, as in
+    the conversion: that is the metadata step's job. ``spec`` is passed for
+    what a backend needs from it (an eye tracker's settings, the PET block).
+
+    How the Editor rebuilds a sidecar that was deleted from the data it was
+    converted from. Raises with the reason when the row cannot be converted.
+    """
+    row = pd.Series({k: ("" if v is None else v) for k, v in dict(row).items()})
+    files_by_uid, _path = _row_data(row, sources)
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    roots = (sources.root,) if sources.root is not None else ()
+    task = _row_to_task(row, work_dir, files_by_uid, source_search_roots=roots, spec=spec)
+    if task is None:
+        raise ValueError("the plan for this row converts nothing")
+    staging = work_dir / f"sub-{safe_path_component(task.subject)}"
+    result = _phase1_one(default_backends(), task, staging)
+    if not result.success:
+        raise RuntimeError(result.error or "the conversion made nothing")
+    apply_fieldmap_renames(staging)
+    enrich_pet_sidecars(staging, [task], spec)
+    clean_mrs_outputs(staging, [task])
+    enrich_physio_sidecars(staging)
+    repair_converter_output(staging)
+    prune_identifiers(staging)
+    out: dict[str, dict] = {}
+    for path in sorted(staging.rglob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out[path.name] = data
+    return out
 
 
 # ---------------------------------------------------------------------------
