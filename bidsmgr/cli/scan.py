@@ -45,6 +45,7 @@ from uuid import uuid4
 import pandas as pd
 
 from ..util.oplog import add_log_arguments, dataset_root_for, log_keywords, logged
+from ..util.paths import missing_folder_message
 from .. import schema
 from ..classifier import dcm2niix_bidsguess, sequence_dict
 from ..classifier.types import Classification
@@ -694,6 +695,32 @@ def _detect_aborts(
                     verdicts[k_e] = "suspected_abort"
 
     return verdicts
+
+
+def _entities_from_names(rows: list[InventoryRow], chosen: dict[str, Classification],
+                         wanted, df: pd.DataFrame) -> dict[str, Classification]:
+    """The wanted entities the series description (else the protocol name)
+    states, laid over each row's classification (``inventory.name_entities``)."""
+    from ..inventory import name_entities as by_name
+
+    features = df.attrs.get("features_by_uid") or {}
+    rows_by_id = {r.row_id.hex: r for r in rows}
+    for key, c in list(chosen.items()):
+        row = rows_by_id.get(key)
+        if row is None or c.skip:
+            continue
+        protocol = next((str((features.get(uid) or {}).get("protocol", "") or "")
+                         for uid in (row.series_uid or "").split("|")
+                         if (features.get(uid) or {}).get("protocol")), "")
+        entities, changed = by_name.apply(c.candidate_entities, c.datatype, c.suffix, wanted,
+                                          row.series_description or "", protocol)
+        if changed:
+            note = "from the sequence name: " + ", ".join(
+                f"{k}-{v}" for k, v in changed.items())
+            chosen[key] = c.model_copy(update={
+                "candidate_entities": entities,
+                "rationale": f"{c.rationale}; {note}" if c.rationale else note})
+    return chosen
 
 
 def _normalize_runs(
@@ -1812,7 +1839,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
     """Final unified TSV column order. Locked contract:
 
     ``TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
-    EXTENDED(3) + EEG_MEG(16) + PET(5) + CURATION(4) = 66``.
+    EXTENDED(3) + EEG_MEG(16) + PET(5) + CURATION(5) = 67``.
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
@@ -1997,6 +2024,8 @@ def _apply_index_widths(df: "pd.DataFrame", widths: dict[str, int]) -> int:
      "scan rules": f"{len(a['user_hints'] or [])} hint(s), "
                    f"{len(a['exclusions'] or [])} exclusion(s)",
      "entities left out": ", ".join(a["drop_entities"] or ()) or "none",
+     "subject labels from": a["subject_from"],
+     "entities the sequence name decides": ", ".join(a["name_entities"] or ()) or "none",
      "acquisition parameters": (a["classifier_config"].general.mode
                                 if a["classifier_config"] is not None else "applied")}))
 def run_scan(
@@ -2016,6 +2045,8 @@ def run_scan(
     index_widths: Optional[dict[str, int]] = None,
     classifier_config=None,
     drop_entities: Optional[list[str]] = None,
+    subject_from: str = "number",
+    name_entities: Optional[list[str]] = None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -2054,13 +2085,26 @@ def run_scan(
         Short entity keys (``acq``, ``run``) to leave out of the proposed
         names, wherever the standard does not require them and they do not
         tell two recordings apart (``inventory.leave_out``).
+    subject_from
+        Where DICOM subjects' labels come from: ``"number"`` (default),
+        ``"patient_id"``, ``"given_name"`` or ``"family_name"``, curated into
+        a BIDS label and numbered where empty (``inventory.subject_label``).
+    name_entities
+        Short entity keys (``acq``, ``task``, ``run``) whose value the series
+        description or protocol name decides when it states one, over the
+        scan's estimate (``inventory.name_entities``).
     """
+
+    if not Path(dicom_root).is_dir():
+        # Said here, before any scanner walks nothing: on Windows the usual
+        # cause is a mapped drive this process cannot see.
+        raise NotADirectoryError(missing_folder_message(dicom_root))
 
     dataset_slug = dataset if dataset else _default_dataset_slug(dicom_root)
 
     df = scan_dicoms_long(
         dicom_root, output_tsv=None, n_jobs=n_jobs, dataset=dataset_slug,
-        cancel_check=cancel_check,
+        cancel_check=cancel_check, subject_from=subject_from,
     )
 
     # Honour a Stop requested during the (dominant) DICOM read before
@@ -2158,6 +2202,10 @@ def run_scan(
     chosen = _reroute_b0_references_to_fmap_epi(rows, chosen)
     abort_verdicts = _detect_aborts(rows, chosen)
     chosen = _normalize_runs(rows, chosen, abort_verdicts)
+    # Last, so what the operator wrote wins over every estimate above,
+    # the run numbering included.
+    if name_entities:
+        chosen = _entities_from_names(rows, chosen, name_entities, df)
 
     probe_stats: dict[str, ProbeFileStats] = {}
     if probe_convert:
@@ -2351,6 +2399,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--subject-from", choices=("number", "patient-id", "given-name", "family-name"),
+        default="number",
+        help=(
+            "Where DICOM subjects' labels come from: numbers (sub-001, default), or "
+            "the patient ID, given name or family name, curated into a BIDS label "
+            "(letters and digits; accents and spaces go). A subject whose field is "
+            "empty or anonymised is numbered; two whose values match are kept apart "
+            "with a number."
+        ),
+    )
+    parser.add_argument(
+        "--name-entity", action="append", default=[], metavar="ENTITY",
+        help=(
+            "Let the sequence name decide ENTITY (a short key such as acq, task or "
+            "run): when the series description or protocol name states it "
+            "(func_task-nback_acq-mb4), that value wins over the scan's estimate. "
+            "Repeat it, or give several separated by commas: --name-entity acq,task."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -2421,6 +2489,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error(
             f"--drop-entity cannot leave out {', '.join(unknown)}. Choose from: "
             + ", ".join(offered()) + " (sub, ses and task name the recording).")
+    from ..inventory import name_entities as _by_name
+
+    try:
+        name_entities = _by_name.parse_list(",".join(args.name_entity))
+    except ValueError as exc:
+        parser.error(f"--name-entity: {exc}")
+    subject_from = args.subject_from.replace("-", "_")
 
     user_hints: Optional[list[UserHint]] = None
     exclusions: Optional[list[ExclusionRule]] = None
@@ -2470,6 +2545,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             user_hints=user_hints, exclusions=exclusions,
             classifier_config=classifier_config,
             drop_entities=drop_entities,
+            subject_from=subject_from,
+            name_entities=name_entities,
             **log_keywords(args),
         )
         version = import_scan_as_version(
@@ -2497,6 +2574,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         exclusions=exclusions,
         classifier_config=classifier_config,
         drop_entities=drop_entities,
+        subject_from=subject_from,
+        name_entities=name_entities,
         **log_keywords(args),
     )
     return 0

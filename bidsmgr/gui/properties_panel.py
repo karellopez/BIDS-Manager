@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QSpinBox,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -532,6 +533,9 @@ class PropertiesPanel(QWidget):
             if section is not None:
                 self._body_layout.addSpacing(6)
                 self._body_layout.addWidget(section)
+        if self._model.column_applies(row, "drop_volumes"):
+            self._body_layout.addSpacing(6)
+            self._body_layout.addWidget(self._build_dummy_volumes(row))
         why = self._build_why_this_name(row)
         if why is not None:
             self._body_layout.addSpacing(6)
@@ -1439,6 +1443,53 @@ class PropertiesPanel(QWidget):
             self._jobs.done.connect(self._on_job_done)
             self._jobs.failed.connect(self._on_job_failed)
         return self._jobs
+
+    def _build_dummy_volumes(self, row: int) -> QWidget:
+        """How many volumes the conversion removes from the start of this
+        functional run (``fixups.dummy_volumes``): its own number, or the
+        default in Settings > Convert."""
+        from .app_settings import AppSettings
+
+        default = int(AppSettings.load().convert_drop_volumes)
+        own = self._model.drop_volumes(row)
+        count = default if own is None else own
+        total = self._cell(row, "probe_n_volumes").strip()
+        box = CollapsibleSection(
+            "Dummy volumes",
+            subtitle=("default" if own is None else "this run"),
+            badge=(f"{count} removed" if count else "none removed"),
+            expanded=bool(count) or own is not None,
+        )
+        why = QLabel(
+            "Volumes removed from the start of this run at conversion, before the signal "
+            "is steady. Its sidecar records it (NumberOfVolumesDiscardedByUser); its "
+            "events and its physiology start at the first volume kept.")
+        why.setObjectName("dlg-hint")
+        why.setWordWrap(True)
+        box.add(why)
+        line = QWidget()
+        h = QHBoxLayout(line)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        spin = QSpinBox()
+        spin.setObjectName("ent-input")
+        spin.setRange(-1, 100)
+        spin.setSpecialValueText(f"Default ({default})")
+        spin.setSuffix(" volumes")
+        spin.setValue(-1 if own is None else own)
+        spin.setToolTip("Default: the number in Settings > Convert > Dummy volumes. "
+                        "0 keeps every volume of this run whatever the default.")
+        spin.valueChanged.connect(
+            lambda v, rr=row: self._model.set_drop_volumes(rr, None if v < 0 else v))
+        h.addWidget(spin)
+        if total.isdigit():
+            of = QLabel(f"of {total} volumes")
+            of.setObjectName("dlg-hint")
+            h.addWidget(of)
+        h.addStretch(1)
+        box.add(line)
+        self.dummy_volumes_spin = spin
+        return box
 
     def _build_fieldmap_links(self, row: int) -> Optional[QWidget]:
         """Which runs this fieldmap corrects, as the conversion will link

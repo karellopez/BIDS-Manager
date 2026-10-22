@@ -1,0 +1,480 @@
+"""Siemens CMRR physiological logs, read and written as BIDS tables.
+
+The CMRR multiband sequences log the physiology of a run in plain text, one
+log per kind of signal, and store the logs together in one ``_PhysioLog``
+DICOM (private tag ``7fe1,1010``) or as ``.log`` files:
+
+- ``PULS``: pulse oximetry, one channel;
+- ``RESP``: respiratory belt, one channel;
+- ``ECG``: up to four leads, ``ECG1`` to ``ECG4``, interleaved line by line;
+- ``EXT``: external inputs, ``EXT1`` and ``EXT2``;
+- ``ACQUISITION_INFO`` (``_Info.log``): when every slice of every volume was
+  acquired.
+
+Every sample carries its time in scanner ticks of 2.5 ms, so each channel is
+placed on an exact grid at its own rate, a missing sample left ``n/a``.
+
+Read here rather than with the vendored ``bidsphysio`` because that parser
+put every line whose channel name contains ``ECG`` into one list: four leads
+became one column four times too long, with the leads interleaved. And its
+trigger was a table of its own, sampled only at the volume starts and filled
+in between with a missing value that a boolean array turns into ``True``: a
+constant 1, a flat line. Measured on the multimodal sample (2026-10-22): ECG
+146,944 rows at 400 Hz (367 s) for a 92 s run; trigger 84,151 rows, all 1.
+
+Written (:func:`write_tables`), the scanner trigger is a ``trigger`` column,
+1 at the first sample of each volume of the run's image and 0 elsewhere, the
+LAST column of every table. Two layouts:
+
+- ``by_rate`` (default): one table per sampling rate, the samples exactly as
+  recorded (the four ECG leads together, pulse and respiration apart). The
+  standard asks one sampling frequency per file, so this is how recordings
+  taken at different rates stay as they were measured.
+- ``single``: one table for the run, every channel on the fastest rate,
+  slower channels linearly interpolated (and said so in the sidecar). Also
+  BIDS compliant: one file, one sampling frequency, the trigger a standard
+  column.
+
+``align`` crops the tables to the run: from the first volume of the image to
+the end of its last volume, so ``StartTime`` is 0 (to within one sample).
+``drop_volumes`` is the number of volumes removed from the start of the image
+(dummy scans): the run, ``StartTime`` and the trigger column then start at the
+first volume kept.
+"""
+
+from __future__ import annotations
+
+import gzip
+import io
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Optional, Sequence
+
+import numpy as np
+
+#: One scanner tick, in seconds.
+TICK = 0.0025
+
+LAYOUT_BY_RATE = "by_rate"
+LAYOUT_SINGLE = "single"
+LAYOUTS = (LAYOUT_BY_RATE, LAYOUT_SINGLE)
+
+#: Log type -> (column label, what it is).
+_KINDS = {
+    "PULS": ("cardiac", "Pulse oximetry"),
+    "RESP": ("respiratory", "Respiratory belt"),
+    "ECG": ("ecg", "ECG"),
+    "EXT": ("external_trigger", "External input"),
+}
+
+#: Column order in a table: what a reader looks for first, the trigger last.
+_ORDER = ("cardiac", "respiratory", "ecg", "external_trigger")
+
+_ROWS_PER_CHUNK = 100_000
+
+
+@dataclass
+class Channel:
+    """One recorded channel on its own grid."""
+
+    name: str              # the scanner's (ECG2, PULS)
+    label: str             # the column (ecg2, cardiac)
+    kind: str              # the log type (ECG, PULS, RESP, EXT)
+    rate: float            # samples per second
+    start: float           # time of the first sample, seconds on the scanner clock
+    values: np.ndarray     # float, NaN where a sample is missing
+
+    @property
+    def end(self) -> float:
+        """Time of the last sample."""
+        return self.start + (len(self.values) - 1) / self.rate
+
+
+@dataclass
+class Volume:
+    """When one volume of the run was acquired (first echo)."""
+
+    index: int
+    start: float
+    finish: float
+
+
+@dataclass
+class CmrrPhysio:
+    """Everything one physio DICOM (or set of logs) holds."""
+
+    channels: list[Channel] = field(default_factory=list)
+    volumes: list[Volume] = field(default_factory=list)
+    uuid: str = ""
+    scan_date: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Reading
+# ---------------------------------------------------------------------------
+
+
+def logs_in_dicom(path: Path) -> list[tuple[str, str]]:
+    """``(file name, text)`` of every log a CMRR physio DICOM carries."""
+    import pydicom
+
+    ds = pydicom.dcmread(str(path), stop_before_pixels=True)
+    if (0x7FE1, 0x1010) not in ds:
+        raise ValueError(f"{Path(path).name} holds no CMRR physiological log "
+                         "(private tag 7fe1,1010 is missing)")
+    data = bytes(ds[0x7FE1, 0x1010].value)
+    rows = int(ds.get("AcquisitionNumber", 0) or 0)
+    if rows <= 0 or len(data) % rows or (len(data) // rows) % 1024:
+        raise ValueError(f"{Path(path).name}: the physiological log is not laid out "
+                         "as a CMRR sequence writes it")
+    waves = (len(data) // rows) // 1024
+    length = len(data) // waves
+    out = []
+    for w in range(waves):
+        block = data[w * length:(w + 1) * length]
+        size = int.from_bytes(block[0:4], sys.byteorder)
+        name_size = int.from_bytes(block[4:8], sys.byteorder)
+        name = block[8:8 + name_size].decode("utf-8", "ignore").rstrip("\x00")
+        text = block[1024:1024 + size].decode("utf-8", "ignore")
+        out.append((name, text))
+    return out
+
+
+def _header(lines: Iterable[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in lines:
+        key, eq, value = line.partition("=")
+        if eq and key.strip() and " " not in key.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
+_INT = re.compile(r"^-?\d+$")
+
+
+def parse_log(text: str) -> tuple[dict[str, str], dict[str, list[tuple[int, float]]],
+                                  list[tuple[int, int, int, int, int]]]:
+    """``(header, samples by channel, acquisition rows)`` of one log.
+
+    Samples are ``(tick, value)``; acquisition rows (an ``_Info`` log) are
+    ``(volume, slice, start tick, finish tick, echo)``.
+    """
+    lines = text.splitlines()
+    header = _header(lines)
+    info = header.get("LogDataType", "") == "ACQUISITION_INFO"
+    samples: dict[str, list[tuple[int, float]]] = {}
+    rows: list[tuple[int, int, int, int, int]] = []
+    for line in lines:
+        parts = line.split()
+        if not parts or not _INT.match(parts[0]):
+            continue
+        if info:
+            if len(parts) >= 5 and all(_INT.match(p) for p in parts[:5]):
+                rows.append(tuple(int(p) for p in parts[:5]))   # type: ignore[arg-type]
+            continue
+        if len(parts) < 3:
+            continue
+        try:
+            value = float(parts[2])
+        except ValueError:
+            continue
+        samples.setdefault(parts[1], []).append((int(parts[0]), value))
+    return header, samples, rows
+
+
+def _label(kind: str, name: str, several: bool) -> str:
+    base = _KINDS.get(kind, (re.sub(r"[^0-9a-z]+", "", kind.lower()) or "signal", ""))[0]
+    if not several:
+        return base
+    digits = re.sub(r"\D", "", name)
+    return f"{base}{digits}" if digits else f"{base}_{name.lower()}"
+
+
+def read_cmrr(paths: Sequence[Path]) -> CmrrPhysio:
+    """Read one CMRR physio DICOM, or a set of CMRR ``.log`` files."""
+    paths = [Path(p) for p in paths]
+    logs: list[tuple[str, str]] = []
+    for path in paths:
+        if path.suffix.lower() == ".log":
+            logs.append((path.name, path.read_text(encoding="utf-8", errors="ignore")))
+        else:
+            logs.extend(logs_in_dicom(path))
+    physio = CmrrPhysio()
+    for _name, text in logs:
+        header, samples, rows = parse_log(text)
+        kind = header.get("LogDataType", "")
+        physio.uuid = physio.uuid or header.get("UUID", "")
+        physio.scan_date = physio.scan_date or header.get("ScanDate", "")
+        if kind == "ACQUISITION_INFO":
+            physio.volumes = _volumes(rows)
+            continue
+        step = _sample_ticks(header, samples)
+        several = len(samples) > 1
+        for channel_name in sorted(samples, key=_natural):
+            ticks = np.array([t for t, _v in samples[channel_name]], dtype=np.int64)
+            values = np.array([v for _t, v in samples[channel_name]], dtype=float)
+            if ticks.size == 0:
+                continue
+            index, start = _place(ticks, step)
+            grid = np.full(int(index[-1]) + 1, np.nan)
+            grid[index] = values
+            physio.channels.append(Channel(
+                name=channel_name, label=_label(kind, channel_name, several), kind=kind,
+                rate=1.0 / (step * TICK), start=start * TICK, values=grid))
+    return physio
+
+
+def _place(ticks: np.ndarray, step: float) -> tuple[np.ndarray, float]:
+    """``(grid index of each sample, tick of grid slot 0)``.
+
+    By SEQUENCE, not by rounding each tick: the scanner corrects its clock
+    once in a while (measured: every channel at once, one tick back, about
+    0.1 s into a run), so the ticks after it sit half a sample off the ticks
+    before. Rounding them one by one put two samples in one slot every other
+    time and left half the pulse channel empty. A step of ``k`` samples is
+    ``max(1, round(gap / step))``: a real gap leaves slots empty, a corrected
+    clock does not. Slot 0's tick is the median offset, so nearly every
+    sample keeps its logged time exactly (those before a correction move by
+    at most one tick, 2.5 ms).
+    """
+    order = np.argsort(ticks, kind="stable")
+    if not np.array_equal(order, np.arange(ticks.size)):
+        ticks = ticks[order]
+    steps = np.maximum(1, np.floor(np.diff(ticks) / step + 0.5)).astype(np.int64)
+    index = np.concatenate([[0], np.cumsum(steps)])
+    start = float(np.median(ticks - index * step))
+    if not np.array_equal(order, np.arange(ticks.size)):
+        # Back to the order the values were read in.
+        unsorted = np.empty_like(index)
+        unsorted[order] = index
+        index = unsorted
+    return index, start
+
+
+def _natural(name: str):
+    digits = re.sub(r"\D", "", name)
+    return (re.sub(r"\d", "", name), int(digits) if digits else 0)
+
+
+def _sample_ticks(header: dict[str, str], samples: dict) -> float:
+    """Ticks between two samples: the log's ``SampleTime``, else measured."""
+    try:
+        step = float(header.get("SampleTime", ""))
+        if step > 0:
+            return step
+    except ValueError:
+        pass
+    diffs = [np.diff(sorted({t for t, _v in values})) for values in samples.values()]
+    diffs = [d for d in diffs if d.size]
+    return float(np.median(np.concatenate(diffs))) if diffs else 1.0
+
+
+def _volumes(rows: list[tuple[int, int, int, int, int]]) -> list[Volume]:
+    """Each volume's first start and last finish, from its first echo."""
+    starts: dict[int, int] = {}
+    finishes: dict[int, int] = {}
+    echoes = [r[4] for r in rows]
+    first_echo = min(echoes) if echoes else 0
+    for volume, _slice, start, finish, echo in rows:
+        if echo != first_echo:
+            continue
+        starts[volume] = min(starts.get(volume, start), start)
+        finishes[volume] = max(finishes.get(volume, finish), finish)
+    return [Volume(v, starts[v] * TICK, finishes[v] * TICK) for v in sorted(starts)]
+
+
+# ---------------------------------------------------------------------------
+# Writing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Table:
+    """One BIDS physio table, before it is written."""
+
+    label: str                       # the recording label ("" for the only table)
+    rate: float
+    start: float                     # time of row 0, scanner clock
+    columns: list[str]
+    data: np.ndarray                 # rows x columns (float, NaN = n/a)
+    descriptions: dict[str, str]
+
+    def start_time(self, t0: float) -> float:
+        return round(self.start - t0, 6)
+
+
+def _ordered(channels: list[Channel]) -> list[Channel]:
+    def key(ch: Channel):
+        base = re.sub(r"\d+$", "", ch.label)
+        rank = _ORDER.index(base) if base in _ORDER else len(_ORDER)
+        return (rank, _natural(ch.name))
+    return sorted(channels, key=key)
+
+
+def _describe(ch: Channel, rate: Optional[float] = None) -> str:
+    what = _KINDS.get(ch.kind, ("", ch.kind))[1] or ch.kind
+    text = f"{what} (Siemens {ch.name}), in the scanner's units."
+    if ch.kind == "ECG" and ch.label != "ecg":
+        lead = re.sub(r"\D", "", ch.name)
+        text = f"ECG channel {lead} (Siemens {ch.name}), in the scanner's units."
+    if rate is not None and abs(rate - ch.rate) > 1e-9:
+        text += (f" Recorded at {ch.rate:g} Hz and resampled to {rate:g} Hz by linear "
+                 "interpolation.")
+    return text
+
+
+def _on_grid(ch: Channel, start: float, rate: float, n: int) -> np.ndarray:
+    """``ch`` sampled at ``start + k / rate`` for ``k < n``: placed exactly when
+    the rate and phase match, else linearly interpolated, never across a gap
+    and never beyond the channel's own first and last sample."""
+    out = np.full(n, np.nan)
+    if abs(ch.rate - rate) < 1e-9:
+        offset = (ch.start - start) * rate
+        shift = int(round(offset))
+        if abs(offset - shift) < 1e-6:
+            lo, hi = max(0, shift), min(n, shift + len(ch.values))
+            if hi > lo:
+                out[lo:hi] = ch.values[lo - shift:hi - shift]
+            return out
+    times = ch.start + np.arange(len(ch.values)) / ch.rate
+    grid = start + np.arange(n) / rate
+    valid = ~np.isnan(ch.values)
+    if valid.sum() < 2:
+        return out
+    inside = (grid >= times[0] - 1e-9) & (grid <= times[-1] + 1e-9)
+    out[inside] = np.interp(grid[inside], times[valid], ch.values[valid])
+    # A grid point next to a missing sample is not interpolated across it.
+    pos = np.clip(np.searchsorted(times, grid[inside]), 1, len(times) - 1)
+    gap = np.isnan(ch.values[pos - 1]) | np.isnan(ch.values[pos])
+    out[np.flatnonzero(inside)[gap]] = np.nan
+    return out
+
+
+def _trigger(volumes: list[Volume], start: float, rate: float, n: int) -> np.ndarray:
+    col = np.zeros(n)
+    for vol in volumes:
+        k = int(np.ceil((vol.start - start) * rate - 1e-9))
+        if 0 <= k < n:
+            col[k] = 1
+    return col
+
+
+def build_tables(physio: CmrrPhysio, *, layout: str = LAYOUT_BY_RATE, align: bool = False,
+                 drop_volumes: int = 0) -> tuple[list[Table], float]:
+    """The tables to write, and the time (scanner clock) ``StartTime`` is
+    measured from: the first volume kept, or the first sample when the log
+    says nothing about volumes."""
+    if layout not in LAYOUTS:
+        raise ValueError(f"unknown physio layout {layout!r}; choose from {', '.join(LAYOUTS)}")
+    channels = _ordered(physio.channels)
+    if not channels:
+        raise ValueError("the physiological log holds no signal")
+    kept = physio.volumes[drop_volumes:] if drop_volumes > 0 else list(physio.volumes)
+    if physio.volumes and not kept:
+        raise ValueError(f"{drop_volumes} volumes to remove, and the run has only "
+                         f"{len(physio.volumes)}")
+    t0 = kept[0].start if kept else min(ch.start for ch in channels)
+    window = None
+    if align and kept:
+        window = (kept[0].start, kept[-1].finish)
+
+    if layout == LAYOUT_SINGLE:
+        groups = [channels]
+    else:
+        by_rate: dict[float, list[Channel]] = {}
+        for ch in channels:
+            by_rate.setdefault(round(ch.rate, 6), []).append(ch)
+        groups = list(by_rate.values())
+
+    tables: list[Table] = []
+    for group in groups:
+        rate = max(ch.rate for ch in group)
+        start = min(ch.start for ch in group)
+        end = max(ch.end for ch in group)
+        if window is not None:
+            # From the first sample at or after the run's start to the last
+            # at or before its end, on this table's grid.
+            k0 = int(np.ceil((window[0] - start) * rate - 1e-9))
+            start = start + k0 / rate
+            end = min(end, window[1])
+        n = int(np.floor((end - start) * rate + 1e-9)) + 1
+        if n <= 0:
+            continue
+        columns, data, descriptions = [], [], {}
+        for ch in group:
+            columns.append(ch.label)
+            data.append(_on_grid(ch, start, rate, n))
+            descriptions[ch.label] = _describe(ch, rate)
+        if kept:
+            columns.append("trigger")
+            data.append(_trigger(kept, start, rate, n))
+            descriptions["trigger"] = (
+                "Scanner volume trigger from the acquisition log: 1 at the first sample of "
+                "each volume of the run's image, 0 elsewhere."
+                + (f" The {drop_volumes} volumes removed from the start of the image are not "
+                   "marked." if drop_volumes > 0 else ""))
+        tables.append(Table(label=_group_label(group), rate=rate, start=start,
+                            columns=columns, data=np.column_stack(data),
+                            descriptions=descriptions))
+    if len(tables) == 1:
+        tables[0].label = ""
+    else:
+        from ..vendor.bidsphysio.base.bidsphysio import unique_bids_labels
+
+        for table, label in zip(tables, unique_bids_labels([t.label for t in tables])):
+            table.label = label
+    return tables, t0
+
+
+def _group_label(group: list[Channel]) -> str:
+    bases = {re.sub(r"\d+$", "", ch.label) for ch in group}
+    return bases.pop() if len(bases) == 1 else group[0].label
+
+
+def table_paths(prefix: Path, table: Table) -> tuple[Path, Path]:
+    """``(<prefix>[_recording-<label>]_physio.tsv.gz, .json)``. ``prefix`` is
+    the recording's name without ``_physio``."""
+    prefix = Path(prefix)
+    stem = prefix.name + (f"_recording-{table.label}" if table.label else "") + "_physio"
+    return prefix.with_name(stem + ".tsv.gz"), prefix.with_name(stem + ".json")
+
+
+def write_tables(physio: CmrrPhysio, prefix: Path, *, layout: str = LAYOUT_BY_RATE,
+                 align: bool = False, drop_volumes: int = 0) -> list[Path]:
+    """Write the BIDS physio tables of ``physio`` next to ``prefix`` (the
+    recording's name without ``_physio``). Returns every file written."""
+    tables, t0 = build_tables(physio, layout=layout, align=align, drop_volumes=drop_volumes)
+    written: list[Path] = []
+    for table in tables:
+        data_path, json_path = table_paths(prefix, table)
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_tsv_gz(data_path, table)
+        sidecar = {
+            "SamplingFrequency": table.rate,
+            "StartTime": table.start_time(t0),
+            "Columns": table.columns,
+        }
+        for column in table.columns:
+            sidecar[column] = {"Description": table.descriptions[column]}
+        json_path.write_text(json.dumps(sidecar, indent=4) + "\n", encoding="utf-8")
+        written += [data_path, json_path]
+    return written
+
+
+def _write_tsv_gz(path: Path, table: Table) -> None:
+    """No header row (BIDS physio), ``n/a`` for a missing sample, the trigger
+    as 0/1, in chunks so a long recording is never all text at once."""
+    fmt = ["%d" if c == "trigger" else "%.10g" for c in table.columns]
+    with gzip.open(path, "wb") as out:
+        for lo in range(0, len(table.data), _ROWS_PER_CHUNK):
+            buf = io.BytesIO()
+            np.savetxt(buf, table.data[lo:lo + _ROWS_PER_CHUNK], fmt=fmt, delimiter="\t")
+            out.write(buf.getvalue().replace(b"nan", b"n/a"))
+
+
+__all__ = ["Channel", "CmrrPhysio", "LAYOUTS", "LAYOUT_BY_RATE", "LAYOUT_SINGLE", "TICK",
+           "Table", "Volume", "build_tables", "logs_in_dicom", "parse_log", "read_cmrr",
+           "table_paths", "write_tables"]

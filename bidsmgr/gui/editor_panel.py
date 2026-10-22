@@ -292,6 +292,28 @@ class EditorPanel(QWidget):
     def current_report(self) -> Optional[ValidationReport]:
         return self._report
 
+    def guide_facts(self) -> dict:
+        """What the guide's Editor path needs to know (``guide_steps``).
+        ``_root`` is the dataset, for what the guide tracks itself."""
+        root = self.current_root()
+        report = self._report
+        counts = report.counts if report is not None else {}
+        worker = self._report_worker
+        return {
+            "_root": root,
+            "root": root is not None,
+            "view_only": self._view_only,
+            "validating": worker is not None and worker.isRunning(),
+            "validated": report is not None,
+            "errors": int(counts.get("err", 0)),
+            "warnings": int(counts.get("warn", 0)),
+        }
+
+    def guide_targets(self) -> dict:
+        """The controls the guide can point at, by name."""
+        return {"open": self._open_btn, "validate": self._validate_dataset_btn,
+                "findings": self._validation_frame}
+
     def start_dataset_validation(self) -> None:
         """Kick a :class:`ReportWorker` against the current root.
 

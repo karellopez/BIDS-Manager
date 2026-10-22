@@ -683,6 +683,8 @@ QLabel#section-caption {
  * of its own background, so the card is one surface; panels nested inside
  * a card stay flat and are divided by hairlines. */
 QWidget#card-canvas { background: transparent; }
+/* The guide's ring and caption are painted; the layer itself is see-through. */
+QWidget#guide-overlay { background: transparent; border: none; }
 QFrame[card="true"] {
     background: $surface;
     border: 1px solid $border;

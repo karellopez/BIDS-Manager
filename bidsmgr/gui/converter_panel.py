@@ -685,6 +685,7 @@ class ConverterPanel(QWidget):
         pre-generated TSV from disk).
         """
         self._model = InventoryTableModel(df, project=self._project, parent=self)
+        self._guide_reviewed = False
         # Apply the user's "Highlight aborts" preference to the fresh model.
         self._model.set_highlight_aborts(self._aborts_btn.isChecked())
         self._table.setModel(self._model)
@@ -753,6 +754,8 @@ class ConverterPanel(QWidget):
         exclusions=None,
         index_widths=None,
         drop_entities=None,
+        subject_from: str = "number",
+        name_entities=None,
     ) -> ScanWorker:
         """Kick off a background scan.
 
@@ -797,6 +800,8 @@ class ConverterPanel(QWidget):
             exclusions=exclusions,
             index_widths=index_widths,
             drop_entities=drop_entities,
+            subject_from=subject_from,
+            name_entities=name_entities,
             classifier_config=AppSettings.load().classifier(),
             parent=self,
         )
@@ -1082,6 +1087,12 @@ class ConverterPanel(QWidget):
 
         self._table = self._build_table()
         self._inspection_stack.addWidget(self._table)
+        # The guide's "check the table" step is done by the USER looking at a
+        # row (a click, or Enter), not by the row selected for them when a
+        # table loads.
+        self._guide_reviewed = False
+        self._table.pressed.connect(self._on_guide_reviewed)
+        self._table.activated.connect(self._on_guide_reviewed)
 
         tv.addWidget(self._inspection_stack, 1)
 
@@ -1191,6 +1202,7 @@ class ConverterPanel(QWidget):
             sourcedata_modalities=tuple(m.strip() for m in s.convert_sourcedata_modalities.split(",")
                                         if m.strip()),
             force_edf=bool(s.convert_force_edf),
+            physio_layout=s.convert_physio_layout,
             bids_version=loader.bids_version(),
             version=str(__version__),
         )
@@ -1811,6 +1823,8 @@ class ConverterPanel(QWidget):
             exclusions=s.to_exclusions(),
             index_widths=s.scan_index_widths,
             drop_entities=s.scan_drop_entities,
+            subject_from=s.scan_subject_from,
+            name_entities=s.scan_name_entities,
         )
 
     def _on_tsv_filename_edited(self) -> None:
@@ -2169,6 +2183,9 @@ class ConverterPanel(QWidget):
             b0_field=self._app_settings.convert_b0_field,
             sourcedata=self._app_settings.convert_sourcedata,
             sourcedata_modalities=self._app_settings.convert_sourcedata_modalities,
+            drop_volumes=self._app_settings.convert_drop_volumes,
+            physio_layout=self._app_settings.convert_physio_layout,
+            physio_align=self._app_settings.convert_physio_align,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -2534,6 +2551,37 @@ class ConverterPanel(QWidget):
             self._table.ScrollHint.PositionAtCenter,
         )
 
+    # ------------------------------------------------------------------
+    # The guide (gui/guide.py)
+    # ------------------------------------------------------------------
+
+    def guide_facts(self) -> dict:
+        """What the guide's Converter path needs to know (``guide_steps``).
+        ``_root`` is the dataset, for what the guide tracks itself."""
+        def running(worker) -> bool:
+            return worker is not None and worker.isRunning()
+
+        rows = self._model.rowCount() if self._model is not None else 0
+        return {
+            "_root": self._bids_root,
+            "project": self._bids_root is not None,
+            "raw_root": self._raw_root is not None,
+            "scanning": self._scan_worker is not None,
+            "rows": rows,
+            "reviewed": bool(rows and self._guide_reviewed),
+            "converting": (self._convert_worker is not None
+                           or running(self._metadata_worker)
+                           or running(self._validate_worker)),
+        }
+
+    def _on_guide_reviewed(self, *_args) -> None:
+        self._guide_reviewed = True
+
+    def guide_targets(self) -> dict:
+        """The controls the guide can point at, by name."""
+        return {"raw_folder": self._raw_pathbar.change_button, "scan": self._scan_btn,
+                "table": self._table, "run": self._run_btn, "properties": self._properties}
+
     def reload_app_settings(self) -> None:
         """Re-read persisted settings into the live panel.
 
@@ -2585,7 +2633,8 @@ class ConverterPanel(QWidget):
         if not features:
             return []
         return by_parameters.rescore(self._model.dataframe(), features,
-                                     self._app_settings.classifier())
+                                     self._app_settings.classifier(),
+                                     name_entities=self._app_settings.scan_name_entities)
 
     def offer_reclassify(self, *, ask: bool = True) -> int:
         """After the classification settings change: name the open table

@@ -503,6 +503,22 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Classifier:", self._scan_skip_bids_guess)
 
+        from ..inventory.subject_label import SOURCES as subject_sources
+
+        self._scan_subject_from = QComboBox()
+        self._scan_subject_from.setObjectName("ent-input")
+        for key, text in subject_sources.items():
+            self._scan_subject_from.addItem(text, key)
+        self._scan_subject_from.setToolTip(
+            "What each DICOM subject is called. Numbers (sub-001, sub-002, ...) by "
+            "default; or the patient ID, given name or family name from the DICOM "
+            "header, curated into a BIDS label: letters and digits only, accents and "
+            "spaces removed (OL_0001 becomes sub-OL0001).\n\nA subject whose field is "
+            "empty or anonymised (ANONYMOUS, DE-IDENTIFIED) is numbered; two subjects "
+            "whose values become the same label are kept apart with a number. Which "
+            "series belong to one subject is decided as before.")
+        form.addRow("Subject labels:", self._scan_subject_from)
+
         # Index widths.
         #
         # A group rather than a row of spin boxes: the first version was six
@@ -579,8 +595,63 @@ class SettingsDialog(QDialog):
         v.addWidget(defaults)
         v.addWidget(widths_box)
         v.addWidget(self._build_leave_out_box())
+        v.addWidget(self._build_name_entities_box())
         v.addStretch(1)
         return w
+
+    def _build_name_entities_box(self) -> QGroupBox:
+        """Entities the sequence name decides over the scan's estimate.
+
+        Same shape as the leave-out box: the readable name on the checkbox,
+        the key beside it; offered from the schema
+        (``inventory.name_entities.offered``).
+        """
+        from ..inventory.name_entities import offered
+
+        box = QGroupBox("Entities the sequence name decides")
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+        explain = QLabel(
+            "When the operator wrote one of these into the series description or the "
+            "protocol name, as in " + code("func_task-nback_acq-mb4_run-02") + ", its "
+            "value wins over the one BIDS Manager estimates. Only a value valid for the "
+            "entity is taken, and only where the standard allows the entity for the "
+            "recording; an entity the name does not mention keeps the estimate.<br><br>"
+            "Applies from the next scan.")
+        explain.setWordWrap(True)
+        explain.setObjectName("dlg-hint")
+        outer.addWidget(explain)
+
+        self._name_entities: dict[str, QCheckBox] = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        keys = offered()
+        columns = 2
+        per_column = -(-len(keys) // columns)
+        for i, key in enumerate(keys):
+            try:
+                info = schema.entity_key_info(key)
+                display, why = info.display_name, info.description.strip()
+            except KeyError:
+                display, why = key, ""
+            check = QCheckBox(display)
+            check.setToolTip(
+                f"{display} ({key}-): the sequence name's value wins.\n\n{why[:300]}"
+                if why else f"The {key} entity: the sequence name's value wins.")
+            tag = QLabel(code(f"{key}-"))
+            tag.setObjectName("dlg-hint")
+            self._name_entities[key] = check
+            col, row = divmod(i, per_column)
+            grid.addWidget(check, row, col * 3)
+            grid.addWidget(tag, row, col * 3 + 1)
+            if col < columns - 1:
+                grid.setColumnMinimumWidth(col * 3 + 2, 14)
+        for col in range(columns):
+            grid.setColumnStretch(col * 3 + 1, 1)
+        outer.addLayout(grid)
+        return box
 
     def _build_leave_out_box(self) -> QGroupBox:
         """Entities left out of the names a scan proposes.
@@ -1029,6 +1100,40 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Force EDF:", self._convert_force_edf)
 
+        self._convert_drop_volumes = QSpinBox()
+        self._convert_drop_volumes.setRange(0, 100)
+        self._convert_drop_volumes.setSpecialValueText("None")
+        self._convert_drop_volumes.setSuffix(" volumes")
+        self._convert_drop_volumes.setToolTip(
+            "Remove the first volumes (dummy scans, before the signal is steady) of every "
+            "functional run, at conversion. The run's sidecar records it "
+            "(NumberOfVolumesDiscardedByUser), its events move with the new first volume "
+            "and its physiology starts there too.\n\nA number in a run's 'drop volumes' "
+            "cell in the scan table wins for that run, 0 included.")
+        form.addRow("Dummy volumes:", self._convert_drop_volumes)
+
+        self._convert_physio_layout = QComboBox()
+        self._convert_physio_layout.setObjectName("ent-input")
+        self._convert_physio_layout.addItem(
+            "One table per sampling rate, as recorded", "by_rate")
+        self._convert_physio_layout.addItem(
+            "One table for the run, resampled to the fastest rate", "single")
+        self._convert_physio_layout.setToolTip(
+            "How a Siemens physiological log is written. BIDS asks one sampling frequency "
+            "per table, so channels recorded at different rates (ECG 400 Hz, pulse 200 Hz, "
+            "respiration 50 Hz) are either kept in a table each, exactly as measured, or "
+            "put in one table with the slower ones interpolated (said so in the sidecar). "
+            "Both are valid BIDS; every ECG lead is its own column and the scanner trigger "
+            "is the last column of every table.")
+        form.addRow("Physiology:", self._convert_physio_layout)
+        self._convert_physio_align = QCheckBox("Crop to the run (start at its first volume)")
+        self._convert_physio_align.setToolTip(
+            "Keep only the samples recorded while the run was acquired: from its first "
+            "volume (after any dummy volumes removed) to the end of its last, so the "
+            "tables start with the run (StartTime 0). Off: the whole recording, with "
+            "StartTime saying where the run starts.")
+        form.addRow("", self._convert_physio_align)
+
         # Defacing, with its engine beside it. Off by default: it is
         # destructive, so it has to be chosen rather than discovered.
         self._convert_deface = QCheckBox(
@@ -1453,6 +1558,10 @@ class SettingsDialog(QDialog):
             box.setValue(int(s.scan_index_widths.get(entity, 0) or 0))
         for key, check in self._drop_entities.items():
             check.setChecked(key in s.scan_drop_entities)
+        for key, check in self._name_entities.items():
+            check.setChecked(key in s.scan_name_entities)
+        self._scan_subject_from.setCurrentIndex(
+            max(0, self._scan_subject_from.findData(s.scan_subject_from)))
 
         self._convert_jobs.setValue(max(1, min(s.convert_n_jobs, cap)))
         idx = self._convert_on_existing.findData(s.convert_on_existing)
@@ -1471,6 +1580,10 @@ class SettingsDialog(QDialog):
             s.convert_preserve_curation
         )
         self._convert_force_edf.setChecked(s.convert_force_edf)
+        self._convert_drop_volumes.setValue(int(s.convert_drop_volumes))
+        self._convert_physio_layout.setCurrentIndex(
+            max(0, self._convert_physio_layout.findData(s.convert_physio_layout)))
+        self._convert_physio_align.setChecked(s.convert_physio_align)
         if self._convert_deface.isEnabled():
             self._convert_deface.setChecked(s.convert_deface)
         idx = self._convert_deface_engine.findData(s.convert_deface_engine)
@@ -1580,6 +1693,9 @@ class SettingsDialog(QDialog):
         }
         s.scan_drop_entities = [
             key for key, check in self._drop_entities.items() if check.isChecked()]
+        s.scan_name_entities = [
+            key for key, check in self._name_entities.items() if check.isChecked()]
+        s.scan_subject_from = self._scan_subject_from.currentData() or "number"
 
         s.convert_n_jobs = self._convert_jobs.value()
         s.convert_on_existing = self._convert_on_existing.currentData() or "skip"
@@ -1595,6 +1711,9 @@ class SettingsDialog(QDialog):
             self._convert_preserve_curation.isChecked()
         )
         s.convert_force_edf = self._convert_force_edf.isChecked()
+        s.convert_drop_volumes = int(self._convert_drop_volumes.value())
+        s.convert_physio_layout = self._convert_physio_layout.currentData() or "by_rate"
+        s.convert_physio_align = self._convert_physio_align.isChecked()
         s.convert_deface = self._convert_deface.isChecked()
         s.convert_deface_engine = (
             self._convert_deface_engine.currentData()
