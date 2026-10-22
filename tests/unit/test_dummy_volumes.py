@@ -130,12 +130,12 @@ def test_physiology_follows_its_run(tmp_path) -> None:
              "1.3": [str(tmp_path / "c.dcm")]}
     tasks = _build_tasks_for_subject(
         rows, tmp_path, files,
-        options=TaskOptions(physio_layout="single", physio_align=True))
+        options=TaskOptions(physio_layout="one_interpolated", physio_align=True))
     by_name = {t.basename: t for t in tasks}
     assert by_name["sub-01_task-rest_bold"].drop_volumes == 3
     assert by_name["sub-01_task-rest_physio"].drop_volumes == 3
     assert by_name["sub-01_task-other_physio"].drop_volumes == 0
-    assert by_name["sub-01_task-rest_physio"].physio_layout == "single"
+    assert by_name["sub-01_task-rest_physio"].physio_layout == "one_interpolated"
     assert by_name["sub-01_task-rest_physio"].physio_align is True
 
 
@@ -147,9 +147,9 @@ def test_the_command_line_hands_it_over(monkeypatch, tmp_path) -> None:
                         lambda *a, **k: seen.update(k) or 0)
     (tmp_path / "inv.tsv").write_text("participant_id\n")
     convert.main([str(tmp_path / "inv.tsv"), str(tmp_path / "out"), "--drop-volumes", "4",
-                  "--physio-layout", "single", "--physio-align", "--no-log-file"])
+                  "--physio-layout", "one-as-recorded", "--physio-align", "--no-log-file"])
     assert seen["drop_volumes"] == 4
-    assert seen["physio_layout"] == "single" and seen["physio_align"] is True
+    assert seen["physio_layout"] == "one_as_recorded" and seen["physio_align"] is True
 
 
 def test_an_unknown_physio_layout_is_refused(tmp_path) -> None:

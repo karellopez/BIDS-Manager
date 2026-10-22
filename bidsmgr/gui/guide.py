@@ -23,7 +23,7 @@ control they cannot reach would be noise.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -37,6 +37,7 @@ from PyQt6.QtCore import (
     Qt,
     QTimer,
     QVariantAnimation,
+    pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF
 from PyQt6.QtWidgets import (
@@ -45,12 +46,16 @@ from PyQt6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QComboBox,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
-from .guide_steps import Step, next_step
+from .guide_steps import Choice, Step, choices, goal_done, next_step
 from .viz import fonts
 
 #: How often the window is read while the guide is on.
@@ -323,12 +328,13 @@ class GuideOverlay(QWidget):
         inner = width - 2 * pad
         lines = []
         y = pad
-        label = step.counter.upper() if step.counter else ("DONE" if step.done else "")
+        flags = int(Qt.TextFlag.TextWordWrap)
+        label = step.heading.upper()
         if label:
-            h = QFontMetrics(counter_font).height()
+            h = QFontMetrics(counter_font).boundingRect(
+                QRect(0, 0, inner, 100000), flags, label).height()
             lines.append((counter_font, label, QRectF(pad, y, inner, h), "counter"))
             y += h + fonts.px(4)
-        flags = int(Qt.TextFlag.TextWordWrap)
         for font, text, role, after in ((title_font, step.title, "title", fonts.px(4)),
                                         (body_font, step.text, "body", 0)):
             h = QFontMetrics(font).boundingRect(QRect(0, 0, inner, 100000), flags, text).height()
@@ -546,6 +552,166 @@ class GuideOverlay(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# The question
+# ---------------------------------------------------------------------------
+
+
+class _ChoiceRow(QFrame):
+    """One answer: its label, a line on what it leads to, "Next step" on the
+    path's own. A frame rather than a button so the two lines wrap and the
+    card's layout measures them; clicked, or Return/Space with the focus."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, choice: Choice, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("guide-choice")
+        self.setProperty("recommended", bool(choice.recommended))
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(choice.label)
+        self.setToolTip(choice.detail)
+        self.key = choice.key
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(fonts.px(12), fonts.px(8), fonts.px(12), fonts.px(8))
+        lay.setSpacing(fonts.px(2))
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(fonts.px(8))
+        title = QLabel(choice.label, self)
+        title.setObjectName("guide-choice-title")
+        title.setWordWrap(True)
+        top.addWidget(title, 1)
+        labels = [title]
+        if choice.recommended:
+            tag = QLabel("Next step", self)
+            tag.setObjectName("guide-choice-tag")
+            top.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
+            labels.append(tag)
+        lay.addLayout(top)
+        detail = QLabel(choice.detail, self)
+        detail.setObjectName("guide-choice-detail")
+        detail.setWordWrap(True)
+        lay.addWidget(detail)
+        labels.append(detail)
+        for label in labels:
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.button() == Qt.MouseButton.LeftButton \
+                and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class GuideQuestion(QFrame):
+    """The question "What would you like to do now?", asked when the user
+    comes to a view that offers more than one thing to do. A card in the window (a child of
+    the central widget, never a window: GUI_LOOK_AND_FEEL 4.26), styled by the
+    stylesheet so it follows the theme and the font size. An answer emits
+    ``chosen``; Not now, Escape or a click anywhere else emits ``dismissed``,
+    and the click still does what it does."""
+
+    chosen = pyqtSignal(str)
+    dismissed = pyqtSignal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("guide-question")
+        self.hide()
+        self._anchor = QRect()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(fonts.px(16), fonts.px(14), fonts.px(16), fonts.px(12))
+        lay.setSpacing(fonts.px(8))
+        kicker = QLabel("GUIDE", self)
+        kicker.setObjectName("guide-question-kicker")
+        title = QLabel("What would you like to do now?", self)
+        title.setObjectName("guide-question-title")
+        title.setWordWrap(True)
+        lay.addWidget(kicker)
+        lay.addWidget(title)
+        self._rows = QVBoxLayout()
+        self._rows.setContentsMargins(0, 0, 0, 0)
+        self._rows.setSpacing(fonts.px(6))
+        lay.addLayout(self._rows)
+        foot = QHBoxLayout()
+        foot.setContentsMargins(0, 0, 0, 0)
+        foot.addStretch(1)
+        later = QPushButton("Not now", self)
+        later.setObjectName("guide-dismiss")
+        later.setCursor(Qt.CursorShape.PointingHandCursor)
+        later.clicked.connect(self.dismissed.emit)
+        foot.addWidget(later)
+        lay.addLayout(foot)
+
+    def choices(self) -> list[str]:
+        return [row.key for row in self.findChildren(_ChoiceRow) if not row.isHidden()]
+
+    def ask(self, choices: Sequence[Choice], anchor: QRect) -> None:
+        """Show ``choices`` over the top of ``anchor`` (the views' area)."""
+        while self._rows.count():
+            row = self._rows.takeAt(0).widget()
+            if row is not None:
+                row.hide()                    # before it loses its parent (4.26)
+                row.setParent(None)
+                row.deleteLater()
+        for choice in choices:
+            row = _ChoiceRow(choice, self)
+            row.clicked.connect(lambda key=choice.key: self.chosen.emit(key))
+            self._rows.addWidget(row)
+        self.place(anchor)
+        self.raise_()
+        if not self.isVisible():
+            self.show()
+            QApplication.instance().installEventFilter(self)
+        # The focus on the path's own next step, so Return takes it and the
+        # focus outline never marks another answer as the one to pick.
+        rows = [r for r in self.findChildren(_ChoiceRow) if not r.isHidden()]
+        pick = next((r for r in rows if r.property("recommended")), rows[0] if rows else None)
+        if pick is not None:
+            pick.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def place(self, anchor: QRect) -> None:
+        """Centred over the views, a little below their top."""
+        self._anchor = QRect(anchor)
+        width = max(fonts.px(260), min(fonts.px(420), anchor.width() - 2 * fonts.px(16)))
+        self.setFixedWidth(width)
+        lay = self.layout()
+        lay.activate()
+        height = lay.totalHeightForWidth(width) if lay.hasHeightForWidth() \
+            else lay.totalSizeHint().height()
+        x = anchor.left() + (anchor.width() - width) // 2
+        y = anchor.top() + max(fonts.px(24), int((anchor.height() - height) * 0.2))
+        self.setGeometry(x, y, width, height)
+
+    def close_question(self) -> None:
+        if self.isVisible():
+            QApplication.instance().removeEventFilter(self)
+            self.hide()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.key() == Qt.Key.Key_Escape:
+            self.dismissed.emit()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt naming
+        if event.type() == QEvent.Type.MouseButtonPress and self.isVisible() \
+                and isinstance(obj, QWidget) and obj is not self \
+                and not self.isAncestorOf(obj):
+            QTimer.singleShot(0, self.dismissed.emit)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # The controller
 # ---------------------------------------------------------------------------
 
@@ -563,10 +729,19 @@ class Guide(QObject):
         self._window = window
         self._host = window.centralWidget()
         self._overlay = GuideOverlay(self._host)
+        self._question = GuideQuestion(self._host)
+        self._question.chosen.connect(self._on_chosen)
+        self._question.dismissed.connect(self._on_dismissed)
         self._host.installEventFilter(self)
         self._on = False
         self._converted_root: Optional[str] = None
+        self._conversions = 0
         self._subjects: dict[str, bool] = {}
+        #: The view the guide last saw; entering another one may ask.
+        self._view: Optional[str] = None
+        #: Per view, the goal the user chose and the facts when they chose it.
+        self._goal: dict[str, str] = {}
+        self._before: dict[str, dict] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self.refresh)
@@ -583,24 +758,55 @@ class Guide(QObject):
         return self._overlay
 
     @property
+    def question(self) -> GuideQuestion:
+        return self._question
+
+    @property
     def enabled(self) -> bool:
         return self._on
 
+    def goal(self, view: str) -> Optional[str]:
+        return self._goal.get(view)
+
     def set_enabled(self, on: bool) -> None:
         self._on = bool(on)
+        self._view = None                 # switched on: the view is entered afresh
+        self._goal.clear()
         if self._on:
             self._timer.start()
             self.refresh()
         else:
             self._timer.stop()
+            self._question.close_question()
             self._overlay.clear()
 
     def repaint_for_palette(self) -> None:
         self._overlay.relayout()
+        if self._question.isVisible():
+            self._question.place(self._anchor())
+
+    def _anchor(self) -> QRect:
+        stack = self._window.stack
+        return QRect(stack.mapTo(self._host, QPoint(0, 0)), stack.size())
+
+    # -- the question ---------------------------------------------------------
+
+    def _on_chosen(self, key: str) -> None:
+        view = self._view
+        if view is not None:
+            self._goal[view] = key
+            self._before[view] = self._facts(view)
+        self._question.close_question()
+        self.refresh()
+
+    def _on_dismissed(self) -> None:
+        self._question.close_question()
+        self.refresh()
 
     # -- what the guide tracks itself ----------------------------------------
 
     def _on_convert_finished(self, rc: int, _parent) -> None:
+        self._conversions += 1
         if int(rc) == 0:
             root = self._window.converter.guide_facts().get("_root")
             self._converted_root = str(root) if root is not None else None
@@ -628,7 +834,8 @@ class Guide(QObject):
         root = facts.pop("_root", None)
         if view == "converter":
             facts["converted"] = root is not None and str(root) == self._converted_root
-        elif view == "editor" and root is not None:
+            facts["conversions"] = self._conversions
+        if view in ("converter", "editor") and root is not None:
             facts["subjects"] = self._has_subjects(root)
         return facts
 
@@ -642,6 +849,8 @@ class Guide(QObject):
         if obj is self._host and event.type() == QEvent.Type.Resize and self._on:
             self._overlay.setGeometry(self._host.rect())
             self._overlay.relayout()
+            if self._question.isVisible():
+                self._question.place(self._anchor())
             self._soon()
         return False
 
@@ -672,7 +881,24 @@ class Guide(QObject):
             self._overlay.clear()
             return
         view = window.guide_view()
-        step = next_step(view, self._facts(view))
+        facts = self._facts(view)
+        if view != self._view:
+            # Come to a view: where it offers more than one thing to do, ask.
+            self._view = view
+            self._goal.pop(view, None)
+            asked = choices(view, facts)
+            if len(asked) >= 2:
+                self._question.ask(asked, self._anchor())
+            else:
+                self._question.close_question()
+        if self._question.isVisible():
+            self._overlay.clear()
+            return
+        goal = self._goal.get(view)
+        if goal is not None and goal_done(view, goal, self._before.get(view, {}), facts):
+            goal = None
+            self._goal.pop(view, None)
+        step = next_step(view, facts, goal)
         if step is None:
             self._overlay.clear()
             return
@@ -681,10 +907,9 @@ class Guide(QObject):
         target = self._rect_in_host(window.guide_target(step.target))
         clear = [r for r in (self._rect_in_host(window.guide_target(name))
                              for name in step.keep_clear) if r is not None]
-        stack = window.stack
-        anchor = QRect(stack.mapTo(self._host, QPoint(0, 0)), stack.size())
         self._overlay.raise_()
-        self._overlay.show_step(step, target, anchor, tuple(clear))
+        self._overlay.show_step(step, target, self._anchor(), tuple(clear))
 
 
-__all__ = ["DONE_LINGER_MS", "Guide", "GuideOverlay", "GuideSwitch", "POLL_MS"]
+__all__ = ["DONE_LINGER_MS", "Guide", "GuideOverlay", "GuideQuestion", "GuideSwitch",
+           "POLL_MS"]

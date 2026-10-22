@@ -394,10 +394,10 @@ def test_the_source_is_converted_with_the_options_it_was_converted_with(tmp_path
     calls = _project(root, monkeypatch, {"sub-01_task-rest_bold.json": {"EchoTime": 0.03}})
     prov = root / ".bidsmgr/provenance/sub-01.json"
     record = json.loads(prov.read_text())
-    record["tasks"][0].update(drop_volumes=3, physio_layout="single", physio_align=True)
+    record["tasks"][0].update(drop_volumes=3, physio_layout="one_as_recorded", physio_align=True)
     prov.write_text(json.dumps(record))
     plan_sidecars(root)
-    assert calls[-1] == TaskOptions(drop_volumes=3, physio_layout="single", physio_align=True)
+    assert calls[-1] == TaskOptions(drop_volumes=3, physio_layout="one_as_recorded", physio_align=True)
 
 
 def test_without_source_data_the_reason_is_given(tmp_path, monkeypatch):

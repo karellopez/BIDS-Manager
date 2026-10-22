@@ -305,8 +305,10 @@ def run_convert(
     ``drop_volumes`` is removed from the start of every functional run whose
     ``drop_volumes`` cell is empty (a cell wins, 0 included); the run's
     physiology starts at the first volume kept too. ``physio_layout`` is
-    ``"by_rate"`` (one table per sampling rate) or ``"single"`` (one table,
-    slower channels resampled); ``physio_align`` crops physiology to its run.
+    ``"by_rate"`` (one table per sampling rate), ``"one_interpolated"`` (one
+    table, slower channels interpolated) or ``"one_as_recorded"`` (one table,
+    n/a between a slower channel's samples); ``physio_align`` crops physiology
+    to its run.
 
     Returns 0 on success, non-zero if any subject failed.
 
@@ -2179,12 +2181,15 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
-        "--physio-layout", choices=("by-rate", "single"), default="by-rate",
+        "--physio-layout", choices=("by-rate", "one-interpolated", "one-as-recorded"),
+        default="by-rate",
         help=(
-            "Physiological recordings: one table per sampling rate, the samples as "
-            "recorded (by-rate, default), or one table for the run with every "
-            "channel on the fastest rate, slower ones interpolated (single). Both "
-            "carry the scanner trigger as the last column."
+            "Physiological recordings. BIDS asks one sampling frequency per table: "
+            "one table per sampling rate, the samples as recorded (by-rate, default); "
+            "one table for the run at the fastest rate, slower channels interpolated "
+            "(one-interpolated); or one table at the fastest rate with each sample in "
+            "the row of its own time and n/a between a slower channel's samples "
+            "(one-as-recorded). All carry the scanner trigger as the last column."
         ),
     )
     parser.add_argument(

@@ -87,8 +87,8 @@ class PlanOptions:
     sourcedata: str = "none"             # "none" | "copy" | "archive"
     sourcedata_modalities: tuple[str, ...] = ()
     force_edf: bool = False
-    #: Physiology: "by_rate" (a table per sampling rate) or "single" (one
-    #: table for the run); ``converter.physio_cmrr``.
+    #: Physiology: "by_rate" (a table per sampling rate), "one_interpolated"
+    #: or "one_as_recorded" (one table for the run); ``converter.physio_cmrr``.
     physio_layout: str = "by_rate"
     bids_version: str = ""
     version: str = ""                    # BIDS Manager's
@@ -295,7 +295,7 @@ def _files_for_row(df, i, two_echoes: bool, force_edf: bool,
         if suffix == "physio":
             stem = base[: -len("_physio")]
             origin = "BIDS Manager (physiology)"
-            if physio_layout == "single":
+            if physio_layout in ("one_interpolated", "one_as_recorded"):
                 add(f"{base}.tsv.gz", origin)
                 add(f"{base}.json", origin, "sidecar")
                 return out

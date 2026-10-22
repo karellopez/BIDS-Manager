@@ -685,6 +685,59 @@ QLabel#section-caption {
 QWidget#card-canvas { background: transparent; }
 /* The guide's ring and caption are painted; the layer itself is see-through. */
 QWidget#guide-overlay { background: transparent; border: none; }
+/* The guide's question: a card over the views, its answers as rows; the
+ * path's own next step tinted with the accent (gui/guide.py). */
+QFrame#guide-question {
+    background: $surface;
+    border: 1px solid $accent;
+    border-radius: 10px;
+}
+QLabel#guide-question-kicker {
+    color: $accent;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#guide-question-title {
+    color: $text;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 700;
+}
+QFrame#guide-choice {
+    background: $surface2;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QFrame#guide-choice:hover { background: $surface3; border-color: $accent; }
+QFrame#guide-choice:focus { border-color: $accent; }
+QFrame#guide-choice[recommended="true"] { background: $accent_bg; border-color: $accent_border; }
+QFrame#guide-choice[recommended="true"]:hover { border-color: $accent; }
+QLabel#guide-choice-title {
+    color: $text;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#guide-choice-detail {
+    color: $dim;
+    background: transparent;
+    font-size: 11px;
+}
+QLabel#guide-choice-tag {
+    color: $accent;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 700;
+}
+QPushButton#guide-dismiss {
+    background: transparent;
+    border: none;
+    color: $dim;
+    font-size: 11px;
+    padding: 2px 6px;
+}
+QPushButton#guide-dismiss:hover { color: $text; }
 QFrame[card="true"] {
     background: $surface;
     border: 1px solid $border;

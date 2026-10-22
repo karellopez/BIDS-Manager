@@ -166,7 +166,7 @@ class TestConvertSuccess:
                 assert json.loads(path.read_text())["Columns"][-1] == "trigger"
 
     def test_the_task_chooses_one_table_aligned_to_the_run(self, tmp_path: Path) -> None:
-        task = self._dicom_task(tmp_path, physio_layout="single", physio_align=True,
+        task = self._dicom_task(tmp_path, physio_layout="one_interpolated", physio_align=True,
                                 drop_volumes=2)
         staging = tmp_path / "staging"
         staging.mkdir()

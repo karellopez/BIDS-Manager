@@ -23,7 +23,7 @@ import pandas as pd
 import pytest
 from PyQt6.QtCore import QEvent, QObject, QPoint, Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QFrame, QPushButton
 
 pytestmark = pytest.mark.gui
 
@@ -197,6 +197,11 @@ def test_the_editor_path(qtbot, window, tmp_path) -> None:
     _settle(qtbot)
     editor = window.editor
     editor._report_worker = None
+    # A converted dataset offers several things to do: the guide asks first.
+    window.guide.refresh()
+    assert window.guide.question.isVisible()
+    window.guide.question.dismissed.emit()
+    _settle(qtbot, 60)
     assert _step(window) == "editor.validate"
     editor._report = ValidationReport(bids_root=root, counts={"ok": 1, "warn": 0, "err": 2})
     assert _step(window) == "editor.fix"
@@ -303,3 +308,120 @@ def test_a_finished_path_fades(qtbot, window, monkeypatch, tmp_path) -> None:
     _settle(qtbot, 900)
     window.guide.refresh()
     assert overlay.step.done and overlay._opacity == 0.0
+
+
+# ---------------------------------------------------------------------------
+# A new raw folder; the question when coming back to a view
+# ---------------------------------------------------------------------------
+
+
+def _with_a_table(qtbot, window, tmp_path):
+    window.welcome.create_project(tmp_path, "Study_Q")
+    window._apply_active_view("converter", persist=False)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    window.picks["dir"] = str(raw)
+    window.converter._raw_pathbar.change_button.click()
+    window.converter.load_inventory(_rows())
+    _settle(qtbot)
+
+
+def _come_back_to_the_converter(qtbot, window) -> None:
+    window._apply_active_view("welcome", persist=False)
+    window.guide.refresh()
+    window.guide.question.dismissed.emit()       # Home asks too, with a project open
+    _settle(qtbot, 60)
+    window._apply_active_view("converter", persist=False)
+    window.guide.refresh()
+    _settle(qtbot, 60)
+
+
+def test_a_new_raw_folder_leads_back_to_scan(qtbot, window, tmp_path) -> None:
+    _guide_on(qtbot, window)
+    _with_a_table(qtbot, window, tmp_path)
+    assert _step(window) == "convert.review"
+    other = tmp_path / "raw2"
+    other.mkdir()
+    window.picks["dir"] = str(other)
+    window.converter._raw_pathbar.change_button.click()
+    assert _step(window) == "convert.scan"
+    # The new scan's table starts the path again from checking it.
+    window.converter.load_inventory(_rows())
+    assert _step(window) == "convert.review"
+
+
+def test_coming_back_asks_what_to_do(qtbot, window, tmp_path) -> None:
+    spy = _WindowSpy()
+    QApplication.instance().installEventFilter(spy)
+    try:
+        _guide_on(qtbot, window)
+        _with_a_table(qtbot, window, tmp_path)
+        _come_back_to_the_converter(qtbot, window)
+    finally:
+        QApplication.instance().removeEventFilter(spy)
+    question = window.guide.question
+    assert question.isVisible() and not question.isWindow()
+    assert question.parentWidget() is window.centralWidget()
+    assert not [w for w in spy.shown if "uide" in w or "hoice" in w], spy.shown
+    assert question.choices() == ["scan", "review", "convert"]
+    assert not window.guide.overlay.isVisible(), "one thing at a time"
+    # The path's own next step has the focus, so Return takes it.
+    focused = QApplication.focusWidget()
+    assert getattr(focused, "key", None) == "review"
+    # Inside the views, clear of the header.
+    assert window.guide._anchor().contains(question.geometry())
+
+
+def test_an_answer_steers_the_hints_until_it_is_reached(qtbot, window, tmp_path) -> None:
+    _guide_on(qtbot, window)
+    _with_a_table(qtbot, window, tmp_path)
+    _come_back_to_the_converter(qtbot, window)
+    rows = {r.key: r for r in window.guide.question.findChildren(QFrame, "guide-choice")}
+    QTest.mouseClick(rows["scan"], Qt.MouseButton.LeftButton)
+    _settle(qtbot, 60)
+    assert not window.guide.question.isVisible()
+    assert window.guide.goal("converter") == "scan"
+    assert _step(window) == "convert.raw_new"
+    assert window.guide.overlay.step.heading == "Scan new data · Step 1 of 2"
+    other = tmp_path / "raw3"
+    other.mkdir()
+    window.picks["dir"] = str(other)
+    window.converter._raw_pathbar.change_button.click()
+    assert _step(window) == "convert.scan_new"
+    window.converter.load_inventory(_rows())     # the scan's table arrives
+    assert _step(window) == "convert.review"
+    assert window.guide.goal("converter") is None, "reached: the path continues"
+
+
+def test_not_now_escape_or_a_click_elsewhere_closes_it(qtbot, window, tmp_path) -> None:
+    _guide_on(qtbot, window)
+    _with_a_table(qtbot, window, tmp_path)
+    question = window.guide.question
+    for close in ("not now", "escape", "elsewhere"):
+        _come_back_to_the_converter(qtbot, window)
+        assert question.isVisible(), close
+        if close == "not now":
+            QTest.mouseClick(question.findChild(QPushButton, "guide-dismiss"),
+                             Qt.MouseButton.LeftButton)
+        elif close == "escape":
+            QTest.keyClick(question, Qt.Key.Key_Escape)
+        else:
+            table = window.converter._table
+            QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton,
+                             pos=table.visualRect(table.model().index(2, 2)).center())
+        _settle(qtbot, 80)
+        assert not question.isVisible(), close
+        assert window.guide.goal("converter") is None
+        assert window.guide.overlay.isVisible(), close
+    # The click elsewhere still did what it does: the user checked a row.
+    assert _step(window) == "convert.run"
+
+
+def test_switching_the_guide_off_closes_the_question(qtbot, window, tmp_path) -> None:
+    _guide_on(qtbot, window)
+    _with_a_table(qtbot, window, tmp_path)
+    _come_back_to_the_converter(qtbot, window)
+    assert window.guide.question.isVisible()
+    window.guide.set_enabled(False)
+    assert not window.guide.question.isVisible()
+    assert not window.guide.overlay.isVisible()

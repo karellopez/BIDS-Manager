@@ -119,7 +119,9 @@ class PhysioDcmBackend:
             "physio %s: %d channel(s) (%s), %d volume(s) in the log, %s",
             task.basename, len(physio.channels),
             ", ".join(ch.label for ch in physio.channels), len(physio.volumes),
-            "one table" if task.physio_layout == "single" else "one table per rate",
+            {"one_interpolated": "one table, interpolated",
+             "one_as_recorded": "one table, as recorded"}.get(task.physio_layout,
+                                                              "one table per rate"),
         )
         return ConvertResult(
             task=task, staged_files=tuple(sorted(staged)), success=True,

@@ -96,8 +96,10 @@ class ConvertTask(BaseModel):
     #: scans): the image, its sidecar, its events and its physiology then
     #: start at the first volume kept. For a physio row: its run's value.
     drop_volumes: int = 0
-    #: Physiology: ``"by_rate"`` (one table per sampling rate, as recorded)
-    #: or ``"single"`` (one table, slower channels resampled to the fastest).
+    #: Physiology: ``"by_rate"`` (one table per sampling rate, as recorded),
+    #: ``"one_interpolated"`` (one table, slower channels interpolated to the
+    #: fastest rate) or ``"one_as_recorded"`` (one table, n/a between a slower
+    #: channel's samples).
     physio_layout: str = "by_rate"
     #: Physiology: crop the tables to the run (first volume kept to the end of
     #: the last), so ``StartTime`` is 0.

@@ -106,3 +106,88 @@ def test_every_text_is_plain(view) -> None:
             continue
         assert "—" not in step.title + step.text
         assert step.target and step.title and step.text
+
+
+# ---------------------------------------------------------------------------
+# A new raw folder, the question, and the goals it sets
+# ---------------------------------------------------------------------------
+
+from bidsmgr.gui.guide_steps import choices, goal_done  # noqa: E402
+
+_TABLE = {"project": True, "raw_root": True, "rows": 12}
+
+
+def test_a_raw_folder_chosen_after_a_scan_leads_to_scan_again() -> None:
+    for facts in ({**_TABLE, "raw_picked": True},
+                  {**_TABLE, "reviewed": True, "raw_picked": True},
+                  {**_TABLE, "reviewed": True, "converted": True, "raw_picked": True}):
+        assert next_step("converter", facts).key == "convert.scan"
+
+
+def test_one_path_asks_nothing() -> None:
+    assert choices("converter", {"project": True}) == []
+    assert choices("converter", {**_TABLE, "scanning": True}) == []
+    assert choices("welcome", {}) == []
+    assert choices("editor", {"root": True}) == []                       # nothing converted
+    assert choices("editor", {"root": True, "subjects": True, "view_only": True}) == []
+
+
+def test_the_converter_asks_with_the_paths_next_step_recommended() -> None:
+    keys = lambda cs: [c.key for c in cs]                           # noqa: E731
+    best = lambda cs: [c.key for c in cs if c.recommended]          # noqa: E731
+    asked = choices("converter", _TABLE)
+    assert keys(asked) == ["scan", "review", "convert"] and best(asked) == ["review"]
+    asked = choices("converter", {**_TABLE, "reviewed": True, "subjects": True})
+    assert keys(asked) == ["scan", "review", "convert", "editor"] and best(asked) == ["convert"]
+    assert best(choices("converter", {**_TABLE, "reviewed": True, "converted": True})) == [
+        "editor"]
+
+
+def test_the_editor_and_home_ask() -> None:
+    base = {"root": True, "subjects": True}
+    first = choices("editor", base)
+    assert [c.key for c in first] == ["validate", "edit", "tools"]
+    assert first[0].recommended and first[0].label == "Validate the dataset"
+    later = choices("editor", {**base, "validated": True, "errors": 2, "warnings": 5})
+    fix = next(c for c in later if c.key == "fix")
+    assert fix.recommended and "2 errors, 5 warnings" in fix.detail
+    assert later[0].label == "Validate again"
+    home = choices("welcome", {"project": True, "project_name": "Motor_Study"})
+    assert [c.key for c in home] == ["continue", "create", "open"]
+    assert home[0].label == "Continue with Motor_Study" and home[0].recommended
+
+
+def test_a_goal_steers_the_steps() -> None:
+    step = next_step("converter", {**_TABLE, "reviewed": True}, "scan")
+    assert (step.key, step.target, step.heading) == (
+        "convert.raw_new", "raw_folder", "Scan new data · Step 1 of 2")
+    assert next_step("converter", {**_TABLE, "raw_picked": True}, "scan").key == \
+        "convert.scan_new"
+    assert next_step("converter", _TABLE, "convert").target == "run"       # no review first
+    assert next_step("converter", _TABLE, "editor").target == "editor"
+    assert next_step("converter", _TABLE, "review").kicker == "Check the table"
+    base = {"root": True, "subjects": True, "validated": True, "errors": 1}
+    assert next_step("editor", base, "edit").target == "tree"
+    assert next_step("editor", {**base, "file_open": True}, "edit").target == "viewer"
+    assert next_step("editor", base, "tools").target == "tools"
+    assert next_step("editor", base, "validate").key == "editor.validate_goal"
+    assert next_step("editor", base, "fix").target == "findings"
+    assert next_step("welcome", {"project": True}, "create").key == "home.location"
+    assert next_step("welcome", {"project": True}, "open").target == "open"
+    # Busy beats a goal: the app is working on it.
+    assert next_step("converter", {**_TABLE, "scanning": True}, "scan").busy
+
+
+def test_a_goal_ends_when_it_is_reached() -> None:
+    before = {**_TABLE, "tables": 1, "conversions": 0, "reports": 0}
+    assert not goal_done("converter", "scan", before, {**before, "raw_picked": True})
+    assert not goal_done("converter", "scan", before, {**before, "tables": 2, "scanning": True})
+    assert goal_done("converter", "scan", before, {**before, "tables": 2})
+    assert not goal_done("converter", "convert", before, {**before, "converting": True})
+    assert goal_done("converter", "convert", before, {**before, "conversions": 1})
+    assert goal_done("converter", "review", before, {**before, "reviewed": True})
+    assert not goal_done("converter", "editor", before, before)
+    assert goal_done("editor", "validate", {"reports": 3}, {"reports": 4})
+    assert not goal_done("editor", "validate", {"reports": 3}, {"reports": 4, "validating": True})
+    assert goal_done("editor", "fix", {}, {"errors": 0, "warnings": 0})
+    assert not goal_done("editor", "edit", {}, {"file_open": True})

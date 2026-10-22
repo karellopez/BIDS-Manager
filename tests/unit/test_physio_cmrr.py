@@ -18,6 +18,8 @@ import pytest
 
 from bidsmgr.converter.physio_cmrr import (
     TICK,
+    Channel,
+    CmrrPhysio,
     build_tables,
     parse_log,
     read_cmrr,
@@ -150,9 +152,9 @@ def test_the_trigger_marks_each_volume_start_on_the_tables_grid(tmp_path, logs) 
         assert np.all(times - starts < 1 / table.rate + 1e-9)
 
 
-def test_one_table_for_the_run_resamples_and_says_so(tmp_path, logs) -> None:
+def test_one_table_for_the_run_interpolates_and_says_so(tmp_path, logs) -> None:
     written = write_tables(read_cmrr(logs), tmp_path / "out" / "sub-01_task-rest",
-                           layout="single")
+                           layout="one_interpolated")
     assert sorted(p.name for p in written) == ["sub-01_task-rest_physio.json",
                                                "sub-01_task-rest_physio.tsv.gz"]
     side = json.loads((tmp_path / "out/sub-01_task-rest_physio.json").read_text())
@@ -164,6 +166,46 @@ def test_one_table_for_the_run_resamples_and_says_so(tmp_path, logs) -> None:
     rows = _table(tmp_path / "out/sub-01_task-rest_physio.tsv.gz")
     assert {len(r) for r in rows} == {7}
     assert [r[-1] for r in rows].count("1") == 10
+
+
+def test_one_table_as_recorded_keeps_every_sample_where_it_was(tmp_path, logs) -> None:
+    """Nothing computed: each sample of a slower channel in the row of its own
+    time, n/a between, its values exactly the recorded ones."""
+    physio = read_cmrr(logs)
+    (table,), _ = build_tables(physio, layout="one_as_recorded")
+    assert table.rate == 400 and table.label == ""
+    assert table.columns == ["cardiac", "respiratory", "ecg1", "ecg2", "ecg3", "ecg4",
+                             "trigger"]
+    by_label = {ch.label: ch for ch in physio.channels}
+    for label, every in (("respiratory", 8), ("cardiac", 2), ("ecg2", 1)):
+        col = table.data[:, table.columns.index(label)]
+        rows = np.flatnonzero(~np.isnan(col))
+        ch = by_label[label]
+        recorded = ch.values[~np.isnan(ch.values)]
+        # Every recorded sample is there once, unchanged, and nothing else.
+        assert np.array_equal(np.sort(col[rows]), np.sort(recorded))
+        assert set(np.diff(rows)) <= {every, 2 * every}       # 2x across a missing one
+        # In the row of its own time.
+        times = table.start + rows / table.rate
+        own = ch.start + np.flatnonzero(~np.isnan(ch.values)) / ch.rate
+        assert np.allclose(times, own, atol=1e-9)
+    desc = table.descriptions
+    assert "row of its own time (one row in 8)" in desc["respiratory"]
+    assert "n/a" in desc["respiratory"] and "interpolat" not in desc["respiratory"]
+    assert "Recorded at" not in desc["ecg1"]
+    assert table.data[:, -1].sum() == 10
+
+
+def test_a_sample_between_rows_goes_to_the_nearest_and_says_how_far() -> None:
+    """Rates that do not share their grid (here a 50 Hz channel one tick after
+    a 200 Hz one): the nearest row, and the column says by how much at most."""
+    fast = Channel("PULS", "cardiac", "PULS", 200.0, 0.0, np.arange(200.0))
+    slow = Channel("RESP", "respiratory", "RESP", 50.0, TICK, np.arange(50.0) + 1000)
+    (table,), _ = build_tables(CmrrPhysio(channels=[fast, slow]), layout="one_as_recorded")
+    col = table.data[:, table.columns.index("respiratory")]
+    assert np.count_nonzero(~np.isnan(col)) == 50       # none lost, none merged
+    assert "at most 2.5 ms" in table.descriptions["respiratory"]
+    assert "nearest" not in table.descriptions["cardiac"]
 
 
 def test_aligned_tables_start_at_the_first_volume(tmp_path, logs) -> None:
@@ -213,7 +255,7 @@ def test_the_tables_are_valid_bids(tmp_path, logs) -> None:
     (root / "sub-01/func").mkdir(parents=True)
     (root / "dataset_description.json").write_text(
         json.dumps({"Name": "p", "BIDSVersion": "1.10.0"}))
-    for layout in ("by_rate", "single"):
+    for layout in ("by_rate", "one_interpolated", "one_as_recorded"):
         for p in (root / "sub-01/func").iterdir():
             p.unlink()
         write_tables(read_cmrr(logs), root / "sub-01/func/sub-01_task-rest", layout=layout)

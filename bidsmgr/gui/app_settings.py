@@ -77,7 +77,7 @@ KEYS = {
     "convert_b0_field":   "convert/b0_field",
     "convert_sourcedata": "convert/sourcedata",      # none|copy|archive
     "convert_drop_volumes": "convert/drop_volumes",  # dummy scans removed from func runs
-    "convert_physio_layout": "convert/physio_layout",  # by_rate|single
+    "convert_physio_layout": "convert/physio_layout",  # by_rate|one_interpolated|one_as_recorded
     "convert_physio_align": "convert/physio_align",
     # The parameter-based classifier's settings, as JSON (its own model).
     "classifier_config":  "classifier/acquisition",
@@ -552,7 +552,7 @@ class AppSettings:
             s.value(KEYS["convert_drop_volumes"]), out.convert_drop_volumes)))
         out.convert_physio_layout = _as_str(s.value(KEYS["convert_physio_layout"]),
                                             out.convert_physio_layout)
-        if out.convert_physio_layout not in ("by_rate", "single"):
+        if out.convert_physio_layout not in ("by_rate", "one_interpolated", "one_as_recorded"):
             out.convert_physio_layout = "by_rate"
         out.convert_physio_align = _as_bool(s.value(KEYS["convert_physio_align"]),
                                             out.convert_physio_align)

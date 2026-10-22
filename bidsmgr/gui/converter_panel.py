@@ -686,6 +686,8 @@ class ConverterPanel(QWidget):
         """
         self._model = InventoryTableModel(df, project=self._project, parent=self)
         self._guide_reviewed = False
+        self._guide_raw_picked = False
+        self._guide_tables += 1
         # Apply the user's "Highlight aborts" preference to the fresh model.
         self._model.set_highlight_aborts(self._aborts_btn.isChecked())
         self._table.setModel(self._model)
@@ -1091,6 +1093,8 @@ class ConverterPanel(QWidget):
         # row (a click, or Enter), not by the row selected for them when a
         # table loads.
         self._guide_reviewed = False
+        self._guide_raw_picked = False
+        self._guide_tables = 0          # tables loaded so far: a new one ends "Scan new data"
         self._table.pressed.connect(self._on_guide_reviewed)
         self._table.activated.connect(self._on_guide_reviewed)
 
@@ -1867,6 +1871,8 @@ class ConverterPanel(QWidget):
                 self._relink(found, seen)
                 return
         self._raw_root = picked
+        # A folder chosen after a table was made is one to scan next (the guide).
+        self._guide_raw_picked = self._model is not None
         AppSettings.remember_raw_root(self._raw_root)
         # Live preview of the picked folder before any scan runs.
         self._raw_pane.set_root(self._raw_root)
@@ -2569,6 +2575,8 @@ class ConverterPanel(QWidget):
             "scanning": self._scan_worker is not None,
             "rows": rows,
             "reviewed": bool(rows and self._guide_reviewed),
+            "raw_picked": bool(rows and self._guide_raw_picked),
+            "tables": self._guide_tables,
             "converting": (self._convert_worker is not None
                            or running(self._metadata_worker)
                            or running(self._validate_worker)),

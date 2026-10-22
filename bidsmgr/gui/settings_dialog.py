@@ -1117,14 +1117,18 @@ class SettingsDialog(QDialog):
         self._convert_physio_layout.addItem(
             "One table per sampling rate, as recorded", "by_rate")
         self._convert_physio_layout.addItem(
-            "One table for the run, resampled to the fastest rate", "single")
+            "One table for the run, slower channels interpolated", "one_interpolated")
+        self._convert_physio_layout.addItem(
+            "One table for the run, every sample as recorded", "one_as_recorded")
         self._convert_physio_layout.setToolTip(
             "How a Siemens physiological log is written. BIDS asks one sampling frequency "
-            "per table, so channels recorded at different rates (ECG 400 Hz, pulse 200 Hz, "
-            "respiration 50 Hz) are either kept in a table each, exactly as measured, or "
-            "put in one table with the slower ones interpolated (said so in the sidecar). "
-            "Both are valid BIDS; every ECG lead is its own column and the scanner trigger "
-            "is the last column of every table.")
+            "per table, and the channels are recorded at different rates (ECG 400 Hz, "
+            "pulse 200 Hz, respiration 50 Hz). So: a table per rate, exactly as measured; "
+            "or one table at the fastest rate, the slower channels either interpolated "
+            "between their samples, or kept as recorded, each sample in the row of its "
+            "own time and n/a in the rows between (nothing computed). The sidecar says "
+            "which. All are valid BIDS; every ECG lead is its own column and the scanner "
+            "trigger is the last column of every table.")
         form.addRow("Physiology:", self._convert_physio_layout)
         self._convert_physio_align = QCheckBox("Crop to the run (start at its first volume)")
         self._convert_physio_align.setToolTip(

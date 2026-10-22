@@ -88,7 +88,7 @@ def test_physio_as_one_table_for_the_run() -> None:
     from bidsmgr.converter.output_plan import PlanOptions
 
     rows = [_row("sub-01", "sub-01_task-rest_physio", "func", uid="p1")]
-    plan = plan_output(pd.DataFrame(rows), None, PlanOptions(physio_layout="single"))
+    plan = plan_output(pd.DataFrame(rows), None, PlanOptions(physio_layout="one_as_recorded"))
     sure = _paths(plan)
     assert "sub-01/func/sub-01_task-rest_physio.tsv.gz" in sure
     assert "sub-01/func/sub-01_task-rest_physio.json" in sure

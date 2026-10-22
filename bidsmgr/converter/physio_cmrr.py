@@ -24,16 +24,20 @@ constant 1, a flat line. Measured on the multimodal sample (2026-10-22): ECG
 
 Written (:func:`write_tables`), the scanner trigger is a ``trigger`` column,
 1 at the first sample of each volume of the run's image and 0 elsewhere, the
-LAST column of every table. Two layouts:
+LAST column of every table. The standard asks ONE sampling frequency per
+file, and the channels are recorded at several (ECG 400 Hz, pulse 200 Hz,
+respiration 50 Hz), so there are three layouts, all BIDS compliant:
 
 - ``by_rate`` (default): one table per sampling rate, the samples exactly as
-  recorded (the four ECG leads together, pulse and respiration apart). The
-  standard asks one sampling frequency per file, so this is how recordings
-  taken at different rates stay as they were measured.
-- ``single``: one table for the run, every channel on the fastest rate,
-  slower channels linearly interpolated (and said so in the sidecar). Also
-  BIDS compliant: one file, one sampling frequency, the trigger a standard
-  column.
+  recorded (the four ECG leads together, pulse and respiration apart).
+- ``one_interpolated``: one table for the run at the fastest rate, slower
+  channels linearly interpolated between their samples (said so per column).
+- ``one_as_recorded``: one table for the run at the fastest rate, every sample
+  of a slower channel in the row of its own time and ``n/a`` in the rows
+  between (a 50 Hz channel fills every eighth row of a 400 Hz table): nothing
+  computed, nothing invented. Each sample is in its exact row when the rates
+  share the scanner's tick grid, which CMRR rates do; otherwise in the nearest
+  row, and its column's description says how far that is at most.
 
 ``align`` crops the tables to the run: from the first volume of the image to
 the end of its last volume, so ``StartTime`` is 0 (to within one sample).
@@ -59,8 +63,9 @@ import numpy as np
 TICK = 0.0025
 
 LAYOUT_BY_RATE = "by_rate"
-LAYOUT_SINGLE = "single"
-LAYOUTS = (LAYOUT_BY_RATE, LAYOUT_SINGLE)
+LAYOUT_ONE_INTERPOLATED = "one_interpolated"
+LAYOUT_ONE_AS_RECORDED = "one_as_recorded"
+LAYOUTS = (LAYOUT_BY_RATE, LAYOUT_ONE_INTERPOLATED, LAYOUT_ONE_AS_RECORDED)
 
 #: Log type -> (column label, what it is).
 _KINDS = {
@@ -314,15 +319,27 @@ def _ordered(channels: list[Channel]) -> list[Channel]:
     return sorted(channels, key=key)
 
 
-def _describe(ch: Channel, rate: Optional[float] = None) -> str:
+def _describe(ch: Channel, rate: Optional[float] = None, *, as_recorded: bool = False,
+              shift: float = 0.0) -> str:
+    """What a column holds; how it was put on the table's rate when that is
+    not its own (``shift``: the most a sample was moved to a row, seconds)."""
     what = _KINDS.get(ch.kind, ("", ch.kind))[1] or ch.kind
     text = f"{what} (Siemens {ch.name}), in the scanner's units."
     if ch.kind == "ECG" and ch.label != "ecg":
         lead = re.sub(r"\D", "", ch.name)
         text = f"ECG channel {lead} (Siemens {ch.name}), in the scanner's units."
-    if rate is not None and abs(rate - ch.rate) > 1e-9:
-        text += (f" Recorded at {ch.rate:g} Hz and resampled to {rate:g} Hz by linear "
-                 "interpolation.")
+    if rate is None or abs(rate - ch.rate) <= 1e-9:
+        return text
+    if not as_recorded:
+        return text + (f" Recorded at {ch.rate:g} Hz and resampled to {rate:g} Hz by "
+                       "linear interpolation.")
+    every = rate / ch.rate
+    text += (f" Recorded at {ch.rate:g} Hz: each sample is in the row of its own time "
+             + (f"(one row in {every:g}) " if abs(every - round(every)) < 1e-9 else "")
+             + "and the rows between are n/a.")
+    if shift > 1e-9:
+        text += (f" Its times fall between the table's rows, so each sample is in the "
+                 f"nearest row, at most {shift * 1000:.3g} ms from when it was recorded.")
     return text
 
 
@@ -353,6 +370,19 @@ def _on_grid(ch: Channel, start: float, rate: float, n: int) -> np.ndarray:
     return out
 
 
+def _as_recorded(ch: Channel, start: float, rate: float, n: int) -> tuple[np.ndarray, float]:
+    """``ch``'s own samples in the rows of their times on a grid of ``n``
+    rows at ``rate`` from ``start``, ``n/a`` elsewhere; and the most a sample
+    was moved to reach its row (0 when the grids share their ticks)."""
+    out = np.full(n, np.nan)
+    exact = (ch.start - start) * rate + np.arange(len(ch.values)) * (rate / ch.rate)
+    rows = np.rint(exact).astype(np.int64)
+    inside = (rows >= 0) & (rows < n)
+    out[rows[inside]] = ch.values[inside]
+    moved = float(np.max(np.abs(exact[inside] - rows[inside])) / rate) if inside.any() else 0.0
+    return out, (moved if moved > 1e-6 / rate else 0.0)
+
+
 def _trigger(volumes: list[Volume], start: float, rate: float, n: int) -> np.ndarray:
     col = np.zeros(n)
     for vol in volumes:
@@ -381,7 +411,7 @@ def build_tables(physio: CmrrPhysio, *, layout: str = LAYOUT_BY_RATE, align: boo
     if align and kept:
         window = (kept[0].start, kept[-1].finish)
 
-    if layout == LAYOUT_SINGLE:
+    if layout in (LAYOUT_ONE_INTERPOLATED, LAYOUT_ONE_AS_RECORDED):
         groups = [channels]
     else:
         by_rate: dict[float, list[Channel]] = {}
@@ -406,8 +436,13 @@ def build_tables(physio: CmrrPhysio, *, layout: str = LAYOUT_BY_RATE, align: boo
         columns, data, descriptions = [], [], {}
         for ch in group:
             columns.append(ch.label)
-            data.append(_on_grid(ch, start, rate, n))
-            descriptions[ch.label] = _describe(ch, rate)
+            if layout == LAYOUT_ONE_AS_RECORDED:
+                values, shift = _as_recorded(ch, start, rate, n)
+                data.append(values)
+                descriptions[ch.label] = _describe(ch, rate, as_recorded=True, shift=shift)
+            else:
+                data.append(_on_grid(ch, start, rate, n))
+                descriptions[ch.label] = _describe(ch, rate)
         if kept:
             columns.append("trigger")
             data.append(_trigger(kept, start, rate, n))
@@ -475,6 +510,7 @@ def _write_tsv_gz(path: Path, table: Table) -> None:
             out.write(buf.getvalue().replace(b"nan", b"n/a"))
 
 
-__all__ = ["Channel", "CmrrPhysio", "LAYOUTS", "LAYOUT_BY_RATE", "LAYOUT_SINGLE", "TICK",
+__all__ = ["Channel", "CmrrPhysio", "LAYOUTS", "LAYOUT_BY_RATE", "LAYOUT_ONE_AS_RECORDED",
+           "LAYOUT_ONE_INTERPOLATED", "TICK",
            "Table", "Volume", "build_tables", "logs_in_dicom", "parse_log", "read_cmrr",
            "table_paths", "write_tables"]

@@ -47,7 +47,7 @@ def test_the_new_settings_round_trip() -> None:
     s.scan_subject_from = "family_name"
     s.scan_name_entities = ["acq", "run"]
     s.convert_drop_volumes = 4
-    s.convert_physio_layout = "single"
+    s.convert_physio_layout = "one_as_recorded"
     s.convert_physio_align = True
     s.guided_mode = True
     s.save()
@@ -55,7 +55,7 @@ def test_the_new_settings_round_trip() -> None:
     assert back.scan_subject_from == "family_name"
     assert back.scan_name_entities == ["acq", "run"]
     assert back.convert_drop_volumes == 4
-    assert back.convert_physio_layout == "single"
+    assert back.convert_physio_layout == "one_as_recorded"
     assert back.convert_physio_align is True
     assert back.guided_mode is True
 
@@ -109,14 +109,14 @@ def test_the_dialog_shows_and_saves_them(qtbot) -> None:
     dlg._name_entities["acq"].setChecked(True)
     dlg._name_entities["run"].setChecked(True)
     dlg._convert_drop_volumes.setValue(5)
-    dlg._convert_physio_layout.setCurrentIndex(dlg._convert_physio_layout.findData("single"))
+    dlg._convert_physio_layout.setCurrentIndex(dlg._convert_physio_layout.findData("one_as_recorded"))
     dlg._convert_physio_align.setChecked(True)
     dlg._on_save()
     back = AppSettings.load()
     assert back.scan_subject_from == "given_name"
     assert back.scan_name_entities == ["acq", "run"]
     assert back.convert_drop_volumes == 5
-    assert back.convert_physio_layout == "single"
+    assert back.convert_physio_layout == "one_as_recorded"
     assert back.convert_physio_align is True
 
 
