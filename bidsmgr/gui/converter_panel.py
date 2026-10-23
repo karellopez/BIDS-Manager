@@ -685,8 +685,7 @@ class ConverterPanel(QWidget):
         pre-generated TSV from disk).
         """
         self._model = InventoryTableModel(df, project=self._project, parent=self)
-        self._guide_reviewed = False
-        self._guide_raw_picked = False
+        self._guide_row_clicks = 0
         self._guide_tables += 1
         # Apply the user's "Highlight aborts" preference to the fresh model.
         self._model.set_highlight_aborts(self._aborts_btn.isChecked())
@@ -1089,14 +1088,14 @@ class ConverterPanel(QWidget):
 
         self._table = self._build_table()
         self._inspection_stack.addWidget(self._table)
-        # The guide's "check the table" step is done by the USER looking at a
-        # row (a click, or Enter), not by the row selected for them when a
-        # table loads.
-        self._guide_reviewed = False
-        self._guide_raw_picked = False
-        self._guide_tables = 0          # tables loaded so far: a new one ends "Scan new data"
-        self._table.pressed.connect(self._on_guide_reviewed)
-        self._table.activated.connect(self._on_guide_reviewed)
+        # What the guide counts (gui/guide_steps): a step moves on when one of
+        # these grows after it was shown. A row the USER clicks (or Enter),
+        # never the row selected for them when a table loads.
+        self._guide_row_clicks = 0      # in the table shown; a new table starts at 0
+        self._guide_raw_picks = 0       # raw data folders chosen
+        self._guide_tables = 0          # tables loaded
+        self._table.pressed.connect(self._on_guide_row_click)
+        self._table.activated.connect(self._on_guide_row_click)
 
         tv.addWidget(self._inspection_stack, 1)
 
@@ -1871,8 +1870,7 @@ class ConverterPanel(QWidget):
                 self._relink(found, seen)
                 return
         self._raw_root = picked
-        # A folder chosen after a table was made is one to scan next (the guide).
-        self._guide_raw_picked = self._model is not None
+        self._guide_raw_picks += 1
         AppSettings.remember_raw_root(self._raw_root)
         # Live preview of the picked folder before any scan runs.
         self._raw_pane.set_root(self._raw_root)
@@ -2562,33 +2560,39 @@ class ConverterPanel(QWidget):
     # ------------------------------------------------------------------
 
     def guide_facts(self) -> dict:
-        """What the guide's Converter path needs to know (``guide_steps``).
+        """What the guide's Converter tasks need to know (``guide_steps``).
         ``_root`` is the dataset, for what the guide tracks itself."""
         def running(worker) -> bool:
             return worker is not None and worker.isRunning()
 
         rows = self._model.rowCount() if self._model is not None else 0
+        selection = self._table.selectionModel()
         return {
             "_root": self._bids_root,
             "project": self._bids_root is not None,
-            "raw_root": self._raw_root is not None,
             "scanning": self._scan_worker is not None,
             "rows": rows,
-            "reviewed": bool(rows and self._guide_reviewed),
-            "raw_picked": bool(rows and self._guide_raw_picked),
+            "row_clicks": self._guide_row_clicks if rows else 0,
+            "selected_rows": len(selection.selectedRows()) if rows and selection else 0,
+            "raw_picks": self._guide_raw_picks,
             "tables": self._guide_tables,
+            "meta_enabled": self._meta_btn.isEnabled(),
             "converting": (self._convert_worker is not None
                            or running(self._metadata_worker)
                            or running(self._validate_worker)),
         }
 
-    def _on_guide_reviewed(self, *_args) -> None:
-        self._guide_reviewed = True
+    def _on_guide_row_click(self, *_args) -> None:
+        self._guide_row_clicks += 1
 
     def guide_targets(self) -> dict:
         """The controls the guide can point at, by name."""
         return {"raw_folder": self._raw_pathbar.change_button, "scan": self._scan_btn,
-                "table": self._table, "run": self._run_btn, "properties": self._properties}
+                "table": self._table, "run": self._run_btn,
+                "properties": self._properties_frame, "filter": self._filter_frame,
+                "overview": self._view_switch.buttons.get("overview"),
+                "dataset_metadata": self._meta_btn, "bulk_edit": self._bulk_btn,
+                "columns": self._columns_btn}
 
     def reload_app_settings(self) -> None:
         """Re-read persisted settings into the live panel.

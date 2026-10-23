@@ -106,7 +106,8 @@ class EditorPanel(QWidget):
         #: The file last opened from the tree: shown again after an undo or
         #: redo has changed the dataset under it.
         self._open_path: Optional[Path] = None
-        self._guide_reports = 0
+        self._guide_reports = 0         # validations finished (the guide counts them)
+        self._guide_file_opens = 0      # files opened in the viewer
 
         self._report: Optional[ValidationReport] = None
         self._report_worker: Optional[ReportWorker] = None
@@ -309,16 +310,15 @@ class EditorPanel(QWidget):
             "errors": int(counts.get("err", 0)),
             "warnings": int(counts.get("warn", 0)),
             "reports": self._guide_reports,
-            # A file of THIS dataset in the viewer (the path outlives a switch).
-            "file_open": (self._open_path is not None and root is not None
-                          and Path(root) in self._open_path.parents),
+            "file_opens": self._guide_file_opens,
         }
 
     def guide_targets(self) -> dict:
         """The controls the guide can point at, by name."""
         return {"open": self._open_btn, "validate": self._validate_dataset_btn,
                 "findings": self._validation_frame, "tree": self._tree_frame,
-                "viewer": self._center_frame, "tools": self._tools_btn}
+                "viewer": self._center_frame, "tools": self._tools_btn,
+                "validate_file": self._validate_file_btn, "undo": self._undo_btn}
 
     def start_dataset_validation(self) -> None:
         """Kick a :class:`ReportWorker` against the current root.
@@ -1012,7 +1012,7 @@ class EditorPanel(QWidget):
         self, report: ValidationReport, root: Path,
     ) -> None:
         self._report = report
-        self._guide_reports += 1        # a finished validation ends the guide's "Validate"
+        self._guide_reports += 1
         self._stamp_tree_badges(report)
         self._update_chips(report)
         # Refresh the form for whatever file the user already has
@@ -1253,6 +1253,7 @@ class EditorPanel(QWidget):
         but a NIfTI).
         """
         self._open_path = Path(path)
+        self._guide_file_opens += 1
         root = self.current_root()
         if path.is_dir():
             if is_recording_path(path):

@@ -388,9 +388,7 @@ class WelcomePanel(QWidget):
         browse.setCursor(Qt.CursorShape.PointingHandCursor)
         browse.clicked.connect(self._on_browse_location)
         self._browse_btn = browse
-        # The guide's first step is done once the user has looked at where
-        # the dataset goes, whether or not they changed it.
-        self._location_chosen = False
+        self._browse_clicks = 0         # the guide moves on when the user browses
         loc_row.addWidget(self._location_edit, 1)
         loc_row.addWidget(browse)
         lay.addLayout(loc_row)
@@ -669,7 +667,7 @@ class WelcomePanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_browse_location(self) -> None:
-        self._location_chosen = True
+        self._browse_clicks += 1
         d = QFileDialog.getExistingDirectory(
             self, "Choose where to create the dataset",
             str(self._create_location),
@@ -683,14 +681,16 @@ class WelcomePanel(QWidget):
     # ------------------------------------------------------------------
 
     def guide_facts(self) -> dict:
-        """What the guide's Home path needs to know (``guide_steps``)."""
-        return {"location_chosen": self._location_chosen,
-                "name": bool(self._name_edit.text().strip())}
+        """What the guide's Home tasks need to know (``guide_steps``)."""
+        return {"browse_clicks": self._browse_clicks,
+                "name": bool(self._name_edit.text().strip()),
+                "recents": self._recent.count()}
 
     def guide_targets(self) -> dict:
         """The controls the guide can point at, by name."""
         return {"browse": self._browse_btn, "name": self._name_edit,
-                "create": self._create_btn, "open": self._open_btn}
+                "create": self._create_btn, "open": self._open_btn,
+                "recent": self._recent, "samples": self._samples_button}
 
     def _on_inline_create(self) -> None:
         name = self._name_edit.text().strip()

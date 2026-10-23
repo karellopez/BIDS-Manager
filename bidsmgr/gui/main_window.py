@@ -287,7 +287,7 @@ class _TopHeader(QFrame):
     def guide_targets(self) -> dict:
         """The header's controls the guide can point at, by name."""
         return {"home": self._welcome_btn, "converter": self._converter_btn,
-                "editor": self._editor_btn}
+                "editor": self._editor_btn, "settings": self._settings_btn}
 
     def set_active_view(self, view: str) -> None:
         """Programmatically toggle the pills (no signal emitted)."""
@@ -654,6 +654,7 @@ class MainWindow(QMainWindow):
         if view == "welcome":
             facts = self.welcome.guide_facts()
             facts["project"] = self._project_root is not None
+            facts["project_root"] = str(self._project_root or "")
             if self._project_root is not None:
                 from .welcome_panel import _dataset_display_name
 

@@ -738,6 +738,74 @@ QPushButton#guide-dismiss {
     padding: 2px 6px;
 }
 QPushButton#guide-dismiss:hover { color: $text; }
+QWidget#guide-question-rows { background: transparent; }
+QScrollArea#guide-question-scroll { background: transparent; border: none; }
+/* The step's card beside its control; the result of a task in the success
+ * colour. Its arrow is painted on the overlay in the same colours. */
+QFrame#guide-card {
+    background: $surface;
+    border: 1px solid $accent;
+    border-radius: 10px;
+}
+QFrame#guide-card[done="true"] { border-color: $success; }
+QLabel#guide-card-kicker {
+    color: $accent;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#guide-card-kicker[done="true"] { color: $success; }
+QLabel#guide-card-title {
+    color: $text;
+    background: transparent;
+    font-size: 13px;
+    font-weight: 700;
+}
+QLabel#guide-card-body {
+    color: $dim;
+    background: transparent;
+    font-size: 12px;
+}
+QFrame#guide-card-rule { background: $subtle; border: none; }
+QPushButton#guide-tasks {
+    background: transparent;
+    border: none;
+    color: $dim;
+    font-size: 11px;
+    padding: 3px 2px;
+}
+QPushButton#guide-tasks:hover { color: $text; }
+QPushButton#guide-prev {
+    background: transparent;
+    border: 1px solid $border;
+    color: $text;
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 3px 10px;
+}
+QPushButton#guide-prev:hover { background: $surface3; }
+QPushButton#guide-prev:disabled { color: $muted; border-color: $subtle; }
+QPushButton#guide-next {
+    background: $accent;
+    border: 1px solid $accent;
+    color: $primary_btn_text;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 12px;
+}
+QPushButton#guide-next:hover { border-color: $text; }
+/* Left in the views' corner after Not now. */
+QPushButton#guide-rest {
+    background: $surface;
+    border: 1px solid $accent_border;
+    color: $text;
+    border-radius: 13px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 14px;
+}
+QPushButton#guide-rest:hover { background: $accent_bg; border-color: $accent; }
 QFrame[card="true"] {
     background: $surface;
     border: 1px solid $border;

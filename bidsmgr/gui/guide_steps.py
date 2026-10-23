@@ -1,55 +1,56 @@
-"""What the guide points at next, decided from what the window shows.
+"""What the guide offers, and the steps of each thing it offers.
 
-The guide (switched on in the header, beside Settings) highlights ONE control:
-the next thing to do. This module decides which, from plain facts each view
-reports about itself (``guide_facts``), and names the control by a target
-name the view resolves (``guide_targets``). No Qt here, so every path can be
-tested without a window.
+The guide (switched on in the header, beside Settings) asks the user what
+they want to do in the view they are in, and walks them through it one
+control at a time. Everything here is plain data and pure functions over the
+facts each view reports about itself (``guide_facts``); controls are named by
+a target the view resolves (``guide_targets``). No Qt, so every task and every
+step can be tested without a window.
 
-The paths, in the order a new user walks them:
-
-- Home: choose where the dataset is saved, name it, create it.
-- Converter: choose the raw data, scan it, check the table, convert. Choosing
-  another raw data folder after a scan starts the path again from Scan.
-- Editor: validate, fix what BIDS still needs.
-
-Where a view offers more than one sensible thing to do (a table already
-scanned, a dataset already converted), the guide ASKS when the user comes to
-it (:func:`choices`), and the answer, a GOAL, steers the steps
-(:func:`next_step`) until it is reached (:func:`goal_done`); then the path
-continues as before.
-
-A step that is waiting for the app (a scan, a conversion, a validation)
-points at the control that is busy and says what is happening, so the guide
-never sends the user somewhere while the app is working. A finished path
-says so and is marked ``done``; the overlay lets it fade.
+- :func:`tasks` lists what a view offers now (a :class:`Task` each, the
+  path's usual next one ``recommended``). Home offers creating, opening,
+  reopening and practising; the Converter scanning, checking the table,
+  metadata per recording and for the dataset, bulk edits, columns,
+  converting, the Editor and the settings; the Editor validating, fixing,
+  editing a file, renaming, sessions, deleting, anonymising, image quality,
+  repairs and undo.
+- A task is an ordered list of :class:`TaskStep`. The user moves with Next
+  and Previous; a step also moves on by itself when something happens AFTER
+  it was shown (:func:`should_advance` compares the facts then and now: a
+  folder picked, a scan finished, a row clicked). A fact that was already
+  true never skips a step: what the user chose is where the guide starts.
+- :func:`shown` is what the card shows for a step: its busy form while the
+  app works on that control (a scan, a conversion, a validation).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional, Union
 
 HOME = "welcome"
 CONVERTER = "converter"
 EDITOR = "editor"
 
+Facts = Mapping[str, object]
+Text = Union[str, Callable[[Facts], str]]
+
 
 @dataclass(frozen=True)
 class Step:
-    """One thing to do, and where."""
+    """One step as the card shows it."""
 
-    key: str            # identity: a new key replays the entrance
+    key: str            # identity: a new key replays the ring's entrance
     target: str         # a name the view (or the header) resolves to a widget
     title: str
     text: str
-    number: int = 0     # position on this path; 0 when off a path
+    number: int = 0     # its place in its task; 0 for a task of one step
     total: int = 0
-    busy: bool = False  # the app is working; nothing to press but Stop
-    done: bool = False  # the path is finished
-    #: Targets the caption must not cover: what its text sends the user to.
+    busy: bool = False  # the app is working on this control
+    done: bool = False  # the task's result: drawn in the success colour
+    #: Targets the card must not cover: what its text sends the user to.
     keep_clear: tuple[str, ...] = ()
-    #: The goal the user chose, shown above the step ("Scan new data").
+    #: The task, named above the step.
     kicker: str = ""
 
     @property
@@ -58,18 +59,36 @@ class Step:
 
     @property
     def heading(self) -> str:
-        """The caption's first line: the goal, the step's place, or Done."""
-        parts = [p for p in (self.kicker, self.counter) if p]
-        return " · ".join(parts) if parts else ("Done" if self.done else "")
+        """The card's first line: the task and the step's place in it."""
+        return " · ".join(p for p in (self.kicker, self.counter) if p)
 
 
 @dataclass(frozen=True)
-class Choice:
-    """One answer to "What would you like to do?"."""
+class TaskStep:
+    """One step of a task: where, what, and what moves it on by itself."""
 
-    key: str            # the goal it sets
+    key: str
+    target: str
+    title: str
+    text: Text
+    keep_clear: tuple[str, ...] = ()
+    #: While this fact is true the app is working on the control.
+    busy_fact: str = ""
+    busy_title: str = ""
+    busy_text: str = ""
+    #: ``(facts when shown, facts now) -> move on``; ``None``: Next only.
+    advance: Optional[Callable[[Facts, Facts], bool]] = None
+    done: bool = False
+
+
+@dataclass(frozen=True)
+class Task:
+    """One thing to do, as the question offers it, and its steps."""
+
+    key: str
     label: str
     detail: str
+    steps: tuple[TaskStep, ...]
     recommended: bool = False
 
 
@@ -77,43 +96,81 @@ def _count(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
+def _grew(name: str) -> Callable[[Facts, Facts], bool]:
+    """Moves on when the counter ``name`` grew since the step was shown."""
+    return lambda then, now: int(now.get(name) or 0) > int(then.get(name) or 0)
+
+
+def _became(name: str) -> Callable[[Facts, Facts], bool]:
+    """Moves on when ``name`` turned true since the step was shown."""
+    return lambda then, now: bool(now.get(name)) and not bool(then.get(name))
+
+
+def _changed(name: str) -> Callable[[Facts, Facts], bool]:
+    """Moves on when ``name`` changed to a value since the step was shown."""
+    return lambda then, now: bool(now.get(name)) and now.get(name) != then.get(name)
+
+
+def _select_several(_then: Facts, now: Facts) -> bool:
+    return int(now.get("selected_rows") or 0) >= 2
+
+
+def _keys() -> tuple[str, str]:
+    """Shift+click and Ctrl+click (⇧+click, ⌘+click on a Mac)."""
+    from ..viz import keynames
+
+    return keynames.mouse(["shift"], "click"), keynames.mouse(["ctrl"], "click")
+
+
 # ---------------------------------------------------------------------------
 # Home
 # ---------------------------------------------------------------------------
 
 
-def _create_path(f: Mapping[str, object], kicker: str = "") -> Step:
-    total = 3
-    if f.get("name"):
-        return Step(
-            "home.create", "create", "Create the dataset",
-            "Press Create dataset. The Converter opens next, ready for your "
-            "raw data.", 3, total, kicker=kicker)
-    if f.get("location_chosen"):
-        return Step(
-            "home.name", "name", "Name the dataset",
-            "Type a short name for your study, without spaces, for example "
-            "My_Study. It becomes the dataset's folder name.", 2, total, kicker=kicker)
-    return Step(
-        "home.location", "browse", "Choose where to save it",
-        "Pick the folder your new dataset will be saved in. Already have a "
-        "dataset? Use Open dataset folder instead.", 1, total, kicker=kicker)
-
-
-def _home(f: Mapping[str, object], goal: Optional[str]) -> Step:
-    if goal == "create":
-        return _create_path(f, "New dataset")
-    if goal == "open":
-        return Step(
-            "home.open", "open", "Open a dataset",
-            "Pick its folder. A BIDS dataset opens as a project; any other "
-            "folder can be looked at, or made into one.", kicker="Another dataset")
+def _home(f: Facts) -> list[Task]:
+    opened = _changed("project_root")
+    out: list[Task] = []
     if f.get("project"):
-        return Step(
-            "home.continue", "converter", "Continue in the Converter",
-            f"{f.get('project_name') or 'Your dataset'} is open. The Converter "
-            "turns your raw data into it.")
-    return _create_path(f)
+        out.append(Task(
+            "continue", f"Continue with {f.get('project_name') or 'this dataset'}",
+            "Scan, convert and check its data in the Converter.",
+            (TaskStep("continue.converter", "converter", "Open the Converter",
+                      "The Converter turns raw data into the dataset: choose the "
+                      "folder, scan, check the table, convert."),)))
+    out.append(Task(
+        "create", "Create a new dataset",
+        "Choose where it is saved, name it, and create it.",
+        (TaskStep("create.browse", "browse", "Choose where to save it",
+                  "Pick the folder your new dataset will be saved in. Skip this to "
+                  "use the folder shown.", advance=_grew("browse_clicks")),
+         TaskStep("create.name", "name", "Name the dataset",
+                  "Type a short name for your study, without spaces, for example "
+                  "My_Study. It becomes the dataset's folder name.",
+                  advance=_became("name")),
+         TaskStep("create.create", "create", "Create the dataset",
+                  "Press Create dataset. The Converter opens next, ready for your "
+                  "raw data.", advance=opened))))
+    out.append(Task(
+        "open", "Open a dataset you have",
+        "A BIDS dataset opens as a project; any other folder can be looked at.",
+        (TaskStep("open.folder", "open", "Open its folder",
+                  "Pick the dataset's folder. A BIDS dataset opens as a project; any "
+                  "other folder can be looked at, or made into one.", advance=opened),)))
+    if f.get("recents"):
+        out.append(Task(
+            "recent", "Reopen a recent project",
+            "Pick up where you left off: the table, its edits and its history.",
+            (TaskStep("recent.list", "recent", "Choose it",
+                      "Double-click a project in Recent projects, or select it and "
+                      "press Open.", advance=opened),)))
+    out.append(Task(
+        "sample", "Practise on a sample dataset",
+        "Download a small real dataset to try every step on.",
+        (TaskStep("sample.menu", "samples", "Download a sample",
+                  "Choose one: it downloads and unpacks. Then create a new dataset "
+                  "and scan the sample's folder."),)))
+    best = "continue" if f.get("project") else ("recent" if f.get("recents") else "create")
+    return _mark(out, best)
 
 
 # ---------------------------------------------------------------------------
@@ -121,74 +178,119 @@ def _home(f: Mapping[str, object], goal: Optional[str]) -> Step:
 # ---------------------------------------------------------------------------
 
 
-def _converter(f: Mapping[str, object], goal: Optional[str]) -> Step:
-    total = 4
+def _converter(f: Facts) -> list[Task]:
     if not f.get("project"):
-        return Step(
-            "convert.no_project", "home", "Start on Home",
-            "Create a new dataset or open one you have. The Converter works "
-            "inside it.")
-    if f.get("scanning"):
-        return Step(
-            "convert.scanning", "scan", "Scanning",
-            "Reading the raw data. The table fills when the scan is done. "
-            "Stop ends it early.", 2, total, busy=True)
-    if f.get("converting"):
-        return Step(
-            "convert.converting", "run", "Converting",
-            "The log below shows the progress. Stop ends it after the subject "
-            "in progress.", 4, total, busy=True)
+        return [Task("start", "Start on Home", "The Converter works inside a dataset.",
+                     (TaskStep("start.home", "home", "Start on Home",
+                               "Create a new dataset or open one you have. The "
+                               "Converter works inside it."),))]
     rows = bool(f.get("rows"))
-    if goal == "scan":
-        if f.get("raw_root") and f.get("raw_picked"):
-            return Step(
-                "convert.scan_new", "scan", "Scan the new folder",
-                "Its recordings become a new scan table. The table you had stays "
-                "as an earlier version in Scan table.", 2, 2, kicker="Scan new data")
-        return Step(
-            "convert.raw_new", "raw_folder", "Choose the new data",
-            "Pick the folder with the recordings to add: DICOM, EEG, MEG or PET "
-            "files. Its subfolders are included.", 1, 2, kicker="Scan new data")
-    if goal == "convert" and rows:
-        return Step(
-            "convert.run_goal", "run", "Convert",
-            "Run conversion writes the ticked recordings into the dataset, with "
-            "their metadata. Subjects already in it are kept or updated as "
-            "Settings > Convert says.", kicker="Convert the table")
-    if goal == "editor":
-        return Step(
-            "convert.editor_goal", "editor", "Open the Editor",
-            "The Editor shows the dataset as it is on disk, file by file, and "
-            "validates it.", kicker="Look at the dataset")
-    scan = Step(
-        "convert.scan", "scan", "Scan the raw data",
-        "Scan reads the folder and lists every recording it finds, with the BIDS "
-        "name it proposes.", 2, total)
-    if rows and f.get("raw_picked"):
-        return scan                    # a folder chosen after the table: scan it next
-    if f.get("converted") and goal is None:
-        return Step(
-            "convert.done", "editor", "Check the result",
-            "The conversion is done. Open the Editor to look at the dataset "
-            "and validate it.", done=True)
-    if not f.get("raw_root"):
-        return Step(
-            "convert.raw", "raw_folder", "Choose your raw data",
-            "Pick the folder with the recordings to convert: DICOM, EEG, MEG "
-            "or PET files. Its subfolders are included.", 1, total)
+    shift, ctrl = _keys()
+    scan_steps = (
+        TaskStep("scan.folder", "raw_folder", "Choose the raw data folder",
+                 "Pick the folder with the recordings: DICOM, EEG, MEG or PET files. "
+                 "Its subfolders are included."
+                 + (" The table you have stays as an earlier version." if rows else ""),
+                 advance=_grew("raw_picks")),
+        TaskStep("scan.scan", "scan", "Scan it",
+                 "Scan reads the folder and lists every recording it finds, with the "
+                 "BIDS name it proposes.", busy_fact="scanning", busy_title="Scanning",
+                 busy_text="Reading the raw data. The table fills when the scan is "
+                           "done. Stop ends it early.", advance=_grew("tables")),
+        TaskStep("scan.table", "table", "Your table",
+                 "One row per recording: what will be converted and how. Check it "
+                 "next, or convert it.", keep_clear=("properties",), done=True),
+    )
+    out = [Task("scan", "Scan new data" if rows else "Scan raw data",
+                "Another raw data folder, scanned into a new table." if rows
+                else "Choose a raw data folder and list its recordings.",
+                scan_steps)]
+    if rows:
+        out += [
+            Task("review", "Check and edit the table",
+                 "Correct names, leave out what you do not want.",
+                 (TaskStep("review.table", "table", "Look through the table",
+                           "One row per recording. Untick a row to leave it out; "
+                           "double-click a cell to change it. Click a row to see it in "
+                           "Properties.", keep_clear=("properties",),
+                           advance=_grew("row_clicks")),
+                  TaskStep("review.properties", "properties", "Its details in Properties",
+                           "The row you clicked: its datatype, suffix and entities, "
+                           "checked against BIDS as you type, and the name it will "
+                           "get."),
+                  TaskStep("review.structure", "filter", "Leave out whole groups",
+                           "In this panel, untick a subject, a session or a kind of "
+                           "recording to leave all of it out at once."),
+                  TaskStep("review.overview", "overview", "See what is unusual",
+                           "Overview lists what differs between subjects: a missing "
+                           "run, a label spelled two ways, two recordings with one "
+                           "name.", done=True))),
+            Task("row_meta", "Edit one recording's metadata",
+                 "Participant, acquisition and task details, in Properties.",
+                 (TaskStep("row_meta.pick", "table", "Choose the recording",
+                           "Click its row.", keep_clear=("properties",),
+                           advance=_grew("row_clicks")),
+                  TaskStep("row_meta.edit", "properties", "Edit it in Properties",
+                           "Scroll to its metadata: the participant, and for EEG and "
+                           "MEG the line frequency, reference and device; for a "
+                           "functional run, its dummy volumes. A value set here wins "
+                           "over the dataset's.", done=True))),
+        ]
+        if f.get("meta_enabled"):
+            out.append(Task(
+                "dataset_meta", "Edit the dataset's metadata",
+                "Device, institution, reference and event labels for every recording.",
+                (TaskStep("dataset_meta.open", "dataset_metadata", "Open Dataset metadata",
+                          "Values here apply to every recording; a recording's own "
+                          "value in Properties wins over them."),)))
+        out += [
+            Task("bulk", "Edit many rows at once",
+                 "One value into one column for every selected row.",
+                 (TaskStep("bulk.select", "table", "Select the rows",
+                           f"{shift} selects a range; {ctrl} adds or removes one row.",
+                           advance=_select_several),
+                  TaskStep("bulk.edit", "bulk_edit", "Press Bulk edit",
+                           "Choose the column and the value: every selected row takes "
+                           "it, as one Undo.", done=True))),
+            Task("columns", "Choose the columns shown",
+                 "Show or hide columns, each with a note on what it holds.",
+                 (TaskStep("columns.open", "columns", "Open Manage columns",
+                           "Tick the columns to show. Drag a column's header to move "
+                           "it; double-click its edge to fit it."),)),
+            Task("convert", "Convert the table",
+                 "Write the ticked recordings into the dataset.",
+                 (TaskStep("convert.run", "run", "Run the conversion",
+                           "Run conversion writes the ticked recordings into the "
+                           "dataset with their metadata, then checks it.",
+                           busy_fact="converting", busy_title="Converting",
+                           busy_text="The log below shows the progress. Stop ends it "
+                                     "after the subject in progress.",
+                           advance=_grew("conversions")),
+                  TaskStep("convert.result", "editor", "Look at the result",
+                           "The Editor shows the dataset as written, file by file, and "
+                           "validates it.", done=True))),
+        ]
+    if f.get("subjects") or f.get("converted"):
+        out.append(Task("editor", "Look at the dataset",
+                        "Open the Editor to check and validate what was converted.",
+                        (TaskStep("editor.pill", "editor", "Open the Editor",
+                                  "The Editor shows the dataset as written, file by "
+                                  "file, and validates it."),)))
+    out.append(Task("settings", "Change how scans and conversions work",
+                    "Subject labels, dummy volumes, physiology and more.",
+                    (TaskStep("settings.open", "settings", "Open Settings",
+                              "The Scan and Convert pages hold what a scan proposes and "
+                              "what a conversion writes. Changes apply to the next scan "
+                              "or conversion."),)))
     if not rows:
-        return scan
-    if not f.get("reviewed"):
-        return Step(
-            "convert.review", "table", "Check the table",
-            "Click a row to see its details in Properties. Untick what you "
-            "do not want, and correct a name that is wrong.", 3, total,
-            keep_clear=("properties",),
-            kicker="Check the table" if goal == "review" else "")
-    return Step(
-        "convert.run", "run", "Convert",
-        "Run conversion writes the ticked recordings into the dataset, with "
-        "their metadata.", 4, total)
+        best = "scan"
+    elif f.get("converted"):
+        best = "editor"
+    elif not f.get("row_clicks"):
+        best = "review"
+    else:
+        best = "convert"
+    return _mark(out, best)
 
 
 # ---------------------------------------------------------------------------
@@ -196,178 +298,170 @@ def _converter(f: Mapping[str, object], goal: Optional[str]) -> Step:
 # ---------------------------------------------------------------------------
 
 
-def _editor(f: Mapping[str, object], goal: Optional[str]) -> Optional[Step]:
-    total = 2
-    if f.get("view_only"):
-        return None                    # a folder to look at, nothing to do
-    if not f.get("root"):
-        return Step(
-            "editor.open", "open", "Open a dataset",
-            "Open folder shows a dataset's files. Your own project opens here "
-            "by itself.")
-    if not f.get("subjects"):
-        return Step(
-            "editor.empty", "converter", "Nothing converted yet",
-            "This dataset has no subjects yet. Convert your raw data in the "
-            "Converter first.")
-    if f.get("validating"):
-        return Step(
-            "editor.validating", "validate", "Validating",
-            "Checking every file. The findings appear in the Validation "
-            "panel.", 1, total, busy=True)
+def _findings_text(f: Facts) -> str:
     errors = int(f.get("errors") or 0)
     warnings = int(f.get("warnings") or 0)
-    if goal == "validate":
-        return Step(
-            "editor.validate_goal", "validate", "Validate the dataset",
-            "Validation checks every file against the BIDS standard and lists "
-            "what still needs fixing.", kicker="Validate")
-    if goal == "fix" and (errors or warnings):
-        what = _count(errors, "error") if errors else _count(warnings, "warning")
-        return Step(
-            "editor.fix_goal", "findings", "Go through the findings",
-            f"{what} left. Click a finding to open the file it is about, fix "
-            "it, then validate again.", kicker="Fix what validation found")
-    if goal == "edit":
-        if not f.get("file_open"):
-            return Step(
-                "editor.pick_file", "tree", "Choose a file",
-                "Click a file in the BIDS tree. Its metadata, table or image "
-                "opens in the middle.", 1, 2, kicker="Look at or edit a file")
-        return Step(
-            "editor.edit_file", "viewer", "Look, and change what you need",
-            "A change is saved with Save and taken back with Undo. Validate the "
-            "file to see what it still lacks.", 2, 2, kicker="Look at or edit a file")
-    if goal == "tools":
-        return Step(
-            "editor.tools", "tools", "Open the Tools",
-            "Rename entities, add or remove sessions, anonymise, check image "
-            "quality, repair sidecars and more, each with a preview first.",
-            kicker="Rename, restructure or repair")
-    if not f.get("validated"):
-        return Step(
-            "editor.validate", "validate", "Validate the dataset",
-            "Validation checks every file against the BIDS standard and lists "
-            "what still needs fixing.", 1, total)
     if errors:
-        return Step(
-            "editor.fix", "findings", "Fix what BIDS needs",
-            f"{_count(errors, 'error')} to fix. Click a finding to open the "
-            "file it is about, fix it, then validate again.", 2, total)
+        return (f"{_count(errors, 'error')} to fix"
+                + (f" and {_count(warnings, 'warning')} to look at" if warnings else "")
+                + ". Each finding names its file; Fix opens it where the value is "
+                  "edited.")
     if warnings:
-        return Step(
-            "editor.valid", "findings", "The dataset is valid",
-            f"Nothing BIDS requires is missing. {_count(warnings, 'warning')} "
-            "remain, worth a look but not required.", done=True)
-    return Step(
-        "editor.valid", "validate", "The dataset is valid",
-        "Nothing BIDS requires is missing, and there are no warnings.",
-        done=True)
+        return (f"Nothing BIDS requires is missing. {_count(warnings, 'warning')} "
+                "remain, worth a look but not required.")
+    return "Nothing BIDS requires is missing, and there are no warnings."
+
+
+def _editor(f: Facts) -> list[Task]:
+    if f.get("view_only"):
+        return []                       # a folder to look at, nothing to do
+    if not f.get("root"):
+        return [Task("open", "Open a dataset", "Look at a dataset's files.",
+                     (TaskStep("open.button", "open", "Open a dataset",
+                               "Open folder shows a dataset's files. Your own project "
+                               "opens here by itself."),))]
+    if not f.get("subjects"):
+        return [Task("convert_first", "Convert your data first",
+                     "This dataset has no subjects yet.",
+                     (TaskStep("convert_first.converter", "converter",
+                               "Nothing converted yet",
+                               "This dataset has no subjects yet. Convert your raw data "
+                               "in the Converter first."),))]
+    validated = bool(f.get("validated"))
+    errors = int(f.get("errors") or 0)
+    warnings = int(f.get("warnings") or 0)
+    out = [Task(
+        "validate", "Validate again" if validated else "Validate the dataset",
+        "Check every file against the BIDS standard.",
+        (TaskStep("validate.run", "validate", "Validate the dataset",
+                  "Validation checks every file against the BIDS standard and lists "
+                  "what still needs fixing.", busy_fact="validating",
+                  busy_title="Validating",
+                  busy_text="Checking every file. The findings appear in the "
+                            "Validation panel.", advance=_grew("reports")),
+         TaskStep("validate.findings", "findings", "What it found", _findings_text,
+                  done=True)))]
+    if validated and (errors or warnings):
+        out.append(Task(
+            "fix", "Fix what validation found",
+            ", ".join(p for p in (_count(errors, "error") if errors else "",
+                                  _count(warnings, "warning") if warnings else "") if p)
+            + ", each a click away from its file.",
+            (TaskStep("fix.finding", "findings", "Choose a finding",
+                      "Each finding names its file. Fix opens it where the value is "
+                      "edited.", advance=_grew("file_opens")),
+             TaskStep("fix.edit", "viewer", "Change the value",
+                      "Edit it here and Save. Undo takes it back."),
+             TaskStep("fix.check", "validate_file", "Check the file again",
+                      "Validate file checks just this file; the finding goes when it "
+                      "is fixed.", done=True))))
+    out += [
+        Task("edit", "Look at or edit a file",
+             "Its metadata, table or image, from the BIDS tree.",
+             (TaskStep("edit.pick", "tree", "Choose a file",
+                       "Click a file in the BIDS tree. Its metadata, table or image "
+                       "opens in the middle.", advance=_grew("file_opens")),
+              TaskStep("edit.change", "viewer", "Look, and change what you need",
+                       "A change is saved with Save and taken back with Undo. Validate "
+                       "file shows what it still lacks.", done=True))),
+        Task("rename", "Rename a subject, session, task or run",
+             "Every file, table and link that names it follows.",
+             (TaskStep("rename.tree", "tree", "Right-click what to rename",
+                       "Right-click a subject's folder or a file and choose Rename. The "
+                       "preview shows every file and link that will change."),
+              TaskStep("rename.tools", "tools", "Or rename across the dataset",
+                       "Tools > Rename entity... renames a value everywhere it is "
+                       "used.", done=True))),
+        Task("sessions", "Add or remove sessions",
+             "Put recordings into a session, or take them out of one.",
+             (TaskStep("sessions.tools", "tools", "Open Tools > Sessions",
+                       "Choose the recordings and the session label; the preview shows "
+                       "where every file goes."),)),
+        Task("delete", "Delete recordings",
+             "Files, datatypes, sessions or subjects, every reference repaired.",
+             (TaskStep("delete.tree", "tree", "Right-click what to delete",
+                       "Choose Delete. Tables and links that name it are repaired, and "
+                       "one Undo brings it all back."),)),
+        Task("anonymise", "Remove identifying information",
+             "Names, dates and devices in the metadata; faces in the images.",
+             (TaskStep("anonymise.tools", "tools", "Open Tools > Identifiable data",
+                       "Anonymise metadata... removes names and IDs and shifts dates; "
+                       "Deface... removes faces from anatomical images. Each shows what "
+                       "it will change first."),)),
+        Task("quality", "Check image quality",
+             "A quick check of anatomical and diffusion images.",
+             (TaskStep("quality.tools", "tools", "Open Tools > Quality check",
+                       "Choose the images; the results open beside them, and are kept "
+                       "in derivatives/bidsmgr-qc."),)),
+        Task("repair", "Repair sidecars and tables",
+             "Missing sidecars, scans tables, names that disagree.",
+             (TaskStep("repair.tools", "tools", "Open Tools > Check and repair",
+                       "Check coherence... finds what disagrees; Write sidecars from the "
+                       "recordings... and Scans and sessions tables... write what is "
+                       "missing."),)),
+        Task("history", "Undo a change", "Every change made here is one step back.",
+             (TaskStep("history.undo", "undo", "Undo",
+                       "Undo takes back the last change, Redo puts it back. Right-click "
+                       "either for the whole history."),)),
+    ]
+    best = "validate" if not validated else ("fix" if errors else "edit")
+    return _mark(out, best)
 
 
 # ---------------------------------------------------------------------------
-# What the user may want, and when they have it
+# Asking, showing, moving on
 # ---------------------------------------------------------------------------
 
 
-def choices(view: str, f: Mapping[str, object]) -> list[Choice]:
-    """What the user may want to do in ``view`` now; fewer than two means
-    there is one path and nothing to ask. The path's own next step is the
-    ``recommended`` one."""
+def _mark(found: list[Task], best: str) -> list[Task]:
+    return [Task(t.key, t.label, t.detail, t.steps, t.key == best) for t in found]
+
+
+def tasks(view: str, facts: Facts) -> list[Task]:
+    """What ``view`` offers now, the path's usual next one ``recommended``."""
     if view == HOME:
-        if not f.get("project"):
-            return []
-        name = f.get("project_name") or "this dataset"
-        return [
-            Choice("continue", f"Continue with {name}",
-                   "Scan, convert and check its data in the Converter.", True),
-            Choice("create", "Create a new dataset",
-                   "Start another project, in a folder of its own."),
-            Choice("open", "Open another dataset",
-                   "A dataset you already have, BIDS or not."),
-        ]
+        return _home(facts)
     if view == CONVERTER:
-        if not f.get("project") or not f.get("rows") or f.get("scanning") \
-                or f.get("converting"):
-            return []
-        if not f.get("reviewed"):
-            nxt = "review"
-        elif f.get("converted"):
-            nxt = "editor"
-        else:
-            nxt = "convert"
-        out = [
-            Choice("scan", "Scan new data",
-                   "Choose another raw data folder and scan it. This table stays "
-                   "as an earlier version."),
-            Choice("review", "Check and edit the table",
-                   "Names, sessions and what is included, row by row."),
-            Choice("convert", "Convert the table",
-                   "Write the ticked recordings into the dataset."),
-        ]
-        if f.get("subjects") or f.get("converted"):
-            out.append(Choice("editor", "Look at the dataset",
-                              "Open the Editor to check and validate what was converted."))
-        return [Choice(c.key, c.label, c.detail, c.key == nxt) for c in out]
+        return _converter(facts)
     if view == EDITOR:
-        if f.get("view_only") or not f.get("root") or not f.get("subjects") \
-                or f.get("validating"):
-            return []
-        errors = int(f.get("errors") or 0)
-        warnings = int(f.get("warnings") or 0)
-        validated = bool(f.get("validated"))
-        nxt = "validate" if not validated else ("fix" if errors else "")
-        out = [Choice("validate", "Validate the dataset" if not validated else
-                      "Validate again", "Check every file against the BIDS standard.")]
-        if validated and (errors or warnings):
-            out.append(Choice(
-                "fix", "Fix what validation found",
-                ", ".join(p for p in (_count(errors, "error") if errors else "",
-                                      _count(warnings, "warning") if warnings else "") if p)
-                + ", each a click away from its file."))
-        out += [
-            Choice("edit", "Look at or edit a file",
-                   "Open a file from the BIDS tree: its metadata, table or image."),
-            Choice("tools", "Rename, restructure or repair",
-                   "Entities, sessions, anonymising, quality checks and more."),
-        ]
-        return [Choice(c.key, c.label, c.detail, c.key == nxt) for c in out]
+        return _editor(facts)
     return []
 
 
-def goal_done(view: str, goal: str, before: Mapping[str, object],
-              now: Mapping[str, object]) -> bool:
-    """Whether the goal chosen when the facts were ``before`` is reached now;
-    the path then continues as it would have."""
-    if view == CONVERTER:
-        if goal == "scan":
-            return now.get("tables") != before.get("tables") and not now.get("scanning")
-        if goal == "convert":
-            return (now.get("conversions") != before.get("conversions")
-                    and not now.get("converting"))
-        if goal == "review":
-            return bool(now.get("reviewed"))
-    if view == EDITOR:
-        if goal == "validate":
-            return now.get("reports") != before.get("reports") and not now.get("validating")
-        if goal == "fix":
-            return not (now.get("errors") or now.get("warnings"))
-    return False
+def find_task(view: str, key: str, facts: Facts) -> Optional[Task]:
+    """The task ``key`` of ``view`` as the facts now make it, or ``None``
+    when it is no longer offered (its table went, say)."""
+    return next((t for t in tasks(view, facts) if t.key == key), None)
 
 
-def next_step(view: str, facts: Mapping[str, object],
-              goal: Optional[str] = None) -> Optional[Step]:
-    """The step to show in ``view`` (``welcome``, ``converter`` or
-    ``editor``) toward ``goal`` (a :class:`Choice` key) or along the view's
-    path, or ``None`` when there is nothing to point at."""
-    if view == HOME:
-        return _home(facts, goal)
-    if view == CONVERTER:
-        return _converter(facts, goal)
-    if view == EDITOR:
-        return _editor(facts, goal)
-    return None
+def shown(task: Task, index: int, facts: Facts) -> Step:
+    """What the card shows for ``task``'s step ``index`` with these facts."""
+    step = task.steps[index]
+    busy = bool(step.busy_fact and facts.get(step.busy_fact))
+    text = step.text(facts) if callable(step.text) else step.text
+    many = len(task.steps) > 1
+    return Step(
+        key=step.key + (".busy" if busy else ""),
+        target=step.target,
+        title=step.busy_title if busy and step.busy_title else step.title,
+        text=step.busy_text if busy and step.busy_text else text,
+        number=index + 1 if many else 0,
+        total=len(task.steps) if many else 0,
+        busy=busy,
+        done=step.done and not busy,
+        keep_clear=step.keep_clear,
+        kicker=task.label,
+    )
 
 
-__all__ = ["CONVERTER", "Choice", "EDITOR", "HOME", "Step", "choices", "goal_done",
-           "next_step"]
+def should_advance(task: Task, index: int, then: Facts, now: Facts) -> bool:
+    """Whether step ``index`` moves on by itself: something happened since it
+    was shown (``then``). Never while the app is still working on it."""
+    step = task.steps[index]
+    if step.advance is None or (step.busy_fact and now.get(step.busy_fact)):
+        return False
+    return bool(step.advance(then, now))
+
+
+__all__ = ["CONVERTER", "EDITOR", "HOME", "Step", "Task", "TaskStep", "find_task",
+           "shown", "should_advance", "tasks"]

@@ -1,193 +1,170 @@
-"""The guide's next step, decided from what each view reports.
+"""The guide's tasks and their steps, decided from what each view reports.
 
-One path per view (Home: where, name, create; Converter: raw data, scan,
-check, convert; Editor: validate, fix), a busy step while the app works, and
-a finished path marked done.
+What each view offers and which one is the usual next; that a task starts
+where the user chose it; that a step moves on by itself only when something
+happens after it was shown (never because a fact was already true, which is
+how "Check and edit the table" used to jump to Run); busy steps; and the
+texts.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from bidsmgr.gui.guide_steps import next_step
+from bidsmgr.gui.guide_steps import find_task, should_advance, shown, tasks
+
+_TABLE = {"project": True, "rows": 12, "tables": 1, "row_clicks": 0, "raw_picks": 1}
 
 
-def _keys(view, *facts):
-    return [next_step(view, f).key for f in facts]
+def _keys(view, facts):
+    return [t.key for t in tasks(view, facts)]
 
 
-def test_home_walks_where_name_create() -> None:
-    assert _keys("welcome", {}, {"location_chosen": True},
-                 {"location_chosen": True, "name": True}) == [
-        "home.location", "home.name", "home.create"]
-    # Typing a name first accepts the folder shown.
-    assert next_step("welcome", {"name": True}).key == "home.create"
-    step = next_step("welcome", {})
-    assert (step.number, step.total, step.counter) == (1, 3, "Step 1 of 3")
-    assert step.target == "browse"
-
-
-def test_home_with_a_project_open_points_to_the_converter() -> None:
-    step = next_step("welcome", {"project": True, "project_name": "Motor_Study"})
-    assert step.target == "converter" and "Motor_Study" in step.text
-    assert step.counter == ""
-
-
-def test_the_name_advice_is_one_home_accepts() -> None:
-    """Home refuses spaces in a dataset name, so the example has none."""
-    assert "My_Study" in next_step("welcome", {"location_chosen": True}).text
-
-
-def test_the_converter_path() -> None:
-    base = {"project": True}
-    assert _keys(
-        "converter",
-        {},
-        base,
-        {**base, "raw_root": True},
-        {**base, "raw_root": True, "rows": 28},
-        {**base, "raw_root": True, "rows": 28, "reviewed": True},
-        {**base, "raw_root": True, "rows": 28, "reviewed": True, "converted": True},
-    ) == ["convert.no_project", "convert.raw", "convert.scan", "convert.review",
-          "convert.run", "convert.done"]
-    assert [next_step("converter", {**base, "raw_root": True}).target,
-            next_step("converter", {**base, "raw_root": True, "rows": 3}).target] == [
-        "scan", "table"]
-
-
-def test_busy_steps_point_at_the_busy_control() -> None:
-    scanning = next_step("converter", {"project": True, "raw_root": True, "scanning": True})
-    converting = next_step("converter", {"project": True, "raw_root": True, "rows": 2,
-                                         "reviewed": True, "converting": True})
-    validating = next_step("editor", {"root": True, "subjects": True, "validating": True})
-    assert (scanning.target, scanning.busy) == ("scan", True)
-    assert (converting.target, converting.busy) == ("run", True)
-    assert (validating.target, validating.busy) == ("validate", True)
-    # Busy wins over what is otherwise next.
-    assert next_step("converter", {"project": True, "scanning": True}).key == "convert.scanning"
-
-
-def test_a_finished_conversion_sends_to_the_editor() -> None:
-    step = next_step("converter", {"project": True, "raw_root": True, "rows": 1,
-                                   "converted": True})
-    assert (step.target, step.done) == ("editor", True)
-
-
-def test_the_editor_path() -> None:
-    base = {"root": True, "subjects": True}
-    assert _keys("editor", {}, {"root": True}, base,
-                 {**base, "validated": True, "errors": 3},
-                 {**base, "validated": True, "warnings": 2},
-                 {**base, "validated": True}) == [
-        "editor.open", "editor.empty", "editor.validate", "editor.fix",
-        "editor.valid", "editor.valid"]
-    fix = next_step("editor", {**base, "validated": True, "errors": 1})
-    assert "1 error to fix" in fix.text and fix.target == "findings"
-    assert "3 errors" in next_step("editor", {**base, "validated": True, "errors": 3}).text
-    valid = next_step("editor", {**base, "validated": True, "warnings": 2})
-    assert valid.done and "2 warnings" in valid.text and valid.target == "findings"
-    clean = next_step("editor", {**base, "validated": True})
-    assert clean.done and clean.target == "validate"
-
-
-def test_a_folder_opened_to_look_at_has_no_steps() -> None:
-    assert next_step("editor", {"root": True, "view_only": True}) is None
-    assert next_step("nowhere", {}) is None
-
-
-@pytest.mark.parametrize("view", ["welcome", "converter", "editor"])
-def test_every_text_is_plain(view) -> None:
-    """No em dashes, and every step names its control."""
-    facts = [{}, {"project": True}, {"project": True, "raw_root": True},
-             {"root": True, "subjects": True, "validated": True, "errors": 2}]
-    for f in facts:
-        step = next_step(view, f)
-        if step is None:
-            continue
-        assert "—" not in step.title + step.text
-        assert step.target and step.title and step.text
+def _best(view, facts):
+    return [t.key for t in tasks(view, facts) if t.recommended]
 
 
 # ---------------------------------------------------------------------------
-# A new raw folder, the question, and the goals it sets
+# What each view offers
 # ---------------------------------------------------------------------------
 
-from bidsmgr.gui.guide_steps import choices, goal_done  # noqa: E402
 
-_TABLE = {"project": True, "raw_root": True, "rows": 12}
-
-
-def test_a_raw_folder_chosen_after_a_scan_leads_to_scan_again() -> None:
-    for facts in ({**_TABLE, "raw_picked": True},
-                  {**_TABLE, "reviewed": True, "raw_picked": True},
-                  {**_TABLE, "reviewed": True, "converted": True, "raw_picked": True}):
-        assert next_step("converter", facts).key == "convert.scan"
-
-
-def test_one_path_asks_nothing() -> None:
-    assert choices("converter", {"project": True}) == []
-    assert choices("converter", {**_TABLE, "scanning": True}) == []
-    assert choices("welcome", {}) == []
-    assert choices("editor", {"root": True}) == []                       # nothing converted
-    assert choices("editor", {"root": True, "subjects": True, "view_only": True}) == []
+def test_home_offers_creating_opening_reopening_and_practising() -> None:
+    assert _keys("welcome", {}) == ["create", "open", "sample"]
+    assert _best("welcome", {}) == ["create"]
+    assert _keys("welcome", {"recents": 2}) == ["create", "open", "recent", "sample"]
+    assert _best("welcome", {"recents": 2}) == ["recent"]
+    with_project = {"project": True, "project_name": "Motor_Study", "recents": 1}
+    assert _keys("welcome", with_project)[0] == "continue"
+    assert tasks("welcome", with_project)[0].label == "Continue with Motor_Study"
+    assert _best("welcome", with_project) == ["continue"]
 
 
-def test_the_converter_asks_with_the_paths_next_step_recommended() -> None:
-    keys = lambda cs: [c.key for c in cs]                           # noqa: E731
-    best = lambda cs: [c.key for c in cs if c.recommended]          # noqa: E731
-    asked = choices("converter", _TABLE)
-    assert keys(asked) == ["scan", "review", "convert"] and best(asked) == ["review"]
-    asked = choices("converter", {**_TABLE, "reviewed": True, "subjects": True})
-    assert keys(asked) == ["scan", "review", "convert", "editor"] and best(asked) == ["convert"]
-    assert best(choices("converter", {**_TABLE, "reviewed": True, "converted": True})) == [
-        "editor"]
+def test_the_converter_offers_more_once_there_is_a_table() -> None:
+    assert _keys("converter", {}) == ["start"]
+    assert _keys("converter", {"project": True}) == ["scan", "settings"]
+    assert tasks("converter", {"project": True})[0].label == "Scan raw data"
+    keys = _keys("converter", _TABLE)
+    assert keys == ["scan", "review", "row_meta", "bulk", "columns", "convert", "settings"]
+    assert tasks("converter", _TABLE)[0].label == "Scan new data"
+    # Dataset metadata where its button works; the Editor once something exists.
+    assert "dataset_meta" in _keys("converter", {**_TABLE, "meta_enabled": True})
+    assert "editor" in _keys("converter", {**_TABLE, "subjects": True})
 
 
-def test_the_editor_and_home_ask() -> None:
+def test_the_converters_usual_next() -> None:
+    assert _best("converter", {"project": True}) == ["scan"]
+    assert _best("converter", _TABLE) == ["review"]
+    assert _best("converter", {**_TABLE, "row_clicks": 3}) == ["convert"]
+    assert _best("converter", {**_TABLE, "converted": True}) == ["editor"]
+
+
+def test_the_editor_offers_its_tools() -> None:
     base = {"root": True, "subjects": True}
-    first = choices("editor", base)
-    assert [c.key for c in first] == ["validate", "edit", "tools"]
-    assert first[0].recommended and first[0].label == "Validate the dataset"
-    later = choices("editor", {**base, "validated": True, "errors": 2, "warnings": 5})
-    fix = next(c for c in later if c.key == "fix")
-    assert fix.recommended and "2 errors, 5 warnings" in fix.detail
-    assert later[0].label == "Validate again"
-    home = choices("welcome", {"project": True, "project_name": "Motor_Study"})
-    assert [c.key for c in home] == ["continue", "create", "open"]
-    assert home[0].label == "Continue with Motor_Study" and home[0].recommended
+    assert _keys("editor", base) == ["validate", "edit", "rename", "sessions", "delete",
+                                     "anonymise", "quality", "repair", "history"]
+    assert _best("editor", base) == ["validate"]
+    found = {**base, "validated": True, "errors": 2, "warnings": 5}
+    assert _keys("editor", found)[:2] == ["validate", "fix"]
+    assert tasks("editor", found)[0].label == "Validate again"
+    assert _best("editor", found) == ["fix"]
+    assert "2 errors, 5 warnings" in find_task("editor", "fix", found).detail
+    assert _best("editor", {**base, "validated": True}) == ["edit"]
 
 
-def test_a_goal_steers_the_steps() -> None:
-    step = next_step("converter", {**_TABLE, "reviewed": True}, "scan")
-    assert (step.key, step.target, step.heading) == (
-        "convert.raw_new", "raw_folder", "Scan new data · Step 1 of 2")
-    assert next_step("converter", {**_TABLE, "raw_picked": True}, "scan").key == \
-        "convert.scan_new"
-    assert next_step("converter", _TABLE, "convert").target == "run"       # no review first
-    assert next_step("converter", _TABLE, "editor").target == "editor"
-    assert next_step("converter", _TABLE, "review").kicker == "Check the table"
-    base = {"root": True, "subjects": True, "validated": True, "errors": 1}
-    assert next_step("editor", base, "edit").target == "tree"
-    assert next_step("editor", {**base, "file_open": True}, "edit").target == "viewer"
-    assert next_step("editor", base, "tools").target == "tools"
-    assert next_step("editor", base, "validate").key == "editor.validate_goal"
-    assert next_step("editor", base, "fix").target == "findings"
-    assert next_step("welcome", {"project": True}, "create").key == "home.location"
-    assert next_step("welcome", {"project": True}, "open").target == "open"
-    # Busy beats a goal: the app is working on it.
-    assert next_step("converter", {**_TABLE, "scanning": True}, "scan").busy
+def test_where_there_is_one_path_or_none() -> None:
+    assert _keys("editor", {}) == ["open"]
+    assert _keys("editor", {"root": True}) == ["convert_first"]
+    assert _keys("editor", {"root": True, "subjects": True, "view_only": True}) == []
+    assert tasks("nowhere", {}) == []
 
 
-def test_a_goal_ends_when_it_is_reached() -> None:
-    before = {**_TABLE, "tables": 1, "conversions": 0, "reports": 0}
-    assert not goal_done("converter", "scan", before, {**before, "raw_picked": True})
-    assert not goal_done("converter", "scan", before, {**before, "tables": 2, "scanning": True})
-    assert goal_done("converter", "scan", before, {**before, "tables": 2})
-    assert not goal_done("converter", "convert", before, {**before, "converting": True})
-    assert goal_done("converter", "convert", before, {**before, "conversions": 1})
-    assert goal_done("converter", "review", before, {**before, "reviewed": True})
-    assert not goal_done("converter", "editor", before, before)
-    assert goal_done("editor", "validate", {"reports": 3}, {"reports": 4})
-    assert not goal_done("editor", "validate", {"reports": 3}, {"reports": 4, "validating": True})
-    assert goal_done("editor", "fix", {}, {"errors": 0, "warnings": 0})
-    assert not goal_done("editor", "edit", {}, {"file_open": True})
+# ---------------------------------------------------------------------------
+# Steps: shown as chosen, moved on by what happens
+# ---------------------------------------------------------------------------
+
+
+def test_a_task_starts_at_its_first_step_whatever_is_already_true() -> None:
+    """The defect: "Check and edit the table" jumped to Run because a row had
+    already been clicked. A fact already true never moves a step."""
+    clicked = {**_TABLE, "row_clicks": 5}
+    review = find_task("converter", "review", clicked)
+    assert shown(review, 0, clicked).target == "table"
+    assert not should_advance(review, 0, clicked, clicked)
+    # A click AFTER the step was shown moves it on, to Properties.
+    assert should_advance(review, 0, clicked, {**clicked, "row_clicks": 6})
+    assert shown(review, 1, clicked).target == "properties"
+
+
+def test_the_scan_task_follows_the_user() -> None:
+    scan = find_task("converter", "scan", _TABLE)
+    assert [s.target for s in scan.steps] == ["raw_folder", "scan", "table"]
+    assert not should_advance(scan, 0, _TABLE, _TABLE)
+    assert should_advance(scan, 0, _TABLE, {**_TABLE, "raw_picks": 2})
+    busy = {**_TABLE, "scanning": True}
+    step = shown(scan, 1, busy)
+    assert step.busy and step.title == "Scanning" and step.key == "scan.scan.busy"
+    assert not should_advance(scan, 1, _TABLE, {**busy, "tables": 2}), "not while scanning"
+    assert should_advance(scan, 1, _TABLE, {**_TABLE, "tables": 2})
+    assert shown(scan, 2, _TABLE).done
+
+
+def test_home_steps_move_on_with_the_user() -> None:
+    create = find_task("welcome", "create", {})
+    assert [s.target for s in create.steps] == ["browse", "name", "create"]
+    assert should_advance(create, 0, {"browse_clicks": 0}, {"browse_clicks": 1})
+    assert not should_advance(create, 1, {"name": True}, {"name": True})
+    assert should_advance(create, 1, {"name": False}, {"name": True})
+    assert should_advance(create, 2, {"project_root": ""}, {"project_root": "/x/Study"})
+    assert not should_advance(create, 2, {"project_root": "/x/A"}, {"project_root": "/x/A"})
+
+
+def test_bulk_edit_waits_for_several_rows() -> None:
+    bulk = find_task("converter", "bulk", _TABLE)
+    assert not should_advance(bulk, 0, _TABLE, {**_TABLE, "selected_rows": 1})
+    assert should_advance(bulk, 0, _TABLE, {**_TABLE, "selected_rows": 3})
+    assert shown(bulk, 1, _TABLE).target == "bulk_edit"
+
+
+def test_converting_and_validating() -> None:
+    convert = find_task("converter", "convert", _TABLE)
+    assert shown(convert, 0, {**_TABLE, "converting": True}).busy
+    assert should_advance(convert, 0, {"conversions": 0}, {"conversions": 1})
+    assert shown(convert, 1, _TABLE).target == "editor"
+    base = {"root": True, "subjects": True}
+    validate = find_task("editor", "validate", base)
+    assert shown(validate, 0, {**base, "validating": True}).busy
+    assert should_advance(validate, 0, {"reports": 0}, {"reports": 1})
+    assert "3 errors to fix" in shown(validate, 1, {**base, "errors": 3}).text
+    assert "no warnings" in shown(validate, 1, base).text
+
+
+def test_the_heading_names_the_task_and_the_step() -> None:
+    create = find_task("welcome", "create", {})
+    assert shown(create, 1, {}).heading == "Create a new dataset · Step 2 of 3"
+    sample = find_task("welcome", "sample", {})
+    assert shown(sample, 0, {}).heading == "Practise on a sample dataset"
+
+
+def test_keys_are_named_as_the_os_names_them(monkeypatch) -> None:
+    from bidsmgr.viz import keynames
+
+    monkeypatch.setattr(keynames, "is_mac", lambda: True)
+    monkeypatch.setattr(keynames, "_on_mac", lambda mac: True if mac is None else mac)
+    text = shown(find_task("converter", "bulk", _TABLE), 0, _TABLE).text
+    assert "⌘" in text and "Ctrl" not in text
+
+
+@pytest.mark.parametrize("view, facts", [
+    ("welcome", {"project": True, "recents": 1}),
+    ("converter", {**_TABLE, "meta_enabled": True, "subjects": True}),
+    ("editor", {"root": True, "subjects": True, "validated": True, "errors": 1}),
+])
+def test_every_text_is_plain_and_every_step_names_a_control(view, facts) -> None:
+    for task in tasks(view, facts):
+        assert task.label and task.detail and task.steps
+        assert "—" not in task.label + task.detail
+        for i in range(len(task.steps)):
+            step = shown(task, i, facts)
+            assert step.target and step.title and step.text
+            assert "—" not in step.title + step.text
