@@ -475,28 +475,39 @@ class WelcomePanel(QWidget):
         return card
 
     def _build_updates_card(self) -> QFrame:
-        from .whats_new import NEWS_FOR
+        from .viz.menus import popup_menu
+        from .whats_new import NEWS
 
         card, lay = _section_card(
             "What's new",
-            f"What BIDS Manager {NEWS_FOR} brings, and the notes of every release: "
-            "new features, fixes, and anything worth knowing before you upgrade.",
+            "What each release brings, and the notes of every release: new features, "
+            "fixes, and anything worth knowing before you upgrade.",
         )
-        news = self._link_label(f"See what's new in BIDS Manager {NEWS_FOR}", "#whats-new")
-        news.setOpenExternalLinks(False)
-        news.setToolTip("The announcement shown when this release first opened")
-        news.linkActivated.connect(lambda _href: self._show_whats_new())
-        lay.addWidget(news)
+        # One button with a menu, as the sample datasets: one entry per
+        # release's news, the newest first.
+        self._news_button = QPushButton("See what's new")
+        self._news_button.setObjectName("tb-btn")
+        self._news_button.setToolTip("The announcement each release showed when it first opened")
+        menu = popup_menu(self._news_button)
+        for item in NEWS:
+            action = menu.addAction(f"In {item.label}")
+            action.setData(item.key)
+            action.triggered.connect(lambda _c=False, k=item.key: self._show_whats_new(k))
+        self._news_button.setMenu(menu)
+        row = QHBoxLayout()
+        row.addWidget(self._news_button)
+        row.addStretch(1)
+        lay.addLayout(row)
         lay.addWidget(self._link_label(
             "Read the update notes",
             "https://ancplaboldenburg.github.io/bids_manager_documentation/updates/",
         ))
         return card
 
-    def _show_whats_new(self) -> None:
+    def _show_whats_new(self, key: str) -> None:
         from .whats_new import show_dialog
 
-        show_dialog(self.window())
+        show_dialog(self.window(), start=key)
 
     def _show_star_request(self) -> None:
         from .star_request import show_dialog

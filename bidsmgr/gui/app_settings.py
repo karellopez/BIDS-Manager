@@ -107,9 +107,11 @@ KEYS = {
     # "default" → ``assets/logo.png`` (monochrome, palette-inverted on dark).
     # "app_icon" → ``assets/macos/AppIcon128.png`` (full-color BIDS-Manager logo).
     "header_logo": "ui/header_logo",
-    # The release whose "What's new" dialog was last shown (``whats_new.NEWS_FOR``,
-    # e.g. "1.5"). Not a setting the user sees: it keeps the dialog to once.
+    # The newest release whose "What's new" was last shown ("1.5" before 1.5.2,
+    # then ``whats_new.NEWS[0].key``), and the version that last ran (since
+    # 1.5.2). Not settings the user sees: they say which news a start shows.
     "whats_new_seen": "ui/whats_new_seen",
+    "last_version": "ui/last_version",
     # Now and then, ask for a star on GitHub (gui/star_request.py). The switch
     # is in Settings > Display and in the dialog ("Don't ask me again").
     "ask_for_star": "ui/ask_for_star",
@@ -780,6 +782,23 @@ class AppSettings:
     @classmethod
     def remember_whats_new_seen(cls, release: str) -> None:
         cls._settings().setValue(KEYS["whats_new_seen"], release)
+
+    @classmethod
+    def last_version(cls) -> str:
+        """The version of BIDS Manager that last ran here ("" if none has
+        recorded it: a first installation, or a version before 1.5.2)."""
+        value = cls._settings().value(KEYS["last_version"])
+        return str(value) if value is not None else ""
+
+    @classmethod
+    def remember_last_version(cls, version: str) -> None:
+        cls._settings().setValue(KEYS["last_version"], version)
+
+    @classmethod
+    def used_before(cls) -> bool:
+        """Whether any setting exists: BIDS Manager has run here before. Read
+        at start-up, before this session writes anything."""
+        return bool(cls._settings().allKeys())
 
     @classmethod
     def remember_ask_for_star(cls, ask: bool) -> None:

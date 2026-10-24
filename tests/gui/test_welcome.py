@@ -155,9 +155,8 @@ def test_resources_card_lists_links(qtbot, isolated_settings) -> None:
         l for l in panel.findChildren(QLabel) if l.objectName() == "welcome-link"
     ]
     # 3 resource links + 1 link to the section that compares the samples +
-    # What's new (opens the dialog) + the update notes = 6 links; the six
-    # samples are a menu now, not six links.
-    assert len(links) == 6
+    # the update notes = 5 links; the six samples and What's new are menus.
+    assert len(links) == 5
     external = [l for l in links if l.openExternalLinks()]
     assert len(external) == 5
     hrefs = " ".join(l.text() for l in links)
@@ -188,21 +187,20 @@ def test_sample_datasets_are_one_dropdown(qtbot, isolated_settings, monkeypatch)
     assert opened == [wp._SAMPLE_DATASETS[0][1]]
 
 
-def test_whats_new_reopens_the_announcement(qtbot, isolated_settings, monkeypatch) -> None:
-    from PyQt6.QtWidgets import QLabel
-
+def test_whats_new_is_a_menu_of_every_release(qtbot, isolated_settings, monkeypatch) -> None:
+    """As the sample datasets: one button, one entry per release's news, each
+    opening the announcement on that news."""
     from bidsmgr.gui import whats_new
 
     shown = []
-    monkeypatch.setattr(whats_new, "show_dialog", lambda parent: shown.append(parent))
+    monkeypatch.setattr(whats_new, "show_dialog", lambda parent, **kw: shown.append(kw))
     panel = WelcomePanel()
     qtbot.addWidget(panel)
-    link = next(l for l in panel.findChildren(QLabel)
-                if l.objectName() == "welcome-link" and l.property("link_url") == "#whats-new")
-    assert not link.openExternalLinks()
-    assert f"BIDS Manager {whats_new.NEWS_FOR}" in link.text()
-    link.linkActivated.emit("#whats-new")
-    assert len(shown) == 1
+    actions = panel._news_button.menu().actions()
+    assert [a.text() for a in actions] == [f"In {n.label}" for n in whats_new.NEWS]
+    actions[1].trigger()
+    actions[0].trigger()
+    assert shown == [{"start": whats_new.NEWS[1].key}, {"start": whats_new.NEWS[0].key}]
 
 
 def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> None:

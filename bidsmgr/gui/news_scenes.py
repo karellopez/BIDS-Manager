@@ -680,7 +680,9 @@ def _names(s: Stage, t: float) -> None:
     """Subject labels from the DICOM identity, and entities the sequence
     name decides."""
     s.panel(0.5, 0.6, 8.6, 4.5, "DICOM header")
-    fields = (("PatientName", "Müller^Anna"), ("PatientID", "OL_0007"),
+    # The name field holds a study code, as MRI sites type there: never a
+    # person's name in a picture of a tool that keeps names out of datasets.
+    fields = (("PatientName", "MOT_017"), ("PatientID", "OL_0007"),
               ("SeriesDescription", "t1_mprage_acq-highres"), ("ProtocolName", "t1_mprage"))
     value_x = 3.75
     for i, (tag, _value) in enumerate(fields):
@@ -688,10 +690,10 @@ def _names(s: Stage, t: float) -> None:
 
     which = 0 if t < 1.0 else 1 if t < 5.6 else 2
     sources = ("Numbers (sub-001, sub-002, ...)", "Patient ID", "Family name")
-    labels = ("001", "OL0007", "Muller")
+    labels = ("001", "OL0007", "MOT017")
     notes = ("Numbered: no identity field is read.",
              "OL_0007 becomes OL0007: letters and digits only.",
-             "Müller becomes Muller: accents lose their marks.")
+             "The name field holds the study's code: MOT_017 becomes MOT017.")
     starts = (0.0, 1.0, 5.6)
     flash = 1.0 - phase(t, starts[which], starts[which] + 0.6) if which else 0.0
 
@@ -767,7 +769,7 @@ def _names(s: Stage, t: float) -> None:
     if which == 1:
         link(1, 0, "OL_0007", "s1", label_mid, 1.2, phase(t, 1.1, 1.4) * (1 - phase(t, 5.2, 5.6)))
     elif which == 2:
-        link(0, 0, "Müller", "s1", label_mid, 5.8, phase(t, 5.7, 6.0))
+        link(0, 0, "MOT_017", "s1", label_mid, 5.8, phase(t, 5.7, 6.0))
     link(2, 10, "acq-highres", "s2", ax + parts_w[2] / 2, 3.5,
          phase(t, 3.4, 3.7) * (1 - 0.6 * phase(t, 5.0, 5.6)))
     # The values over the lines that leave them.
@@ -779,11 +781,14 @@ def _names(s: Stage, t: float) -> None:
 #: dialog paints them (``widgets/sidecar_views.ORIGIN_TONES``).
 _TONES = {"Source data": ("teal", "teal_bg"), "Your answers": ("purple", "purple_bg"),
           "Placeholder": ("warning", "warning_bg")}
+#: The file tree's indent in the sidecars scene, narrower to leave the
+#: sidecar room for its longest line and its pill.
+_INDENT = 0.34
 
 
 def _sidecars(s: Stage, t: float) -> None:
     """A missing sidecar written again, each field from where it is known."""
-    s.panel(0.5, 0.6, 6.6, 4.9, "Editor")
+    s.panel(0.5, 0.6, 5.8, 4.9, "Editor")
     rows = (("sub-01", 0, "folder"), ("func", 1, "folder"),
             ("sub-01_task-rest_bold.nii.gz", 2, "image"), ("sub-01_task-rest_bold.json", 2, "sidecar"),
             ("sub-01_task-rest_events.tsv", 2, "table"))
@@ -792,18 +797,19 @@ def _sidecars(s: Stage, t: float) -> None:
         y = 1.2 + 0.66 * i
         if i == 3:
             if written < 1:
-                s.box(0.65 + 0.8, y + 0.04, 5.25, 0.56, None, "error", radius=0.1,
+                s.box(0.68 + 2 * _INDENT, y + 0.04, 4.75, 0.56, None, "error", radius=0.1,
                       alpha=1 - written, dash=True)
-                s.tree_row(0.75, y, depth, name, kind, width=5.6, colour="muted", italic=True,
-                           alpha=1 - written)
-                s.dot(6.75, y + 0.31, 0.08, "error", alpha=1 - written)
-            s.tree_row(0.75, y, depth, name, kind, width=5.6, alpha=written)
-            s.dot(6.75, y + 0.31, 0.08, "success", alpha=written)
+                s.tree_row(0.75, y, depth, name, kind, width=5.0, colour="muted", italic=True,
+                           alpha=1 - written, size=9, indent=_INDENT)
+                s.dot(5.98, y + 0.31, 0.08, "error", alpha=1 - written)
+            s.tree_row(0.75, y, depth, name, kind, width=5.0, alpha=written, size=9,
+                       indent=_INDENT)
+            s.dot(5.98, y + 0.31, 0.08, "success", alpha=written)
         else:
-            s.tree_row(0.75, y, depth, name, kind, width=5.6)
+            s.tree_row(0.75, y, depth, name, kind, width=5.0, size=9, indent=_INDENT)
     origins = ("Source data", "File header", "Your answers", "Other sidecars", "File name",
                "Placeholder")
-    s.panel(0.5, 5.85, 6.6, 3.65, "Read from")
+    s.panel(0.5, 5.85, 5.8, 3.65, "Read from")
     lines = (("RepetitionTime", "2.0,", 0), ("EchoTime", "0.03,", 0),
              ("PhaseEncodingDirection", '"j-",', 0), ("TaskName", '"rest",', 4),
              ("InstitutionName", '"Oldenburg",', 2), ("B0FieldSource", '"fmap0",', 3),
@@ -815,14 +821,14 @@ def _sidecars(s: Stage, t: float) -> None:
         used = [k for k, line in enumerate(lines) if line[2] == i]
         glow = max((1 - abs(t - (first + gap * k + 0.1)) / 0.45 for k in used), default=0.0)
         if glow > 0:
-            s.box(0.65, y + 0.02, 6.3, 0.46, "surface3", None, radius=0.1, alpha=glow)
+            s.box(0.65, y + 0.02, 5.5, 0.46, "surface3", None, radius=0.1, alpha=glow)
         s.dot(0.95, y + 0.25, 0.09, fg)
         s.text(1.2, y, 5.6, 0.5, origin, "text", 9)
 
-    s.panel(7.5, 0.6, 8.0, 8.9)
-    s.text(7.75, 0.7, 7.5, 0.55, "sub-01_task-rest_bold.json", "tree_sidecar", 10, bold=True)
-    s.text(7.75, 1.3, 1.0, 0.6, "{", "dim", 10, mono=True)
-    s.text(7.5, 4.5, 8.0, 0.6, "No sidecar yet", "muted", 10, align=_CENTRE,
+    s.panel(6.7, 0.6, 8.8, 8.9)
+    s.text(6.95, 0.7, 8.3, 0.55, "sub-01_task-rest_bold.json", "tree_sidecar", 10, bold=True)
+    s.text(6.95, 1.3, 1.0, 0.6, "{", "dim", 10, mono=True)
+    s.text(6.7, 4.5, 8.8, 0.6, "No sidecar yet", "muted", 10, align=_CENTRE,
            alpha=1 - phase(t, 1.7, 2.0))
     for k, (key, value, origin) in enumerate(lines):
         at = first + gap * k
@@ -832,21 +838,22 @@ def _sidecars(s: Stage, t: float) -> None:
         y = 1.9 + 0.68 * k
         fly = phase(t, at - 0.45, at)
         if fly < 1:
-            sx, sy = 6.9, 6.65 + 0.5 * origin
-            fx, fy = lerp(sx, 7.9, fly), lerp(sy, y + 0.3, fly) - 0.8 * math.sin(math.pi * fly)
+            sx, sy = 6.1, 6.65 + 0.5 * origin
+            fx, fy = lerp(sx, 7.1, fly), lerp(sy, y + 0.3, fly) - 0.8 * math.sin(math.pi * fly)
             s.dot(fx, fy, 0.08, _TONES.get(origins[origin], ("dim",))[0], alpha=1 - fly * 0.3)
-        s.json_line(8.05 - 0.3 * (1 - a), y, key, value, size=10, alpha=a, width=5.6,
+        s.json_line(7.25 - 0.3 * (1 - a), y, key, value, size=10, alpha=a, width=6.0,
                     value_colour="warning" if origin == 5 else "text")
         fg, bg = _TONES.get(origins[origin], ("dim", "surface3"))
         s.chip(15.25, y + 0.07, origins[origin], fg, bg, size=8, alpha=a, right=True)
     end_a = phase(t, first + gap * 6, first + gap * 6 + 0.3)
-    s.text(7.75, 1.9 + 0.68 * 7, 1.0, 0.6, "}", "dim", 10, mono=True, alpha=end_a)
-    s.text(7.75, 8.75, 7.5, 0.55, "Never over a value already there. One step: Undo takes it back.",
+    s.text(6.95, 1.9 + 0.68 * 7, 1.0, 0.6, "}", "dim", 10, mono=True, alpha=end_a)
+    s.text(6.95, 8.75, 8.3, 0.55, "Never over a value already there. One step: Undo takes it back.",
            "dim", 9, alpha=written)
     # The right-click that starts it.
     menu = phase(t, 0.7, 0.95) * (1 - phase(t, 1.75, 2.0))
-    s.menu(2.7, 3.15, ("Write its sidecar", "Write missing sidecars here"),
-           0 if t > 1.2 else -1, alpha=menu, width=4.2)
+    s.menu(2.7, 3.15, ("Write its sidecar from the recording...",),
+           0 if t > 1.2 else -1, alpha=menu, width=s.width("Write its sidecar from the recording...",
+                                                           10) + 0.6)
     if t < 2.0:
         go = phase(t, 0.2, 1.2)
         s.cursor(lerp(5.0, 3.6, go), lerp(1.4, 3.5, go),
@@ -1036,7 +1043,7 @@ def _anonymise(s: Stage, t: float) -> None:
     s.panel(6.0, 0.6, 9.5, 8.9)
     s.text(6.25, 0.7, 9.0, 0.55, "sub-01_T1w.json", "tree_sidecar", 10, bold=True)
     # (key, before, after (None: removed), when it changes)
-    lines = (("PatientName", '"Anna Müller"', None, ticks[0]),
+    lines = (("PatientName", '"MOT_017"', None, ticks[0]),
              ("PatientID", '"OL_0007"', None, ticks[0]),
              ("AcquisitionDateTime", '"2026-03-14T09:12:00"', '"1905-03-11T09:12:00"', ticks[1]),
              ("InstitutionName", '"University of Oldenburg"', '"University of Oldenburg"', 99.0),
@@ -1179,10 +1186,11 @@ SCENES: tuple[Scene, ...] = (
           "Three volumes leave a run; the events and the physiology move with it", 8.0,
           _dummy_volumes),
     Scene("names", "1.5.2", "Names from the scanner",
-          "Name subjects from the patient ID or name instead of a number, and let a token "
-          "such as acq-highres in the sequence name decide an entity.",
-          "A subject label taken from the patient ID, then the family name, and acq taken "
-          "from the series description", 9.0, _names),
+          "Name subjects from the patient ID, or the code typed as the patient name, "
+          "instead of a number, and let a token such as acq-highres in the sequence name "
+          "decide an entity.",
+          "A subject label taken from the patient ID, then from the study code in the "
+          "patient name field, and acq taken from the series description", 9.0, _names),
     Scene("sidecars", "1.5.2", "Sidecars written from the recordings",
           "A missing or incomplete sidecar is written again from the source data, the "
           "file's header, your answers and the files that link to it, never over a value "
