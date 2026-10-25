@@ -65,7 +65,10 @@ def single_log(kind: str, rate: int, seconds: float = 10.0, *,
     return "\n".join(lines) + "\n"
 
 
-def info_log(volumes: int = 10, *, first: int = START + 1000, slices: int = 4) -> str:
+def info_log(volumes: int = 10, *, first: int = START + 1000, slices: int = 4,
+             last_slices: int | None = None) -> str:
+    """The acquisition log; ``last_slices`` stops the run during its last
+    volume after that many slices, as an operator stopping a long run does."""
     lines = ["UUID        = 08b19a26-bf5b-4d0b-90aa-85b2893c9c75",
              "ScanDate    = 20230914_102000", "LogVersion  = EJA_1",
              "LogDataType = ACQUISITION_INFO", f"NumSlices   = {slices}",
@@ -73,7 +76,8 @@ def info_log(volumes: int = 10, *, first: int = START + 1000, slices: int = 4) -
              "VOLUME   SLICE   ACQ_START_TICS  ACQ_FINISH_TICS  ECHO", ""]
     for v in range(volumes):
         start = first + v * TR_TICKS
-        for s in range(slices):
+        acquired = last_slices if (last_slices is not None and v == volumes - 1) else slices
+        for s in range(acquired):
             # Slice-interleaved: the volume's start is its EARLIEST slice,
             # which is not the first row listed (slice 1 starts first).
             offset = 0 if s == 1 else 5 * (s + 1)

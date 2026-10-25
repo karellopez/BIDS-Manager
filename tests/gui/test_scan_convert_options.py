@@ -221,3 +221,73 @@ def test_one_change_is_one_undo(qtbot, tmp_path) -> None:
     assert panel._model.drop_volumes(0) is None
     panel._on_redo()
     assert panel._model.drop_volumes(0) == 6
+
+
+# ---------------------------------------------------------------------------
+# A physiological log follows its run: Properties says which, and how many
+# ---------------------------------------------------------------------------
+
+
+def _log_row(name="sub-001_task-rest_physio", **extra) -> dict:
+    return _row(suffix="physio", bids_name=name, bids_path=name, series_uid="1.2.4",
+                sequence="task-rest_bold_PhysioLog", acq_time="102137.78",
+                study_instance_uid="1.9", task="rest",
+                entities=json.dumps({"subject": "001", "task": "rest"}), **extra)
+
+
+_ENTITY = {"sub": "subject", "ses": "session", "task": "task", "acq": "acquisition",
+           "run": "run"}
+
+
+def _run_row(name="sub-001_task-rest_bold", **extra) -> dict:
+    entities = {_ENTITY[k]: v for k, v in (t.split("-", 1) for t in name.split("_")[:-1])}
+    return _row(bids_name=name, bids_path=name, sequence="task-rest_bold",
+                acq_time="102012.13", study_instance_uid="1.9",
+                entities=json.dumps(entities), task=entities.get("task", ""),
+                session=f"ses-{entities['session']}" if "session" in entities else "", **extra)
+
+
+def test_a_log_names_the_run_it_follows_and_its_count(qtbot) -> None:
+    s = AppSettings()
+    s.convert_drop_volumes = 0
+    s.save()
+    # The run renamed in the table: the log still follows it (by acquisition).
+    panel, model = _panel(qtbot, [_run_row("sub-001_task-rest_acq-mb4_bold", drop_volumes="4"),
+                                  _log_row(), _row("anat", "T1w")])
+    panel.set_selected_row(1)
+    assert getattr(panel, "dummy_volumes_spin", None) is None, "the log has no count of its own"
+    assert panel.physio_run_label.text() == "sub-001_task-rest_acq-mb4_bold"
+    assert panel.physio_volumes_box._badge == "4 removed"
+    assert panel.physio_volumes_box._subtitle == "its run"
+    # The number is the run's: changed there, the log follows.
+    model.set_drop_volumes(0, 2)
+    panel.set_selected_row(0)
+    assert panel.dummy_volumes_physio.text() == "sub-001_task-rest_physio"
+    panel.set_selected_row(1)
+    assert panel.physio_volumes_box._badge == "2 removed"
+    # The run's default, when it has no number of its own.
+    s.convert_drop_volumes = 3
+    s.save()
+    model.set_drop_volumes(0, None)
+    panel.set_selected_row(1)
+    assert panel.physio_volumes_box._badge == "3 removed"
+
+
+def test_a_log_without_its_run_keeps_every_volume(qtbot) -> None:
+    panel, _model = _panel(qtbot, [_log_row(), _row("anat", "T1w")])
+    panel.set_selected_row(0)
+    assert panel.physio_run_label is None
+    assert panel.physio_volumes_box._subtitle == "no run"
+    assert panel.physio_volumes_box._badge == "none removed"
+
+
+def test_a_long_run_name_does_not_widen_properties(qtbot) -> None:
+    """GUI_LOOK_AND_FEEL 4.23: the name elides, it never sets a minimum width."""
+    long = "sub-001_ses-baselinevisit_task-restingstatewitheyesopen_acq-multiband8_run-01_bold"
+    short_panel, _m = _panel(qtbot, [_run_row(), _log_row()])
+    long_panel, _m2 = _panel(qtbot, [_run_row(long), _log_row()])
+    for panel in (short_panel, long_panel):
+        panel.set_selected_row(1)
+        panel.physio_volumes_box.set_expanded(True)
+    assert long_panel.physio_run_label.text() == long
+    assert long_panel.minimumSizeHint().width() <= short_panel.minimumSizeHint().width()

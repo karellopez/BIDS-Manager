@@ -90,6 +90,9 @@ class PlanOptions:
     #: Physiology: "by_rate" (a table per sampling rate), "one_interpolated"
     #: or "one_as_recorded" (one table for the run); ``converter.physio_cmrr``.
     physio_layout: str = "by_rate"
+    #: Volumes removed from the start of a functional run whose
+    #: ``drop_volumes`` cell is empty (``fixups.dummy_volumes``).
+    drop_volumes: int = 0
     bids_version: str = ""
     version: str = ""                    # BIDS Manager's
     dcm2niix_version: str = ""
@@ -962,6 +965,35 @@ def _iso_time(df, i) -> str:
     return UNKNOWN
 
 
+def _volumes_removed(df, i, suffix: str, options: PlanOptions) -> int:
+    """Volumes the conversion removes from the start of this row
+    (``fixups.dummy_volumes.volumes_to_remove``), 0 for a cell that is not
+    a number (the conversion reports it and uses the default)."""
+    from ..fixups.dummy_volumes import volumes_to_remove
+
+    datatype = _cell(df, i, "datatype")
+    try:
+        return volumes_to_remove(_cell(df, i, "drop_volumes"), datatype, suffix,
+                                 options.drop_volumes)
+    except ValueError:
+        return volumes_to_remove("", datatype, suffix, options.drop_volumes)
+
+
+def _first_kept_time(df, i, name: str, features, options: PlanOptions) -> str:
+    """The recording's time in the scans table: the scan's, moved to the
+    first volume kept when volumes are removed from the start of the run
+    (``n x RepetitionTime``, as ``fixups.dummy_volumes`` moves it)."""
+    stamp = _iso_time(df, i)
+    suffix = name.split(".", 1)[0].rsplit("_", 1)[-1]
+    removed = _volumes_removed(df, i, suffix, options)
+    tr = getattr(_features_of(features, _cell(df, i, "series_uid")), "repetition_time", None)
+    if not removed or stamp == UNKNOWN or not isinstance(tr, (int, float)) or tr <= 0:
+        return stamp
+    from ..fixups.dummy_volumes import later_datetime
+
+    return later_datetime(stamp, removed * float(tr)) or stamp
+
+
 def _scans_tsv(df, planned: PlannedFile, features, options: PlanOptions) -> FilePreview:
     """``filename`` relative to the session folder, and the time."""
     by_row = {}
@@ -978,7 +1010,9 @@ def _scans_tsv(df, planned: PlannedFile, features, options: PlanOptions) -> File
         datatype = _cell(df, i, "datatype")
         for f in files:
             if f.path in listed:
-                rows.append((f"{datatype}/{f.path.rsplit('/', 1)[-1]}", _iso_time(df, i)))
+                name = f.path.rsplit("/", 1)[-1]
+                rows.append((f"{datatype}/{name}",
+                             _first_kept_time(df, i, name, features, options)))
     rows.sort()
     return FilePreview("tsv", header=("filename", "acq_time"), rows=tuple(rows),
                        note="One row per recording of the session, its time from the scan. "
@@ -1540,6 +1574,9 @@ def _sidecar(df, row, planned: PlannedFile, options: PlanOptions, features, spec
         if datatype in ("fmap", "func", "dwi", "perf"):
             for key, value, source in _links(df, row, options, features):
                 out.put(key, value, source)
+        removed = _volumes_removed(df, row, suffix, options)
+        if removed:
+            out.put("NumberOfVolumesDiscardedByUser", removed, "settings")
 
     if suffix not in ("channels", "events", "coordsystem", "electrodes", "physio", "physioevents"):
         note = _deface(df, row, datatype, suffix, options, features, out)

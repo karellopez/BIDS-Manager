@@ -1326,44 +1326,56 @@ def _build_tasks_for_subject(
         )
         if task is not None:
             tasks.append(task)
-    return _physio_follows_its_run(tasks)
+    return _physio_follows_its_run(tasks, _physio_links(subject_df))
 
 
-def _run_key(task: ConvertTask) -> str:
-    """A recording's name without its suffix: what a run and its physiology share."""
-    return task.basename.rsplit("_", 1)[0]
+def _physio_links(df: pd.DataFrame) -> dict[str, str]:
+    """``{physio row id: run row id}`` for the logs of functional runs
+    (``fixups.dummy_volumes.physio_runs``), in the ids the tasks carry."""
+    from ..fixups.dummy_volumes import physio_runs
+    from ..project.orchestration import row_id
+
+    positions = {label: k for k, label in enumerate(df.index)}
+    frame = df.reset_index(drop=True)
+    return {row_id(frame, positions[log_]): row_id(frame, positions[run])
+            for log_, run in physio_runs(df).items()}
 
 
-def _physio_follows_its_run(tasks: list[ConvertTask]) -> list[ConvertTask]:
-    """A physio row takes the volumes removed from its run: its tables then
-    start where the run's image starts. The run is the functional image with
-    the same name but the suffix (``..._task-rest_bold`` for
-    ``..._task-rest_physio``)."""
+def _physio_follows_its_run(tasks: list[ConvertTask],
+                            links: dict[str, str]) -> list[ConvertTask]:
+    """A physiology log takes the volumes removed from the run it was
+    recorded with (``links``): its tables then start where the run's image
+    starts. A log with no run while volumes are removed from this subject's
+    runs is said so in the log, since its tables then keep every volume."""
     from ..fixups.dummy_volumes import applies
 
-    removed = {_run_key(t): t.drop_volumes for t in tasks
-               if applies(t.datatype, t.suffix) and t.drop_volumes > 0}
-    if not removed:
-        return tasks
-    return [t.model_copy(update={"drop_volumes": removed[_run_key(t)]})
-            if t.suffix == "physio" and _run_key(t) in removed else t
-            for t in tasks]
+    by_id = {t.row_id: t for t in tasks}
+    cutting = any(applies(t.datatype, t.suffix) and t.drop_volumes > 0 for t in tasks)
+    out = []
+    for t in tasks:
+        if t.datatype == "func" and t.suffix == "physio":
+            run = by_id.get(links.get(t.row_id, ""))
+            if run is not None:
+                if run.drop_volumes != t.drop_volumes:
+                    t = t.model_copy(update={"drop_volumes": run.drop_volumes})
+            elif cutting:
+                log.warning(
+                    "%s: no functional run being converted was recorded with this "
+                    "physiological log, so no volumes are removed from it", t.basename)
+        out.append(t)
+    return out
 
 
 def _drop_volumes_for(row: pd.Series, datatype: str, suffix: str, default: int) -> int:
-    """Volumes to remove from this row: its cell (a number, 0 included), else
-    ``default``; only for a functional time series."""
-    from ..fixups.dummy_volumes import applies
+    """Volumes to remove from this row (``fixups.dummy_volumes.volumes_to_remove``);
+    a cell that is not a number is reported and the default used."""
+    from ..fixups.dummy_volumes import volumes_to_remove
 
-    if not applies(datatype, suffix):
-        return 0
-    cell = str(row.get("drop_volumes", "") or "").strip()
-    if cell:
-        try:
-            return max(0, int(float(cell)))
-        except ValueError:
-            log.warning("drop_volumes %r is not a number; %d used", cell, default)
-    return default
+    try:
+        return volumes_to_remove(row.get("drop_volumes", ""), datatype, suffix, default)
+    except ValueError:
+        log.warning("drop_volumes %r is not a number; %d used", row.get("drop_volumes"), default)
+        return volumes_to_remove("", datatype, suffix, default)
 
 
 def _row_to_task(
@@ -2176,8 +2188,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
         help=(
             "Remove the first N volumes (dummy scans) of every functional run "
             "whose drop_volumes cell in the table is empty; a cell wins, 0 "
-            "included. The image, its sidecar (NumberOfVolumesDiscardedByUser), "
-            "its events and its physiology then start at the first volume kept."
+            "included. The image, its sidecar (NumberOfVolumesDiscardedByUser, "
+            "the acquisition time), its time in the scans table, its events and "
+            "the physiology recorded with it then start at the first volume kept."
         ),
     )
     parser.add_argument(

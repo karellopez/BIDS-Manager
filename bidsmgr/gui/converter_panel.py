@@ -1206,6 +1206,7 @@ class ConverterPanel(QWidget):
                                         if m.strip()),
             force_edf=bool(s.convert_force_edf),
             physio_layout=s.convert_physio_layout,
+            drop_volumes=int(s.convert_drop_volumes),
             bids_version=loader.bids_version(),
             version=str(__version__),
         )

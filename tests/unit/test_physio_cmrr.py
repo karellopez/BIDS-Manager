@@ -264,3 +264,144 @@ def test_the_tables_are_valid_bids(tmp_path, logs) -> None:
                   if str(i.severity).lower().endswith(("err", "error"))
                   and "physio" in str(f.path)]
         assert errors == [], (layout, errors)
+
+
+# ---------------------------------------------------------------------------
+# A log with no signal: the volume timings alone
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def timing_only(tmp_path: Path) -> CmrrPhysio:
+    """What the scanner logs when physiology logging is on and no sensor is
+    attached (SIna OL_4925 runs 2 and 3, the MRI guide sample): the
+    acquisition log alone."""
+    return read_cmrr([p for p in write_logs(tmp_path / "logs", volumes=10)
+                      if "Info" in p.name])
+
+
+def _marks(table) -> np.ndarray:
+    return np.flatnonzero(table.data[:, table.columns.index("trigger")] == 1)
+
+
+def test_a_log_with_only_volume_timings_gives_the_trigger_alone(timing_only) -> None:
+    assert timing_only.channels == [] and len(timing_only.volumes) == 10
+    tables, t0 = build_tables(timing_only)
+    assert len(tables) == 1
+    table = tables[0]
+    assert table.label == "" and table.columns == ["trigger"]
+    assert table.rate == 400.0
+    assert table.start_time(t0) == 0.0
+    # One row per scanner tick: every volume start is exactly a mark.
+    assert list(_marks(table)) == [v * TR_TICKS for v in range(10)]
+    end = timing_only.volumes[-1].finish
+    assert table.start + (len(table.data) - 1) / table.rate == pytest.approx(end)
+    assert set(np.unique(table.data)) == {0.0, 1.0}
+    assert "no physiological signal" in table.descriptions["trigger"]
+
+
+def test_the_layout_does_not_change_a_trigger_alone(timing_only) -> None:
+    first, _ = build_tables(timing_only)
+    for layout in ("one_interpolated", "one_as_recorded"):
+        tables, _ = build_tables(timing_only, layout=layout)
+        assert len(tables) == 1 and np.array_equal(tables[0].data, first[0].data)
+
+
+def test_removed_volumes_move_a_trigger_alone(timing_only) -> None:
+    tables, t0 = build_tables(timing_only, drop_volumes=3)
+    table = tables[0]
+    assert t0 == pytest.approx(timing_only.volumes[3].start)
+    # Not cropped: the rows before the first volume kept stay, unmarked,
+    # before StartTime 0.
+    assert table.start_time(t0) == pytest.approx(-3 * TR_TICKS * TICK)
+    assert list(_marks(table)) == [v * TR_TICKS for v in range(3, 10)]
+    assert "3 volumes removed" in table.descriptions["trigger"]
+    aligned, t0 = build_tables(timing_only, drop_volumes=3, align=True)
+    assert aligned[0].start_time(t0) == 0.0
+    assert list(_marks(aligned[0])) == [v * TR_TICKS for v in range(7)]
+
+
+def test_a_trigger_alone_is_written_as_the_runs_only_table(tmp_path, timing_only) -> None:
+    from bidsmgr.editor.validator import validate
+
+    root = tmp_path / "ds"
+    (root / "sub-01/func").mkdir(parents=True)
+    (root / "dataset_description.json").write_text(
+        json.dumps({"Name": "p", "BIDSVersion": "1.10.0"}))
+    written = write_tables(timing_only, root / "sub-01/func/sub-01_task-rest")
+    assert sorted(p.name for p in written) == ["sub-01_task-rest_physio.json",
+                                               "sub-01_task-rest_physio.tsv.gz"]
+    sidecar = json.loads((root / "sub-01/func/sub-01_task-rest_physio.json").read_text())
+    assert sidecar["Columns"] == ["trigger"]
+    assert sidecar["SamplingFrequency"] == 400.0 and sidecar["StartTime"] == 0.0
+    rows = _table(root / "sub-01/func/sub-01_task-rest_physio.tsv.gz")
+    assert rows[0] == ["1"] and {r[0] for r in rows} == {"0", "1"}
+    report = validate(root, strict=True)
+    errors = [(f.path, i.rule_id) for f in report.files for i in f.issues
+              if str(i.severity).lower().endswith(("err", "error")) and "physio" in str(f.path)]
+    assert errors == []
+
+
+def test_a_log_with_neither_signal_nor_timings_is_refused() -> None:
+    with pytest.raises(ValueError, match="neither a signal nor the volume timings"):
+        build_tables(CmrrPhysio())
+
+
+# ---------------------------------------------------------------------------
+# Channel names
+# ---------------------------------------------------------------------------
+
+
+def test_two_external_inputs_read_as_a_pair(tmp_path) -> None:
+    """The scanner names the first input after the kind alone (EXT, then
+    EXT2), as on SIna OL_4594."""
+    lines = ["UUID        = 08b19a26-bf5b-4d0b-90aa-85b2893c9c75",
+             "ScanDate    = 20250821_142638", "LogVersion  = EJA_1",
+             "LogDataType = EXT", "SampleTime  = 8", "",
+             "ACQ_TIME_TICS  CHANNEL  VALUE  SIGNAL", ""]
+    for k in range(200):
+        tick = START + 8 * k
+        lines += [f"     {tick}     EXT       {k % 2} ", f"     {tick}     EXT2      0 "]
+    log = tmp_path / "Physio_EXT.log"
+    log.write_text("\n".join(lines) + "\n")
+    physio = read_cmrr([log])
+    assert [ch.label for ch in physio.channels] == ["external_trigger1", "external_trigger2"]
+    tables, _ = build_tables(physio)
+    assert len(tables) == 1 and tables[0].columns == ["external_trigger1", "external_trigger2"]
+
+
+def test_a_volume_on_a_row_is_marked_in_that_row(logs) -> None:
+    """Volume times are seconds of the day (~37,000 s here, as on a real
+    scanner), so a row index carries float noise of a few 1e-9 rows. The ECG
+    table shares the scanner's 2.5 ms ticks: every volume starts exactly on
+    one of its rows and must be marked there, not 2.5 ms later (it was, on
+    a real run, whenever volumes were removed or the tables cropped)."""
+    physio = read_cmrr(logs)
+    for drop, align in ((0, False), (3, False), (3, True), (0, True)):
+        tables, t0 = build_tables(physio, drop_volumes=drop, align=align)
+        ecg = next(t for t in tables if t.label == "ecg")
+        marks = _marks(ecg)
+        assert marks[0] / ecg.rate + ecg.start_time(t0) == pytest.approx(0.0, abs=1e-9)
+        assert set(np.diff(marks)) == {TR_TICKS}
+        if align:
+            assert ecg.start_time(t0) == 0.0 and marks[0] == 0
+
+
+def test_a_volume_the_scanner_did_not_finish_is_not_the_runs(tmp_path) -> None:
+    """A run stopped by hand (SIna OL_4594: the last of 1,130 volumes has 40
+    of its 48 slices): dcm2niix writes that volume apart and the image has
+    1,129, so the trigger marks 1,129, never one beyond the image."""
+    from tests.fixtures.cmrr_physio import info_log
+
+    log = tmp_path / "Physio_Info.log"
+    log.write_text(info_log(10, slices=4, last_slices=2))
+    physio = read_cmrr([log])
+    assert len(physio.volumes) == 9 and physio.unfinished == 1
+    tables, _t0 = build_tables(physio, drop_volumes=2)
+    assert len(_marks(tables[0])) == 7
+    assert "did not finish" in tables[0].descriptions["trigger"]
+    # A volume in the middle missing a line is the image's: it stays.
+    text = info_log(10, slices=4).splitlines()
+    middle = next(i for i, line in enumerate(text) if line.split()[:2] == ["4", "2"])
+    log.write_text("\n".join(text[:middle] + text[middle + 1:]) + "\n")
+    assert len(read_cmrr([log]).volumes) == 10

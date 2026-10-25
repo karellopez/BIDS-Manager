@@ -39,11 +39,22 @@ respiration 50 Hz), so there are three layouts, all BIDS compliant:
   share the scanner's tick grid, which CMRR rates do; otherwise in the nearest
   row, and its column's description says how far that is at most.
 
+A log with no signal at all (logging on, no sensor attached) still says
+when each volume was acquired: it is written as ONE table holding the trigger
+column alone, on the scanner's clock (400 Hz, one row per tick), from the
+first volume to the end of the last. 1.5.1 wrote a trigger of 1 in every row
+for such a log, and 1.5.2 at first wrote nothing.
+
 ``align`` crops the tables to the run: from the first volume of the image to
 the end of its last volume, so ``StartTime`` is 0 (to within one sample).
 ``drop_volumes`` is the number of volumes removed from the start of the image
 (dummy scans): the run, ``StartTime`` and the trigger column then start at the
-first volume kept.
+first volume kept. Measured on nine real runs (two scanner generations, 50 to
+1,225 volumes): volume i of the image is volume i of the log, to the
+millisecond, so removing N from both keeps them together. A run stopped by
+hand ends in a volume the scanner did not finish: the log lists it, the
+image does not (dcm2niix writes it apart), so it is not a volume of the run
+here either and the trigger counts exactly the image's volumes.
 """
 
 from __future__ import annotations
@@ -115,6 +126,9 @@ class CmrrPhysio:
     volumes: list[Volume] = field(default_factory=list)
     uuid: str = ""
     scan_date: str = ""
+    #: Volumes the scanner started and did not finish when the run was
+    #: stopped: in the log, not in the image (:func:`_volumes`).
+    unfinished: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +209,10 @@ def _label(kind: str, name: str, several: bool) -> str:
     if not several:
         return base
     digits = re.sub(r"\D", "", name)
+    if not digits and name.upper() == kind.upper():
+        # The first of several channels of a kind is named after the kind
+        # alone: EXT, then EXT2.
+        digits = "1"
     return f"{base}{digits}" if digits else f"{base}_{name.lower()}"
 
 
@@ -214,7 +232,7 @@ def read_cmrr(paths: Sequence[Path]) -> CmrrPhysio:
         physio.uuid = physio.uuid or header.get("UUID", "")
         physio.scan_date = physio.scan_date or header.get("ScanDate", "")
         if kind == "ACQUISITION_INFO":
-            physio.volumes = _volumes(rows)
+            physio.volumes, physio.unfinished = _volumes(rows, _int(header.get("NumSlices")))
             continue
         step = _sample_ticks(header, samples)
         several = len(samples) > 1
@@ -277,10 +295,21 @@ def _sample_ticks(header: dict[str, str], samples: dict) -> float:
     return float(np.median(np.concatenate(diffs))) if diffs else 1.0
 
 
-def _volumes(rows: list[tuple[int, int, int, int, int]]) -> list[Volume]:
-    """Each volume's first start and last finish, from its first echo."""
+def _volumes(rows: list[tuple[int, int, int, int, int]],
+             slices: int = 0) -> tuple[list[Volume], int]:
+    """Each volume's first start and last finish, from its first echo; and
+    how many volumes at the end the scanner did not finish.
+
+    A run stopped by hand stops in the middle of a volume: the log lists the
+    slices acquired (40 of 48 on SIna OL_4594, 8 of 48 on OL_4925), dcm2niix
+    writes that volume to a file of its own (``_bolda``, "partial volume")
+    and the conversion leaves it out, so it is not a volume of the image.
+    With ``slices`` (the log's ``NumSlices``), trailing volumes with fewer
+    slices are left out; a volume in the middle missing a line is kept,
+    since the image has it."""
     starts: dict[int, int] = {}
     finishes: dict[int, int] = {}
+    counts: dict[int, int] = {}
     echoes = [r[4] for r in rows]
     first_echo = min(echoes) if echoes else 0
     for volume, _slice, start, finish, echo in rows:
@@ -288,7 +317,20 @@ def _volumes(rows: list[tuple[int, int, int, int, int]]) -> list[Volume]:
             continue
         starts[volume] = min(starts.get(volume, start), start)
         finishes[volume] = max(finishes.get(volume, finish), finish)
-    return [Volume(v, starts[v] * TICK, finishes[v] * TICK) for v in sorted(starts)]
+        counts[volume] = counts.get(volume, 0) + 1
+    order = sorted(starts)
+    unfinished = 0
+    while slices > 0 and order and counts[order[-1]] < slices:
+        order.pop()
+        unfinished += 1
+    return [Volume(v, starts[v] * TICK, finishes[v] * TICK) for v in order], unfinished
+
+
+def _int(text) -> int:
+    try:
+        return int(str(text).strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -383,29 +425,86 @@ def _as_recorded(ch: Channel, start: float, rate: float, n: int) -> tuple[np.nda
     return out, (moved if moved > 1e-6 / rate else 0.0)
 
 
+#: How near a row a time must be to be ON it, in rows. A row index computed
+#: from scanner times (seconds of the day, ~10^4 to 10^5) carries float noise
+#: of a few 1e-9 rows: a tolerance below that put a volume that starts
+#: exactly on a row one row late (2.5 ms on a 400 Hz table, measured on a
+#: real ECG table).
+_ON_ROW = 1e-6
+
+
+def _first_row(seconds: float, rate: float) -> int:
+    """The first row at or after ``seconds`` from row 0."""
+    return int(np.ceil(seconds * rate - _ON_ROW))
+
+
+def _row_count(seconds: float, rate: float) -> int:
+    """Rows from row 0 to the last at or before ``seconds``, both included."""
+    return int(np.floor(seconds * rate + _ON_ROW)) + 1
+
+
 def _trigger(volumes: list[Volume], start: float, rate: float, n: int) -> np.ndarray:
     col = np.zeros(n)
     for vol in volumes:
-        k = int(np.ceil((vol.start - start) * rate - 1e-9))
+        k = _first_row(vol.start - start, rate)
         if 0 <= k < n:
             col[k] = 1
     return col
+
+
+def _trigger_description(drop_volumes: int, *, alone: bool = False,
+                         unfinished: int = 0) -> str:
+    text = ("Scanner volume trigger from the acquisition log: 1 at the first sample of "
+            "each volume of the run's image, 0 elsewhere.")
+    if alone:
+        text += (" The log recorded no physiological signal, only when each volume was "
+                 "acquired, on the scanner's clock (one row per 2.5 ms tick).")
+    if drop_volumes > 0:
+        text += (f" The {drop_volumes} volumes removed from the start of the image are not "
+                 "marked.")
+    if unfinished > 0:
+        text += (" The last volume, which the scanner did not finish when the run was "
+                 "stopped and which is not in the image, is not marked."
+                 if unfinished == 1 else
+                 f" The last {unfinished} volumes, which the scanner did not finish and "
+                 "which are not in the image, are not marked.")
+    return text
+
+
+def _trigger_only(volumes: list[Volume], kept: list[Volume], *, align: bool,
+                  drop_volumes: int, unfinished: int = 0) -> Table:
+    """The table of a log with no signal: the trigger alone, one row per
+    scanner tick, from the first volume (the first kept when ``align``) to
+    the end of the last. Every volume starts on a tick, so each mark is in
+    the row of its exact time."""
+    rate = 1.0 / TICK
+    start = (kept if align else volumes)[0].start
+    end = max(vol.finish for vol in kept)
+    n = _row_count(end - start, rate)
+    return Table(label="", rate=rate, start=start, columns=["trigger"],
+                 data=_trigger(kept, start, rate, n).reshape(-1, 1),
+                 descriptions={"trigger": _trigger_description(
+                     drop_volumes, alone=True, unfinished=unfinished)})
 
 
 def build_tables(physio: CmrrPhysio, *, layout: str = LAYOUT_BY_RATE, align: bool = False,
                  drop_volumes: int = 0) -> tuple[list[Table], float]:
     """The tables to write, and the time (scanner clock) ``StartTime`` is
     measured from: the first volume kept, or the first sample when the log
-    says nothing about volumes."""
+    says nothing about volumes. A log with volumes and no signal gives one
+    table, the trigger alone (:func:`_trigger_only`)."""
     if layout not in LAYOUTS:
         raise ValueError(f"unknown physio layout {layout!r}; choose from {', '.join(LAYOUTS)}")
     channels = _ordered(physio.channels)
-    if not channels:
-        raise ValueError("the physiological log holds no signal")
+    if not channels and not physio.volumes:
+        raise ValueError("the physiological log holds neither a signal nor the volume timings")
     kept = physio.volumes[drop_volumes:] if drop_volumes > 0 else list(physio.volumes)
     if physio.volumes and not kept:
         raise ValueError(f"{drop_volumes} volumes to remove, and the run has only "
                          f"{len(physio.volumes)}")
+    if not channels:
+        return [_trigger_only(physio.volumes, kept, align=align, drop_volumes=drop_volumes,
+                              unfinished=physio.unfinished)], kept[0].start
     t0 = kept[0].start if kept else min(ch.start for ch in channels)
     window = None
     if align and kept:
@@ -427,10 +526,9 @@ def build_tables(physio: CmrrPhysio, *, layout: str = LAYOUT_BY_RATE, align: boo
         if window is not None:
             # From the first sample at or after the run's start to the last
             # at or before its end, on this table's grid.
-            k0 = int(np.ceil((window[0] - start) * rate - 1e-9))
-            start = start + k0 / rate
+            start = start + _first_row(window[0] - start, rate) / rate
             end = min(end, window[1])
-        n = int(np.floor((end - start) * rate + 1e-9)) + 1
+        n = _row_count(end - start, rate)
         if n <= 0:
             continue
         columns, data, descriptions = [], [], {}
@@ -446,11 +544,8 @@ def build_tables(physio: CmrrPhysio, *, layout: str = LAYOUT_BY_RATE, align: boo
         if kept:
             columns.append("trigger")
             data.append(_trigger(kept, start, rate, n))
-            descriptions["trigger"] = (
-                "Scanner volume trigger from the acquisition log: 1 at the first sample of "
-                "each volume of the run's image, 0 elsewhere."
-                + (f" The {drop_volumes} volumes removed from the start of the image are not "
-                   "marked." if drop_volumes > 0 else ""))
+            descriptions["trigger"] = _trigger_description(drop_volumes,
+                                                           unfinished=physio.unfinished)
         tables.append(Table(label=_group_label(group), rate=rate, start=start,
                             columns=columns, data=np.column_stack(data),
                             descriptions=descriptions))

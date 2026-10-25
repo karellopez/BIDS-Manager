@@ -201,7 +201,10 @@ class TestConvertFailure:
         assert result.success is False
         assert "the physiological log could not be read" in (result.error or "")
 
-    def test_a_log_with_no_signal_is_failure(self, tmp_path: Path) -> None:
+    def test_a_log_with_only_volume_timings_writes_the_trigger_alone(
+            self, tmp_path: Path) -> None:
+        # Logging on, no sensor attached: the volume timings are what the
+        # log holds, and they are written (1.5.2 first wrote nothing).
         from tests.fixtures.cmrr_physio import info_log
 
         log = tmp_path / "src" / "Physio_Info.log"
@@ -211,5 +214,10 @@ class TestConvertFailure:
         staging = tmp_path / "staging"
         staging.mkdir()
         result = PhysioDcmBackend().convert(task, staging)
-        assert result.success is False
-        assert "holds no signal" in (result.error or "")
+        assert result.success is True, result.error
+        names = sorted(Path(p).name for p in result.staged_files)
+        assert len(names) == 2 and all(n.endswith(("_physio.json", "_physio.tsv.gz"))
+                                       for n in names)
+        sidecar = next(Path(p) for p in result.staged_files if str(p).endswith(".json"))
+        meta = json.loads(sidecar.read_text())
+        assert meta["Columns"] == ["trigger"] and meta["SamplingFrequency"] == 400.0

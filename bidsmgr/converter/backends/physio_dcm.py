@@ -115,14 +115,21 @@ class PhysioDcmBackend:
                 error="the physiological log produced no table",
                 duration_s=time.monotonic() - t0,
             )
-        log.info(
-            "physio %s: %d channel(s) (%s), %d volume(s) in the log, %s",
-            task.basename, len(physio.channels),
-            ", ".join(ch.label for ch in physio.channels), len(physio.volumes),
-            {"one_interpolated": "one table, interpolated",
-             "one_as_recorded": "one table, as recorded"}.get(task.physio_layout,
-                                                              "one table per rate"),
-        )
+        if physio.unfinished:
+            log.info("physio %s: the run was stopped during its last volume, which the image "
+                     "does not hold; the trigger leaves it out", task.basename)
+        if not physio.channels:
+            log.info("physio %s: no signal in the log, only the timing of its %d volume(s): "
+                     "the trigger alone", task.basename, len(physio.volumes))
+        else:
+            log.info(
+                "physio %s: %d channel(s) (%s), %d volume(s) in the log, %s",
+                task.basename, len(physio.channels),
+                ", ".join(ch.label for ch in physio.channels), len(physio.volumes),
+                {"one_interpolated": "one table, interpolated",
+                 "one_as_recorded": "one table, as recorded"}.get(task.physio_layout,
+                                                                  "one table per rate"),
+            )
         return ConvertResult(
             task=task, staged_files=tuple(sorted(staged)), success=True,
             duration_s=time.monotonic() - t0,
