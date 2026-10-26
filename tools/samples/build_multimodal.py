@@ -256,6 +256,8 @@ def build_v3(source: Path, out: Path) -> Path:
         "cut\nto the same 60 volumes (version 3; version 2 kept all 100, so its trigger\n"
         "marked 40 volumes the image does not have). Nothing else in any file was changed.")
     for old, new in (
+        # Measured on the zip: 311.4 MB of files (what Finder shows), 124.9 MB zipped.
+        ("About 305 MB unpacked, 126 MB as a zip.", "About 311 MB unpacked, 125 MB as a zip."),
         ("- **Physiological recordings split by signal.** The physio log of the BOLD run\n"
          "  becomes one `_physio.tsv.gz` per signal (cardiac, ECG, respiratory, trigger).",
          "- **Physiological recordings, one table per sampling rate.** The physio log of\n"

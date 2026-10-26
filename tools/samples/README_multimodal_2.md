@@ -36,7 +36,7 @@ dose_sheet.csv    the PET fields the scanner did not record (injected mass,
                   specific activity, mode of administration, ...)
 ```
 
-About 305 MB unpacked, 125 MB as a zip.
+About 311 MB unpacked, 125 MB as a zip.
 
 ## One participant
 
