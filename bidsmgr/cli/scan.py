@@ -1376,7 +1376,7 @@ def _flag_ct_companion_rows(df: pd.DataFrame) -> None:
 _SUB_LABEL_RE = _re.compile(r"^sub-(\d+)$")
 
 
-def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
+def _renumber_subjects_after(df: pd.DataFrame, others, keep=frozenset()) -> None:
     """Shift ``df``'s ``sub-NNN`` labels past those already used in ``others``.
 
     Every modality scanner numbers its own subjects from ``sub-001``. Merging
@@ -1387,7 +1387,8 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
     the user renames rows in the inventory to merge them deliberately.
 
     Rewrites ``participant_id`` plus the ``entities`` / basename columns derived
-    from it, so the row stays internally consistent.
+    from it, so the row stays internally consistent. Rows in ``keep`` (index
+    labels) are left as they are: already given a subject on purpose.
     """
     if df.empty or "participant_id" not in df.columns:
         return
@@ -1405,7 +1406,10 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
 
     offset = max(used)
     remap: dict[str, str] = {}
-    for label in df["participant_id"].astype(str):
+    for idx in df.index:
+        if idx in keep:
+            continue
+        label = str(df.at[idx, "participant_id"])
         m = _SUB_LABEL_RE.match(label.strip())
         if m and label not in remap:
             remap[label] = f"sub-{int(m.group(1)) + offset:03d}"
@@ -1413,23 +1417,77 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
         return
 
     for idx in df.index:
-        old = str(df.at[idx, "participant_id"]).strip()
-        new = remap.get(old)
-        if not new:
+        if idx in keep:
             continue
-        df.at[idx, "participant_id"] = new
-        token = new[len("sub-"):]
-        if "entities" in df.columns:
-            try:
-                ents = json.loads(df.at[idx, "entities"] or "{}")
-            except (TypeError, ValueError):
-                ents = {}
-            if ents.get("subject"):
-                ents["subject"] = token
-                df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
-        for col in ("bids_name", "bids_path"):
-            if col in df.columns:
-                df.at[idx, col] = str(df.at[idx, col]).replace(old, new, 1)
+        new = remap.get(str(df.at[idx, "participant_id"]).strip())
+        if new:
+            _relabel_row(df, idx, new)
+
+
+def _relabel_row(df: pd.DataFrame, idx, new: str) -> None:
+    """Give one row the participant ``new``: ``participant_id`` and the
+    ``entities`` / basename columns derived from it, so the row stays
+    internally consistent."""
+    old = str(df.at[idx, "participant_id"]).strip()
+    df.at[idx, "participant_id"] = new
+    token = new[len("sub-"):]
+    if "entities" in df.columns:
+        try:
+            ents = json.loads(df.at[idx, "entities"] or "{}")
+        except (TypeError, ValueError):
+            ents = {}
+        if ents.get("subject"):
+            ents["subject"] = token
+            df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
+    for col in ("bids_name", "bids_path"):
+        if col in df.columns and old:
+            df.at[idx, col] = str(df.at[idx, col]).replace(old, new, 1)
+
+
+_PARTICIPANT_FOLDER_RE = _re.compile(r"^sub-[A-Za-z0-9]+$", _re.IGNORECASE)
+
+
+def _participant_folder(relpath: str) -> str:
+    """The ``sub-<label>`` folder a path relative to the scanned root lies
+    in, lower-cased, or ``""``. Splits on both separators: on Windows the
+    stored paths use backslashes."""
+    for part in _re.split(r"[\\/]", str(relpath or "")):
+        if _PARTICIPANT_FOLDER_RE.match(part):
+            return part.lower()
+    return ""
+
+
+def _join_folder_subject(df: pd.DataFrame, others) -> set:
+    """Give a row the subject of its participant folder when EVERY other
+    recording in that ``sub-`` folder was given one and the same subject.
+
+    For the eye tracker, whose files name no participant: it used to be
+    shifted past every label in use (``_renumber_subjects_after``) even when
+    its folder plainly belonged to one subject, so a one-person tree came out
+    as two subjects. The join is narrow on purpose. A folder whose other
+    recordings carry several subjects (identities the user still has to
+    reconcile), a folder with nothing else in it, and a file in no ``sub-``
+    folder all keep the separate number, so two people are never put
+    together by the scan. Returns the index labels joined.
+    """
+    subjects: dict[str, set[str]] = {}
+    for other in others:
+        if other is None or other.empty or "participant_id" not in other.columns:
+            continue
+        for idx in other.index:
+            label = str(other.at[idx, "participant_id"] or "").strip()
+            where = str(other.at[idx, "source_folder"]) if "source_folder" in other.columns else ""
+            folder = _participant_folder(where)
+            if label and folder:
+                subjects.setdefault(folder, set()).add(label)
+    joined = set()
+    for idx in df.index:
+        where = str(df.at[idx, "source_folder"]) if "source_folder" in df.columns else ""
+        labels = subjects.get(_participant_folder(where), set())
+        if len(labels) == 1:
+            _relabel_row(df, idx, next(iter(labels)))
+            joined.add(idx)
+    return joined
 
 
 def _classify_pet_rows(df: pd.DataFrame) -> None:
@@ -2141,7 +2199,11 @@ def run_scan(
     df_eye = scan_eyetrack(Path(dicom_root), dataset=dataset_slug or "",
                            cancel_check=cancel_check)
     if not df_eye.empty:
-        _renumber_subjects_after(df_eye, (df, df_eeg))
+        # An EyeLink file names no participant: it joins the subject of its
+        # participant folder when that folder is plainly one person's, and
+        # takes a number of its own otherwise.
+        joined = _join_folder_subject(df_eye, (df, df_eeg))
+        _renumber_subjects_after(df_eye, (df, df_eeg), keep=joined)
         df_eeg = (
             df_eye if df_eeg.empty
             else pd.concat([df_eeg, df_eye], ignore_index=True, sort=False)

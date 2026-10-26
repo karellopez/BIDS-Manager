@@ -10,8 +10,8 @@ citation file). Then every predicted file must be written, every written file
 predicted, and every value the preview states (anything but "…") must be the
 value in the file, TODO placeholders included.
 
-Gated on ``BIDS_MANAGER_REAL_MRI_DATA``; the sample lives beside the raw data
-(``sample_datasets/2026-10/BIDS_Manager_multimodal_sample_v2``).
+Gated on ``BIDS_MANAGER_REAL_MRI_DATA``; the published multimodal sample is
+downloaded once and cached (``tests/fixtures/sample_data``).
 """
 
 from __future__ import annotations
@@ -23,19 +23,20 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tests.fixtures.data_root import data_root
-
-_ROOT = data_root()
-SAMPLE = (_ROOT.parent / "sample_datasets" / "2026-10" / "BIDS_Manager_multimodal_sample_v2"
-          if _ROOT is not None else None)
+from tests.fixtures import sample_data
 
 pytestmark = [
     pytest.mark.real_data,
     pytest.mark.skipif(not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
                        reason="BIDS_MANAGER_REAL_MRI_DATA not set"),
-    pytest.mark.skipif(SAMPLE is None or not SAMPLE.exists(),
-                       reason=f"multimodal sample missing at {SAMPLE}"),
 ]
+
+
+def _sample() -> Path:
+    """The published multimodal sample, downloaded once and cached
+    (``tests/fixtures/sample_data``): the folder holding ``raw/`` and its
+    spreadsheets. Skips when it cannot be had."""
+    return sample_data.require("multimodal").parent
 
 
 @pytest.fixture(scope="module")
@@ -45,17 +46,18 @@ def converted(tmp_path_factory):
     from bidsmgr.cli.scan import run_scan
     from bidsmgr.recording_meta import dump_spec, load_spec, scaffold_sidecar_path
 
+    sample = _sample()
     work = tmp_path_factory.mktemp("preview")
     inv = work / "inv.tsv"
-    run_scan(SAMPLE / "raw", inv, n_jobs=2, probe_convert=True)
+    run_scan(sample / "raw", inv, n_jobs=2, probe_convert=True)
     spec = load_spec(scaffold_sidecar_path(inv))
     spec.sequence_templates["func/bold"] = {"TaskDescription": "Rest with eyes open"}
     spec.defaults.institution_name = "University of Oldenburg"
     spec.dataset_description.authors = ["Ada Lovelace", "Alan Turing"]
     spec.dataset_description.license = "CC-BY-4.0"
-    spec.participants_file = str(SAMPLE / "participants.csv")
+    spec.participants_file = str(sample / "participants.csv")
     scaffold_sidecar_path(inv).write_text(dump_spec(spec), encoding="utf-8")
-    assert run_convert(inv, work / "bids", raw_root=SAMPLE / "raw") == 0
+    assert run_convert(inv, work / "bids", raw_root=sample / "raw") == 0
     assert run_metadata_cli(work / "bids", inventory_tsv=inv, fill_scope="recommended",
                             generate_companions=True, write_citation_file=True) == 0
     root = next(p for p in (work / "bids").iterdir() if p.is_dir())
@@ -196,10 +198,11 @@ def converted_cut(tmp_path_factory):
     from bidsmgr.cli.metadata import run_metadata_cli
     from bidsmgr.cli.scan import run_scan
 
+    sample = _sample()
     work = tmp_path_factory.mktemp("preview_cut")
     inv = work / "inv.tsv"
-    run_scan(SAMPLE / "raw", inv, n_jobs=2, probe_convert=True)
-    assert run_convert(inv, work / "bids", raw_root=SAMPLE / "raw", drop_volumes=CUT) == 0
+    run_scan(sample / "raw", inv, n_jobs=2, probe_convert=True)
+    assert run_convert(inv, work / "bids", raw_root=sample / "raw", drop_volumes=CUT) == 0
     assert run_metadata_cli(work / "bids", inventory_tsv=inv, fill_scope="recommended") == 0
     root = next(p for p in (work / "bids").iterdir() if p.is_dir())
     return inv, root
