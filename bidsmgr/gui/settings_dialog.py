@@ -52,6 +52,7 @@ from ..deface import run as deface_run
 from ..classifier import user_rules
 from ..util.system_info import SystemInfo, get_system_info
 from .app_settings import AppSettings
+from .metadata_help import schema_summary
 from .typefaces import code
 
 
@@ -564,7 +565,7 @@ class SettingsDialog(QDialog):
             box.setRange(0, 6)
             box.setSpecialValueText("as found")
             box.setSuffix(" digits")
-            box.setToolTip(why[:300] if why else f"The {entity} entity.")
+            box.setToolTip(schema_summary(why) if why else f"The {entity} entity.")
             self._index_widths[entity] = box
 
             name = QLabel(code(f"{entity}-"))
@@ -638,7 +639,7 @@ class SettingsDialog(QDialog):
                 display, why = key, ""
             check = QCheckBox(display)
             check.setToolTip(
-                f"{display} ({key}-): the sequence name's value wins.\n\n{why[:300]}"
+                f"{display} ({key}-): the sequence name's value wins.\n\n{schema_summary(why)}"
                 if why else f"The {key} entity: the sequence name's value wins.")
             tag = QLabel(code(f"{key}-"))
             tag.setObjectName("dlg-hint")
@@ -696,7 +697,7 @@ class SettingsDialog(QDialog):
                 display, why = key, ""
             check = QCheckBox(display)
             check.setToolTip(
-                f"{display} ({key}-)\n\n{why[:300]}" if why else f"The {key} entity.")
+                f"{display} ({key}-)\n\n{schema_summary(why)}" if why else f"The {key} entity.")
             tag = QLabel(code(f"{key}-"))
             tag.setObjectName("dlg-hint")
             self._drop_entities[key] = check
@@ -791,6 +792,13 @@ class SettingsDialog(QDialog):
         builtin.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         builtin.verticalHeader().setVisible(False)
         builtin.setMinimumHeight(240)
+        # The first three columns as wide as their longest value or title:
+        # at Qt's default width the capitalised title "Label / group" was
+        # cut at both ends ("ABEL / GROUI").
+        for col in range(3):
+            builtin.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents
+            )
         builtin.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
         )

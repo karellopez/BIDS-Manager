@@ -130,6 +130,26 @@ def test_the_entity_choices_are_the_ones_a_name_can_decide(qtbot) -> None:
     assert "sub" not in dlg._name_entities and "ses" not in dlg._name_entities
 
 
+def test_the_entity_tooltips_end_on_a_whole_sentence(qtbot) -> None:
+    """Every entity control on Settings > Scan explains its entity from the
+    schema. The text used to be cut at 300 characters, mid-word, with its
+    Markdown showing ("...MUST be indexed with the [`run-<index>`](SPEC_ROOT"
+    then "w"); now it ends a sentence, in lines Qt can show."""
+    from bidsmgr.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(AppSettings())
+    qtbot.addWidget(dlg)
+    controls = {**{f"name {k}": w for k, w in dlg._name_entities.items()},
+                **{f"leave out {k}": w for k, w in dlg._drop_entities.items()},
+                **{f"width {k}": w for k, w in dlg._index_widths.items()}}
+    assert controls
+    for name, widget in controls.items():
+        tip = widget.toolTip()
+        assert tip.rstrip()[-1] in '.!?)"', (name, tip[-60:])
+        assert "`" not in tip and "](" not in tip and "**" not in tip, name
+        assert all(len(line) <= 72 for line in tip.splitlines()), name
+
+
 # ---------------------------------------------------------------------------
 # A run's own count: Properties and the table
 # ---------------------------------------------------------------------------
