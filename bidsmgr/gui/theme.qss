@@ -2113,3 +2113,18 @@ QFrame#val-filter-row { background: transparent; border: none; }
 
 /* The Log tab's corner icons sit on the tab bar, not in a header. */
 QWidget#dock-corner { background: transparent; }
+
+/* A run's progress in a tool dialog (Compress or decompress images): a slim
+   track in the card's tone, the done part in the accent. The counts are said
+   in the status line beside it, so the bar carries no text. */
+QProgressBar#run-progress {
+    background: $surface2;
+    border: 1px solid $border;
+    border-radius: 4px;
+    min-height: 8px;
+    max-height: 8px;
+}
+QProgressBar#run-progress::chunk {
+    background: $accent;
+    border-radius: 3px;
+}

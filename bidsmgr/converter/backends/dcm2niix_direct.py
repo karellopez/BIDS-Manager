@@ -18,11 +18,19 @@ Layout written by ``convert``::
         <basename>_e2.nii.gz
         <basename>_ph.nii.gz
 
+``.nii`` instead of ``.nii.gz`` when the task asks for uncompressed images
+(``ConvertTask.compress``, Settings > Convert).
+
 The fmap suffix mapping (``_e1`` / ``_e2`` / ``_ph`` →
 ``magnitude1`` / ``magnitude2`` / ``phasediff``) is applied by
 ``fixups/fieldmaps.py`` *after* this backend returns, before the
 atomic per-subject commit. ``IntendedFor`` lives in
 ``fixups/intended_for.py`` for the same reason.
+
+Every OTHER series dcm2niix splits into one file per echo (a multi-echo GRE,
+a multi-echo BOLD or MPRAGE) is named here, by :func:`_name_echoes`: its
+``_e<n>`` / ``_e<n>_ph`` tokens become the ``echo`` (and ``part``) entities,
+where the standard allows them for that suffix.
 
 Reference: architecture.md §7. Decision log §13: dcm2niix invoked
 directly, no wrapper layer.
@@ -150,6 +158,7 @@ class Dcm2niixDirect:
 
             proc = _run_dcm2niix(
                 self._bin, dicoms_dir, output_dir, task.basename,
+                compress=task.compress,
             )
         finally:
             # Best-effort cleanup of the per-series staging; not fatal.
@@ -183,6 +192,9 @@ class Dcm2niixDirect:
                     len(dropped), task.basename,
                     ", ".join(p.name for p in dropped),
                 )
+        # After the residuals: a name the echoes are given here no longer
+        # starts with the basename dcm2niix was handed.
+        staged = _name_echoes(staged, task)
 
         missing = _missing_expected(staged, task.expected_outputs, task.basename, output_dir)
         if missing:
@@ -241,21 +253,22 @@ def _run_dcm2niix(
     output_dir: Path,
     basename: str,
     *,
+    compress: bool = True,
     timeout: int = DEFAULT_TIMEOUT_S,
 ) -> subprocess.CompletedProcess:
     """Invoke dcm2niix to write ``<basename>.nii.gz`` etc. into ``output_dir``.
 
     Flags: ``-b y`` (write JSON), ``-ba n`` (don't anonymise — keeps
-    SeriesInstanceUID for provenance / dedup), ``-z y`` (gzip),
-    ``-f <basename>`` (we control the name; do not use ``%j`` here),
-    and ``--terse`` is intentionally NOT passed so debugging stderr
-    survives.
+    SeriesInstanceUID for provenance / dedup), ``-z y`` (gzip; ``-z n``
+    with ``compress=False``, for ``.nii``), ``-f <basename>`` (we control
+    the name; do not use ``%j`` here), and ``--terse`` is intentionally NOT
+    passed so debugging stderr survives.
     """
     cmd = [
         str(binary),
         "-b", "y",
         "-ba", "n",
-        "-z", "y",
+        "-z", "y" if compress else "n",
         "-o", str(output_dir),
         "-f", basename,
         str(dicom_dir),
@@ -285,6 +298,121 @@ def _name_phase_part(staged: list[Path], basename: str) -> list[Path]:
     sidecar = next((p for p in out if p.name == f"{basename}.json"), None)
     if image is not None and sidecar is not None:
         _write_phase_units(sidecar, image)
+    return sorted(out)
+
+
+_ECHO_TAIL_RE = re.compile(r"^_e(\d+)(_ph)?$")
+
+
+def echo_basename(basename: str, datatype: str, suffix: str, echo: int,
+                  part: str = "") -> Optional[str]:
+    """The name of echo ``echo`` of the recording ``basename``.
+
+    ``echo-<echo>`` (and ``part-<part>`` when given) set on the name's
+    entities and placed where the standard orders them, so
+    ``sub-01_acq-fa35_echo-1_part-mag_MEGRE`` gives
+    ``sub-01_acq-fa35_echo-3_part-mag_MEGRE`` for echo 3. ``None`` where the
+    suffix's rule has no ``echo``, and for fieldmaps, whose echoes
+    ``fixups/fieldmaps`` names (``magnitude1/2``, ``phasediff``). The
+    conversion names each file dcm2niix splits off by it, and the BIDS
+    preview predicts those names by it.
+    """
+    if datatype == "fmap":
+        return None
+    try:
+        allowed = set(schema.allowed_entities(datatype, suffix))
+    except Exception:  # noqa: BLE001 - an unknown suffix is left as dcm2niix wrote it
+        return None
+    if "echo" not in allowed:
+        return None
+    entities = dict(schema.name_entities(f"{basename}.x"))
+    entities["echo"] = str(int(echo))
+    if part and "part" in allowed:
+        entities["part"] = part
+    return "_".join(f"{k}-{entities[k]}" for k in schema.entity_keys()
+                    if entities.get(k)) + f"_{suffix}"
+
+
+def _name_echoes(staged: list[Path], task) -> list[Path]:
+    """Name each echo dcm2niix split off a series with the ``echo`` entity.
+
+    A series acquired at several echo times (a multi-echo GRE, a multi-echo
+    BOLD or MPRAGE) is ONE inventory row and comes out of dcm2niix as one file
+    per echo, ``<basename>_e1``, ``_e2``, ... (``_e2_ph`` for the phase of a
+    series that holds magnitude and phase). Those tails are dcm2niix's, not
+    BIDS's: written as they are, every echo of a MEGRE series kept the row's
+    ``echo-1`` and gained an ``_e2`` after its suffix, a name the standard
+    does not define (96 validation errors on one QSM session).
+
+    Here each tail becomes the entity it stands for (:func:`echo_basename`):
+    the echo's number (the sidecar's ``EchoNumber``, else the tail's) in
+    ``echo``, and ``_ph`` in ``part-phase`` (with the other files of the
+    series then ``part-mag``). Only for a suffix whose rule allows ``echo``;
+    fieldmaps are left to ``fixups/fieldmaps``, which maps the same tails to
+    ``magnitude1/2`` and ``phasediff``. A file whose new name is already
+    taken keeps dcm2niix's, so nothing is overwritten.
+    """
+    if not staged or echo_basename(task.basename, task.datatype, task.suffix, 1) is None:
+        return staged
+    basename = task.basename
+    found = []
+    for path in staged:
+        ext = _matching_ext(path.name, _KNOWN_OUTPUT_EXTS)
+        if not ext:
+            continue
+        stem = path.name[: -len(ext)]
+        if not stem.startswith(basename):
+            continue
+        match = _ECHO_TAIL_RE.match(stem[len(basename):])
+        if match:
+            found.append((path, ext, int(match.group(1)), bool(match.group(2))))
+    if not found:
+        return staged
+
+    has_part = "part" in schema.name_entities(f"{basename}.x")
+    any_phase = any(phase for *_rest, phase in found)
+
+    def numbered(echo: int, phase: bool) -> str:
+        part = "phase" if phase else ("mag" if any_phase and not has_part else "")
+        return echo_basename(basename, task.datatype, task.suffix, echo, part) or basename
+
+    # The echo number of each (stem): the sidecar's EchoNumber where it says one.
+    echo_of: dict[str, int] = {}
+    for path, ext, echo, _phase in found:
+        if ext == ".json":
+            try:
+                value = json.loads(path.read_text(encoding="utf-8")).get("EchoNumber")
+                if isinstance(value, (int, float)) and int(value) == value and value > 0:
+                    echo_of[path.name[: -len(ext)]] = int(value)
+            except (OSError, ValueError):
+                pass
+
+    taken = {p.name for p in staged}
+    out = [p for p in staged if p not in {f[0] for f in found}]
+    renamed: list[Path] = []
+    for path, ext, echo, phase in found:
+        stem = path.name[: -len(ext)]
+        target = path.with_name(numbered(echo_of.get(stem, echo), phase) + ext)
+        if target.name in taken or target.exists():
+            log.warning("echo naming: %s would land on %s, which is taken; kept as written",
+                        path.name, target.name)
+            out.append(path)
+            continue
+        path.rename(target)
+        taken.discard(path.name)
+        taken.add(target.name)
+        out.append(target)
+        renamed.append(target)
+    # A phase image says its units, as BIDS requires of every part-phase file.
+    for image in renamed:
+        if "_part-phase_" not in f"_{image.name}" or not image.name.endswith((".nii.gz", ".nii")):
+            continue
+        sidecar = image.with_name(image.name[: -len(".nii.gz" if image.name.endswith(".gz") else ".nii")]
+                                  + ".json")
+        if sidecar.exists():
+            _write_phase_units(sidecar, image)
+    if renamed:
+        log.info("echo naming: %d file(s) of %s named by echo", len(renamed), basename)
     return sorted(out)
 
 
@@ -466,4 +594,4 @@ def _missing_expected(
     return missing
 
 
-__all__ = ["Dcm2niixDirect"]
+__all__ = ["Dcm2niixDirect", "echo_basename"]

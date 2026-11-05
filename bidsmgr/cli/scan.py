@@ -723,6 +723,117 @@ def _entities_from_names(rows: list[InventoryRow], chosen: dict[str, Classificat
     return chosen
 
 
+#: Siemens' distortion-correction markers: ``ND`` is the image as acquired,
+#: ``DIS2D``/``DIS3D`` the same acquisition reconstructed with the gradient
+#: non-linearity corrected (``features._distortion_marker``).
+_CORRECTED = {"DIS2D", "DIS3D"}
+_ND_DESCRIPTION_RE = _re.compile(r"[_\-\s]ND$", _re.IGNORECASE)
+
+
+def _flip_label(angle) -> str:
+    """``35.0`` -> ``fa35``, ``7.5`` -> ``fa7p5`` (a BIDS label is alphanumeric)."""
+    value = float(angle)
+    text = str(int(value)) if value.is_integer() else f"{value:g}".replace(".", "p")
+    return f"fa{text}"
+
+
+def _name_megre_protocols(rows: list[InventoryRow], chosen: dict[str, Classification],
+                          df: pd.DataFrame) -> dict[str, Classification]:
+    """Tell multi-echo GRE (``anat/MEGRE``) protocols apart by what differs.
+
+    A session may hold two MEGRE protocols at different flip angles, each
+    reconstructed twice (with and without distortion correction), and every
+    one as magnitude and phase. BIDS has no ``flip`` entity for MEGRE (it
+    belongs to VFA/MPM), so ``run-1`` to ``run-4`` was all that kept the
+    names apart, and a run means "the same acquisition repeated", which
+    these are not. Within a subject and session:
+
+    - protocols that differ in flip angle get ``acq-fa<angle>`` (``acq-fa35``,
+      ``acq-fa14``) in place of a shared acquisition label that told them
+      nothing apart;
+    - a reconstruction without distortion correction (Siemens ``ND``) gets
+      ``rec-nd`` when the corrected reconstruction of it is here too.
+
+    Rows of any other suffix, and rows a scan rule named, are left alone.
+    """
+    features = df.attrs.get("features_by_uid") or {}
+    rows_by_id = {r.row_id.hex: r for r in rows}
+
+    def facts(row) -> dict:
+        for uid in (row.series_uid or "").split("|"):
+            if features.get(uid):
+                return features[uid]
+        return {}
+
+    megre = {}
+    for key, c in chosen.items():
+        row = rows_by_id.get(key)
+        if (row is None or c.skip or c.datatype != "anat" or c.suffix != "MEGRE"
+                or c.classifier.startswith("user_hint")):
+            continue
+        megre[key] = (row, facts(row))
+    if len(megre) < 2:
+        return chosen
+
+    notes: dict[str, list[str]] = defaultdict(list)
+
+    def without(entities: dict, *names: str) -> tuple:
+        return _entity_signature({k: v for k, v in entities.items() if k not in names})
+
+    # 1. Flip angles. Magnitude and phase of one protocol share an angle, so
+    #    they are grouped together (``part`` and ``echo`` left out of the key).
+    groups: dict[tuple, list[str]] = defaultdict(list)
+    for key, (row, _f) in megre.items():
+        c = chosen[key]
+        groups[(row.subject_hint or "", row.session_hint or "",
+                without(c.candidate_entities, "part", "echo", "reconstruction"))].append(key)
+    for members in groups.values():
+        angles = {key: megre[key][1].get("flip_angle") for key in members}
+        if None in angles.values() or len(set(angles.values())) < 2:
+            continue
+        shown = ", ".join(f"{a:g}" for a in sorted(set(angles.values()), reverse=True))
+        for key in members:
+            label = _flip_label(angles[key])
+            chosen[key].candidate_entities["acquisition"] = label
+            notes[key].append(f"acq-{label}: the MEGRE protocols differ in flip angle "
+                              f"({shown} degrees)")
+
+    # 2. Reconstructions of one acquisition (same entities, part included).
+    groups = defaultdict(list)
+    for key, (row, _f) in megre.items():
+        c = chosen[key]
+        if c.candidate_entities.get("reconstruction"):
+            continue
+        groups[(row.subject_hint or "", row.session_hint or "",
+                without(c.candidate_entities, "echo"))].append(key)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        marks = {key: str(megre[key][1].get("distortion") or "").upper() for key in members}
+        if any(marks.values()):
+            uncorrected = [k for k, m in marks.items() if m == "ND"]
+            corrected = [k for k, m in marks.items() if m in _CORRECTED]
+        else:  # no marker in the header: the description's ``_ND`` and its twin
+            names = {k: (megre[k][0].series_description or "").strip() for k in members}
+            uncorrected = [k for k, n in names.items() if _ND_DESCRIPTION_RE.search(n)]
+            plain = {_ND_DESCRIPTION_RE.sub("", names[k]).lower() for k in uncorrected}
+            corrected = [k for k, n in names.items()
+                         if k not in uncorrected and n.lower() in plain]
+        if not uncorrected or not corrected:
+            continue
+        for key in uncorrected:
+            chosen[key].candidate_entities["reconstruction"] = "nd"
+            notes[key].append("rec-nd: reconstructed without distortion correction "
+                              "(the corrected reconstruction is named without rec)")
+
+    for key, lines in notes.items():
+        c = chosen[key]
+        note = "; ".join(lines)
+        chosen[key] = c.model_copy(update={
+            "rationale": f"{c.rationale}; {note}" if c.rationale else note})
+    return chosen
+
+
 def _normalize_runs(
     rows: list[InventoryRow],
     chosen: dict[str, Classification],
@@ -2262,6 +2373,7 @@ def run_scan(
                                      forced=forced)
 
     chosen = _reroute_b0_references_to_fmap_epi(rows, chosen)
+    chosen = _name_megre_protocols(rows, chosen, df)
     abort_verdicts = _detect_aborts(rows, chosen)
     chosen = _normalize_runs(rows, chosen, abort_verdicts)
     # Last, so what the operator wrote wins over every estimate above,

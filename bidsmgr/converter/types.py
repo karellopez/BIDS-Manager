@@ -66,6 +66,11 @@ class ConvertTask(BaseModel):
     # DWI ``.bval``/``.bvec``) is never affected. Set False to keep them.
     skip_residuals: bool = True
 
+    # NIfTI images written compressed (``.nii.gz``, the default) or not
+    # (``.nii``). BIDS accepts both; some tools (older SPM, MATLAB scripts)
+    # read only the uncompressed form. Settings > Convert, ``--no-compress``.
+    compress: bool = True
+
     # EEG/MEG-specific: per-row knobs the inventory TSV carries. The CLI
     # resolves these (cell, else recording-metadata default) before building
     # the task. ``line_freq`` / ``montage`` are applied during the write;

@@ -1205,6 +1205,7 @@ class ConverterPanel(QWidget):
             sourcedata_modalities=tuple(m.strip() for m in s.convert_sourcedata_modalities.split(",")
                                         if m.strip()),
             force_edf=bool(s.convert_force_edf),
+            compress=bool(s.convert_compress_nifti),
             physio_layout=s.convert_physio_layout,
             drop_volumes=int(s.convert_drop_volumes),
             bids_version=loader.bids_version(),
@@ -2180,6 +2181,7 @@ class ConverterPanel(QWidget):
             on_existing=self._app_settings.convert_on_existing,
             raw_root=self._sources.root if self._sources is not None else self._raw_root,
             skip_residuals=self._app_settings.convert_skip_residuals,
+            compress=self._app_settings.convert_compress_nifti,
             preserve_curation=self._app_settings.convert_preserve_curation,
             force_edf=self._app_settings.convert_force_edf,
             deface=self._app_settings.convert_deface,

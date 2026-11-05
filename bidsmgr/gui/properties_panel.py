@@ -651,7 +651,8 @@ class PropertiesPanel(QWidget):
     def _preview_extension(self, row: int, datatype: str, suffix: str) -> str:
         """Pick the extension shown in the predicted-path preview.
 
-        MRI datatypes render ``.nii.gz``; physio renders ``.tsv.gz``; EEG / MEG /
+        MRI datatypes render ``.nii.gz`` (``.nii`` when Settings > Convert writes
+        uncompressed images); physio renders ``.tsv.gz``; EEG / MEG /
         iEEG / NIRS render the source recording's own extension (what mne-bids
         keeps by default) with a per-datatype fallback. Fixes the preview always
         showing ``.nii.gz`` for electrophysiology rows.
@@ -664,7 +665,9 @@ class PropertiesPanel(QWidget):
                 if src.endswith(ext):
                     return ext
             return self._DATATYPE_DEFAULT_EXT.get(datatype, "")
-        return ".nii.gz"
+        from .app_settings import AppSettings
+
+        return ".nii.gz" if AppSettings.load().convert_compress_nifti else ".nii"
 
     def _build_path_preview(
         self, row: int, datatype: str, suffix: str, entities: dict[str, str],

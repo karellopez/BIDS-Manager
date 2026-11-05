@@ -218,6 +218,7 @@ bidsmgr-validate  = "bidsmgr.cli.validate:main"
 bidsmgr-deface    = "bidsmgr.cli.deface:main"
 bidsmgr-anonymise = "bidsmgr.cli.anonymise:main"
 bidsmgr-sidecars  = "bidsmgr.cli.sidecars:main"
+bidsmgr-compress  = "bidsmgr.cli.compress:main"
 bidsmgr-view      = "bidsmgr.cli.view:main"
 bidsmgr-qc        = "bidsmgr.cli.qc:main"
 

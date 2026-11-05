@@ -69,6 +69,7 @@ KEYS = {
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
     "convert_on_existing": "convert/on_existing",    # skip|update|replace|error
     "convert_skip_residuals": "convert/skip_residuals",
+    "convert_compress_nifti": "convert/compress_nifti",  # .nii.gz (true) or .nii
     "convert_preserve_curation": "convert/preserve_curation",
     "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
     "convert_deface":     "convert/deface",          # remove faces before commit
@@ -243,6 +244,9 @@ class AppSettings:
     # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
     # ``..._bold``). Default on: they are derived duplicates, not real images.
     convert_skip_residuals: bool = True
+    # NIfTI images written compressed (``.nii.gz``) or not (``.nii``). Both
+    # are valid BIDS; some tools read only one, and ``.nii`` reads faster.
+    convert_compress_nifti: bool = True
     # Re-converting a subject somebody already curated in the Editor:
     # merge the sidecars field by field rather than overwrite them, so an
     # afternoon of annotation survives the second pass. Only bites when a
@@ -525,6 +529,9 @@ class AppSettings:
         out.convert_skip_residuals = _as_bool(
             s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
         )
+        out.convert_compress_nifti = _as_bool(
+            s.value(KEYS["convert_compress_nifti"]), out.convert_compress_nifti,
+        )
         out.convert_preserve_curation = _as_bool(
             s.value(KEYS["convert_preserve_curation"]),
             out.convert_preserve_curation,
@@ -674,6 +681,7 @@ class AppSettings:
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
             ("convert_skip_residuals",   self.convert_skip_residuals),
+            ("convert_compress_nifti",   self.convert_compress_nifti),
             ("convert_preserve_curation", self.convert_preserve_curation),
             ("convert_force_edf",        self.convert_force_edf),
             ("convert_deface",           self.convert_deface),

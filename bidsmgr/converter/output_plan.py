@@ -87,6 +87,8 @@ class PlanOptions:
     sourcedata: str = "none"             # "none" | "copy" | "archive"
     sourcedata_modalities: tuple[str, ...] = ()
     force_edf: bool = False
+    #: NIfTI images as ``.nii.gz`` (True, the default) or ``.nii``.
+    compress: bool = True
     #: Physiology: "by_rate" (a table per sampling rate), "one_interpolated"
     #: or "one_as_recorded" (one table for the run); ``converter.physio_cmrr``.
     physio_layout: str = "by_rate"
@@ -224,8 +226,9 @@ _PHYSIO_SIGNALS = ("cardiac", "ecg", "respiratory", "externalTrigger")
 _ECHO_SUFFIXES = {"magnitude", "magnitude1", "magnitude2", "phasediff", "phase1", "phase2",
                   "fieldmap", "epi"}
 _SPLIT_WARNING = ("dcm2niix splits a series with several echoes into one file per echo "
-                  "(_e1, _e2, ...), names BIDS does not allow; the validator will list them as "
-                  "not included. Name each echo with the echo entity, or leave the series out.")
+                  "(_e1, _e2, ...), and this recording's suffix has no echo entity to name them "
+                  "by; the validator will list them as not included. Leave the series out, or "
+                  "give it a suffix that takes echo.")
 
 
 def _mne_basename(name: str) -> str:
@@ -263,7 +266,7 @@ def _renamed_reason(name: str, written: str) -> str:
 
 def _files_for_row(df, i, two_echoes: bool, force_edf: bool,
                    diffusion: bool = False, echoes: int = 1,
-                   physio_layout: str = "by_rate") -> list[PlannedFile]:
+                   physio_layout: str = "by_rate", compress: bool = True) -> list[PlannedFile]:
     name = _cell(df, i, "bids_name")
     datatype = _cell(df, i, "datatype")
     subject = _cell(df, i, "participant_id") or f"sub-{_split_name(name).get('sub', '')}"
@@ -310,12 +313,21 @@ def _files_for_row(df, i, two_echoes: bool, force_edf: bool,
                 add(f"{stem}_recording-{signal}_physio.json", origin, "sidecar", cond)
             return out
         origin = "dcm2niix"
+        nii = ".nii.gz" if compress else ".nii"
         if echoes >= 2 and suffix not in _ECHO_SUFFIXES:
+            # One file per echo, each named by the conversion's own rule.
+            from .backends.dcm2niix_direct import echo_basename
+
             for k in range(1, echoes + 1):
-                add(f"{base}_e{k}.nii.gz", origin, warning=_SPLIT_WARNING)
-                add(f"{base}_e{k}.json", origin, "sidecar", warning=_SPLIT_WARNING)
+                own = echo_basename(name, datatype, suffix, k)
+                if own is None:
+                    add(f"{base}_e{k}{nii}", origin, warning=_SPLIT_WARNING)
+                    add(f"{base}_e{k}.json", origin, "sidecar", warning=_SPLIT_WARNING)
+                else:
+                    add(f"{folder}/{own}{nii}", origin)
+                    add(f"{folder}/{own}.json", origin, "sidecar")
             return out
-        add(f"{base}.nii.gz", origin)
+        add(f"{base}{nii}", origin)
         add(f"{base}.json", origin, "sidecar")
         if suffix == "dwi" or (suffix == "epi" and diffusion):
             add(f"{base}.bval", origin, "table")
@@ -323,16 +335,16 @@ def _files_for_row(df, i, two_echoes: bool, force_edf: bool,
         if suffix == "magnitude1":
             stem = base[: -len("magnitude1")]
             if two_echoes:
-                add(f"{stem}magnitude2.nii.gz", origin)
+                add(f"{stem}magnitude2{nii}", origin)
                 add(f"{stem}magnitude2.json", origin, "sidecar")
             if "|" in uid:                     # the magnitude and its phase, joined
-                add(f"{stem}phasediff.nii.gz", origin)
+                add(f"{stem}phasediff{nii}", origin)
                 add(f"{stem}phasediff.json", origin, "sidecar")
         return out
 
     ext = _ext(source)
     if datatype == "pet":                               # ECAT
-        add(f"{base}.nii.gz", "BIDS Manager (nibabel)")
+        add(f"{base}{'.nii.gz' if compress else '.nii'}", "BIDS Manager (nibabel)")
         add(f"{base}.json", "BIDS Manager (nibabel)", "sidecar")
         return out
     if datatype in _MNE_DATATYPES:
@@ -493,7 +505,7 @@ def plan_output(df, included: Optional[Sequence[bool]] = None,
         uid = _cell(df, i, "series_uid")
         files = _files_for_row(df, i, _two_echoes(features or {}, uid), options.force_edf,
                                _diffusion(features or {}, uid), _echoes(features or {}, uid),
-                               options.physio_layout)
+                               options.physio_layout, options.compress)
         for f in files + _attached(df, i, files):
             put(f)
         subject = _cell(df, i, "participant_id")
@@ -1001,7 +1013,7 @@ def _scans_tsv(df, planned: PlannedFile, features, options: PlanOptions) -> File
         uid = _cell(df, i, "series_uid")
         by_row[i] = _files_for_row(df, i, _two_echoes(features or {}, uid), options.force_edf,
                                    _diffusion(features or {}, uid), _echoes(features or {}, uid),
-                                   options.physio_layout)
+                                   options.physio_layout, options.compress)
     # As the metadata step lists them, by its own rule: the recordings, not
     # their sidecars, gradient tables or side files.
     listed = _listed([f for files in by_row.values() for f in files])
@@ -1179,7 +1191,8 @@ def _links(df, row, options: PlanOptions, features) -> list[tuple[str, object, s
         for t in links[row]:
             datatype, target = _cell(df, t, "datatype"), _cell(df, t, "bids_name")
             session = _cell(df, t, "session")
-            parts = ([session] if session else []) + [datatype, f"{target}.nii.gz"]
+            image = ".nii.gz" if options.compress else ".nii"
+            parts = ([session] if session else []) + [datatype, f"{target}{image}"]
             rel = "/".join(parts)
             names.append(rel if options.intended_for == "relative" else f"bids::{subject}/{rel}")
         out.append(("IntendedFor", names, "settings"))
@@ -1256,7 +1269,7 @@ def _manufacturer(raw: str) -> str:
     return raw
 
 
-def _mri_fields(df, row, feats, out: _Fields, suffix: str = "") -> None:
+def _mri_fields(df, row, feats, out: _Fields, suffix: str = "", echo: int = 0) -> None:
     """What dcm2niix writes from the header, in its own forms: the
     manufacturer by its short name, multi-valued codes joined by a backslash,
     a factor of 1 left out."""
@@ -1287,7 +1300,11 @@ def _mri_fields(df, row, feats, out: _Fields, suffix: str = "") -> None:
     # first echo, the second and the phase difference the second, and the
     # phase difference names both.
     echoes = sorted(getattr(feats, "echo_times", []) or [])
-    if echoes:
+    if echo and len(echoes) >= 2 and suffix not in _ECHO_SUFFIXES and echo <= len(echoes):
+        # One echo of a series split by echo: its own time and number.
+        add("EchoTime", _seconds(echoes[echo - 1]))
+        add("EchoNumber", echo)
+    elif echoes:
         add("EchoTime", _seconds(echoes[-1] if suffix in ("magnitude2", "phasediff")
                                  else echoes[0]))
     if len(echoes) >= 2 and suffix == "phasediff":
@@ -1560,7 +1577,11 @@ def _sidecar(df, row, planned: PlannedFile, options: PlanOptions, features, spec
             notes.append(note)
     else:
         if feats is not None:
-            _mri_fields(df, row, feats, out, suffix)
+            echo = re.search(r"_echo-(\d+)_", f"_{name}_")
+            _mri_fields(df, row, feats, out, suffix, int(echo.group(1)) if echo else 0)
+            if "_part-phase_" in f"_{name}_":
+                # The conversion reads the phase image's range for it: rad or arbitrary.
+                out.put("Units", UNKNOWN, "converter")
         else:
             out.put("Modality", "MR", "scan")
             out.put("SeriesDescription", _cell(df, row, "sequence"), "scan")

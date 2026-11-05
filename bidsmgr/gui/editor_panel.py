@@ -141,6 +141,7 @@ class EditorPanel(QWidget):
         self._tree_pane.rename_requested.connect(self._on_rename)
         self._tree_pane.entities_requested.connect(self._on_edit_entities)
         self._tree_pane.delete_requested.connect(self._on_delete)
+        self._tree_pane.compression_requested.connect(self._on_compression)
         self._tree_pane.deface_requested.connect(self._on_deface)
         self._tree_pane.sidecars_requested.connect(self._on_sidecars)
         self._tree_pane.deface_compare_requested.connect(
@@ -661,6 +662,17 @@ class EditorPanel(QWidget):
             "BIDS, so this is a house style."
         )
         self._pad_action.triggered.connect(self._on_pad_values)
+
+        self._compress_action = self._tools_menu.addAction(
+            "Compress or decompress images..."
+        )
+        self._compress_action.setToolTip(
+            "Write the dataset's NIfTI images as .nii.gz or as .nii: the same "
+            "image, both valid BIDS. The scans tables, IntendedFor and every "
+            "other file that names an image follow. Starts on the tree "
+            "selection, or on the whole dataset when there is none."
+        )
+        self._compress_action.triggered.connect(lambda: self._on_compression())
 
         self._entities_action = self._tools_menu.addAction(
             "Add or remove an entity..."
@@ -1546,6 +1558,31 @@ class EditorPanel(QWidget):
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _on_compression(self, targets: Optional[list] = None) -> None:
+        """Compress or decompress images, after showing every one and what
+        names it. The open file follows to its new name."""
+        from .compression_dialog import CompressionDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = CompressionDialog(root, chosen, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        renamed = dlg.renamed()
+        opened = self._open_path
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if opened is not None and opened in renamed:
+            self._on_file_selected(renamed[opened])
+        elif opened is not None and opened.exists():
+            self._on_file_selected(opened)
+        if self._report is not None:
+            self.start_dataset_validation()
+        self._sync_undo_redo()
 
     # -- what validation ignores (.bidsignore) ----------------------------
 

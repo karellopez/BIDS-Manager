@@ -1080,6 +1080,17 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Residuals:", self._convert_skip_residuals)
 
+        self._convert_compress_nifti = QComboBox()
+        self._convert_compress_nifti.addItem("Compressed (.nii.gz), smaller on disk", True)
+        self._convert_compress_nifti.addItem("Uncompressed (.nii), faster to open", False)
+        self._convert_compress_nifti.setToolTip(
+            "How the conversion writes NIfTI images. Both are valid BIDS and hold the same "
+            "image: .nii.gz is gzip-compressed, often less than half the size; .nii opens "
+            "faster and is what some tools (SPM, older pipelines) read.\n\nImages already "
+            "in a dataset keep their form: change them in the Editor with Tools > Compress "
+            "or decompress images..., which updates every file that names them.")
+        form.addRow("NIfTI images:", self._convert_compress_nifti)
+
         # How a fieldmap is linked to the runs it corrects. Measured with
         # sdcflows (what fMRIPrep uses): URIs are ignored by fMRIPrep 24.1 and
         # earlier, B0FieldIdentifier is read by every version.
@@ -1579,6 +1590,7 @@ class SettingsDialog(QDialog):
         idx = self._convert_on_existing.findData(s.convert_on_existing)
         self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
         self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
+        self._convert_compress_nifti.setCurrentIndex(0 if s.convert_compress_nifti else 1)
         self._convert_intended_for.setCurrentIndex(
             max(0, self._convert_intended_for.findData(s.convert_intended_for)))
         self._convert_b0_field.setChecked(s.convert_b0_field)
@@ -1714,6 +1726,7 @@ class SettingsDialog(QDialog):
         # Keep the legacy flag in sync for any old reader.
         s.convert_overwrite = (s.convert_on_existing == "replace")
         s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
+        s.convert_compress_nifti = self._convert_compress_nifti.currentIndex() == 0
         s.convert_intended_for = self._convert_intended_for.currentData() or "uri"
         s.convert_b0_field = self._convert_b0_field.isChecked()
         s.convert_sourcedata = self._convert_sourcedata.currentData() or "none"

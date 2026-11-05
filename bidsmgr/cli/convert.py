@@ -299,8 +299,12 @@ def run_convert(
     drop_volumes: int = 0,
     physio_layout: str = "by_rate",
     physio_align: bool = False,
+    compress: bool = True,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
+
+    ``compress`` (default True) writes NIfTI images as ``.nii.gz``; False
+    writes ``.nii``. Both are valid BIDS.
 
     ``drop_volumes`` is removed from the start of every functional run whose
     ``drop_volumes`` cell is empty (a cell wins, 0 included); the run's
@@ -474,7 +478,8 @@ def run_convert(
         spec = _apply_pet_spreadsheet(spec, Path(pet_spreadsheet), df)
 
     task_options = TaskOptions(drop_volumes=max(0, int(drop_volumes or 0)),
-                               physio_layout=physio_layout, physio_align=bool(physio_align))
+                               physio_layout=physio_layout, physio_align=bool(physio_align),
+                               compress=bool(compress))
 
     backends = default_backends(dcm2niix_bin=dcm2niix_bin)
     # Capture dcm2niix version once for provenance — it's still the
@@ -1301,6 +1306,8 @@ class TaskOptions(NamedTuple):
     drop_volumes: int = 0
     physio_layout: str = "by_rate"
     physio_align: bool = False
+    #: NIfTI images as ``.nii.gz`` (True) or ``.nii`` (False).
+    compress: bool = True
 
 
 def _build_tasks_for_subject(
@@ -1408,7 +1415,7 @@ def _row_to_task(
     if source_file:
         return _row_to_task_file_based(
             row, bids_root, source_search_roots=source_search_roots,
-            force_edf=force_edf, spec=spec,
+            force_edf=force_edf, spec=spec, compress=options.compress,
         )
 
     return None
@@ -1472,14 +1479,15 @@ def _row_to_task_mri(
 
     # Expected outputs differ by suffix. Physio rows produce
     # ``.tsv.gz`` + ``.json`` from the physio backend; everything
-    # else dcm2niix-direct handles produces ``.nii.gz`` + ``.json``,
-    # plus DWI extras.
+    # else dcm2niix-direct handles produces ``.nii.gz`` (``.nii`` when
+    # uncompressed) + ``.json``, plus DWI extras.
+    image = ".nii.gz" if options.compress else ".nii"
     if suffix == "physio":
         expected_outputs = (".tsv.gz", ".json")
     elif suffix == "dwi":
-        expected_outputs = (".nii.gz", ".json", ".bval", ".bvec")
+        expected_outputs = (image, ".json", ".bval", ".bvec")
     else:
-        expected_outputs = (".nii.gz", ".json")
+        expected_outputs = (image, ".json")
 
     # Surface the row's canonical entities dict (the source of truth
     # the user edited) — informational for backends that want to inspect
@@ -1502,6 +1510,7 @@ def _row_to_task_mri(
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
         skip_residuals=skip_residuals,
+        compress=options.compress,
         companion_files=parse_companions(row.get("companion_files", "")),
         fieldmap_targets=_parse_fieldmap_targets(row),
         drop_volumes=_drop_volumes_for(row, datatype, suffix, options.drop_volumes),
@@ -1545,6 +1554,7 @@ def _row_to_task_file_based(
     source_search_roots: tuple[Path, ...] = (),
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
+    compress: bool = True,
 ) -> Optional[ConvertTask]:
     """Build a :class:`ConvertTask` for a row whose source is one file.
 
@@ -1703,6 +1713,7 @@ def _row_to_task_file_based(
         eeg_reference=eeg_reference,
         eeg_ground=eeg_ground,
         force_edf=force_edf,
+        compress=compress,
         companion_files=parse_companions(row.get("companion_files", "")),
         eyetrack=_eyetrack_settings(spec, source_file) if eyetrack else {},
     )
@@ -2224,6 +2235,15 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--no-compress", action="store_true",
+        help=(
+            "Write NIfTI images uncompressed (.nii) instead of compressed "
+            "(.nii.gz, the default). Both are valid BIDS; some tools (older "
+            "SPM, MATLAB scripts) read only .nii, which takes two to four "
+            "times the space."
+        ),
+    )
+    parser.add_argument(
         "--deface", action="store_true",
         help=(
             "Remove the face from anatomical and PET images before the "
@@ -2353,6 +2373,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
             drop_volumes=args.drop_volumes,
             physio_layout=args.physio_layout.replace("-", "_"),
             physio_align=args.physio_align,
+            compress=not args.no_compress,
             **log_keywords(args),
         )
         return _anonymise_after(rc, bids_root.parent, [bids_root.name], args)
@@ -2385,6 +2406,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         drop_volumes=args.drop_volumes,
         physio_layout=args.physio_layout.replace("-", "_"),
         physio_align=args.physio_align,
+        compress=not args.no_compress,
         **log_keywords(args),
     )
     names = [args.dataset] if args.dataset else _dataset_names(Path(args.tsv))
